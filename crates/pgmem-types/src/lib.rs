@@ -12,8 +12,8 @@ mod go_port;
 pub mod json;
 pub mod numeric;
 pub mod text;
-pub mod zone;
 mod value;
+pub mod zone;
 
 pub use datetime::Interval;
 pub use error::{ErrorFields, SqlError, SqlResult, code};

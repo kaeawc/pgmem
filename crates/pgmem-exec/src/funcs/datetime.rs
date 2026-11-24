@@ -190,7 +190,9 @@ pub fn resolve_at_time_zone(src: &Type, zone_ty: &Type) -> SqlResult<Resolved> {
         Type::Timestamp | Type::Date => {
             Ok(Resolved { func: strict("timezone", tz_from_timestamp), args: vec![zt, Type::Timestamp], ret: Type::Timestamptz })
         }
-        Type::TimeTz | Type::Time => Ok(Resolved { func: strict("timezone", tz_of_timetz), args: vec![zt, Type::TimeTz], ret: Type::TimeTz }),
+        Type::TimeTz | Type::Time => {
+            Ok(Resolved { func: strict("timezone", tz_of_timetz), args: vec![zt, Type::TimeTz], ret: Type::TimeTz })
+        }
         other => Err(no_function("timezone", &[zone_ty.clone(), other.clone()])),
     }
 }
@@ -201,7 +203,10 @@ fn zone_arg(v: &Value) -> SqlResult<Zone> {
         Value::Interval(i) => {
             if i.months != 0 || i.days != 0 {
                 let text = dt::format_interval(i);
-                return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, format!("interval time zone \"{text}\" must not include months or days")));
+                return Err(SqlError::new(
+                    code::INVALID_PARAMETER_VALUE,
+                    format!("interval time zone \"{text}\" must not include months or days"),
+                ));
             }
             Ok(Zone::fixed(i32::try_from(i.micros / USECS_PER_SEC).map_err(|_| SqlError::out_of_range("interval"))?))
         }

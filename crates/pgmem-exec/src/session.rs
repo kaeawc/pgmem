@@ -282,7 +282,11 @@ impl Session {
     /// The input/output context of this session's settings (`TimeZone`, `DateStyle` order).
     pub fn format_context(&self) -> pgmem_types::context::Context {
         use pgmem_types::context::{Context, DateOrder};
-        let zone = self.settings.get("timezone").and_then(|z| pgmem_types::zone::Zone::from_setting(z)).unwrap_or_else(pgmem_types::zone::Zone::utc);
+        let zone = self
+            .settings
+            .get("timezone")
+            .and_then(|z| pgmem_types::zone::Zone::from_setting(z))
+            .unwrap_or_else(pgmem_types::zone::Zone::utc);
         let style = self.settings.get("datestyle").map(|s| s.to_ascii_uppercase()).unwrap_or_default();
         let date_order = if style.contains("DMY") || style.contains("EURO") {
             DateOrder::Dmy
@@ -675,7 +679,10 @@ fn timezone_setting(value: &str) -> SqlResult<String> {
         let literal = v[9..].split('\'').nth(1).ok_or_else(invalid)?;
         let iv = pgmem_types::datetime::parse_interval(literal).map_err(|_| invalid())?;
         if iv.months != 0 || iv.days != 0 {
-            return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, String::from("invalid interval value for time zone: day not allowed")));
+            return Err(SqlError::new(
+                code::INVALID_PARAMETER_VALUE,
+                String::from("invalid interval value for time zone: day not allowed"),
+            ));
         }
         let secs = i32::try_from(iv.micros / 1_000_000).map_err(|_| invalid())?;
         return Ok(Zone::fixed(secs).name);

@@ -3,7 +3,7 @@
 //! bundled tz database, POSIX-style offsets such as `UTC+5`), with Postgres' rules for local
 //! times that fall in a DST gap or fold.
 
-use crate::datetime::{USECS_PER_SEC, PG_EPOCH_UNIX_SECS};
+use crate::datetime::{PG_EPOCH_UNIX_SECS, USECS_PER_SEC};
 use jiff::tz::{AmbiguousOffset, TimeZone};
 
 /// Postgres' `Default` timezone abbreviation set: (abbreviation, seconds east, is_dst).

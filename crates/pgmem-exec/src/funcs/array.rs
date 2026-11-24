@@ -217,8 +217,12 @@ fn generate_series(a: &[Value], _: &EvalCtx) -> SqlResult<Vec<Row>> {
                 cur = match a.get(3) {
                     // The 4-argument form steps in the given zone's local time (Postgres 16).
                     Some(z) => {
-                        let zone = pgmem_types::zone::Zone::from_spec(z.as_str().unwrap_or(""))
-                            .ok_or_else(|| SqlError::new(code::INVALID_PARAMETER_VALUE, format!("time zone \"{}\" not recognized", z.as_str().unwrap_or(""))))?;
+                        let zone = pgmem_types::zone::Zone::from_spec(z.as_str().unwrap_or("")).ok_or_else(|| {
+                            SqlError::new(
+                                code::INVALID_PARAMETER_VALUE,
+                                format!("time zone \"{}\" not recognized", z.as_str().unwrap_or("")),
+                            )
+                        })?;
                         let _ctx = pgmem_types::context::enter(pgmem_types::context::Context { zone, ..pgmem_types::context::current() });
                         super::datetime::tstz_add_interval(cur, step)?
                     }
