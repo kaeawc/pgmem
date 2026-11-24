@@ -1,0 +1,305 @@
+# Joins.
+statement ok
+CREATE TABLE dept (id int PRIMARY KEY, name text)
+
+statement ok
+CREATE TABLE emp (id int PRIMARY KEY, name text, dept_id int, manager_id int)
+
+statement ok
+INSERT INTO dept VALUES (1, 'eng'), (2, 'sales'), (3, 'empty')
+
+statement ok
+INSERT INTO emp VALUES (1, 'ann', 1, NULL), (2, 'bob', 1, 1), (3, 'cat', 2, 1), (4, 'dan', NULL, 2)
+
+statement ok
+CREATE TABLE l (k int, v text)
+
+statement ok
+CREATE TABLE r (k int, w text)
+
+statement ok
+INSERT INTO l VALUES (1, 'l1'), (2, 'l2'), (NULL, 'lnull'), (2, 'l2b')
+
+statement ok
+INSERT INTO r VALUES (2, 'r2'), (3, 'r3'), (NULL, 'rnull')
+
+# Inner joins
+query
+SELECT e.name, d.name FROM emp e JOIN dept d ON e.dept_id = d.id ORDER BY e.id
+----
+name:text | name:text
+ann | eng
+bob | eng
+cat | sales
+
+query
+SELECT e.name, d.name FROM emp e, dept d WHERE e.dept_id = d.id ORDER BY e.id
+----
+name:text | name:text
+ann | eng
+bob | eng
+cat | sales
+
+query
+SELECT l.v, r.w FROM l INNER JOIN r ON l.k = r.k ORDER BY l.v
+----
+v:text | w:text
+l2 | r2
+l2b | r2
+
+# Outer joins
+query
+SELECT e.name, d.name FROM emp e LEFT JOIN dept d ON e.dept_id = d.id ORDER BY e.id
+----
+name:text | name:text
+ann | eng
+bob | eng
+cat | sales
+dan | NULL
+
+query
+SELECT e.name, d.name FROM emp e RIGHT JOIN dept d ON e.dept_id = d.id ORDER BY d.id, e.id
+----
+name:text | name:text
+ann | eng
+bob | eng
+cat | sales
+NULL | empty
+
+query
+SELECT l.v, r.w FROM l FULL JOIN r ON l.k = r.k ORDER BY l.v NULLS LAST, r.w
+----
+v:text | w:text
+l1 | NULL
+l2 | r2
+l2b | r2
+lnull | NULL
+NULL | r3
+NULL | rnull
+
+query
+SELECT l.v, r.w FROM l LEFT OUTER JOIN r ON l.k = r.k AND r.w = 'r2' ORDER BY l.v
+----
+v:text | w:text
+l1 | NULL
+l2 | r2
+l2b | r2
+lnull | NULL
+
+query
+SELECT l.v, r.w FROM l LEFT JOIN r ON l.k = r.k WHERE r.w IS NULL ORDER BY l.v
+----
+v:text | w:text
+l1 | NULL
+lnull | NULL
+
+query
+SELECT d.name, count(e.id) FROM dept d LEFT JOIN emp e ON e.dept_id = d.id GROUP BY d.name ORDER BY d.name
+----
+name:text | count:int8
+empty | 0
+eng | 2
+sales | 1
+
+query
+SELECT l.v, r.w FROM l FULL JOIN r ON false ORDER BY l.v NULLS LAST, r.w
+----
+v:text | w:text
+l1 | NULL
+l2 | NULL
+l2b | NULL
+lnull | NULL
+NULL | r2
+NULL | r3
+NULL | rnull
+
+# Cross join
+query
+SELECT d.name, x FROM dept d CROSS JOIN (VALUES (1), (2)) v(x) ORDER BY d.name, x
+----
+name:text | x:int4
+empty | 1
+empty | 2
+eng | 1
+eng | 2
+sales | 1
+sales | 2
+
+query
+SELECT count(*) FROM emp, dept
+----
+count:int8
+12
+
+# USING and NATURAL: merged columns
+query
+SELECT * FROM l JOIN r USING (k) ORDER BY v
+----
+k:int4 | v:text | w:text
+2 | l2 | r2
+2 | l2b | r2
+
+query
+SELECT * FROM l FULL JOIN r USING (k) ORDER BY k NULLS LAST, v, w
+----
+k:int4 | v:text | w:text
+1 | l1 | NULL
+2 | l2 | r2
+2 | l2b | r2
+3 | NULL | r3
+NULL | lnull | NULL
+NULL | NULL | rnull
+
+statement error 42702 ORDER BY "k" is ambiguous
+SELECT k, l.k, r.k FROM l FULL JOIN r USING (k) ORDER BY k NULLS LAST, v, w
+
+query
+SELECT k, l.k, r.k FROM l FULL JOIN r USING (k) ORDER BY 1 NULLS LAST, v, w
+----
+k:int4 | k:int4 | k:int4
+1 | 1 | NULL
+2 | 2 | 2
+2 | 2 | 2
+3 | NULL | 3
+NULL | NULL | NULL
+NULL | NULL | NULL
+
+query
+SELECT * FROM l NATURAL JOIN r ORDER BY v
+----
+k:int4 | v:text | w:text
+2 | l2 | r2
+2 | l2b | r2
+
+query
+SELECT * FROM l NATURAL LEFT JOIN r ORDER BY v
+----
+k:int4 | v:text | w:text
+1 | l1 | NULL
+2 | l2 | r2
+2 | l2b | r2
+NULL | lnull | NULL
+
+query
+SELECT * FROM dept NATURAL JOIN emp ORDER BY id
+----
+id:int4 | name:text | dept_id:int4 | manager_id:int4
+
+query
+SELECT * FROM l JOIN r USING (k) AS j ORDER BY j.k, v
+----
+k:int4 | v:text | w:text
+2 | l2 | r2
+2 | l2b | r2
+
+statement error 42703 column "nope" specified in USING clause does not exist in left table
+SELECT * FROM l JOIN r USING (nope)
+
+statement error 42703 column "dept_id" specified in USING clause does not exist in right table
+SELECT * FROM emp JOIN dept USING (dept_id)
+
+# Self joins
+query
+SELECT e.name AS employee, m.name AS manager FROM emp e LEFT JOIN emp m ON e.manager_id = m.id ORDER BY e.id
+----
+employee:text | manager:text
+ann | NULL
+bob | ann
+cat | ann
+dan | bob
+
+query
+SELECT a.name, b.name FROM emp a JOIN emp b ON a.dept_id = b.dept_id AND a.id < b.id ORDER BY a.id, b.id
+----
+name:text | name:text
+ann | bob
+
+# Multi-way joins and parenthesized joins
+query
+SELECT e.name, d.name, m.name FROM emp e JOIN dept d ON d.id = e.dept_id LEFT JOIN emp m ON m.id = e.manager_id ORDER BY e.id
+----
+name:text | name:text | name:text
+ann | eng | NULL
+bob | eng | ann
+cat | sales | ann
+
+query
+SELECT d.name, e.name FROM dept d LEFT JOIN (emp e JOIN emp m ON e.manager_id = m.id) ON e.dept_id = d.id ORDER BY d.id, e.id
+----
+name:text | name:text
+eng | bob
+sales | cat
+empty | NULL
+
+query
+SELECT * FROM (l JOIN r USING (k)) AS lr ORDER BY lr.v
+----
+k:int4 | v:text | w:text
+2 | l2 | r2
+2 | l2b | r2
+
+# Join-condition edge cases
+query
+SELECT l.v, r.w FROM l JOIN r ON true ORDER BY l.v, r.w
+----
+v:text | w:text
+l1 | r2
+l1 | r3
+l1 | rnull
+l2 | r2
+l2 | r3
+l2 | rnull
+l2b | r2
+l2b | r3
+l2b | rnull
+lnull | r2
+lnull | r3
+lnull | rnull
+
+query
+SELECT l.v, r.w FROM l JOIN r ON l.k IS NOT DISTINCT FROM r.k ORDER BY l.v
+----
+v:text | w:text
+l2 | r2
+l2b | r2
+lnull | rnull
+
+query
+SELECT l.v, r.w FROM l JOIN r ON l.k < r.k ORDER BY l.v, r.w
+----
+v:text | w:text
+l1 | r2
+l1 | r3
+l2 | r3
+l2b | r3
+
+query
+SELECT l.v, r.w FROM l LEFT JOIN r ON NULL ORDER BY l.v
+----
+v:text | w:text
+l1 | NULL
+l2 | NULL
+l2b | NULL
+lnull | NULL
+
+statement error 42601 syntax error at end of input
+SELECT * FROM l JOIN r
+
+statement error 42P01 missing FROM-clause entry for table "x"
+SELECT * FROM l JOIN r ON l.k = r.k JOIN dept ON dept.id = x.id
+
+statement error 42702 column reference "k" is ambiguous
+SELECT k FROM l JOIN r ON l.k = r.k
+
+statement error 42804 argument of JOIN/ON must be type boolean, not type integer
+SELECT * FROM l JOIN r ON 1
+
+query
+SELECT e.name FROM emp e WHERE EXISTS (SELECT 1 FROM dept d WHERE d.id = e.dept_id AND d.name = 'eng') ORDER BY e.id
+----
+name:text
+ann
+bob
+
+statement error 42712 table name "e" specified more than once
+SELECT * FROM emp e, emp e

@@ -1,0 +1,213 @@
+# POSIX regular expressions and SIMILAR TO.
+
+# match operators
+query
+SELECT 'abc' ~ 'b', 'abc' ~ '^b', 'ABC' ~* 'b', 'abc' !~ 'z', 'ABC' !~* 'b'
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | f | t | t | f
+
+query
+SELECT 'foo123' ~ '\d+$', 'foo' ~ '\mfoo\M', 'a.c' ~ 'a\.c'
+----
+?column?:bool | ?column?:bool | ?column?:bool
+t | t | t
+
+statement error 2201B invalid regular expression: parentheses () not balanced
+SELECT 'abc' ~ '('
+
+
+# regexp_match / regexp_matches
+query
+SELECT regexp_match('foobarbequebaz', 'bar.*que')
+----
+regexp_match:_text
+{barbeque}
+
+query
+SELECT regexp_match('foobarbequebaz', '(bar)(beque)')
+----
+regexp_match:_text
+{bar,beque}
+
+query
+SELECT regexp_match('abc', 'z')
+----
+regexp_match:_text
+NULL
+
+query
+SELECT (regexp_match('key=value', '(\w+)=(\w+)'))[2]
+----
+regexp_match:text
+value
+
+query
+SELECT regexp_matches('foobarbequebaz', 'ba.', 'g')
+----
+regexp_matches:_text
+{bar}
+{baz}
+
+query
+SELECT regexp_matches('a1b2c3', '([a-z])(\d)', 'g')
+----
+regexp_matches:_text
+{a,1}
+{b,2}
+{c,3}
+
+query
+SELECT regexp_matches('ABC', 'b', 'i')
+----
+regexp_matches:_text
+{B}
+
+query
+SELECT count(*) FROM regexp_matches('abc', 'z', 'g')
+----
+count:int8
+0
+
+
+# regexp_replace
+query
+SELECT regexp_replace('Thomas', '.[mN]a.', 'M')
+----
+regexp_replace:text
+ThM
+
+query
+SELECT regexp_replace('foobarbaz', 'b(..)', 'X\1Y', 'g')
+----
+regexp_replace:text
+fooXarYXazY
+
+query
+SELECT regexp_replace('aaa', 'a', 'b'), regexp_replace('aaa', 'a', 'b', 'g')
+----
+regexp_replace:text | regexp_replace:text
+baa | bbb
+
+query
+SELECT regexp_replace('AbcAbc', 'a', 'x', 'gi')
+----
+regexp_replace:text
+xbcxbc
+
+query
+SELECT regexp_replace('A PostgreSQL function', 'a|e|i|o|u', 'X', 1, 0, 'i')
+----
+regexp_replace:text
+X PXstgrXSQL fXnctXXn
+
+query
+SELECT regexp_replace('A PostgreSQL function', 'a|e|i|o|u', 'X', 1, 3, 'i')
+----
+regexp_replace:text
+A PostgrXSQL function
+
+query
+SELECT regexp_replace('abc', 'b', '\&\&')
+----
+regexp_replace:text
+abbc
+
+query
+SELECT regexp_replace(E'line1\nline2', '^line', 'L', 'gn')
+----
+regexp_replace:text
+L1\nL2
+
+query
+SELECT regexp_replace('a.c', '.', 'x', 'q')
+----
+regexp_replace:text
+axc
+
+statement error 22023 invalid regular expression option: "z"
+SELECT regexp_replace('abc', 'b', 'x', 'z')
+
+
+# PG15 regexp functions
+query
+SELECT regexp_count('ABCABCAXYaxy', 'A.'), regexp_count('ABCABCAXYaxy', 'A.', 1, 'i')
+----
+regexp_count:int4 | regexp_count:int4
+3 | 4
+
+query
+SELECT regexp_instr('number of your row', '\w+', 1, 3), regexp_instr('ABCDEFGHI', '(c..)(...)', 1, 1, 0, 'i', 2)
+----
+regexp_instr:int4 | regexp_instr:int4
+11 | 6
+
+query
+SELECT regexp_instr('abcabc', 'b', 1, 2, 1)
+----
+regexp_instr:int4
+6
+
+query
+SELECT regexp_substr('number of your row', '\w+', 1, 3), regexp_substr('ABCDEFGHI', '(c..)(...)', 1, 1, 'i', 2)
+----
+regexp_substr:text | regexp_substr:text
+your | FGH
+
+query
+SELECT regexp_substr('abc', 'z')
+----
+regexp_substr:text
+NULL
+
+query
+SELECT regexp_like('Hello World', 'world'), regexp_like('Hello World', 'world', 'i')
+----
+regexp_like:bool | regexp_like:bool
+f | t
+
+
+# SIMILAR TO
+query
+SELECT 'abc' SIMILAR TO 'abc', 'abc' SIMILAR TO 'a', 'abc' SIMILAR TO '%(b|d)%', 'abc' SIMILAR TO '(b|c)%'
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | f | t | f
+
+query
+SELECT 'abc' NOT SIMILAR TO 'a_c', 'aaa' SIMILAR TO 'a{2,3}', 'ab' SIMILAR TO '[a-c]+'
+----
+?column?:bool | ?column?:bool | ?column?:bool
+f | t | t
+
+query
+SELECT 'a%c' SIMILAR TO 'a#%c' ESCAPE '#'
+----
+?column?:bool
+t
+
+
+# regex classes and features
+query
+SELECT regexp_replace('a  b   c', '\s+', ' ', 'g'), regexp_replace('Hello', '[[:upper:]]', '_', 'g')
+----
+regexp_replace:text | regexp_replace:text
+a b c | _ello
+
+query
+SELECT regexp_match('2024-03-15', '(\d{4})-(\d{2})-(\d{2})')
+----
+regexp_match:_text
+{2024,03,15}
+
+query
+SELECT regexp_match('foobar', '(?:foo)(bar)'), regexp_match('aaa', 'a+?')
+----
+regexp_match:_text | regexp_match:_text
+{bar} | {a}
+
+query
+SELECT regexp_match('abc', '(?i)B')
+----
+regexp_match:_text
+{b}

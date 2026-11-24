@@ -1,0 +1,347 @@
+# information_schema views, queried the way schema tools and migration diffing tools do.
+
+statement ok
+CREATE SCHEMA app
+
+statement ok
+CREATE TABLE authors (
+  id serial PRIMARY KEY,
+  name varchar(100) NOT NULL,
+  email text UNIQUE,
+  rating numeric(5,2) DEFAULT 0,
+  born date,
+  active boolean NOT NULL DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now()
+)
+
+statement ok
+CREATE TABLE books (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  author_id int NOT NULL REFERENCES authors (id) ON DELETE CASCADE,
+  title text NOT NULL,
+  isbn char(13),
+  price numeric(10,2) CHECK (price >= 0),
+  pages smallint,
+  weight real,
+  tags text[],
+  meta jsonb,
+  CONSTRAINT books_isbn_key UNIQUE (isbn)
+)
+
+statement ok
+CREATE TABLE app.reviews (
+  book_id bigint,
+  reviewer text,
+  stars int,
+  PRIMARY KEY (book_id, reviewer),
+  FOREIGN KEY (book_id) REFERENCES public.books (id) ON UPDATE RESTRICT
+)
+
+statement ok
+CREATE VIEW cheap_books AS SELECT id, title FROM books WHERE price < 10
+
+statement ok
+CREATE SEQUENCE invoice_seq START 1000 INCREMENT 5 MAXVALUE 99999 CACHE 1
+
+# schemata
+query
+SELECT schema_name FROM information_schema.schemata
+WHERE schema_name NOT LIKE 'pg\_%' AND schema_name <> 'information_schema'
+ORDER BY schema_name
+----
+schema_name:name
+app
+public
+
+# tables
+query
+SELECT table_schema, table_name, table_type
+FROM information_schema.tables
+WHERE table_schema IN ('public', 'app')
+ORDER BY table_schema, table_name
+----
+table_schema:name | table_name:name | table_type:varchar
+app | reviews | BASE TABLE
+public | authors | BASE TABLE
+public | books | BASE TABLE
+public | cheap_books | VIEW
+
+query
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'
+ORDER BY table_name
+----
+table_name:name
+authors
+books
+
+query
+SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'authors')
+----
+exists:bool
+t
+
+query
+SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'missing')
+----
+exists:bool
+f
+
+# columns
+query
+SELECT column_name, ordinal_position, data_type, is_nullable, column_default
+FROM information_schema.columns
+WHERE table_schema = 'public' AND table_name = 'authors'
+ORDER BY ordinal_position
+----
+column_name:name | ordinal_position:int4 | data_type:varchar | is_nullable:varchar | column_default:varchar
+id | 1 | integer | NO | nextval('authors_id_seq'::regclass)
+name | 2 | character varying | NO | NULL
+email | 3 | text | YES | NULL
+rating | 4 | numeric | YES | 0
+born | 5 | date | YES | NULL
+active | 6 | boolean | NO | true
+created_at | 7 | timestamp with time zone | NO | now()
+
+query
+SELECT column_name, data_type, udt_name, character_maximum_length, numeric_precision, numeric_scale
+FROM information_schema.columns
+WHERE table_schema = 'public' AND table_name = 'books'
+ORDER BY ordinal_position
+----
+column_name:name | data_type:varchar | udt_name:name | character_maximum_length:int4 | numeric_precision:int4 | numeric_scale:int4
+id | bigint | int8 | NULL | 64 | 0
+author_id | integer | int4 | NULL | 32 | 0
+title | text | text | NULL | NULL | NULL
+isbn | character | bpchar | 13 | NULL | NULL
+price | numeric | numeric | NULL | 10 | 2
+pages | smallint | int2 | NULL | 16 | 0
+weight | real | float4 | NULL | 24 | NULL
+tags | ARRAY | _text | NULL | NULL | NULL
+meta | jsonb | jsonb | NULL | NULL | NULL
+
+query
+SELECT column_name, is_identity, identity_generation, column_default
+FROM information_schema.columns
+WHERE table_schema = 'public' AND table_name = 'books' AND column_name = 'id'
+----
+column_name:name | is_identity:varchar | identity_generation:varchar | column_default:varchar
+id | YES | ALWAYS | NULL
+
+query
+SELECT column_name, datetime_precision
+FROM information_schema.columns
+WHERE table_name = 'authors' AND data_type IN ('date', 'timestamp with time zone')
+ORDER BY column_name
+----
+column_name:name | datetime_precision:int4
+born | 0
+created_at | 6
+
+query
+SELECT table_name, column_name, data_type
+FROM information_schema.columns
+WHERE table_schema = 'app'
+ORDER BY table_name, ordinal_position
+----
+table_name:name | column_name:name | data_type:varchar
+reviews | book_id | bigint
+reviews | reviewer | text
+reviews | stars | integer
+
+query
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_name = 'cheap_books'
+ORDER BY ordinal_position
+----
+column_name:name | data_type:varchar
+id | bigint
+title | text
+
+# table_constraints
+query
+SELECT constraint_name, constraint_type
+FROM information_schema.table_constraints
+WHERE table_schema = 'public' AND table_name = 'books' AND constraint_type <> 'CHECK'
+ORDER BY constraint_name
+----
+constraint_name:name | constraint_type:varchar
+books_author_id_fkey | FOREIGN KEY
+books_isbn_key | UNIQUE
+books_pkey | PRIMARY KEY
+
+query
+SELECT constraint_name, constraint_type, is_deferrable, initially_deferred
+FROM information_schema.table_constraints
+WHERE table_schema = 'app'
+ORDER BY constraint_name
+----
+constraint_name:name | constraint_type:varchar | is_deferrable:varchar | initially_deferred:varchar
+reviews_book_id_fkey | FOREIGN KEY | NO | NO
+reviews_book_id_not_null | CHECK | NO | NO
+reviews_pkey | PRIMARY KEY | NO | NO
+reviews_reviewer_not_null | CHECK | NO | NO
+
+query
+SELECT count(*) FROM information_schema.table_constraints
+WHERE table_name = 'books' AND constraint_type = 'CHECK'
+----
+count:int8
+4
+
+# key_column_usage
+query
+SELECT constraint_name, column_name, ordinal_position
+FROM information_schema.key_column_usage
+WHERE table_schema = 'app' AND table_name = 'reviews'
+ORDER BY constraint_name, ordinal_position
+----
+constraint_name:name | column_name:name | ordinal_position:int4
+reviews_book_id_fkey | book_id | 1
+reviews_pkey | book_id | 1
+reviews_pkey | reviewer | 2
+
+query
+SELECT kcu.column_name
+FROM information_schema.table_constraints tc
+JOIN information_schema.key_column_usage kcu
+  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_name = 'authors'
+----
+column_name:name
+id
+
+# referential_constraints
+query
+SELECT constraint_name, unique_constraint_name, match_option, update_rule, delete_rule
+FROM information_schema.referential_constraints
+WHERE constraint_schema IN ('public', 'app')
+ORDER BY constraint_name
+----
+constraint_name:name | unique_constraint_name:name | match_option:varchar | update_rule:varchar | delete_rule:varchar
+books_author_id_fkey | authors_pkey | NONE | NO ACTION | CASCADE
+reviews_book_id_fkey | books_pkey | NONE | RESTRICT | NO ACTION
+
+# foreign keys, the classic join used by ORMs
+query
+SELECT tc.table_schema, tc.table_name, kcu.column_name,
+       ccu.table_schema AS foreign_table_schema, ccu.table_name AS foreign_table_name, ccu.column_name AS foreign_column_name
+FROM information_schema.table_constraints AS tc
+JOIN information_schema.key_column_usage AS kcu
+  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+JOIN information_schema.constraint_column_usage AS ccu
+  ON ccu.constraint_name = tc.constraint_name AND ccu.constraint_schema = tc.table_schema
+WHERE tc.constraint_type = 'FOREIGN KEY'
+ORDER BY tc.table_name
+----
+table_schema:name | table_name:name | column_name:name | foreign_table_schema:name | foreign_table_name:name | foreign_column_name:name
+public | books | author_id | public | authors | id
+app | reviews | book_id | public | books | id
+
+# constraint_column_usage
+query
+SELECT table_name, column_name, constraint_name
+FROM information_schema.constraint_column_usage
+WHERE table_schema = 'public' AND table_name = 'authors'
+ORDER BY constraint_name, column_name
+----
+table_name:name | column_name:name | constraint_name:name
+authors | active | authors_active_not_null
+authors | created_at | authors_created_at_not_null
+authors | email | authors_email_key
+authors | id | authors_id_not_null
+authors | name | authors_name_not_null
+authors | id | authors_pkey
+authors | id | books_author_id_fkey
+
+# check_constraints
+query
+SELECT cc.check_clause
+FROM information_schema.check_constraints cc
+JOIN information_schema.table_constraints tc ON tc.constraint_name = cc.constraint_name
+WHERE tc.table_name = 'books' AND tc.constraint_type = 'CHECK' AND cc.check_clause NOT LIKE '%NOT NULL%'
+----
+check_clause:varchar
+(price >= (0)::numeric)
+
+# views
+query
+SELECT table_name, view_definition, check_option, is_updatable
+FROM information_schema.views
+WHERE table_schema = 'public'
+----
+table_name:name | view_definition:varchar | check_option:varchar | is_updatable:varchar
+cheap_books |  SELECT id,\n    title\n   FROM books\n  WHERE (price < (10)::numeric); | NONE | YES
+
+# sequences
+query
+SELECT sequence_name, data_type, numeric_precision, start_value, minimum_value, maximum_value, increment, cycle_option
+FROM information_schema.sequences
+WHERE sequence_schema = 'public'
+ORDER BY sequence_name
+----
+sequence_name:name | data_type:varchar | numeric_precision:int4 | start_value:varchar | minimum_value:varchar | maximum_value:varchar | increment:varchar | cycle_option:varchar
+authors_id_seq | integer | 32 | 1 | 1 | 2147483647 | 1 | NO
+invoice_seq | bigint | 64 | 1000 | 1 | 99999 | 5 | NO
+
+# element_types for array columns
+query
+SELECT c.column_name, e.data_type
+FROM information_schema.columns c
+LEFT JOIN information_schema.element_types e
+  ON (c.table_catalog, c.table_schema, c.table_name, 'TABLE', c.dtd_identifier)
+   = (e.object_catalog, e.object_schema, e.object_name, e.object_type, e.collection_type_identifier)
+WHERE c.table_name = 'books' AND c.data_type = 'ARRAY'
+----
+column_name:name | data_type:varchar
+tags | text
+
+# routines and enum-backed columns
+statement ok
+CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')
+
+statement ok
+CREATE TABLE people (id int, feeling mood)
+
+query
+SELECT column_name, data_type, udt_schema, udt_name
+FROM information_schema.columns
+WHERE table_name = 'people'
+ORDER BY ordinal_position
+----
+column_name:name | data_type:varchar | udt_schema:name | udt_name:name
+id | integer | pg_catalog | int4
+feeling | USER-DEFINED | public | mood
+
+statement ok
+CREATE FUNCTION add_one(x int) RETURNS int LANGUAGE sql AS 'SELECT x + 1'
+
+query
+SELECT routine_name, routine_type, data_type
+FROM information_schema.routines
+WHERE routine_schema = 'public'
+----
+routine_name:name | routine_type:varchar | data_type:varchar
+add_one | FUNCTION | integer
+
+# changes are visible immediately
+statement ok
+ALTER TABLE authors ADD COLUMN bio varchar(500)
+
+query
+SELECT column_name, character_maximum_length, is_nullable
+FROM information_schema.columns
+WHERE table_name = 'authors' AND column_name = 'bio'
+----
+column_name:name | character_maximum_length:int4 | is_nullable:varchar
+bio | 500 | YES
+
+statement ok
+DROP VIEW cheap_books
+
+query
+SELECT count(*) FROM information_schema.views WHERE table_schema = 'public'
+----
+count:int8
+0

@@ -1,0 +1,313 @@
+# Array functions and operators.
+
+# dimensions
+query
+SELECT array_length(ARRAY[1, 2, 3], 1), array_length(ARRAY[[1, 2], [3, 4], [5, 6]], 2), array_length(ARRAY[]::int[], 1), array_length(ARRAY[1], 2)
+----
+array_length:int4 | array_length:int4 | array_length:int4 | array_length:int4
+3 | 2 | NULL | NULL
+
+query
+SELECT cardinality(ARRAY[[1, 2], [3, 4]]), cardinality(ARRAY[]::int[]), array_ndims(ARRAY[[1], [2]])
+----
+cardinality:int4 | cardinality:int4 | array_ndims:int4
+4 | 0 | 2
+
+query
+SELECT array_dims(ARRAY[1, 2, 3]), array_dims(ARRAY[[1, 2], [3, 4]]), array_dims('[2:4]={1,2,3}'::int[]), array_dims(ARRAY[]::int[])
+----
+array_dims:text | array_dims:text | array_dims:text | array_dims:text
+[1:3] | [1:2][1:2] | [2:4] | NULL
+
+query
+SELECT array_lower('[2:4]={1,2,3}'::int[], 1), array_upper('[2:4]={1,2,3}'::int[], 1), array_upper(ARRAY[1, 2], 1), array_lower(ARRAY[]::int[], 1)
+----
+array_lower:int4 | array_upper:int4 | array_upper:int4 | array_lower:int4
+2 | 4 | 2 | NULL
+
+query
+SELECT ('[2:4]={1,2,3}'::int[])[2], ('[2:4]={1,2,3}'::int[])[1], '[2:4]={1,2,3}'::int[]
+----
+int4:int4 | int4:int4 | int4:_int4
+1 | NULL | [2:4]={1,2,3}
+
+
+# subscripts and slices
+query
+SELECT (ARRAY[10, 20, 30])[2], (ARRAY[10, 20, 30])[5], (ARRAY[[1, 2], [3, 4]])[2][1]
+----
+array:int4 | array:int4 | array:int4
+20 | NULL | 3
+
+query
+SELECT (ARRAY[1, 2, 3, 4, 5])[2:4], (ARRAY[1, 2, 3, 4, 5])[:2], (ARRAY[1, 2, 3, 4, 5])[4:], (ARRAY[[1, 2], [3, 4]])[1:2][2:2]
+----
+array:_int4 | array:_int4 | array:_int4 | array:_int4
+{2,3,4} | {1,2} | {4,5} | {{2},{4}}
+
+
+# append / prepend / cat
+query
+SELECT array_append(ARRAY[1, 2], 3), array_prepend(0, ARRAY[1, 2]), array_cat(ARRAY[1, 2], ARRAY[3, 4]), array_append(NULL::int[], 1)
+----
+array_append:_int4 | array_prepend:_int4 | array_cat:_int4 | array_append:_int4
+{1,2,3} | {0,1,2} | {1,2,3,4} | {1}
+
+query
+SELECT ARRAY[1, 2] || 3, 0 || ARRAY[1, 2], ARRAY[1, 2] || ARRAY[3], ARRAY[[1, 2]] || ARRAY[3, 4], ARRAY[1] || NULL::int[]
+----
+?column?:_int4 | ?column?:_int4 | ?column?:_int4 | ?column?:_int4 | ?column?:_int4
+{1,2,3} | {0,1,2} | {1,2,3} | {{1,2},{3,4}} | {1}
+
+statement error 2202E cannot concatenate incompatible arrays
+SELECT ARRAY[[1, 2]] || ARRAY[3]
+
+
+# remove / replace / position
+query
+SELECT array_remove(ARRAY[1, 2, 3, 2], 2), array_remove(ARRAY[1, NULL, 2], NULL), array_replace(ARRAY[1, 2, 5, 4], 5, 3)
+----
+array_remove:_int4 | array_remove:_int4 | array_replace:_int4
+{1,3} | {1,2} | {1,2,3,4}
+
+query
+SELECT array_position(ARRAY['a', 'b', 'c', 'b'], 'b'), array_position(ARRAY['a', 'b', 'c', 'b'], 'b', 3), array_position(ARRAY[1, 2], 9), array_position(ARRAY[1, NULL], NULL)
+----
+array_position:int4 | array_position:int4 | array_position:int4 | array_position:int4
+2 | 4 | NULL | 2
+
+query
+SELECT array_positions(ARRAY['A', 'A', 'B', 'A'], 'A'), array_positions(ARRAY[1, 2], 3)
+----
+array_positions:_int4 | array_positions:_int4
+{1,2,4} | {}
+
+statement error 0A000 removing elements from multidimensional arrays is not supported
+SELECT array_remove(ARRAY[[1, 2], [3, 4]], 1)
+
+
+# PG16+ helpers
+query
+SELECT array_fill(7, ARRAY[3]), array_fill(0, ARRAY[2, 2]), array_fill(1, ARRAY[2], ARRAY[5])
+----
+array_fill:_int4 | array_fill:_int4 | array_fill:_int4
+{7,7,7} | {{0,0},{0,0}} | [5:6]={1,1}
+
+query
+SELECT trim_array(ARRAY[1, 2, 3, 4, 5], 2), array_sample(ARRAY[1], 1), array_shuffle(ARRAY[7])
+----
+trim_array:_int4 | array_sample:_int4 | array_shuffle:_int4
+{1,2,3} | {1} | {7}
+
+query
+SELECT array_reverse(ARRAY[1, 2, 3]), array_sort(ARRAY[3, 1, 2])
+----
+array_reverse:_int4 | array_sort:_int4
+{3,2,1} | {1,2,3}
+
+
+# array_to_string
+query
+SELECT array_to_string(ARRAY[1, 2, 3], ', '), array_to_string(ARRAY[[1, 2], [3, 4]], '-'), array_to_string(ARRAY[]::text[], ',') || '|'
+----
+array_to_string:text | array_to_string:text | ?column?:text
+1, 2, 3 | 1-2-3-4 | |
+
+
+# unnest
+query
+SELECT unnest(ARRAY[1, 2, 3])
+----
+unnest:int4
+1
+2
+3
+
+query
+SELECT unnest(ARRAY[[1, 2], [3, 4]])
+----
+unnest:int4
+1
+2
+3
+4
+
+query
+SELECT * FROM unnest(ARRAY[1, 2, 3], ARRAY['a', 'b'])
+----
+unnest:int4 | unnest:text
+1 | a
+2 | b
+3 | NULL
+
+query
+SELECT * FROM unnest(ARRAY['x', 'y', 'z']) WITH ORDINALITY
+----
+unnest:text | ordinality:int8
+x | 1
+y | 2
+z | 3
+
+query
+SELECT t.v, t.n FROM unnest(ARRAY['x', 'y']) WITH ORDINALITY AS t(v, n)
+----
+v:text | n:int8
+x | 1
+y | 2
+
+query
+SELECT * FROM unnest(ARRAY[1, 2], ARRAY['a', 'b']) WITH ORDINALITY AS t(num, letter, ord)
+----
+num:int4 | letter:text | ord:int8
+1 | a | 1
+2 | b | 2
+
+query
+SELECT unnest(ARRAY[1, 2]), unnest(ARRAY['a', 'b', 'c'])
+----
+unnest:int4 | unnest:text
+1 | a
+2 | b
+NULL | c
+
+query
+SELECT count(*) FROM unnest(ARRAY[]::int[])
+----
+count:int8
+0
+
+
+# operators
+query
+SELECT ARRAY[1, 4, 3] @> ARRAY[3, 1], ARRAY[2, 7] <@ ARRAY[1, 7, 4, 2, 6], ARRAY[1, 4, 3] && ARRAY[2, 1], ARRAY[1, 2] && ARRAY[3]
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | f
+
+query
+SELECT ARRAY[1, 2, 3] = ARRAY[1, 2, 3], ARRAY[1, 2, 3] < ARRAY[1, 2, 4], ARRAY[1, 2] < ARRAY[1, 2, 3], ARRAY[1, NULL] = ARRAY[1, NULL]
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t
+
+query
+SELECT ARRAY[1, 1, 2] @> ARRAY[2, 2], ARRAY[NULL::int] @> ARRAY[NULL::int]
+----
+?column?:bool | ?column?:bool
+t | f
+
+
+# ANY / ALL
+query
+SELECT 2 = ANY(ARRAY[1, 2, 3]), 5 = ANY(ARRAY[1, 2, 3]), 5 > ALL(ARRAY[1, 2, 3]), 2 <> ALL(ARRAY[1, 2, 3])
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | f | t | f
+
+query
+SELECT 1 = ANY(ARRAY[2, NULL]), 1 = ANY(ARRAY[1, NULL]), 1 = ALL(ARRAY[1, NULL]), 1 = ANY('{}'::int[]), 1 = ALL('{}'::int[])
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+NULL | t | NULL | f | t
+
+query
+SELECT 'abc' LIKE ANY(ARRAY['a%', 'z%']), 'abc' ILIKE ALL(ARRAY['A%', '%C'])
+----
+?column?:bool | ?column?:bool
+t | t
+
+query
+SELECT 2 = SOME(ARRAY[1, 2]), 3 IN (1, 2, 3), 3 NOT IN (1, NULL)
+----
+?column?:bool | ?column?:bool | ?column?:bool
+t | t | NULL
+
+
+# array construction and aggregation
+query
+SELECT ARRAY(SELECT x * 2 FROM generate_series(1, 3) x), ARRAY[]::text[], '{}'::int[]
+----
+array:_int4 | array:_text | int4:_int4
+{2,4,6} | {} | {}
+
+query
+SELECT array_agg(x ORDER BY x DESC), array_agg(DISTINCT x ORDER BY x) FROM (VALUES (1), (2), (2), (NULL)) v(x)
+----
+array_agg:_int4 | array_agg:_int4
+{NULL,2,2,1} | {1,2,NULL}
+
+query
+SELECT array_agg(ARRAY[x, x * 10]) FROM (VALUES (1), (2)) v(x)
+----
+array_agg:_int4
+{{1,10},{2,20}}
+
+query
+SELECT string_agg(s, ',' ORDER BY s), string_agg(DISTINCT s, '|' ORDER BY s) FROM (VALUES ('b'), ('a'), ('b')) v(s)
+----
+string_agg:text | string_agg:text
+a,b,b | a|b
+
+query
+SELECT '{1,2,3}'::int[], '{{1,2},{3,4}}'::int[], '{"a b",NULL,"","c\"d"}'::text[], ARRAY['a,b', 'c']
+----
+int4:_int4 | int4:_int4 | text:_text | array:_text
+{1,2,3} | {{1,2},{3,4}} | {"a b",NULL,"","c\"d"} | {"a,b",c}
+
+statement error 22P02 malformed array literal: "{{1,2},{3}}"
+SELECT '{{1,2},{3}}'::int[]
+
+statement error 2202E multidimensional arrays must have array expressions with matching dimensions
+SELECT ARRAY[[1, 2], [3]]
+
+query
+SELECT ARRAY[1, 2.5], pg_typeof(ARRAY[1, 2.5]), ARRAY[1::smallint, 2::bigint], pg_typeof(ARRAY['a', 'b'])
+----
+array:_numeric | pg_typeof:regtype | array:_int8 | pg_typeof:regtype
+{1,2.5} | numeric[] | {1,2} | text[]
+
+
+# arrays in tables
+statement ok
+CREATE TABLE t (id int, tags text[])
+
+statement ok
+INSERT INTO t VALUES (1, '{a,b}'), (2, '{b,c}'), (3, '{}'), (4, NULL)
+
+query
+SELECT id FROM t WHERE 'b' = ANY(tags) ORDER BY id
+----
+id:int4
+1
+2
+
+query
+SELECT id, cardinality(tags), array_length(tags, 1) FROM t ORDER BY id
+----
+id:int4 | cardinality:int4 | array_length:int4
+1 | 2 | 2
+2 | 2 | 2
+3 | 0 | NULL
+4 | NULL | NULL
+
+statement ok
+UPDATE t SET tags[3] = 'z' WHERE id = 1
+
+statement ok
+UPDATE t SET tags = array_append(tags, 'x') WHERE id = 2
+
+query
+SELECT id, tags FROM t ORDER BY id
+----
+id:int4 | tags:_text
+1 | {a,b,z}
+2 | {b,c,x}
+3 | {}
+4 | NULL
+
+query
+SELECT id, tags FROM t WHERE tags && ARRAY['z', 'c'] ORDER BY id
+----
+id:int4 | tags:_text
+1 | {a,b,z}
+2 | {b,c,x}

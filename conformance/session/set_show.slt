@@ -1,0 +1,601 @@
+# SET / SHOW / RESET for settings that drivers and clients touch at connect time.
+
+# search_path
+statement ok
+CREATE SCHEMA s1
+
+statement ok
+SET search_path TO s1, public
+
+query
+SHOW search_path
+----
+search_path:text
+s1, public
+
+statement ok
+SET search_path = public
+
+query
+SHOW search_path
+----
+search_path:text
+public
+
+statement ok
+SET search_path TO "$user", public
+
+query
+SHOW search_path
+----
+search_path:text
+"$user", public
+
+query
+SELECT current_schema()
+----
+current_schema:name
+public
+
+statement ok
+SET search_path TO DEFAULT
+
+query
+SHOW search_path
+----
+search_path:text
+"$user", public
+
+# TimeZone and its effect on timestamptz output
+statement ok
+SET TimeZone = 'UTC'
+
+query
+SHOW TimeZone
+----
+TimeZone:text
+UTC
+
+query
+SELECT '2024-06-01 12:00:00+00'::timestamptz
+----
+timestamptz:timestamptz
+2024-06-01 12:00:00+00
+
+statement ok
+SET TIME ZONE 'America/New_York'
+
+query
+SHOW timezone
+----
+TimeZone:text
+America/New_York
+
+query
+SELECT '2024-06-01 12:00:00+00'::timestamptz, '2024-01-15 12:00:00+00'::timestamptz
+----
+timestamptz:timestamptz | timestamptz:timestamptz
+2024-06-01 08:00:00-04 | 2024-01-15 07:00:00-05
+
+statement ok
+SET TIME ZONE 'Europe/Berlin'
+
+query
+SELECT '2024-06-01 12:00:00+00'::timestamptz::text
+----
+text:text
+2024-06-01 14:00:00+02
+
+query
+SELECT '2024-06-01 12:00:00'::timestamptz AT TIME ZONE 'UTC'
+----
+timezone:timestamp
+2024-06-01 10:00:00
+
+statement ok
+SET TIME ZONE LOCAL
+
+statement ok
+SET TIME ZONE INTERVAL '+05:30' HOUR TO MINUTE
+
+query
+SELECT '2024-06-01 12:00:00+00'::timestamptz
+----
+timestamptz:timestamptz
+2024-06-01 17:30:00+05:30
+
+statement ok
+SET TIME ZONE -3
+
+query
+SHOW TimeZone
+----
+TimeZone:text
+<-03>+03
+
+statement ok
+SET timezone TO 'Asia/Tokyo'
+
+query
+SELECT current_setting('TimeZone'), '2024-06-01 00:00:00+00'::timestamptz
+----
+current_setting:text | timestamptz:timestamptz
+Asia/Tokyo | 2024-06-01 09:00:00+09
+
+statement error 22023 invalid value for parameter "TimeZone": "Mars/Olympus_Mons"
+SET TIME ZONE 'Mars/Olympus_Mons'
+
+statement ok
+SET TIME ZONE 'UTC'
+
+# DateStyle
+statement ok
+SET DateStyle = 'ISO, MDY'
+
+query
+SHOW DateStyle
+----
+DateStyle:text
+ISO, MDY
+
+query
+SELECT '2024-03-04'::date, '2024-03-04 05:06:07'::timestamp
+----
+date:date | timestamp:timestamp
+2024-03-04 | 2024-03-04 05:06:07
+
+statement ok
+SET DateStyle = 'German'
+
+query
+SHOW DateStyle
+----
+DateStyle:text
+German, DMY
+
+query
+SELECT '2024-03-04'::date
+----
+date:date
+04.03.2024
+
+statement ok
+SET DateStyle = 'SQL, DMY'
+
+query
+SELECT '2024-03-04'::date, '05/06/2024'::date::text
+----
+date:date | text:text
+04/03/2024 | 05/06/2024
+
+statement ok
+SET datestyle TO postgres, mdy
+
+query
+SELECT '2024-03-04 05:06:07'::timestamp
+----
+timestamp:timestamp
+Mon Mar 04 05:06:07 2024
+
+statement error 22023 invalid value for parameter "DateStyle": "Klingon"
+SET DateStyle = 'Klingon'
+
+statement ok
+SET DateStyle = 'ISO'
+
+query
+SHOW DateStyle
+----
+DateStyle:text
+ISO, MDY
+
+# IntervalStyle
+statement ok
+SET IntervalStyle = 'postgres'
+
+query
+SELECT interval '1 year 2 months 3 days 04:05:06'
+----
+interval:interval
+1 year 2 mons 3 days 04:05:06
+
+statement ok
+SET IntervalStyle = 'iso_8601'
+
+query
+SELECT interval '1 year 2 months 3 days 04:05:06'
+----
+interval:interval
+P1Y2M3DT4H5M6S
+
+statement ok
+SET IntervalStyle = 'sql_standard'
+
+query
+SELECT interval '1 year 2 months 3 days 04:05:06'
+----
+interval:interval
++1-2 +3 +4:05:06
+
+statement ok
+SET IntervalStyle = 'postgres_verbose'
+
+query
+SELECT interval '1 day 02:00:00'
+----
+interval:interval
+@ 1 day 2 hours
+
+statement error 22023 invalid value for parameter "IntervalStyle": "nope"
+SET IntervalStyle = 'nope'
+
+statement ok
+RESET IntervalStyle
+
+query
+SHOW IntervalStyle
+----
+IntervalStyle:text
+postgres
+
+# extra_float_digits
+statement ok
+SET extra_float_digits = 3
+
+query
+SHOW extra_float_digits
+----
+extra_float_digits:text
+3
+
+query
+SELECT 0.1::float8, 1.0::float4 / 3
+----
+float8:float8 | ?column?:float8
+0.1 | 0.3333333333333333
+
+statement ok
+SET extra_float_digits = 0
+
+query
+SELECT 0.1::float8 + 0.2::float8, 1.0::float4 / 3
+----
+?column?:float8 | ?column?:float8
+0.3 | 0.333333333333333
+
+statement ok
+SET extra_float_digits = -3
+
+query
+SELECT pi()
+----
+pi:float8
+3.14159265359
+
+statement error 22023 10 is outside the valid range for parameter "extra_float_digits" (-15 .. 3)
+SET extra_float_digits = 10
+
+statement ok
+RESET extra_float_digits
+
+# statement_timeout
+statement ok
+SET statement_timeout = 0
+
+query
+SHOW statement_timeout
+----
+statement_timeout:text
+0
+
+statement ok
+SET statement_timeout = '5s'
+
+query
+SHOW statement_timeout
+----
+statement_timeout:text
+5s
+
+statement ok
+SET statement_timeout = 1500
+
+query
+SHOW statement_timeout
+----
+statement_timeout:text
+1500ms
+
+statement ok
+SET statement_timeout TO '2min'
+
+query
+SHOW statement_timeout
+----
+statement_timeout:text
+2min
+
+statement error 22023 invalid value for parameter "statement_timeout": "soon"
+SET statement_timeout = 'soon'
+
+statement ok
+RESET statement_timeout
+
+query
+SHOW statement_timeout
+----
+statement_timeout:text
+0
+
+# application_name
+statement ok
+SET application_name = 'my app'
+
+query
+SHOW application_name
+----
+application_name:text
+my app
+
+statement ok
+SET application_name TO DEFAULT
+
+query
+SELECT current_setting('application_name')
+----
+current_setting:text
+(empty)
+
+# client_min_messages
+statement ok
+SET client_min_messages = warning
+
+query
+SHOW client_min_messages
+----
+client_min_messages:text
+warning
+
+statement ok
+SET client_min_messages TO 'ERROR'
+
+query
+SHOW client_min_messages
+----
+client_min_messages:text
+error
+
+statement error 22023 invalid value for parameter "client_min_messages": "loud"
+SET client_min_messages = 'loud'
+
+statement ok
+RESET client_min_messages
+
+query
+SHOW client_min_messages
+----
+client_min_messages:text
+notice
+
+# standard_conforming_strings
+query
+SHOW standard_conforming_strings
+----
+standard_conforming_strings:text
+on
+
+statement ok
+SET standard_conforming_strings = on
+
+query
+SELECT 'a\b'
+----
+?column?:text
+a\b
+
+statement ok
+SET standard_conforming_strings = off
+
+query
+SHOW standard_conforming_strings
+----
+standard_conforming_strings:text
+off
+
+statement ok
+SET standard_conforming_strings = on
+
+# client_encoding / misc driver startup settings
+query
+SHOW client_encoding
+----
+client_encoding:text
+UTF8
+
+statement ok
+SET client_encoding = 'UTF8'
+
+statement ok
+SET NAMES 'UTF8'
+
+query
+SHOW server_encoding
+----
+server_encoding:text
+UTF8
+
+query
+SHOW integer_datetimes
+----
+integer_datetimes:text
+on
+
+query
+SHOW max_identifier_length
+----
+max_identifier_length:text
+63
+
+query
+SHOW transaction_isolation
+----
+transaction_isolation:text
+read committed
+
+statement ok
+SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE
+
+query
+SHOW default_transaction_isolation
+----
+default_transaction_isolation:text
+serializable
+
+statement ok
+SET default_transaction_isolation = 'read committed'
+
+statement ok
+SET lock_timeout = '10s'
+
+query
+SHOW lock_timeout
+----
+lock_timeout:text
+10s
+
+statement ok
+SET idle_in_transaction_session_timeout = 0
+
+statement ok
+SET row_security = off
+
+statement ok
+SET bytea_output = 'hex'
+
+query
+SELECT '\x0102'::bytea
+----
+bytea:bytea
+\x0102
+
+statement ok
+SET bytea_output = 'escape'
+
+query
+SELECT 'ab'::bytea
+----
+bytea:bytea
+ab
+
+statement ok
+RESET bytea_output
+
+# unknown settings
+statement error 42704 unrecognized configuration parameter "no_such_setting"
+SET no_such_setting = 1
+
+statement error 42704 unrecognized configuration parameter "no_such_setting"
+SHOW no_such_setting
+
+statement ok
+SET myapp.user_id = '42'
+
+query
+SHOW myapp.user_id
+----
+myapp.user_id:text
+42
+
+query
+SELECT current_setting('myapp.user_id')
+----
+current_setting:text
+42
+
+# SET LOCAL and transactions
+statement ok
+SET LOCAL statement_timeout = '1s'
+
+query
+SHOW statement_timeout
+----
+statement_timeout:text
+0
+
+statement ok
+BEGIN
+
+statement ok
+SET LOCAL search_path TO s1
+
+query
+SHOW search_path
+----
+search_path:text
+s1
+
+statement ok
+COMMIT
+
+query
+SHOW search_path
+----
+search_path:text
+"$user", public
+
+statement ok
+BEGIN
+
+statement ok
+SET search_path TO s1
+
+statement ok
+ROLLBACK
+
+query
+SHOW search_path
+----
+search_path:text
+"$user", public
+
+statement ok
+BEGIN
+
+statement ok
+SET search_path TO s1
+
+statement ok
+COMMIT
+
+query
+SHOW search_path
+----
+search_path:text
+s1
+
+# SHOW ALL / RESET ALL
+statement ok
+RESET ALL
+
+query
+SHOW search_path
+----
+search_path:text
+"$user", public
+
+query
+SELECT count(*) > 100 FROM pg_settings
+----
+?column?:bool
+t
+
+# other sessions are unaffected
+statement ok
+SET application_name = 'main_session'
+
+connection other
+query
+SELECT current_setting('application_name') = 'main_session'
+----
+?column?:bool
+f

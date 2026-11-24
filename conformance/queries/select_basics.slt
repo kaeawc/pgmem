@@ -1,0 +1,235 @@
+# SELECT basics: expressions, aliases, column naming, VALUES, TABLE.
+statement ok
+CREATE TABLE items (id int PRIMARY KEY, name text NOT NULL, price numeric(10,2), qty int)
+
+statement ok
+INSERT INTO items VALUES (1, 'apple', 1.50, 10), (2, 'banana', 0.25, 100), (3, 'cherry', NULL, 0), (4, 'date', 3.00, NULL)
+
+# SELECT without FROM
+query
+SELECT 1, 2.5, 'x', true, NULL
+----
+?column?:int4 | ?column?:numeric | ?column?:text | ?column?:bool | ?column?:text
+1 | 2.5 | x | t | NULL
+
+query
+SELECT 1 + 2 * 3, (1 + 2) * 3, 7 / 2, 7 % 3, -7 / 2, 2 ^ 10
+----
+?column?:int4 | ?column?:int4 | ?column?:int4 | ?column?:int4 | ?column?:int4 | ?column?:float8
+7 | 9 | 3 | 1 | -3 | 1024
+
+query
+SELECT 7.0 / 2, 1e3, 1.5e-2, 10::float8 / 4
+----
+?column?:numeric | ?column?:numeric | ?column?:numeric | ?column?:float8
+3.5000000000000000 | 1000 | 0.015 | 2.5
+
+# Column naming
+query
+SELECT lower('ABC'), upper('abc'), length('hello'), coalesce(NULL, 1), abs(-3), 1 IS NOT NULL
+----
+lower:text | upper:text | length:int4 | coalesce:int4 | abs:int4 | ?column?:bool
+abc | ABC | 5 | 1 | 3 | t
+
+query
+SELECT 1 AS one, 2 two, 'q' AS "Quoted Name", 3 AS "select"
+----
+one:int4 | two:int4 | Quoted Name:text | select:int4
+1 | 2 | q | 3
+
+query
+SELECT CAST('12' AS int), '12'::int, int '5', CASE WHEN true THEN 1 END, ARRAY[1,2], ROW(1, 'a')
+----
+int4:int4 | int4:int4 | int4:int4 | case:int4 | array:_int4 | row:record
+12 | 12 | 5 | 1 | {1,2} | (1,a)
+
+query
+SELECT x.* FROM (SELECT 1 AS a, 'b' AS b) x
+----
+a:int4 | b:text
+1 | b
+
+query
+SELECT count(*), max(id), sum(qty) FROM items
+----
+count:int8 | max:int4 | sum:int8
+4 | 4 | 110
+
+# Expressions over table columns
+query
+SELECT id, name, price * qty AS total FROM items ORDER BY id
+----
+id:int4 | name:text | total:numeric
+1 | apple | 15.00
+2 | banana | 25.00
+3 | cherry | NULL
+4 | date | NULL
+
+query
+SELECT id, name || '-' || id AS label, upper(substr(name, 1, 1)) AS initial FROM items ORDER BY id
+----
+id:int4 | label:text | initial:text
+1 | apple-1 | A
+2 | banana-2 | B
+3 | cherry-3 | C
+4 | date-4 | D
+
+query
+SELECT id, CASE WHEN qty IS NULL THEN 'unknown' WHEN qty = 0 THEN 'out' ELSE 'in' END AS stock FROM items ORDER BY id
+----
+id:int4 | stock:text
+1 | in
+2 | in
+3 | out
+4 | unknown
+
+query
+SELECT id, coalesce(price, 0) AS p, nullif(qty, 0) AS q, greatest(id, 2), least(id, 2) FROM items ORDER BY id
+----
+id:int4 | p:numeric | q:int4 | greatest:int4 | least:int4
+1 | 1.50 | 10 | 2 | 1
+2 | 0.25 | 100 | 2 | 2
+3 | 0 | NULL | 3 | 2
+4 | 3.00 | NULL | 4 | 2
+
+query
+SELECT *, id * 10 AS ten FROM items WHERE id <= 2 ORDER BY id
+----
+id:int4 | name:text | price:numeric | qty:int4 | ten:int4
+1 | apple | 1.50 | 10 | 10
+2 | banana | 0.25 | 100 | 20
+
+query
+SELECT items.name, i2.name FROM items, items AS i2 WHERE items.id = 1 AND i2.id = 2
+----
+name:text | name:text
+apple | banana
+
+# Same output name twice
+query
+SELECT 1 AS a, 2 AS a
+----
+a:int4 | a:int4
+1 | 2
+
+# VALUES lists
+query
+VALUES (1, 'one'), (2, 'two'), (3, NULL)
+----
+column1:int4 | column2:text
+1 | one
+2 | two
+3 | NULL
+
+query
+SELECT * FROM (VALUES (1, 'a'), (2, 'b')) AS v(num, letter) ORDER BY num DESC
+----
+num:int4 | letter:text
+2 | b
+1 | a
+
+query
+VALUES (1), (2.5), (NULL)
+----
+column1:numeric
+1
+2.5
+NULL
+
+query
+SELECT column1, column2 FROM (VALUES (10, true), (20, false)) v ORDER BY column1
+----
+column1:int4 | column2:bool
+10 | t
+20 | f
+
+statement error 42601 VALUES lists must all be the same length
+VALUES (1, 2), (3)
+
+statement error 42804 VALUES types integer and text cannot be matched
+VALUES (1), ('x'::text)
+
+query
+VALUES (1, 'a') ORDER BY 1 DESC LIMIT 1
+----
+column1:int4 | column2:text
+1 | a
+
+# TABLE t
+query
+TABLE items ORDER BY id LIMIT 2
+----
+id:int4 | name:text | price:numeric | qty:int4
+1 | apple | 1.50 | 10
+2 | banana | 0.25 | 100
+
+# Type coercion of literals
+query
+SELECT '1' || 2, 1 || '2', 3 = '3', 'abc' < 'abd'
+----
+?column?:text | ?column?:text | ?column?:bool | ?column?:bool
+12 | 12 | t | t
+
+query
+SELECT pg_typeof(1), pg_typeof(1.0), pg_typeof('a'), pg_typeof(1::bigint + 1), pg_typeof(1::smallint + 1::smallint), pg_typeof(1 + 1.5)
+----
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+integer | numeric | unknown | bigint | smallint | numeric
+
+query
+SELECT 2147483647::bigint + 1, 9223372036854775807::numeric + 1
+----
+?column?:int8 | ?column?:numeric
+2147483648 | 9223372036854775808
+
+statement error 22003 integer out of range
+SELECT 2147483647 + 1
+
+statement error 22P02 invalid input syntax for type integer: "abc"
+SELECT 'abc'::int
+
+query
+SELECT 10 / 3::numeric, round(10 / 3::numeric, 2), 10::numeric / 4
+----
+?column?:numeric | round:numeric | ?column?:numeric
+3.3333333333333333 | 3.33 | 2.5000000000000000
+
+query
+SELECT 'a' IS NULL, NULL IS NULL, NULL = NULL, NULL::int + 1
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:int4
+f | t | NULL | NULL
+
+# Duplicate-free selection
+query
+SELECT DISTINCT qty IS NULL AS missing FROM items ORDER BY 1
+----
+missing:bool
+f
+t
+
+query
+SELECT DISTINCT * FROM (VALUES (1, 'a'), (1, 'a'), (2, 'b')) v(x, y) ORDER BY x
+----
+x:int4 | y:text
+1 | a
+2 | b
+
+# Boolean output and text forms
+query
+SELECT true AND NULL, false AND NULL, true OR NULL, NOT NULL::boolean
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+NULL | f | t | NULL
+
+query
+SELECT 1.10::numeric, 1.10::float8, 0.1::float4 + 0.2::float4, 1e20::float8, '-0'::float8
+----
+numeric:numeric | float8:float8 | ?column?:float4 | float8:float8 | float8:float8
+1.10 | 1.1 | 0.3 | 1e+20 | -0
+
+query
+SELECT 'it''s', E'tab\there', $$dollar 'quoted'$$, U&'\0041'
+----
+?column?:text | ?column?:text | ?column?:text | ?column?:text
+it's | tab	here | dollar 'quoted' | A

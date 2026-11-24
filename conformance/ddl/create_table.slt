@@ -1,0 +1,181 @@
+# CREATE TABLE variants.
+
+# Plain table, duplicates, IF NOT EXISTS
+statement ok
+CREATE TABLE users (id bigint PRIMARY KEY, email text NOT NULL, created_at timestamptz DEFAULT '2024-01-01 00:00:00+00')
+
+statement error 42P07 relation "users" already exists
+CREATE TABLE users (id int)
+
+statement ok
+CREATE TABLE IF NOT EXISTS users (id int)
+
+query
+SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_name = 'users' ORDER BY ordinal_position
+----
+column_name:name | data_type:varchar | is_nullable:varchar
+id | bigint | NO
+email | text | NO
+created_at | timestamp with time zone | YES
+
+statement error 42701 column "a" specified more than once
+CREATE TABLE dupcol (a int, a text)
+
+statement error 42704 type "nosuchtype" does not exist
+CREATE TABLE badtype (a nosuchtype)
+
+# Quoted identifiers keep case; unquoted fold to lower case
+statement ok
+CREATE TABLE "MixedCase" ("Id" int, "select" text, plain int); INSERT INTO "MixedCase" ("Id", "select", PLAIN) VALUES (1, 'kw', 2)
+
+query
+SELECT "Id", "select", plain FROM "MixedCase"
+----
+Id:int4 | select:text | plain:int4
+1 | kw | 2
+
+statement error 42P01 relation "mixedcase" does not exist
+SELECT * FROM MixedCase
+
+statement ok
+CREATE TABLE FoldMe (ColA int)
+
+query
+SELECT table_name, column_name FROM information_schema.columns WHERE table_name = 'foldme'
+----
+table_name:name | column_name:name
+foldme | cola
+
+# Column defaults, DEFAULT keyword, DEFAULT VALUES
+statement ok
+CREATE TABLE defaults (id int, status text DEFAULT 'new', n int DEFAULT 1 + 2, flag boolean DEFAULT false, arr int[] DEFAULT '{}'); INSERT INTO defaults (id) VALUES (1); INSERT INTO defaults VALUES (2, DEFAULT, DEFAULT, true, DEFAULT); INSERT INTO defaults DEFAULT VALUES
+
+query
+SELECT id, status, n, flag, arr FROM defaults ORDER BY id
+----
+id:int4 | status:text | n:int4 | flag:bool | arr:_int4
+1 | new | 3 | f | {}
+2 | new | 3 | t | {}
+NULL | new | 3 | f | {}
+
+# CREATE TABLE LIKE: NOT NULL is always copied, defaults and indexes only with INCLUDING
+statement ok
+CREATE TABLE src (id int PRIMARY KEY, name text NOT NULL DEFAULT 'anon', note varchar(20)); INSERT INTO src VALUES (1, 'a', 'x'), (2, 'b', NULL), (3, 'c', 'z'); CREATE TABLE copy_plain (LIKE src)
+
+statement error 23502 null value in column "name" of relation "copy_plain" violates not-null constraint
+INSERT INTO copy_plain (id) VALUES (1)
+
+statement ok
+INSERT INTO copy_plain (id, name) VALUES (1, 'n'), (1, 'dup ok'); CREATE TABLE copy_all (LIKE src INCLUDING ALL, extra int); INSERT INTO copy_all (id) VALUES (1)
+
+statement error 23505 duplicate key value violates unique constraint "copy_all_pkey"
+INSERT INTO copy_all (id) VALUES (1)
+
+query
+SELECT id, name, note, extra FROM copy_all
+----
+id:int4 | name:text | note:varchar | extra:int4
+1 | anon | NULL | NULL
+
+# CREATE TABLE AS / SELECT INTO
+statement ok
+CREATE TABLE ctas AS SELECT id, upper(name) AS uname FROM src WHERE id < 3
+
+query
+SELECT id, uname FROM ctas ORDER BY id
+----
+id:int4 | uname:text
+1 | A
+2 | B
+
+statement ok
+CREATE TABLE ctas_empty AS SELECT * FROM src WITH NO DATA; CREATE TABLE ctas_cols (a, b) AS VALUES (1, 'one'), (2, 'two')
+
+query
+SELECT a, b FROM ctas_cols ORDER BY a
+----
+a:int4 | b:text
+1 | one
+2 | two
+
+statement error 42P07 relation "ctas" already exists
+CREATE TABLE ctas AS SELECT 1
+
+statement ok
+SELECT id, name INTO selinto FROM src WHERE id = 3
+
+query
+SELECT id, name FROM selinto
+----
+id:int4 | name:text
+3 | c
+
+# TEMP and UNLOGGED tables
+statement ok
+CREATE TEMP TABLE tmp1 (a int); CREATE UNLOGGED TABLE unl (a int); INSERT INTO tmp1 VALUES (1); INSERT INTO unl VALUES (1); CREATE TEMPORARY TABLE tmp2 (a int) ON COMMIT DELETE ROWS; INSERT INTO tmp2 VALUES (1)
+
+query
+SELECT (SELECT count(*) FROM tmp1), (SELECT count(*) FROM unl), (SELECT count(*) FROM tmp2)
+----
+count:int8 | count:int8 | count:int8
+1 | 1 | 0
+
+connection other
+statement error 42P01 relation "tmp1" does not exist
+SELECT * FROM tmp1
+
+query
+SELECT relname, relpersistence FROM pg_class WHERE relname IN ('tmp1', 'unl', 'src') ORDER BY relname
+----
+relname:name | relpersistence:char
+src | p
+tmp1 | t
+unl | u
+
+# A temp table shadows a permanent one of the same name
+statement ok
+CREATE TEMP TABLE src (x int)
+
+query
+SELECT (SELECT count(*) FROM src), (SELECT count(*) FROM public.src)
+----
+count:int8 | count:int8
+0 | 3
+
+statement ok
+DROP TABLE src
+
+query
+SELECT count(*) FROM src
+----
+count:int8
+3
+
+# varchar length and numeric precision are enforced
+statement ok
+CREATE TABLE lens (v varchar(3), c char(3), n numeric(5,2))
+
+statement error 22001 value too long for type character varying(3)
+INSERT INTO lens (v) VALUES ('abcd')
+
+statement error 22003 numeric field overflow
+INSERT INTO lens (n) VALUES (12345)
+
+statement ok
+INSERT INTO lens VALUES ('abc', 'a', 123.456)
+
+query
+SELECT v, c, length(c), n FROM lens
+----
+v:varchar | c:bpchar | length:int4 | n:numeric
+abc | a   | 1 | 123.46
+
+# Table with no columns
+statement ok
+CREATE TABLE nocols ()
+
+query
+SELECT count(*) FROM nocols
+----
+count:int8
+0

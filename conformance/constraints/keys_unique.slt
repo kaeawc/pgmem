@@ -1,0 +1,127 @@
+# PRIMARY KEY and UNIQUE.
+
+statement ok
+CREATE TABLE t (id int PRIMARY KEY, code text UNIQUE); INSERT INTO t VALUES (1, 'a')
+
+statement error 23505 duplicate key value violates unique constraint "t_pkey"
+INSERT INTO t VALUES (1, 'b')
+
+statement error 23505 duplicate key value violates unique constraint "t_code_key"
+INSERT INTO t VALUES (2, 'a')
+
+statement ok
+INSERT INTO t VALUES (2, NULL), (3, NULL)
+
+statement error 23505 duplicate key value violates unique constraint "t_pkey"
+UPDATE t SET id = 1 WHERE id = 2
+
+# A failing multi-row insert inserts nothing
+statement error 23505 duplicate key value violates unique constraint "t_pkey"
+INSERT INTO t VALUES (10, 'x'), (10, 'y')
+
+query
+SELECT id, code FROM t ORDER BY id
+----
+id:int4 | code:text
+1 | a
+2 | NULL
+3 | NULL
+
+# A non-deferrable unique key is checked row by row
+statement ok
+CREATE TABLE seqs (n int PRIMARY KEY); INSERT INTO seqs VALUES (1), (2), (3)
+
+statement error 23505 duplicate key value violates unique constraint "seqs_pkey"
+UPDATE seqs SET n = n + 1
+
+statement error 42P16 multiple primary keys for table "twopk" are not allowed
+CREATE TABLE twopk (a int PRIMARY KEY, b int PRIMARY KEY)
+
+# Composite primary key implies NOT NULL on every column
+statement ok
+CREATE TABLE memberships (user_id int, group_id int, role text, PRIMARY KEY (user_id, group_id)); INSERT INTO memberships VALUES (1, 1, 'a'), (1, 2, 'b'), (2, 1, 'c')
+
+statement error 23505 duplicate key value violates unique constraint "memberships_pkey"
+INSERT INTO memberships VALUES (1, 2, 'z')
+
+statement error 23502 null value in column "group_id" of relation "memberships" violates not-null constraint
+INSERT INTO memberships VALUES (3, NULL, 'z')
+
+query
+SELECT column_name, is_nullable FROM information_schema.columns WHERE table_name = 'memberships' ORDER BY ordinal_position
+----
+column_name:name | is_nullable:varchar
+user_id | NO
+group_id | NO
+role | YES
+
+# Named constraints; NULLs never conflict in a plain UNIQUE
+statement ok
+CREATE TABLE named (a int CONSTRAINT named_pk PRIMARY KEY, b int, c int, CONSTRAINT bc_unique UNIQUE (b, c)); INSERT INTO named VALUES (1, 1, 1), (2, 1, NULL), (3, 1, NULL)
+
+statement error 23505 duplicate key value violates unique constraint "bc_unique"
+INSERT INTO named VALUES (4, 1, 1)
+
+query
+SELECT constraint_name, constraint_type FROM information_schema.table_constraints WHERE table_name = 'named' AND constraint_type IN ('PRIMARY KEY', 'UNIQUE') ORDER BY constraint_name
+----
+constraint_name:name | constraint_type:varchar
+bc_unique | UNIQUE
+named_pk | PRIMARY KEY
+
+statement error 42P07 relation "named_pk" already exists
+CREATE TABLE named2 (a int, CONSTRAINT named_pk UNIQUE (a))
+
+statement error 42P07 relation "bc_unique" already exists
+ALTER TABLE named ADD CONSTRAINT bc_unique UNIQUE (a)
+
+# UNIQUE NULLS NOT DISTINCT
+statement ok
+CREATE TABLE nnd (a int, b int, UNIQUE NULLS NOT DISTINCT (a, b)); INSERT INTO nnd VALUES (1, NULL), (2, NULL)
+
+statement error 23505 duplicate key value violates unique constraint "nnd_a_b_key"
+INSERT INTO nnd VALUES (1, NULL)
+
+# Adding keys to tables with existing data
+statement ok
+CREATE TABLE later (a int, b int); INSERT INTO later VALUES (1, 1), (2, 1), (NULL, 2)
+
+statement error 23502 column "a" of relation "later" contains null values
+ALTER TABLE later ADD PRIMARY KEY (a)
+
+statement error 23505 could not create unique index "later_b_key"
+ALTER TABLE later ADD UNIQUE (b)
+
+statement ok
+DELETE FROM later WHERE a IS NULL; ALTER TABLE later ADD PRIMARY KEY (a); ALTER TABLE later ADD CONSTRAINT later_ab_key UNIQUE (a, b) DEFERRABLE
+
+query
+SELECT conname, contype, condeferrable, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'later'::regclass ORDER BY conname
+----
+conname:name | contype:char | condeferrable:bool | pg_get_constraintdef:text
+later_a_not_null | n | f | NOT NULL a
+later_ab_key | u | t | UNIQUE (a, b) DEFERRABLE
+later_pkey | p | f | PRIMARY KEY (a)
+
+# ON CONFLICT against keys
+statement ok
+INSERT INTO memberships VALUES (1, 1, 'new') ON CONFLICT (user_id, group_id) DO UPDATE SET role = EXCLUDED.role; INSERT INTO memberships VALUES (1, 1, 'ignored') ON CONFLICT ON CONSTRAINT memberships_pkey DO NOTHING
+
+query
+SELECT role FROM memberships WHERE user_id = 1 AND group_id = 1
+----
+role:text
+new
+
+statement error 42P10 there is no unique or exclusion constraint matching the ON CONFLICT specification
+INSERT INTO memberships VALUES (1, 1, 'x') ON CONFLICT (role) DO NOTHING
+
+statement error 21000 ON CONFLICT DO UPDATE command cannot affect row a second time
+INSERT INTO memberships VALUES (5, 5, 'a'), (5, 5, 'b') ON CONFLICT (user_id, group_id) DO UPDATE SET role = EXCLUDED.role
+
+# Dropping and re-adding a primary key
+statement ok
+ALTER TABLE memberships DROP CONSTRAINT memberships_pkey; INSERT INTO memberships VALUES (1, 1, 'dup')
+
+statement error 23505 could not create unique index "memberships_pkey"
+ALTER TABLE memberships ADD PRIMARY KEY (user_id, group_id)

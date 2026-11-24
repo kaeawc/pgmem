@@ -1,0 +1,78 @@
+# EXCLUDE constraints.
+
+statement ok
+CREATE TABLE bookings (room int, during tsrange, EXCLUDE USING gist (during WITH &&)); INSERT INTO bookings VALUES (1, '[2024-01-01 10:00, 2024-01-01 11:00)'), (1, '[2024-01-01 11:00, 2024-01-01 12:00)')
+
+statement error 23P01 conflicting key value violates exclusion constraint "bookings_during_excl"
+INSERT INTO bookings VALUES (2, '[2024-01-01 10:30, 2024-01-01 10:45)')
+
+query
+SELECT room, during FROM bookings ORDER BY during
+----
+room:int4 | during:tsrange
+1 | ["2024-01-01 10:00:00","2024-01-01 11:00:00")
+1 | ["2024-01-01 11:00:00","2024-01-01 12:00:00")
+
+# Equality exclusion with btree behaves like UNIQUE
+statement ok
+CREATE TABLE eq (a int, EXCLUDE (a WITH =)); INSERT INTO eq VALUES (1), (2), (NULL), (NULL)
+
+statement error 23P01 conflicting key value violates exclusion constraint "eq_a_excl"
+INSERT INTO eq VALUES (1)
+
+statement error 23P01 conflicting key value violates exclusion constraint "eq_a_excl"
+UPDATE eq SET a = 1 WHERE a = 2
+
+# Equality on a scalar under gist needs btree_gist
+statement error 42704 data type integer has no default operator class for access method "gist"
+CREATE TABLE rooms (room int, during tsrange, EXCLUDE USING gist (room WITH =, during WITH &&))
+
+# Named exclusion with a WHERE clause
+statement ok
+CREATE TABLE shifts (worker int, during int4range, active boolean, CONSTRAINT no_overlap EXCLUDE USING gist (during WITH &&) WHERE (active)); INSERT INTO shifts VALUES (1, '[1,5)', true), (2, '[3,8)', false)
+
+statement error 23P01 conflicting key value violates exclusion constraint "no_overlap"
+INSERT INTO shifts VALUES (3, '[4,6)', true)
+
+statement ok
+INSERT INTO shifts VALUES (3, '[5,6)', true)
+
+# Adding an exclusion constraint validates existing rows
+statement ok
+CREATE TABLE later (r int4range); INSERT INTO later VALUES ('[1,3)'), ('[2,4)')
+
+statement error 23P01 could not create exclusion constraint "later_r_excl"
+ALTER TABLE later ADD EXCLUDE USING gist (r WITH &&)
+
+statement ok
+DELETE FROM later WHERE r = '[2,4)'; ALTER TABLE later ADD CONSTRAINT later_excl EXCLUDE USING gist (r WITH &&)
+
+query
+SELECT conname, contype FROM pg_constraint WHERE conrelid = 'later'::regclass
+----
+conname:name | contype:char
+later_excl | x
+
+# Deferrable exclusion
+statement ok
+CREATE TABLE dex (r int4range, EXCLUDE USING gist (r WITH &&) DEFERRABLE INITIALLY DEFERRED)
+
+statement ok
+BEGIN; INSERT INTO dex VALUES ('[1,5)'), ('[3,7)'); UPDATE dex SET r = '[5,7)' WHERE r = '[3,7)'; COMMIT
+
+query
+SELECT r FROM dex ORDER BY r
+----
+r:int4range
+[1,5)
+[5,7)
+
+# PostgreSQL 18 temporal primary keys (WITHOUT OVERLAPS)
+statement error 42704 data type integer has no default operator class for access method "gist"
+CREATE TABLE temporal (id int, valid daterange, PRIMARY KEY (id, valid WITHOUT OVERLAPS))
+
+statement ok
+CREATE TABLE temporal_r (id int4range, valid daterange, PRIMARY KEY (id, valid WITHOUT OVERLAPS)); INSERT INTO temporal_r VALUES ('[1,2)', '[2024-01-01,2024-02-01)'), ('[1,2)', '[2024-02-01,2024-03-01)')
+
+statement error 23P01 conflicting key value violates exclusion constraint "temporal_r_pkey"
+INSERT INTO temporal_r VALUES ('[1,2)', '[2024-01-15,2024-01-20)')

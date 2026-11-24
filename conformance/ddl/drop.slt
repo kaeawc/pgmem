@@ -1,0 +1,139 @@
+# DROP with CASCADE / RESTRICT and dependency errors.
+
+statement ok
+CREATE TABLE parent (id int PRIMARY KEY); CREATE TABLE child (id int, parent_id int REFERENCES parent (id)); CREATE VIEW parent_v AS SELECT id FROM parent
+
+statement error 42P01 table "nosuch" does not exist
+DROP TABLE nosuch
+
+statement error 2BP01 cannot drop table parent because other objects depend on it
+DROP TABLE parent
+
+# Wrong object kind
+statement error 42809 "parent" is not a view
+DROP VIEW parent
+
+statement error 42809 "parent_v" is not a table
+DROP TABLE parent_v
+
+statement error 42809 "parent" is not a sequence
+DROP SEQUENCE parent
+
+# CASCADE drops the view and the foreign key, but not the referencing table
+statement ok
+DROP TABLE parent CASCADE
+
+query
+SELECT (SELECT count(*) FROM pg_constraint WHERE conrelid = 'child'::regclass AND contype = 'f'), (SELECT count(*) FROM pg_views WHERE viewname = 'parent_v')
+----
+count:int8 | count:int8
+0 | 0
+
+statement ok
+INSERT INTO child VALUES (1, 999)
+
+# Several tables in one statement; a missing one aborts the whole drop
+statement error 42P01 table "nosuch" does not exist
+DROP TABLE child, nosuch
+
+query
+SELECT count(*) FROM child
+----
+count:int8
+1
+
+# Views depending on views
+statement ok
+CREATE TABLE base (a int, b int); CREATE VIEW v1 AS SELECT a FROM base; CREATE VIEW v2 AS SELECT a FROM v1
+
+statement error 2BP01 cannot drop view v1 because other objects depend on it
+DROP VIEW v1
+
+statement ok
+DROP VIEW v1 CASCADE
+
+statement error 42P01 relation "v2" does not exist
+SELECT * FROM v2
+
+# Owned sequence goes with its table; a referenced one blocks
+statement ok
+CREATE TABLE s (id serial PRIMARY KEY)
+
+statement error 2BP01 cannot drop sequence s_id_seq because other objects depend on it
+DROP SEQUENCE s_id_seq
+
+statement ok
+DROP TABLE s
+
+query
+SELECT count(*) FROM pg_class WHERE relname = 's_id_seq'
+----
+count:int8
+0
+
+statement ok
+CREATE SEQUENCE free_seq; CREATE TABLE uses_seq (id int DEFAULT nextval('free_seq'))
+
+statement error 2BP01 cannot drop sequence free_seq because other objects depend on it
+DROP SEQUENCE free_seq
+
+statement ok
+DROP SEQUENCE free_seq CASCADE
+
+query
+SELECT column_default FROM information_schema.columns WHERE table_name = 'uses_seq'
+----
+column_default:varchar
+NULL
+
+# Index backing a constraint
+statement ok
+CREATE TABLE u (a int UNIQUE)
+
+statement error 2BP01 cannot drop index u_a_key because constraint u_a_key on table u requires it
+DROP INDEX u_a_key
+
+statement error 42704 index "u_plain" does not exist
+DROP INDEX u_plain
+
+# Function used in a default
+statement ok
+CREATE FUNCTION f_one() RETURNS int LANGUAGE sql AS 'SELECT 1'; CREATE TABLE fdep (a int DEFAULT f_one())
+
+statement error 2BP01 cannot drop function f_one() because other objects depend on it
+DROP FUNCTION f_one()
+
+statement ok
+DROP FUNCTION f_one() CASCADE; INSERT INTO fdep DEFAULT VALUES
+
+query
+SELECT a FROM fdep
+----
+a:int4
+NULL
+
+# DROP is transactional
+statement ok
+BEGIN; DROP TABLE fdep; ROLLBACK
+
+query
+SELECT count(*) FROM fdep
+----
+count:int8
+1
+
+# Type used by a column
+statement ok
+CREATE TYPE mood AS ENUM ('sad', 'happy'); CREATE TABLE person (id int, m mood)
+
+statement error 2BP01 cannot drop type mood because other objects depend on it
+DROP TYPE mood
+
+statement ok
+DROP TYPE mood CASCADE
+
+query
+SELECT column_name FROM information_schema.columns WHERE table_name = 'person'
+----
+column_name:name
+id

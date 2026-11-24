@@ -1,0 +1,346 @@
+# Aggregates, GROUP BY, HAVING, grouping sets.
+statement ok
+CREATE TABLE sales (id int PRIMARY KEY, region text, product text, qty int, price numeric(8,2), big bigint, f float8)
+
+statement ok
+INSERT INTO sales VALUES (1, 'north', 'apple', 10, 1.50, 1000, 0.5), (2, 'north', 'pear', 5, 2.00, 2000, 1.5), (3, 'south', 'apple', 7, 1.50, 3000, 2.5), (4, 'south', 'apple', 3, 1.25, NULL, NULL), (5, 'east', 'pear', NULL, NULL, 5000, 3.5), (6, 'north', 'apple', 1, 1.75, 6000, 4.5)
+
+statement ok
+CREATE TABLE empty_t (n int)
+
+# Result types
+query
+SELECT count(*), count(qty), sum(qty), sum(big), sum(price), sum(f), avg(qty), avg(price), avg(f) FROM sales
+----
+count:int8 | count:int8 | sum:int8 | sum:numeric | sum:numeric | sum:float8 | avg:numeric | avg:numeric | avg:float8
+6 | 5 | 26 | 17000 | 8.00 | 12.5 | 5.2000000000000000 | 1.6000000000000000 | 2.5
+
+query
+SELECT pg_typeof(sum(1::int2)), pg_typeof(sum(1::int4)), pg_typeof(sum(1::int8)), pg_typeof(avg(1::int4)), pg_typeof(avg(1::float4)), pg_typeof(count(*))
+----
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+bigint | bigint | numeric | numeric | double precision | bigint
+
+query
+SELECT min(qty), max(qty), min(product), max(product), min(price), max(f) FROM sales
+----
+min:int4 | max:int4 | min:text | max:text | min:numeric | max:float8
+1 | 10 | apple | pear | 1.25 | 4.5
+
+# Empty input
+query
+SELECT count(*), count(n), sum(n), avg(n), max(n), array_agg(n), string_agg(n::text, ',') FROM empty_t
+----
+count:int8 | count:int8 | sum:int8 | avg:numeric | max:int4 | array_agg:_int4 | string_agg:text
+0 | 0 | NULL | NULL | NULL | NULL | NULL
+
+query
+SELECT n, count(*) FROM empty_t GROUP BY n
+----
+n:int4 | count:int8
+
+query
+SELECT count(*) FROM empty_t HAVING count(*) > 0
+----
+count:int8
+
+# DISTINCT aggregates
+query
+SELECT count(DISTINCT product), count(DISTINCT region), sum(DISTINCT price) FROM sales
+----
+count:int8 | count:int8 | sum:numeric
+2 | 3 | 6.50
+
+# GROUP BY
+query
+SELECT region, count(*), sum(qty) FROM sales GROUP BY region ORDER BY region
+----
+region:text | count:int8 | sum:int8
+east | 1 | NULL
+north | 3 | 16
+south | 2 | 10
+
+query
+SELECT region, product, sum(qty) AS total FROM sales GROUP BY region, product ORDER BY region, product
+----
+region:text | product:text | total:int8
+east | pear | NULL
+north | apple | 11
+north | pear | 5
+south | apple | 10
+
+query
+SELECT upper(region) AS r, count(*) FROM sales GROUP BY 1 ORDER BY 1
+----
+r:text | count:int8
+EAST | 1
+NORTH | 3
+SOUTH | 2
+
+query
+SELECT region AS r, count(*) FROM sales GROUP BY r ORDER BY r
+----
+r:text | count:int8
+east | 1
+north | 3
+south | 2
+
+query
+SELECT qty IS NULL AS missing, count(*) FROM sales GROUP BY qty IS NULL ORDER BY 1
+----
+missing:bool | count:int8
+f | 5
+t | 1
+
+query
+SELECT s.id, s.region, count(*) FROM sales s GROUP BY s.id ORDER BY s.id LIMIT 2
+----
+id:int4 | region:text | count:int8
+1 | north | 1
+2 | north | 1
+
+# HAVING
+query
+SELECT region, sum(qty) FROM sales GROUP BY region HAVING sum(qty) > 10 ORDER BY region
+----
+region:text | sum:int8
+north | 16
+
+query
+SELECT region FROM sales GROUP BY region HAVING count(*) = 1
+----
+region:text
+east
+
+query
+SELECT 'x' AS c HAVING 1 = 1
+----
+c:text
+x
+
+# FILTER
+query
+SELECT count(*) FILTER (WHERE product = 'apple') AS apples, sum(qty) FILTER (WHERE region = 'north') AS north_qty FROM sales
+----
+apples:int8 | north_qty:int8
+4 | 16
+
+query
+SELECT region, count(*) FILTER (WHERE qty > 4) FROM sales GROUP BY region ORDER BY region
+----
+region:text | count:int8
+east | 0
+north | 2
+south | 1
+
+# string_agg and array_agg
+query
+SELECT string_agg(product, ',' ORDER BY id) FROM sales
+----
+string_agg:text
+apple,pear,apple,apple,pear,apple
+
+query
+SELECT region, string_agg(DISTINCT product, '|' ORDER BY product) FROM sales GROUP BY region ORDER BY region
+----
+region:text | string_agg:text
+east | pear
+north | apple|pear
+south | apple
+
+query
+SELECT array_agg(qty ORDER BY id), array_agg(qty ORDER BY qty DESC NULLS LAST) FROM sales
+----
+array_agg:_int4 | array_agg:_int4
+{10,5,7,3,NULL,1} | {10,7,5,3,1,NULL}
+
+query
+SELECT array_agg(DISTINCT region ORDER BY region) FROM sales
+----
+array_agg:_text
+{east,north,south}
+
+query
+SELECT region, array_agg(id ORDER BY id) FROM sales GROUP BY region ORDER BY region
+----
+region:text | array_agg:_int4
+east | {5}
+north | {1,2,6}
+south | {3,4}
+
+query
+SELECT array_agg(x) FROM (VALUES (ARRAY[1,2]), (ARRAY[3,4])) v(x)
+----
+array_agg:_int4
+{{1,2},{3,4}}
+
+# Boolean and bitwise aggregates
+query
+SELECT bool_and(qty > 0), bool_or(qty > 9), every(qty IS NOT NULL), bit_and(qty), bit_or(qty) FROM sales
+----
+bool_and:bool | bool_or:bool | every:bool | bit_and:int4 | bit_or:int4
+t | t | f | 0 | 15
+
+# Statistical aggregates
+query
+SELECT round(stddev(qty), 4), round(variance(qty), 4), round(stddev_pop(qty), 4), round(var_samp(qty)::numeric, 4) FROM sales
+----
+round:numeric | round:numeric | round:numeric | round:numeric
+3.4928 | 12.2000 | 3.1241 | 12.2000
+
+query
+SELECT round(corr(qty, f)::numeric, 6), round(regr_slope(f, qty)::numeric, 6), covar_pop(qty, f) FROM sales
+----
+round:numeric | round:numeric | covar_pop:float8
+-0.891902 | -0.403509 | -4.3125
+
+# Ordered-set aggregates
+query
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY qty), percentile_disc(0.5) WITHIN GROUP (ORDER BY qty) FROM sales
+----
+percentile_cont:float8 | percentile_disc:int4
+5 | 5
+
+query
+SELECT percentile_cont(ARRAY[0.25, 0.75]) WITHIN GROUP (ORDER BY f), percentile_disc(0.9) WITHIN GROUP (ORDER BY price) FROM sales
+----
+percentile_cont:_float8 | percentile_disc:numeric
+{1.5,3.5} | 2.00
+
+query
+SELECT mode() WITHIN GROUP (ORDER BY product), mode() WITHIN GROUP (ORDER BY region) FROM sales
+----
+mode:text | mode:text
+apple | north
+
+query
+SELECT region, percentile_cont(0.5) WITHIN GROUP (ORDER BY qty) FROM sales GROUP BY region ORDER BY region
+----
+region:text | percentile_cont:float8
+east | NULL
+north | 5
+south | 5
+
+query
+SELECT rank(5) WITHIN GROUP (ORDER BY qty), dense_rank(5) WITHIN GROUP (ORDER BY qty), percent_rank(5) WITHIN GROUP (ORDER BY qty) FROM sales
+----
+rank:int8 | dense_rank:int8 | percent_rank:float8
+3 | 3 | 0.3333333333333333
+
+# JSON aggregates
+query
+SELECT json_agg(product ORDER BY id), jsonb_object_agg(id, qty ORDER BY id) FROM sales WHERE id <= 3
+----
+json_agg:json | jsonb_object_agg:jsonb
+["apple", "pear", "apple"] | {"1": 10, "2": 5, "3": 7}
+
+# GROUPING SETS / ROLLUP / CUBE
+query
+SELECT region, product, sum(qty) FROM sales GROUP BY GROUPING SETS ((region), (product), ()) ORDER BY region NULLS LAST, product NULLS LAST
+----
+region:text | product:text | sum:int8
+east | NULL | NULL
+north | NULL | 16
+south | NULL | 10
+NULL | apple | 21
+NULL | pear | 5
+NULL | NULL | 26
+
+query
+SELECT region, product, sum(qty), grouping(region, product) FROM sales GROUP BY ROLLUP (region, product) ORDER BY region NULLS LAST, product NULLS LAST
+----
+region:text | product:text | sum:int8 | grouping:int4
+east | pear | NULL | 0
+east | NULL | NULL | 1
+north | apple | 11 | 0
+north | pear | 5 | 0
+north | NULL | 16 | 1
+south | apple | 10 | 0
+south | NULL | 10 | 1
+NULL | NULL | 26 | 3
+
+query
+SELECT region, product, count(*), grouping(region), grouping(product) FROM sales GROUP BY CUBE (region, product) ORDER BY 4, 5, region NULLS LAST, product NULLS LAST
+----
+region:text | product:text | count:int8 | grouping:int4 | grouping:int4
+east | pear | 1 | 0 | 0
+north | apple | 2 | 0 | 0
+north | pear | 1 | 0 | 0
+south | apple | 2 | 0 | 0
+east | NULL | 1 | 0 | 1
+north | NULL | 3 | 0 | 1
+south | NULL | 2 | 0 | 1
+NULL | apple | 4 | 1 | 0
+NULL | pear | 2 | 1 | 0
+NULL | NULL | 6 | 1 | 1
+
+query
+SELECT coalesce(region, 'ALL') AS region, sum(qty) FROM sales GROUP BY ROLLUP (region) ORDER BY grouping(region), region
+----
+region:text | sum:int8
+east | NULL
+north | 16
+south | 10
+ALL | 26
+
+query
+SELECT region, product, sum(qty) FROM sales GROUP BY region, ROLLUP (product) ORDER BY region, product NULLS LAST
+----
+region:text | product:text | sum:int8
+east | pear | NULL
+east | NULL | NULL
+north | apple | 11
+north | pear | 5
+north | NULL | 16
+south | apple | 10
+south | NULL | 10
+
+query
+SELECT count(*) FROM sales GROUP BY GROUPING SETS ((), ())
+----
+count:int8
+6
+6
+
+statement error 42803 arguments to GROUPING must be grouping expressions of the associated query level
+SELECT region, grouping(product) FROM sales GROUP BY region
+
+# Aggregate errors
+statement error 42803 column "sales.product" must appear in the GROUP BY clause or be used in an aggregate function
+SELECT region, product FROM sales GROUP BY region
+
+statement error 42803 aggregate function calls cannot be nested
+SELECT sum(count(*)) FROM sales
+
+statement error 42803 aggregate functions are not allowed in WHERE
+SELECT id FROM sales WHERE count(*) > 1
+
+statement error 42883 function sum(text) does not exist
+SELECT sum(product) FROM sales
+
+statement error 42883 function percentile_cont(numeric, text) does not exist
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY product) FROM sales
+
+statement error 22003 percentile value 1.5 is not between 0 and 1
+SELECT percentile_cont(1.5) WITHIN GROUP (ORDER BY qty) FROM sales
+
+statement error 42803 aggregate functions are not allowed in FILTER
+SELECT count(*) FILTER (WHERE sum(qty) > 1) FROM sales
+
+query
+SELECT sum(qty) FROM sales WHERE false
+----
+sum:int8
+NULL
+
+query
+SELECT sum(2147483647) FROM generate_series(1, 3)
+----
+sum:int8
+6442450941
+
+query
+SELECT avg(x) FROM (VALUES (1), (2)) v(x)
+----
+avg:numeric
+1.5000000000000000

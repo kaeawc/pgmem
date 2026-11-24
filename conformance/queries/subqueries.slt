@@ -1,0 +1,249 @@
+# Subqueries.
+statement ok
+CREATE TABLE customers (id int PRIMARY KEY, name text, city text)
+
+statement ok
+CREATE TABLE orders (id int PRIMARY KEY, customer_id int, amount numeric, placed date)
+
+statement ok
+INSERT INTO customers VALUES (1, 'ann', 'oslo'), (2, 'bob', 'rome'), (3, 'cat', 'oslo'), (4, 'dan', NULL)
+
+statement ok
+INSERT INTO orders VALUES (10, 1, 100, '2024-01-01'), (11, 1, 50, '2024-02-01'), (12, 2, 75, '2024-01-15'), (13, 3, 200, '2024-03-01'), (14, NULL, 5, '2024-03-02')
+
+# Scalar subqueries
+query
+SELECT (SELECT max(amount) FROM orders)
+----
+max:numeric
+200
+
+query
+SELECT name, (SELECT sum(amount) FROM orders o WHERE o.customer_id = c.id) AS total FROM customers c ORDER BY id
+----
+name:text | total:numeric
+ann | 150
+bob | 75
+cat | 200
+dan | NULL
+
+query
+SELECT (SELECT amount FROM orders WHERE id = 999)
+----
+amount:numeric
+NULL
+
+statement error 21000 more than one row returned by a subquery used as an expression
+SELECT (SELECT amount FROM orders)
+
+statement error 42601 subquery must return only one column
+SELECT (SELECT 1, 2)
+
+query
+SELECT id FROM orders WHERE amount > (SELECT avg(amount) FROM orders) ORDER BY id
+----
+id:int4
+10
+13
+
+query
+SELECT name FROM customers c WHERE (SELECT count(*) FROM orders o WHERE o.customer_id = c.id) = 0 ORDER BY name
+----
+name:text
+dan
+
+# Correlated subqueries
+query
+SELECT o.id FROM orders o WHERE o.amount = (SELECT max(amount) FROM orders o2 WHERE o2.customer_id = o.customer_id) ORDER BY o.id
+----
+id:int4
+10
+12
+13
+
+query
+SELECT c.name, (SELECT o.placed FROM orders o WHERE o.customer_id = c.id ORDER BY o.placed DESC LIMIT 1) AS last_order FROM customers c ORDER BY c.id
+----
+name:text | last_order:date
+ann | 2024-02-01
+bob | 2024-01-15
+cat | 2024-03-01
+dan | NULL
+
+# EXISTS
+query
+SELECT name FROM customers c WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id) ORDER BY name
+----
+name:text
+ann
+bob
+cat
+
+query
+SELECT name FROM customers c WHERE NOT EXISTS (SELECT FROM orders o WHERE o.customer_id = c.id) ORDER BY name
+----
+name:text
+dan
+
+query
+SELECT EXISTS (SELECT 1 FROM orders WHERE amount > 1000), EXISTS (SELECT NULL)
+----
+exists:bool | exists:bool
+f | t
+
+# IN subqueries
+query
+SELECT name FROM customers WHERE id IN (SELECT customer_id FROM orders) ORDER BY name
+----
+name:text
+ann
+bob
+cat
+
+query
+SELECT name FROM customers WHERE id NOT IN (SELECT customer_id FROM orders) ORDER BY name
+----
+name:text
+
+query
+SELECT name FROM customers WHERE id NOT IN (SELECT customer_id FROM orders WHERE customer_id IS NOT NULL) ORDER BY name
+----
+name:text
+dan
+
+query
+SELECT name FROM customers WHERE (id, city) IN (SELECT id, 'oslo' FROM customers) ORDER BY name
+----
+name:text
+ann
+cat
+
+statement error 42601 subquery has too many columns
+SELECT name FROM customers WHERE id IN (SELECT id, name FROM customers)
+
+# Derived tables
+query
+SELECT t.customer_id, t.total FROM (SELECT customer_id, sum(amount) AS total FROM orders GROUP BY customer_id) t WHERE t.total > 60 ORDER BY t.customer_id
+----
+customer_id:int4 | total:numeric
+1 | 150
+2 | 75
+3 | 200
+
+query
+SELECT * FROM (SELECT 1 AS x) a, (SELECT 2 AS y) b
+----
+x:int4 | y:int4
+1 | 2
+
+query
+SELECT * FROM (SELECT id, name FROM customers) AS c(cid, cname) ORDER BY cid LIMIT 2
+----
+cid:int4 | cname:text
+1 | ann
+2 | bob
+
+query
+SELECT count(*) FROM (SELECT DISTINCT city FROM customers) s
+----
+count:int8
+3
+
+# Subquery without alias (allowed since PG 16)
+query
+SELECT * FROM (SELECT 1 AS a)
+----
+a:int4
+1
+
+# LATERAL
+query
+SELECT c.name, x.amount FROM customers c, LATERAL (SELECT amount FROM orders o WHERE o.customer_id = c.id ORDER BY amount DESC LIMIT 1) x ORDER BY c.id
+----
+name:text | amount:numeric
+ann | 100
+bob | 75
+cat | 200
+
+query
+SELECT c.name, x.amount FROM customers c LEFT JOIN LATERAL (SELECT amount FROM orders o WHERE o.customer_id = c.id ORDER BY amount DESC LIMIT 1) x ON true ORDER BY c.id
+----
+name:text | amount:numeric
+ann | 100
+bob | 75
+cat | 200
+dan | NULL
+
+query
+SELECT c.id, g FROM customers c, LATERAL generate_series(1, c.id) g WHERE c.id <= 2 ORDER BY c.id, g
+----
+id:int4 | g:int4
+1 | 1
+2 | 1
+2 | 2
+
+query
+SELECT c.id, v.doubled FROM customers c CROSS JOIN LATERAL (SELECT c.id * 2 AS doubled) v ORDER BY c.id
+----
+id:int4 | doubled:int4
+1 | 2
+2 | 4
+3 | 6
+4 | 8
+
+statement error 42P01 invalid reference to FROM-clause entry for table "c"
+SELECT c.name FROM customers c, (SELECT amount FROM orders o WHERE o.customer_id = c.id) x
+
+# Subqueries in various positions
+query
+SELECT name FROM customers ORDER BY (SELECT count(*) FROM orders o WHERE o.customer_id = customers.id) DESC, name
+----
+name:text
+ann
+bob
+cat
+dan
+
+query
+SELECT customer_id, count(*) FROM orders GROUP BY customer_id HAVING count(*) > (SELECT 1) ORDER BY customer_id
+----
+customer_id:int4 | count:int8
+1 | 2
+
+query
+SELECT ARRAY(SELECT id FROM orders WHERE amount >= 75 ORDER BY id)
+----
+array:_int4
+{10,12,13}
+
+query
+SELECT (SELECT name FROM customers WHERE id = o.customer_id) AS who, amount FROM orders o ORDER BY o.id
+----
+who:text | amount:numeric
+ann | 100
+ann | 50
+bob | 75
+cat | 200
+NULL | 5
+
+query
+SELECT x FROM generate_series(1, 5) x WHERE x > ALL (SELECT customer_id FROM orders WHERE customer_id IS NOT NULL) ORDER BY x
+----
+x:int4
+4
+5
+
+query
+SELECT (SELECT (SELECT 42))
+----
+?column?:int4
+42
+
+query
+SELECT c.name FROM customers c WHERE c.id = (SELECT customer_id FROM orders WHERE id = 13)
+----
+name:text
+cat
+
+statement error 21000 more than one row returned by a subquery used as an expression
+SELECT c.name FROM customers c WHERE c.id = (SELECT customer_id FROM orders WHERE amount > 10)

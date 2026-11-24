@@ -1,0 +1,216 @@
+# INSERT ... ON CONFLICT
+statement ok
+CREATE TABLE kv (k text PRIMARY KEY, v int NOT NULL CHECK (v >= 0), hits int DEFAULT 0)
+
+statement ok
+INSERT INTO kv (k, v) VALUES ('a', 1), ('b', 2)
+
+# DO NOTHING
+statement ok
+INSERT INTO kv (k, v) VALUES ('a', 100) ON CONFLICT DO NOTHING
+
+query rowsort
+INSERT INTO kv (k, v) VALUES ('a', 100), ('c', 3) ON CONFLICT (k) DO NOTHING RETURNING k, v
+----
+k:text | v:int4
+c | 3
+
+query rowsort
+INSERT INTO kv (k, v) VALUES ('d', 4), ('d', 5) ON CONFLICT DO NOTHING RETURNING k, v
+----
+k:text | v:int4
+d | 4
+
+# DO UPDATE with EXCLUDED
+query rowsort
+INSERT INTO kv (k, v) VALUES ('a', 10) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v RETURNING k, v, hits
+----
+k:text | v:int4 | hits:int4
+a | 10 | 0
+
+query rowsort
+INSERT INTO kv (k, v) VALUES ('a', 5), ('e', 6) ON CONFLICT (k) DO UPDATE SET v = kv.v + EXCLUDED.v, hits = kv.hits + 1 RETURNING k, v, hits
+----
+k:text | v:int4 | hits:int4
+a | 15 | 1
+e | 6 | 0
+
+query rowsort
+INSERT INTO kv AS t (k, v) VALUES ('b', 20) ON CONFLICT (k) DO UPDATE SET v = t.v * EXCLUDED.v RETURNING t.k, t.v
+----
+k:text | v:int4
+b | 40
+
+# EXCLUDED holds the defaulted values of the proposed row
+query rowsort
+INSERT INTO kv (k, v) VALUES ('b', 1) ON CONFLICT (k) DO UPDATE SET hits = EXCLUDED.hits + 50 RETURNING k, v, hits
+----
+k:text | v:int4 | hits:int4
+b | 40 | 50
+
+# DO UPDATE ... WHERE: rows that fail the condition are neither updated nor returned
+query rowsort
+INSERT INTO kv (k, v) VALUES ('a', 1), ('b', 999) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v WHERE kv.v < EXCLUDED.v RETURNING k, v
+----
+k:text | v:int4
+b | 999
+
+query rowsort
+INSERT INTO kv (k, v) VALUES ('c', 30) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v WHERE EXCLUDED.v > 100 RETURNING k, v
+----
+k:text | v:int4
+
+# ON CONSTRAINT
+query rowsort
+INSERT INTO kv (k, v) VALUES ('c', 33) ON CONFLICT ON CONSTRAINT kv_pkey DO UPDATE SET v = EXCLUDED.v RETURNING k, v
+----
+k:text | v:int4
+c | 33
+
+statement error 42704 constraint "no_such_constraint" for table "kv" does not exist
+INSERT INTO kv (k, v) VALUES ('c', 1) ON CONFLICT ON CONSTRAINT no_such_constraint DO NOTHING
+
+# Row-constructor SET in DO UPDATE
+query rowsort
+INSERT INTO kv (k, v) VALUES ('d', 40) ON CONFLICT (k) DO UPDATE SET (v, hits) = (EXCLUDED.v, kv.hits + 7) RETURNING k, v, hits
+----
+k:text | v:int4 | hits:int4
+d | 40 | 7
+
+# Inserted versus updated, the xmax = 0 idiom
+query rowsort
+INSERT INTO kv (k, v) VALUES ('d', 41), ('f', 7) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v RETURNING k, v, (xmax = 0) AS inserted
+----
+k:text | v:int4 | inserted:bool
+d | 41 | f
+f | 7 | t
+
+# Errors
+statement error 21000 ON CONFLICT DO UPDATE command cannot affect row a second time
+INSERT INTO kv (k, v) VALUES ('g', 1), ('g', 2) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v
+
+query
+SELECT count(*) FROM kv WHERE k = 'g'
+----
+count:int8
+0
+
+statement error 42601 ON CONFLICT DO UPDATE requires inference specification or constraint name
+INSERT INTO kv (k, v) VALUES ('a', 1) ON CONFLICT DO UPDATE SET v = 2
+
+statement error 42P10 there is no unique or exclusion constraint matching the ON CONFLICT specification
+INSERT INTO kv (k, v) VALUES ('a', 1) ON CONFLICT (v) DO NOTHING
+
+statement error 23514 new row for relation "kv" violates check constraint "kv_v_check"
+INSERT INTO kv (k, v) VALUES ('a', 1) ON CONFLICT (k) DO UPDATE SET v = -1
+
+statement error 42703 column "nope" of relation "kv" does not exist
+INSERT INTO kv (k, v) VALUES ('a', 1) ON CONFLICT (k) DO UPDATE SET nope = 1
+
+# Changing the conflicting key in DO UPDATE
+query rowsort
+INSERT INTO kv (k, v) VALUES ('f', 0) ON CONFLICT (k) DO UPDATE SET k = 'f2' RETURNING k, v
+----
+k:text | v:int4
+f2 | 7
+
+statement error 23505 duplicate key value violates unique constraint "kv_pkey"
+INSERT INTO kv (k, v) VALUES ('f2', 0) ON CONFLICT (k) DO UPDATE SET k = 'a'
+
+query
+SELECT k, v, hits FROM kv ORDER BY k
+----
+k:text | v:int4 | hits:int4
+a | 15 | 1
+b | 999 | 50
+c | 33 | 0
+d | 41 | 7
+e | 6 | 0
+f2 | 7 | 0
+
+# Composite unique key, inference ignores column order
+statement ok
+CREATE TABLE pair (a int, b int, n int, UNIQUE (a, b))
+
+statement ok
+INSERT INTO pair VALUES (1, 1, 0), (1, 2, 0)
+
+query rowsort
+INSERT INTO pair VALUES (1, 2, 5) ON CONFLICT (b, a) DO UPDATE SET n = pair.n + EXCLUDED.n RETURNING *
+----
+a:int4 | b:int4 | n:int4
+1 | 2 | 5
+
+statement error 42P10 there is no unique or exclusion constraint matching the ON CONFLICT specification
+INSERT INTO pair VALUES (1, 2, 5) ON CONFLICT (a) DO NOTHING
+
+# NULLs never conflict in a plain unique index
+query rowsort
+INSERT INTO pair VALUES (NULL, 1, 1), (NULL, 1, 2) ON CONFLICT (a, b) DO NOTHING RETURNING *
+----
+a:int4 | b:int4 | n:int4
+NULL | 1 | 1
+NULL | 1 | 2
+
+# Partial unique index: inference needs the matching predicate
+statement ok
+CREATE TABLE users (id serial PRIMARY KEY, email text NOT NULL, deleted boolean NOT NULL DEFAULT false)
+
+statement ok
+CREATE UNIQUE INDEX users_live_email ON users (email) WHERE NOT deleted
+
+statement ok
+INSERT INTO users (email, deleted) VALUES ('x@example.com', true), ('x@example.com', false)
+
+query rowsort
+INSERT INTO users (email) VALUES ('x@example.com') ON CONFLICT (email) WHERE NOT deleted DO UPDATE SET email = EXCLUDED.email || '.dup' RETURNING id, email, deleted
+----
+id:int4 | email:text | deleted:bool
+2 | x@example.com.dup | f
+
+statement error 42P10 there is no unique or exclusion constraint matching the ON CONFLICT specification
+INSERT INTO users (email) VALUES ('y@example.com') ON CONFLICT (email) DO NOTHING
+
+# Expression unique index
+statement ok
+CREATE TABLE accounts (id int PRIMARY KEY, email text)
+
+statement ok
+CREATE UNIQUE INDEX accounts_email_lower ON accounts (lower(email))
+
+statement ok
+INSERT INTO accounts VALUES (1, 'Alice@Example.com')
+
+query rowsort
+INSERT INTO accounts VALUES (2, 'ALICE@example.COM') ON CONFLICT (lower(email)) DO UPDATE SET email = EXCLUDED.email RETURNING id, email
+----
+id:int4 | email:text
+1 | ALICE@example.COM
+
+statement error 23505 duplicate key value violates unique constraint "accounts_email_lower"
+INSERT INTO accounts VALUES (3, 'alice@example.com')
+
+# A conflict on a serial table still consumes a sequence value
+statement ok
+CREATE TABLE tags (id serial PRIMARY KEY, name text UNIQUE)
+
+statement ok
+INSERT INTO tags (name) VALUES ('red')
+
+statement ok
+INSERT INTO tags (name) VALUES ('red') ON CONFLICT (name) DO NOTHING
+
+query rowsort
+INSERT INTO tags (name) VALUES ('blue') RETURNING id, name
+----
+id:int4 | name:text
+3 | blue
+
+# A conflict with a different unique constraint than the target is still an error
+statement error 23505 duplicate key value violates unique constraint "tags_pkey"
+INSERT INTO tags (id, name) VALUES (1, 'green') ON CONFLICT (name) DO NOTHING
+
+query rowsort
+INSERT INTO tags (id, name) VALUES (1, 'green') ON CONFLICT DO NOTHING RETURNING id
+----
+id:int4

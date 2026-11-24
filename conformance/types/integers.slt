@@ -1,0 +1,170 @@
+# Integer types: int2 / int4 / int8.
+
+# Range limits
+query
+SELECT 32767::int2, (-32768)::int2, 2147483647::int4, (-2147483648)::int4
+----
+int2:int2 | int2:int2 | int4:int4 | int4:int4
+32767 | -32768 | 2147483647 | -2147483648
+
+query
+SELECT 9223372036854775807::int8, (-9223372036854775808)::int8
+----
+int8:int8 | int8:int8
+9223372036854775807 | -9223372036854775808
+
+# Literal typing: integer literals pick int4, then int8, then numeric
+query
+SELECT pg_typeof(1), pg_typeof(2147483648), pg_typeof(9223372036854775808)
+----
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+integer | bigint | numeric
+
+# Out-of-range input
+statement error 22003 smallint out of range
+SELECT 32768::int2
+
+statement error 22003 value "2147483648" is out of range for type integer
+SELECT '2147483648'::int4
+
+statement error 22003 value "9223372036854775808" is out of range for type bigint
+SELECT '9223372036854775808'::int8
+
+statement error 22P02 invalid input syntax for type integer: "abc"
+SELECT 'abc'::int4
+
+statement error 22P02 invalid input syntax for type integer: ""
+SELECT ''::int4
+
+statement error 22P02 invalid input syntax for type integer: "1.5"
+SELECT '1.5'::int4
+
+# Whitespace, sign and underscores in input
+query
+SELECT ' 42 '::int4, '+7'::int4, '-0'::int4, '1_000'::int4
+----
+int4:int4 | int4:int4 | int4:int4 | int4:int4
+42 | 7 | 0 | 1000
+
+# Overflow in arithmetic
+statement error 22003 integer out of range
+SELECT 2147483647::int4 + 1
+
+statement error 22003 smallint out of range
+SELECT 32767::int2 + 1::int2
+
+statement error 22003 bigint out of range
+SELECT 9223372036854775807::int8 * 2
+
+statement error 22003 integer out of range
+SELECT -(-2147483648)::int4
+
+# Mixed-width arithmetic promotes
+query
+SELECT pg_typeof(1::int2 + 1::int2), pg_typeof(1::int2 + 1::int4), pg_typeof(1::int4 + 1::int8)
+----
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+smallint | integer | bigint
+
+query
+SELECT 2147483647::int4 + 1::int8
+----
+?column?:int8
+2147483648
+
+# Integer division truncates toward zero
+query
+SELECT 7 / 2, -7 / 2, 7 / -2, -7 / -2
+----
+?column?:int4 | ?column?:int4 | ?column?:int4 | ?column?:int4
+3 | -3 | -3 | 3
+
+statement error 22012 division by zero
+SELECT 1 / 0
+
+statement error 22012 division by zero
+SELECT 1::int8 / 0::int8
+
+statement error 22012 division by zero
+SELECT 5 % 0
+
+# Modulo takes the sign of the dividend
+query
+SELECT 7 % 3, -7 % 3, 7 % -3, mod(-7, 3)
+----
+?column?:int4 | ?column?:int4 | ?column?:int4 | mod:int4
+1 | -1 | 1 | -1
+
+statement error 22003 integer out of range
+SELECT (-2147483648)::int4 / (-1)::int4
+
+query
+SELECT (-2147483648)::int4 % (-1)::int4
+----
+?column?:int4
+0
+
+# Casting float/numeric to int rounds half away from zero (numeric) / half-even (float)
+query
+SELECT 2.5::int4, 3.5::int4, (-2.5)::int4, 2.5::float8::int4, 3.5::float8::int4
+----
+int4:int4 | int4:int4 | int4:int4 | int4:int4 | int4:int4
+3 | 4 | -3 | 2 | 4
+
+statement error 22003 integer out of range
+SELECT 3e9::float8::int4
+
+# Bitwise and shift operators
+query
+SELECT 5 & 3, 5 | 3, 5 # 3, ~5, 1 << 4, 256 >> 2
+----
+?column?:int4 | ?column?:int4 | ?column?:int4 | ?column?:int4 | ?column?:int4 | ?column?:int4
+1 | 7 | 6 | -6 | 16 | 64
+
+# abs, gcd, lcm, factorial
+query
+SELECT abs(-5), gcd(12, 18), lcm(4, 6), factorial(5)
+----
+abs:int4 | gcd:int4 | lcm:int4 | factorial:numeric
+5 | 6 | 12 | 120
+
+statement error 22003 integer out of range
+SELECT abs((-2147483648)::int4)
+
+# Integer columns: storing out-of-range values
+statement ok
+CREATE TABLE ints (s smallint, i integer, b bigint)
+
+statement ok
+INSERT INTO ints VALUES (1, 2, 3), (-32768, 2147483647, -9223372036854775808)
+
+statement error 22003 smallint out of range
+INSERT INTO ints (s) VALUES (40000)
+
+statement error 22003 integer out of range
+INSERT INTO ints (i) VALUES (2147483648)
+
+# Numeric value is rounded when inserted into an integer column
+statement ok
+INSERT INTO ints (i) VALUES (2.6)
+
+query
+SELECT s, i, b FROM ints ORDER BY i
+----
+s:int2 | i:int4 | b:int8
+1 | 2 | 3
+NULL | 3 | NULL
+-32768 | 2147483647 | -9223372036854775808
+
+# Aggregates widen: sum(int4) is int8, sum(int8) is numeric, avg is numeric
+query
+SELECT pg_typeof(sum(i)), pg_typeof(sum(b)), pg_typeof(avg(i)), pg_typeof(sum(s)) FROM ints
+----
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+bigint | numeric | numeric | bigint
+
+query
+SELECT sum(i), avg(i)::numeric(20,4) FROM ints
+----
+sum:int8 | avg:numeric
+2147483652 | 715827884.0000

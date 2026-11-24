@@ -1,0 +1,223 @@
+# SET LOCAL, SET inside transactions and set_config(..., is_local)
+statement ok
+SET work_mem = '16MB'
+
+statement ok
+BEGIN
+
+statement ok
+SET LOCAL work_mem = '8MB'
+
+query
+SHOW work_mem
+----
+work_mem:text
+8MB
+
+statement ok
+COMMIT
+
+query
+SHOW work_mem
+----
+work_mem:text
+16MB
+
+# A plain SET inside a rolled back transaction is undone
+statement ok
+BEGIN
+
+statement ok
+SET work_mem = '32MB'
+
+statement ok
+ROLLBACK
+
+query
+SHOW work_mem
+----
+work_mem:text
+16MB
+
+# A plain SET inside a committed transaction persists
+statement ok
+BEGIN
+
+statement ok
+SET work_mem = '32MB'
+
+statement ok
+COMMIT
+
+query
+SHOW work_mem
+----
+work_mem:text
+32MB
+
+# SET LOCAL outside a transaction only warns and has no lasting effect
+statement ok
+SET LOCAL work_mem = '1MB'
+
+query
+SHOW work_mem
+----
+work_mem:text
+32MB
+
+# Savepoints scope settings too
+statement ok
+BEGIN
+
+statement ok
+SET LOCAL search_path = pg_catalog
+
+statement ok
+SAVEPOINT s
+
+statement ok
+SET LOCAL search_path = information_schema
+
+query
+SHOW search_path
+----
+search_path:text
+information_schema
+
+statement ok
+ROLLBACK TO s
+
+query
+SHOW search_path
+----
+search_path:text
+pg_catalog
+
+statement ok
+COMMIT
+
+query
+SHOW search_path
+----
+search_path:text
+"$user", public
+
+# Custom settings the way row-level-security apps use them
+statement ok
+BEGIN
+
+query
+SELECT set_config('app.user_id', '42', true)
+----
+set_config:text
+42
+
+query
+SELECT current_setting('app.user_id')
+----
+current_setting:text
+42
+
+statement ok
+COMMIT
+
+query
+SELECT current_setting('app.user_id') AS after_commit
+----
+after_commit:text
+(empty)
+
+query
+SELECT current_setting('app.never_set', true) IS NULL AS missing
+----
+missing:bool
+t
+
+statement error 42704 unrecognized configuration parameter "app.never_set"
+SELECT current_setting('app.never_set')
+
+statement ok
+SET app.tenant = 'acme'
+
+statement ok
+BEGIN
+
+statement ok
+SET LOCAL app.tenant = 'other'
+
+query
+SELECT current_setting('app.tenant')
+----
+current_setting:text
+other
+
+statement ok
+ROLLBACK
+
+query
+SELECT current_setting('app.tenant')
+----
+current_setting:text
+acme
+
+query
+SELECT set_config('app.tenant', 'session-wide', false)
+----
+set_config:text
+session-wide
+
+query
+SHOW app.tenant
+----
+app.tenant:text
+session-wide
+
+# SET LOCAL time zone affects timestamptz output only inside the transaction
+statement ok
+BEGIN
+
+statement ok
+SET LOCAL TIME ZONE 'America/New_York'
+
+query
+SELECT '2024-06-01 12:00:00+00'::timestamptz AS ts
+----
+ts:timestamptz
+2024-06-01 08:00:00-04
+
+statement ok
+COMMIT
+
+query
+SELECT '2024-06-01 12:00:00+00'::timestamptz AS ts
+----
+ts:timestamptz
+2024-06-01 12:00:00+00
+
+# statement_timeout set locally reverts
+statement ok
+BEGIN
+
+statement ok
+SET LOCAL statement_timeout = '5s'
+
+query
+SHOW statement_timeout
+----
+statement_timeout:text
+5s
+
+statement ok
+COMMIT
+
+query
+SHOW statement_timeout
+----
+statement_timeout:text
+0
+
+statement error 42704 unrecognized configuration parameter "no_such_setting"
+SET LOCAL no_such_setting = 1
+
+statement error 22023 invalid value for parameter "work_mem": "lots"
+SET work_mem = 'lots'

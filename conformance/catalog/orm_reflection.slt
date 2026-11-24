@@ -1,0 +1,436 @@
+# Schema reflection and type loading queries in the style of Rails, Django, SQLAlchemy, Prisma,
+# Hibernate (pgjdbc), pgx and npgsql. Literal OIDs are replaced by names, and OIDs are never selected.
+
+statement ok
+CREATE TYPE role_kind AS ENUM ('admin', 'member', 'guest')
+
+statement ok
+CREATE TABLE users (
+  id bigserial PRIMARY KEY,
+  login varchar(40) NOT NULL,
+  kind role_kind NOT NULL DEFAULT 'member',
+  score double precision,
+  created_at timestamp(6) NOT NULL
+)
+
+statement ok
+CREATE UNIQUE INDEX index_users_on_login ON users (login)
+
+statement ok
+CREATE TABLE posts (
+  id serial PRIMARY KEY,
+  user_id bigint NOT NULL,
+  title text,
+  CONSTRAINT fk_posts_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+)
+
+statement ok
+COMMENT ON TABLE users IS 'app users'
+
+statement ok
+COMMENT ON COLUMN users.login IS 'login name'
+
+# Rails: data_sources / table_exists?
+query
+SELECT c.relname FROM pg_class c LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = ANY (current_schemas(false)) AND c.relkind IN ('r','p')
+ORDER BY c.relname
+----
+relname:name
+posts
+users
+
+query
+SELECT current_schemas(false), current_schemas(true)
+----
+current_schemas:_name | current_schemas:_name
+{public} | {pg_catalog,public}
+
+# Rails: column_definitions
+query
+SELECT a.attname, format_type(a.atttypid, a.atttypmod),
+       pg_get_expr(d.adbin, d.adrelid), a.attnotnull, c.collname,
+       col_description(a.attrelid, a.attnum) AS comment,
+       attidentity AS identity, attgenerated as attgenerated
+FROM pg_attribute a
+LEFT JOIN pg_attrdef d ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+LEFT JOIN pg_type t ON a.atttypid = t.oid
+LEFT JOIN pg_collation c ON a.attcollation = c.oid AND a.attcollation <> t.typcollation
+WHERE a.attrelid = '"users"'::regclass
+  AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+----
+attname:name | format_type:text | pg_get_expr:text | attnotnull:bool | collname:name | comment:text | identity:char | attgenerated:char
+id | bigint | nextval('users_id_seq'::regclass) | t | NULL | NULL | (empty) | (empty)
+login | character varying(40) | NULL | t | NULL | login name | (empty) | (empty)
+kind | role_kind | 'member'::role_kind | t | NULL | NULL | (empty) | (empty)
+score | double precision | NULL | f | NULL | NULL | (empty) | (empty)
+created_at | timestamp(6) without time zone | NULL | t | NULL | NULL | (empty) | (empty)
+
+# Rails: primary_keys
+query
+SELECT a.attname
+FROM (
+  SELECT indrelid, indkey, generate_subscripts(indkey, 1) idx
+  FROM pg_index
+  WHERE indrelid = '"posts"'::regclass AND indisprimary
+) i
+JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[i.idx]
+ORDER BY i.idx
+----
+attname:name
+id
+
+# Rails: indexes
+query
+SELECT distinct i.relname, d.indisunique, d.indkey, pg_get_indexdef(d.indexrelid)
+FROM pg_class t
+INNER JOIN pg_index d ON t.oid = d.indrelid
+INNER JOIN pg_class i ON d.indexrelid = i.oid
+LEFT JOIN pg_namespace n ON n.oid = t.relnamespace
+WHERE i.relkind IN ('i', 'I') AND d.indisprimary = 'f' AND t.relname = 'users'
+  AND n.nspname = ANY (current_schemas(false))
+ORDER BY i.relname
+----
+relname:name | indisunique:bool | indkey:int2vector | pg_get_indexdef:text
+index_users_on_login | t | 2 | CREATE UNIQUE INDEX index_users_on_login ON public.users USING btree (login)
+
+# Rails: foreign_keys
+query
+SELECT t2.oid::regclass::text AS to_table, a1.attname AS column, a2.attname AS primary_key,
+       c.conname AS name, c.confupdtype AS on_update, c.confdeltype AS on_delete,
+       c.convalidated AS valid, c.condeferrable AS deferrable, c.condeferred AS deferred
+FROM pg_constraint c
+JOIN pg_class t1 ON c.conrelid = t1.oid
+JOIN pg_class t2 ON c.confrelid = t2.oid
+JOIN pg_attribute a1 ON a1.attnum = c.conkey[1] AND a1.attrelid = t1.oid
+JOIN pg_attribute a2 ON a2.attnum = c.confkey[1] AND a2.attrelid = t2.oid
+JOIN pg_namespace t3 ON c.connamespace = t3.oid
+WHERE c.contype = 'f' AND t1.relname = 'posts' AND t3.nspname = ANY (current_schemas(false))
+ORDER BY c.conname
+----
+to_table:text | column:name | primary_key:name | name:name | on_update:char | on_delete:char | valid:bool | deferrable:bool | deferred:bool
+users | user_id | id | fk_posts_user | a | c | t | f | f
+
+# Rails: table_comment
+query
+SELECT pg_catalog.obj_description(c.oid, 'pg_class')
+FROM pg_catalog.pg_class c
+LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname = 'users' AND c.relkind IN ('r','p') AND n.nspname = ANY (current_schemas(false))
+----
+obj_description:text
+app users
+
+# Rails: type map loading (names only)
+query
+SELECT t.typname, t.typelem <> 0 AS is_array, t.typtype
+FROM pg_type as t
+WHERE t.typname IN ('int2', 'int4', 'int8', 'oid', 'float4', 'float8', 'text', 'varchar', 'bool', 'timestamp', 'timestamptz', 'json', 'jsonb', 'uuid')
+ORDER BY t.typname
+----
+typname:name | is_array:bool | typtype:char
+bool | f | b
+float4 | f | b
+float8 | f | b
+int2 | f | b
+int4 | f | b
+int8 | f | b
+json | f | b
+jsonb | f | b
+oid | f | b
+text | f | b
+timestamp | f | b
+timestamptz | f | b
+uuid | f | b
+varchar | f | b
+
+query
+SELECT t.typname, t.typtype
+FROM pg_type as t
+LEFT JOIN pg_range as r ON t.oid = r.rngtypid
+WHERE t.typtype IN ('r', 'e', 'd') AND t.typnamespace = 'public'::regnamespace
+ORDER BY t.typname
+----
+typname:name | typtype:char
+role_kind | e
+
+# Django: get_table_list
+query
+SELECT c.relname,
+  CASE WHEN c.relispartition THEN 'p' WHEN c.relkind IN ('m', 'v') THEN 'v' ELSE 't' END,
+  obj_description(c.oid, 'pg_class')
+FROM pg_catalog.pg_class c
+LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('f', 'm', 'p', 'r', 'v')
+  AND n.nspname NOT IN ('pg_catalog', 'pg_toast')
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY c.relname
+----
+relname:name | case:text | obj_description:text
+posts | t | NULL
+users | t | app users
+
+# Django: get_sequences
+query
+SELECT s.relname, a.attname
+FROM pg_class s
+  JOIN pg_depend d ON d.objid = s.oid AND d.classid = 'pg_class'::regclass AND d.refclassid = 'pg_class'::regclass
+  JOIN pg_attribute a ON d.refobjid = a.attrelid AND d.refobjsubid = a.attnum
+  JOIN pg_class tbl ON tbl.oid = d.refobjid AND tbl.relname = 'users' AND pg_catalog.pg_table_is_visible(tbl.oid)
+WHERE s.relkind = 'S'
+----
+relname:name | attname:name
+users_id_seq | id
+
+# Django: get_constraints
+query
+SELECT c.conname,
+  array(SELECT attname FROM unnest(c.conkey) WITH ORDINALITY cols(colid, arridx)
+        JOIN pg_attribute AS ca ON cols.colid = ca.attnum
+        WHERE ca.attrelid = c.conrelid ORDER BY cols.arridx),
+  c.contype,
+  (SELECT fkc.relname || '.' || fka.attname FROM pg_attribute AS fka
+   JOIN pg_class AS fkc ON fka.attrelid = fkc.oid
+   WHERE fka.attrelid = c.confrelid AND fka.attnum = c.confkey[1]),
+  cl.reloptions
+FROM pg_constraint AS c
+JOIN pg_class AS cl ON c.conrelid = cl.oid
+WHERE cl.relname = 'posts' AND pg_catalog.pg_table_is_visible(cl.oid)
+ORDER BY c.conname
+----
+conname:name | array:_name | contype:char | ?column?:text | reloptions:_text
+fk_posts_user | {user_id} | f | users.id | NULL
+posts_id_not_null | {id} | n | NULL | NULL
+posts_pkey | {id} | p | NULL | NULL
+posts_user_id_not_null | {user_id} | n | NULL | NULL
+
+# Django: index part of get_constraints
+query
+SELECT indexname, array_agg(attname ORDER BY arridx), indisunique, indisprimary, amname
+FROM (
+  SELECT c2.relname as indexname, idx.*, attr.attname, am.amname
+  FROM (
+    SELECT DISTINCT ON (pi.indexrelid) pi.indexrelid, pi.indrelid, pi.indisunique, pi.indisprimary, c.oid AS coid,
+           unnest(pi.indkey) AS colid, generate_series(1, array_length(pi.indkey, 1)) AS arridx
+    FROM pg_index pi JOIN pg_class c ON pi.indrelid = c.oid
+    WHERE c.relname = 'users' AND pg_catalog.pg_table_is_visible(c.oid)
+  ) idx
+  LEFT JOIN pg_class c2 ON idx.indexrelid = c2.oid
+  LEFT JOIN pg_am am ON c2.relam = am.oid
+  LEFT JOIN pg_attribute attr ON attr.attrelid = idx.indrelid AND attr.attnum = idx.colid
+) s
+GROUP BY indexname, indisunique, indisprimary, amname
+ORDER BY indexname
+----
+indexname:name | array_agg:_name | indisunique:bool | indisprimary:bool | amname:name
+index_users_on_login | {login} | t | f | btree
+users_pkey | {id} | t | t | btree
+
+# SQLAlchemy: dialect initialization
+query
+SELECT current_schema()
+----
+current_schema:name
+public
+
+query
+SHOW standard_conforming_strings
+----
+standard_conforming_strings:text
+on
+
+query
+SHOW transaction isolation level
+----
+transaction_isolation:text
+read committed
+
+# SQLAlchemy: has_table
+query
+SELECT pg_catalog.pg_class.relname
+FROM pg_catalog.pg_class JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_class.relnamespace
+WHERE pg_catalog.pg_class.relname = 'users'
+  AND pg_catalog.pg_class.relkind = ANY (ARRAY['r', 'p', 'f', 'v', 'm'])
+  AND pg_catalog.pg_table_is_visible(pg_catalog.pg_class.oid)
+  AND pg_catalog.pg_namespace.nspname != 'pg_catalog'
+----
+relname:name
+users
+
+# SQLAlchemy: get_enums
+query
+SELECT pg_catalog.format_type(pg_catalog.pg_type.oid, NULL) AS name,
+       pg_catalog.pg_type_is_visible(pg_catalog.pg_type.oid) AS visible,
+       pg_catalog.pg_namespace.nspname AS schema,
+       lbl_agg.labels AS labels
+FROM pg_catalog.pg_type
+JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_type.typnamespace
+LEFT OUTER JOIN (
+  SELECT pg_catalog.pg_enum.enumtypid AS enumtypid,
+         array_agg(CAST(pg_catalog.pg_enum.enumlabel AS TEXT) ORDER BY pg_catalog.pg_enum.enumsortorder) AS labels
+  FROM pg_catalog.pg_enum GROUP BY pg_catalog.pg_enum.enumtypid
+) AS lbl_agg ON pg_catalog.pg_type.oid = lbl_agg.enumtypid
+WHERE pg_catalog.pg_type.typtype = 'e'
+ORDER BY pg_catalog.pg_namespace.nspname, pg_catalog.pg_type.typname
+----
+name:text | visible:bool | schema:name | labels:_text
+role_kind | t | public | {admin,member,guest}
+
+# Prisma: columns
+query
+SELECT oid.namespace, info.table_name, info.column_name,
+       format_type(att.atttypid, att.atttypmod) as formatted_type,
+       info.numeric_precision, info.numeric_scale, info.datetime_precision,
+       info.data_type, info.udt_schema as type_schema_name, info.udt_name as full_data_type,
+       pg_get_expr(attdef.adbin, attdef.adrelid) AS column_default,
+       info.is_nullable, info.is_identity, info.character_maximum_length
+FROM information_schema.columns info
+JOIN pg_attribute att ON att.attname = info.column_name
+JOIN (
+  SELECT pg_class.oid, relname, pg_namespace.nspname as namespace
+  FROM pg_class JOIN pg_namespace on pg_namespace.oid = pg_class.relnamespace
+  AND pg_namespace.nspname = ANY (ARRAY['public'])
+) as oid on oid.oid = att.attrelid AND relname = info.table_name AND namespace = info.table_schema
+LEFT OUTER JOIN pg_attrdef attdef ON attdef.adrelid = att.attrelid AND attdef.adnum = att.attnum AND table_schema = namespace
+WHERE table_schema = ANY (ARRAY['public'])
+ORDER BY namespace, table_name, ordinal_position
+----
+namespace:name | table_name:name | column_name:name | formatted_type:text | numeric_precision:int4 | numeric_scale:int4 | datetime_precision:int4 | data_type:varchar | type_schema_name:name | full_data_type:name | column_default:text | is_nullable:varchar | is_identity:varchar | character_maximum_length:int4
+public | posts | id | integer | 32 | 0 | NULL | integer | pg_catalog | int4 | nextval('posts_id_seq'::regclass) | NO | NO | NULL
+public | posts | user_id | bigint | 64 | 0 | NULL | bigint | pg_catalog | int8 | NULL | NO | NO | NULL
+public | posts | title | text | NULL | NULL | NULL | text | pg_catalog | text | NULL | YES | NO | NULL
+public | users | id | bigint | 64 | 0 | NULL | bigint | pg_catalog | int8 | nextval('users_id_seq'::regclass) | NO | NO | NULL
+public | users | login | character varying(40) | NULL | NULL | NULL | character varying | pg_catalog | varchar | NULL | NO | NO | 40
+public | users | kind | role_kind | NULL | NULL | NULL | USER-DEFINED | public | role_kind | 'member'::role_kind | NO | NO | NULL
+public | users | score | double precision | 53 | NULL | NULL | double precision | pg_catalog | float8 | NULL | YES | NO | NULL
+public | users | created_at | timestamp(6) without time zone | NULL | NULL | 6 | timestamp without time zone | pg_catalog | timestamp | NULL | NO | NO | NULL
+
+# Prisma: enums
+query
+SELECT t.typname as name, e.enumlabel as value, n.nspname as namespace
+FROM pg_type t
+JOIN pg_enum e ON t.oid = e.enumtypid
+JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+WHERE n.nspname = ANY (ARRAY['public'])
+ORDER BY e.enumsortorder
+----
+name:name | value:name | namespace:name
+role_kind | admin | public
+role_kind | member | public
+role_kind | guest | public
+
+# Prisma: foreign keys
+query
+SELECT con.conname AS constraint_name, child.attname AS child_column, parent_class.relname AS parent_table,
+       parent.attname AS parent_column, con.confdeltype, con.confupdtype, con.condeferrable, con.condeferred
+FROM (
+  SELECT unnest(con1.conkey) AS parent, unnest(con1.confkey) AS child, con1.oid, con1.conname, con1.confrelid,
+         con1.conrelid, con1.confdeltype, con1.confupdtype, con1.condeferrable, con1.condeferred
+  FROM pg_class cl
+  JOIN pg_namespace ns ON cl.relnamespace = ns.oid
+  JOIN pg_constraint con1 ON con1.conrelid = cl.oid
+  WHERE ns.nspname = ANY (ARRAY['public']) AND con1.contype = 'f'
+) con
+JOIN pg_attribute parent ON parent.attrelid = con.confrelid AND parent.attnum = con.child
+JOIN pg_class parent_class ON parent_class.oid = con.confrelid
+JOIN pg_attribute child ON child.attrelid = con.conrelid AND child.attnum = con.parent
+ORDER BY con.conname
+----
+constraint_name:name | child_column:name | parent_table:name | parent_column:name | confdeltype:char | confupdtype:char | condeferrable:bool | condeferred:bool
+fk_posts_user | user_id | users | id | c | a | f | f
+
+# Hibernate / pgjdbc: DatabaseMetaData.getTables
+query
+SELECT NULL AS TABLE_CAT, n.nspname AS TABLE_SCHEM, c.relname AS TABLE_NAME,
+  CASE n.nspname ~ '^pg_' OR n.nspname = 'information_schema'
+    WHEN true THEN CASE WHEN n.nspname = 'pg_catalog' OR n.nspname = 'information_schema' THEN 'SYSTEM TABLE' ELSE NULL END
+    WHEN false THEN CASE c.relkind WHEN 'r' THEN 'TABLE' WHEN 'p' THEN 'PARTITIONED TABLE' WHEN 'i' THEN 'INDEX'
+      WHEN 'S' THEN 'SEQUENCE' WHEN 'v' THEN 'VIEW' WHEN 'c' THEN 'TYPE' WHEN 'f' THEN 'FOREIGN TABLE'
+      WHEN 'm' THEN 'MATERIALIZED VIEW' ELSE NULL END
+    ELSE NULL END AS TABLE_TYPE,
+  d.description AS REMARKS
+FROM pg_catalog.pg_namespace n, pg_catalog.pg_class c
+LEFT JOIN pg_catalog.pg_description d ON (c.oid = d.objoid AND d.objsubid = 0 AND d.classoid = 'pg_class'::regclass)
+WHERE c.relnamespace = n.oid AND n.nspname LIKE 'public' AND c.relname LIKE '%'
+ORDER BY TABLE_TYPE, TABLE_SCHEM, TABLE_NAME
+----
+table_cat:text | table_schem:name | table_name:name | table_type:text | remarks:text
+NULL | public | index_users_on_login | INDEX | NULL
+NULL | public | posts_pkey | INDEX | NULL
+NULL | public | users_pkey | INDEX | NULL
+NULL | public | posts_id_seq | SEQUENCE | NULL
+NULL | public | users_id_seq | SEQUENCE | NULL
+NULL | public | posts | TABLE | NULL
+NULL | public | users | TABLE | app users
+
+# Hibernate: sequence discovery
+query
+SELECT sequence_catalog IS NOT NULL AS has_catalog, sequence_schema, sequence_name, start_value, minimum_value, maximum_value, increment
+FROM information_schema.sequences
+ORDER BY sequence_name
+----
+has_catalog:bool | sequence_schema:name | sequence_name:name | start_value:varchar | minimum_value:varchar | maximum_value:varchar | increment:varchar
+t | public | posts_id_seq | 1 | 1 | 2147483647 | 1
+t | public | users_id_seq | 1 | 1 | 9223372036854775807 | 1
+
+# pgx: LoadType for an enum and its array type
+query
+SELECT t.typname, t.typtype, coalesce(e.typname, '') AS elem
+FROM pg_type t LEFT JOIN pg_type e ON e.oid = t.typelem
+WHERE t.oid = to_regtype('role_kind') OR t.oid = to_regtype('role_kind[]')
+ORDER BY t.typname
+----
+typname:name | typtype:char | elem:name
+_role_kind | b | role_kind
+role_kind | e | (empty)
+
+query
+SELECT enumlabel FROM pg_enum WHERE enumtypid = to_regtype('role_kind') ORDER BY enumsortorder
+----
+enumlabel:name
+admin
+member
+guest
+
+# pgx: composite type fields
+statement ok
+CREATE TYPE address AS (street text, zip varchar(10))
+
+query
+SELECT a.attname, format_type(a.atttypid, a.atttypmod)
+FROM pg_attribute a
+JOIN pg_type t ON t.typrelid = a.attrelid
+WHERE t.oid = to_regtype('address') AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+----
+attname:name | format_type:text
+street | text
+zip | character varying(10)
+
+# npgsql: type loading (filtered to a few builtin and user types)
+query
+SELECT ns.nspname, typ.typname, typ.typtype, typ.typcategory,
+       CASE WHEN typ.typelem <> 0 THEN elemtyp.typname END AS elemname
+FROM pg_type AS typ
+JOIN pg_namespace AS ns ON (ns.oid = typ.typnamespace)
+LEFT OUTER JOIN pg_type AS elemtyp ON (elemtyp.oid = typ.typelem AND typ.typcategory = 'A')
+WHERE typ.typname IN ('int4', '_int4', 'text', 'uuid', 'jsonb', 'role_kind', '_role_kind', 'address', 'int4range')
+ORDER BY ns.nspname, typ.typname
+----
+nspname:name | typname:name | typtype:char | typcategory:char | elemname:name
+pg_catalog | _int4 | b | A | int4
+pg_catalog | int4 | b | N | NULL
+pg_catalog | int4range | r | R | NULL
+pg_catalog | jsonb | b | U | NULL
+pg_catalog | text | b | S | NULL
+pg_catalog | uuid | b | U | NULL
+public | _role_kind | b | A | role_kind
+public | address | c | C | NULL
+public | role_kind | e | E | NULL
+
+query
+SELECT r.rngsubtype::regtype::text FROM pg_range r WHERE r.rngtypid = 'int4range'::regtype
+----
+rngsubtype:text
+integer

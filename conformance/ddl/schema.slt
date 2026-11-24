@@ -1,0 +1,139 @@
+# CREATE SCHEMA and search_path.
+
+statement ok
+CREATE SCHEMA app
+
+statement error 42P06 schema "app" already exists
+CREATE SCHEMA app
+
+statement ok
+CREATE SCHEMA IF NOT EXISTS app; CREATE TABLE app.items (id int, name text); INSERT INTO app.items VALUES (1, 'in app')
+
+statement error 42P01 relation "items" does not exist
+SELECT * FROM items
+
+query
+SELECT current_schema(), current_setting('search_path')
+----
+current_schema:name | current_setting:text
+public | "$user", public
+
+# search_path changes name resolution and the creation schema
+statement ok
+SET search_path TO app, public
+
+query
+SELECT current_schema(), (SELECT name FROM items)
+----
+current_schema:name | name:text
+app | in app
+
+statement ok
+CREATE TABLE created_in_app (a int)
+
+query
+SELECT table_schema FROM information_schema.tables WHERE table_name = 'created_in_app'
+----
+table_schema:name
+app
+
+# Same name in two schemas: the first one on the path wins
+statement ok
+CREATE TABLE public.items (id int, name text); INSERT INTO public.items VALUES (2, 'in public')
+
+query
+SELECT name FROM items
+----
+name:text
+in app
+
+statement ok
+SET search_path = public, app
+
+query
+SELECT name FROM items
+----
+name:text
+in public
+
+# A nonexistent schema on the path is skipped
+statement ok
+SET search_path TO nosuch, public
+
+query
+SELECT current_schema()
+----
+current_schema:name
+public
+
+statement ok
+RESET search_path
+
+# SET LOCAL reverts at the end of the transaction
+statement ok
+BEGIN; SET LOCAL search_path TO app
+
+query
+SELECT name FROM items
+----
+name:text
+in app
+
+statement ok
+COMMIT
+
+query
+SELECT name FROM items
+----
+name:text
+in public
+
+# Quoted schema names
+statement ok
+CREATE SCHEMA "My Schema"; CREATE TABLE "My Schema".t (a int); INSERT INTO "My Schema".t VALUES (1)
+
+query
+SELECT a FROM "My Schema".t
+----
+a:int4
+1
+
+# CREATE SCHEMA with embedded elements
+statement ok
+CREATE SCHEMA billing CREATE TABLE invoices (id int PRIMARY KEY, total numeric) CREATE VIEW big AS SELECT id FROM invoices WHERE total > 100; INSERT INTO billing.invoices VALUES (1, 50), (2, 500)
+
+query
+SELECT id FROM billing.big
+----
+id:int4
+2
+
+# DROP SCHEMA
+statement error 2BP01 cannot drop schema app because other objects depend on it
+DROP SCHEMA app
+
+statement error 3F000 schema "nosuch" does not exist
+DROP SCHEMA nosuch
+
+statement ok
+DROP SCHEMA app CASCADE
+
+# ALTER SCHEMA RENAME
+statement ok
+ALTER SCHEMA billing RENAME TO accounts
+
+query
+SELECT count(*) FROM accounts.invoices
+----
+count:int8
+2
+
+# Temp tables live in pg_temp, which is searched first
+statement ok
+CREATE TEMP TABLE items (id int, name text)
+
+query
+SELECT (SELECT count(*) FROM items), (SELECT count(*) FROM pg_temp.items)
+----
+count:int8 | count:int8
+0 | 0

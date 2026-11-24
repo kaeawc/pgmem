@@ -20,6 +20,13 @@ against the Rust `pgmem` binary as a client-compatibility check (CI job `pgx-exa
 - Integration tests live in one binary: `crates/pgmem/tests/it/` (one module per area). Unit tests
   stay in-module. Doctests are disabled.
 - Time goes through the server `Clock` (`Server::set_now`), never `SystemTime::now()` in engine code.
+- The SQL conformance corpus (`conformance/<area>/*.slt`, format in
+  `crates/pgmem-conformance/src/corpus.rs`) is the feature-completeness measure. Expected results
+  are recorded from PostgreSQL 18 (`--dsn ... --record`), never written by hand, and every record
+  must pass on Postgres (CI `postgres-fidelity`). pgmem's failures are listed in
+  `conformance/known_failures.txt`; CI job `conformance` fails on any change to that set, so after
+  fixing something run `cargo run -p pgmem-conformance -- --update` and commit the result
+  (it also regenerates CONFORMANCE.md).
 - `parity/go_tests.tsv` maps every pgmem-go test to its Rust port; `scripts/parity.py check` must
   pass. Deviations (where pgmem-go was not Postgres-accurate) need a note.
 
@@ -33,6 +40,8 @@ cargo lint                          # clippy --all-targets -D warnings
 cargo fmt --all
 cargo deny check
 python3 scripts/parity.py check
+cargo run -p pgmem-conformance       # corpus vs pgmem (--update after fixes; -v shows failures)
+cargo run -p pgmem-conformance -- --dsn "host=127.0.0.1 port=5432 user=postgres" [--record] [area/]
 (cd examples && go test ./...)       # pgx suites against target/release/pgmem
 PGMEM_TEST_DSN="host=127.0.0.1 port=5432 user=postgres" cargo nextest run -p pgmem --test it
 ```
@@ -53,4 +62,5 @@ After any change: `cargo c && cargo lint && cargo t`.
   builtins (`funcs/`), `Session` (transaction state machine, settings).
 - `crates/pgmem-wire` — protocol v3 server (startup, simple and extended query).
 - `crates/pgmem` — public `Server` API, the `pgmem` binary, integration tests.
+- `crates/pgmem-conformance` — corpus runner (records from Postgres, ratchets pgmem's pass rate).
 - `examples/` — Go sqlc + pgx projects; `examples/internal/pgmemtest` starts the Rust binary.

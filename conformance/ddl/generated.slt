@@ -1,0 +1,112 @@
+# Generated columns.
+
+statement ok
+CREATE TABLE people (first text, last text, full_name text GENERATED ALWAYS AS (first || ' ' || last) STORED); INSERT INTO people (first, last) VALUES ('Ada', 'Lovelace'); INSERT INTO people (first, last, full_name) VALUES ('a', 'b', DEFAULT); INSERT INTO people (first) VALUES ('Solo'); UPDATE people SET last = 'King' WHERE first = 'Ada'
+
+query
+SELECT first, last, full_name FROM people ORDER BY first
+----
+first:text | last:text | full_name:text
+Ada | King | Ada King
+Solo | NULL | NULL
+a | b | a b
+
+statement error 428C9 cannot insert a non-DEFAULT value into column "full_name"
+INSERT INTO people (first, last, full_name) VALUES ('a', 'b', 'c')
+
+statement error 428C9 column "full_name" can only be updated to DEFAULT
+UPDATE people SET full_name = 'x'
+
+# CHECK on a generated column
+statement ok
+CREATE TABLE items (price numeric(10,2), qty int, total numeric GENERATED ALWAYS AS (price * qty) STORED CHECK (total < 1000)); INSERT INTO items (price, qty) VALUES (9.99, 3)
+
+statement error 23514 new row for relation "items" violates check constraint "items_total_check"
+INSERT INTO items (price, qty) VALUES (500, 3)
+
+query
+SELECT price, qty, total FROM items
+----
+price:numeric | qty:int4 | total:numeric
+9.99 | 3 | 29.97
+
+# Invalid generated columns
+statement error 42P17 cannot use generated column "b" in column generation expression
+CREATE TABLE bad (a int, b int GENERATED ALWAYS AS (a * 2) STORED, c int GENERATED ALWAYS AS (b * 2) STORED)
+
+statement error 42P17 generation expression is not immutable
+CREATE TABLE bad (a timestamptz GENERATED ALWAYS AS (now()) STORED)
+
+# Virtual generated columns (the PostgreSQL 18 default)
+statement ok
+CREATE TABLE virt (a int, b int GENERATED ALWAYS AS (a + 1) VIRTUAL, c int GENERATED ALWAYS AS (a * 10)); INSERT INTO virt (a) VALUES (1), (2)
+
+query
+SELECT a, b, c FROM virt ORDER BY a
+----
+a:int4 | b:int4 | c:int4
+1 | 2 | 10
+2 | 3 | 20
+
+query
+SELECT table_name, column_name, is_generated, generation_expression FROM information_schema.columns WHERE table_name IN ('people', 'virt') ORDER BY table_name, ordinal_position
+----
+table_name:name | column_name:name | is_generated:varchar | generation_expression:varchar
+people | first | NEVER | NULL
+people | last | NEVER | NULL
+people | full_name | ALWAYS | ((first || ' '::text) || last)
+virt | a | NEVER | NULL
+virt | b | ALWAYS | (a + 1)
+virt | c | ALWAYS | (a * 10)
+
+# ADD COLUMN ... GENERATED fills existing rows; DROP EXPRESSION keeps the values
+statement ok
+CREATE TABLE ext (x int); INSERT INTO ext VALUES (3), (4); ALTER TABLE ext ADD COLUMN sq int GENERATED ALWAYS AS (x * x) STORED
+
+query
+SELECT x, sq FROM ext ORDER BY x
+----
+x:int4 | sq:int4
+3 | 9
+4 | 16
+
+statement ok
+ALTER TABLE ext ALTER COLUMN sq DROP EXPRESSION; INSERT INTO ext VALUES (5, 0)
+
+query
+SELECT x, sq FROM ext ORDER BY x
+----
+x:int4 | sq:int4
+3 | 9
+4 | 16
+5 | 0
+
+# SET EXPRESSION recomputes
+statement ok
+ALTER TABLE people ALTER COLUMN full_name SET EXPRESSION AS (last || ', ' || first)
+
+query
+SELECT full_name FROM people WHERE first = 'Ada'
+----
+full_name:text
+King, Ada
+
+# Unique constraint on a generated column
+statement ok
+CREATE TABLE emails (addr text, lower_addr text GENERATED ALWAYS AS (lower(addr)) STORED UNIQUE); INSERT INTO emails (addr) VALUES ('A@x.com')
+
+statement error 23505 duplicate key value violates unique constraint "emails_lower_addr_key"
+INSERT INTO emails (addr) VALUES ('a@X.COM')
+
+# A column used by a generated column cannot be dropped without CASCADE
+statement error 2BP01 cannot drop column first of table people because other objects depend on it
+ALTER TABLE people DROP COLUMN first
+
+statement ok
+ALTER TABLE people DROP COLUMN first CASCADE
+
+query
+SELECT column_name FROM information_schema.columns WHERE table_name = 'people' ORDER BY ordinal_position
+----
+column_name:name
+last

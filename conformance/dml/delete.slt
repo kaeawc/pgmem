@@ -1,0 +1,148 @@
+# DELETE: USING, subqueries, RETURNING, foreign key actions.
+statement ok
+CREATE TABLE author (id int PRIMARY KEY, name text, active boolean DEFAULT true)
+
+statement ok
+CREATE TABLE book (id int PRIMARY KEY, author_id int REFERENCES author ON DELETE CASCADE, title text, year int)
+
+statement ok
+CREATE TABLE review (id int PRIMARY KEY, book_id int REFERENCES book ON DELETE SET NULL, stars int)
+
+statement ok
+CREATE TABLE loan (id int PRIMARY KEY, book_id int REFERENCES book)
+
+statement ok
+INSERT INTO author VALUES (1, 'ada', true), (2, 'bea', false), (3, 'cy', true), (4, 'dot', true)
+
+statement ok
+INSERT INTO book VALUES (10, 1, 'a1', 2001), (11, 1, 'a2', 2005), (20, 2, 'b1', 1999), (30, 3, 'c1', 2010), (31, 3, 'c2', 2011)
+
+statement ok
+INSERT INTO review VALUES (100, 10, 5), (101, 20, 3), (102, 30, 4)
+
+statement ok
+INSERT INTO loan VALUES (1000, 31)
+
+# RETURNING
+query rowsort
+DELETE FROM review WHERE stars < 4 RETURNING *
+----
+id:int4 | book_id:int4 | stars:int4
+101 | 20 | 3
+
+query rowsort
+DELETE FROM review WHERE id = 999 RETURNING id
+----
+id:int4
+
+# DELETE ... USING
+query rowsort
+DELETE FROM book b USING author a WHERE b.author_id = a.id AND NOT a.active RETURNING b.id, b.title, a.name
+----
+id:int4 | title:text | name:text
+20 | b1 | bea
+
+query rowsort
+DELETE FROM book USING (VALUES (2001), (2010)) AS y(year) WHERE book.year = y.year RETURNING book.id
+----
+id:int4
+10
+30
+
+query
+SELECT id, book_id FROM review ORDER BY id
+----
+id:int4 | book_id:int4
+100 | NULL
+102 | NULL
+
+# Subqueries
+query rowsort
+DELETE FROM author WHERE NOT EXISTS (SELECT 1 FROM book WHERE book.author_id = author.id) AND id > 3 RETURNING id
+----
+id:int4
+4
+
+query rowsort
+DELETE FROM review WHERE book_id IS NULL OR book_id NOT IN (SELECT id FROM book) RETURNING id
+----
+id:int4
+100
+102
+
+# Foreign keys: RESTRICT by default, CASCADE when declared
+statement error 23503 update or delete on table "book" violates foreign key constraint "loan_book_id_fkey" on table "loan"
+DELETE FROM book WHERE id = 31
+
+statement error 23503 update or delete on table "book" violates foreign key constraint "loan_book_id_fkey" on table "loan"
+DELETE FROM author WHERE id = 3
+
+query
+SELECT id, title FROM book ORDER BY id
+----
+id:int4 | title:text
+11 | a2
+31 | c2
+
+statement ok
+DELETE FROM loan
+
+query rowsort
+DELETE FROM author WHERE id = 3 RETURNING name
+----
+name:text
+cy
+
+query
+SELECT id, author_id FROM book ORDER BY id
+----
+id:int4 | author_id:int4
+11 | 1
+
+# RETURNING old (PostgreSQL 18)
+query rowsort
+DELETE FROM book WHERE id = 11 RETURNING old.title, new.title
+----
+title:text | title:text
+a2 | NULL
+
+# DELETE ... WHERE CURRENT OF
+statement ok
+INSERT INTO book VALUES (40, 1, 'd1', 2020), (41, 1, 'd2', 2021)
+
+statement ok
+BEGIN
+
+statement ok
+DECLARE cur CURSOR FOR SELECT id FROM book WHERE id >= 40 ORDER BY id FOR UPDATE
+
+statement ok
+FETCH 1 FROM cur
+
+query rowsort
+DELETE FROM book WHERE CURRENT OF cur RETURNING id
+----
+id:int4
+40
+
+statement ok
+COMMIT
+
+statement error 42P01 invalid reference to FROM-clause entry for table "book"
+DELETE FROM book b WHERE book.id = 1
+
+statement error 42P01 relation "nope" does not exist
+DELETE FROM nope
+
+# Delete everything
+query rowsort
+DELETE FROM book RETURNING id
+----
+id:int4
+41
+
+query
+SELECT count(*) FROM book
+----
+count:int8
+0

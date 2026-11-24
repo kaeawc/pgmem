@@ -1,0 +1,158 @@
+# Sequences.
+
+statement ok
+CREATE SEQUENCE s1
+
+query
+SELECT nextval('s1'), nextval('s1'), currval('s1')
+----
+nextval:int8 | nextval:int8 | currval:int8
+1 | 2 | 2
+
+query
+SELECT last_value, is_called FROM s1
+----
+last_value:int8 | is_called:bool
+2 | t
+
+statement error 42P07 relation "s1" already exists
+CREATE SEQUENCE s1
+
+# currval is per session and undefined before nextval
+statement ok
+CREATE SEQUENCE s2 START WITH 100 INCREMENT BY 10
+
+statement error 55000 currval of sequence "s2" is not yet defined in this session
+SELECT currval('s2')
+
+query
+SELECT nextval('s2'), nextval('s2')
+----
+nextval:int8 | nextval:int8
+100 | 110
+
+connection other
+statement error 55000 currval of sequence "s2" is not yet defined in this session
+SELECT currval('s2')
+
+connection other
+query
+SELECT nextval('s2')
+----
+nextval:int8
+120
+
+query
+SELECT currval('s2'), lastval()
+----
+currval:int8 | lastval:int8
+110 | 110
+
+# setval with and without is_called
+query
+SELECT setval('s1', 50), nextval('s1')
+----
+setval:int8 | nextval:int8
+50 | 51
+
+query
+SELECT setval('s1', 50, false), nextval('s1')
+----
+setval:int8 | nextval:int8
+50 | 50
+
+statement error 22003 setval: value 0 is out of bounds for sequence "s1" (1..9223372036854775807)
+SELECT setval('s1', 0)
+
+# MAXVALUE, CYCLE, descending, AS type
+statement ok
+CREATE SEQUENCE small MINVALUE 1 MAXVALUE 3; CREATE SEQUENCE cyc MINVALUE 1 MAXVALUE 2 CYCLE; CREATE SEQUENCE down INCREMENT BY -1; CREATE SEQUENCE si AS smallint START 32767
+
+query
+SELECT nextval('small'), nextval('small'), nextval('small'), nextval('cyc'), nextval('cyc'), nextval('cyc'), nextval('down'), nextval('down'), nextval('si')
+----
+nextval:int8 | nextval:int8 | nextval:int8 | nextval:int8 | nextval:int8 | nextval:int8 | nextval:int8 | nextval:int8 | nextval:int8
+1 | 2 | 3 | 1 | 2 | 1 | -1 | -2 | 32767
+
+statement error 2200H nextval: reached maximum value of sequence "small" (3)
+SELECT nextval('small')
+
+# Invalid definitions
+statement error 22023 INCREMENT must not be zero
+CREATE SEQUENCE bad INCREMENT BY 0
+
+statement error 22023 START value (0) cannot be less than MINVALUE (1)
+CREATE SEQUENCE bad START WITH 0 MINVALUE 1
+
+# ALTER SEQUENCE
+statement ok
+ALTER SEQUENCE s2 RESTART WITH 5
+
+query
+SELECT nextval('s2')
+----
+nextval:int8
+5
+
+statement ok
+ALTER SEQUENCE s2 INCREMENT BY 2
+
+query
+SELECT nextval('s2')
+----
+nextval:int8
+7
+
+statement ok
+ALTER SEQUENCE s2 RESTART; ALTER SEQUENCE s2 RENAME TO s2b
+
+query
+SELECT nextval('s2b')
+----
+nextval:int8
+100
+
+statement error 42P01 relation "nosuch" does not exist
+ALTER SEQUENCE nosuch RESTART
+
+# nextval is not rolled back
+statement ok
+BEGIN; SELECT nextval('s1'); ROLLBACK
+
+query
+SELECT nextval('s1')
+----
+nextval:int8
+52
+
+query
+SELECT sequence_name, data_type, start_value, minimum_value, maximum_value, increment, cycle_option FROM information_schema.sequences WHERE sequence_name IN ('s1', 'small', 'cyc', 'si') ORDER BY sequence_name
+----
+sequence_name:name | data_type:varchar | start_value:varchar | minimum_value:varchar | maximum_value:varchar | increment:varchar | cycle_option:varchar
+cyc | bigint | 1 | 1 | 2 | 1 | YES
+s1 | bigint | 1 | 1 | 9223372036854775807 | 1 | NO
+si | smallint | 32767 | 1 | 32767 | 1 | NO
+small | bigint | 1 | 1 | 3 | 1 | NO
+
+# OWNED BY: dropped with the table
+statement ok
+CREATE TABLE owner_t (id int); CREATE SEQUENCE owned_seq OWNED BY owner_t.id; DROP TABLE owner_t
+
+statement error 42P01 relation "owned_seq" does not exist
+SELECT nextval('owned_seq')
+
+# Schema-qualified and regclass references
+statement ok
+CREATE SCHEMA sx; CREATE SEQUENCE sx.q
+
+query
+SELECT nextval('sx.q'), nextval('sx.q'::regclass)
+----
+nextval:int8 | nextval:int8
+1 | 2
+
+statement ok
+DROP SEQUENCE s1, small
+
+statement error 42P01 sequence "s1" does not exist
+DROP SEQUENCE s1

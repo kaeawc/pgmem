@@ -1,0 +1,198 @@
+# set_config / current_setting, error codes for unknown settings and invalid values.
+
+query
+SELECT set_config('search_path', 'public', false)
+----
+set_config:text
+public
+
+query
+SELECT current_setting('search_path')
+----
+current_setting:text
+public
+
+query
+SELECT set_config('myapp.tenant', 'acme', false), current_setting('myapp.tenant')
+----
+set_config:text | current_setting:text
+acme | acme
+
+query
+SELECT current_setting('myapp.missing', true)
+----
+current_setting:text
+NULL
+
+query
+SELECT current_setting('no_such_setting', true) IS NULL
+----
+?column?:bool
+t
+
+statement error 42704 unrecognized configuration parameter "no_such_setting"
+SELECT current_setting('no_such_setting')
+
+statement error 42704 unrecognized configuration parameter "myapp.missing"
+SELECT current_setting('myapp.missing')
+
+statement error 42704 unrecognized configuration parameter "no_such_setting"
+SELECT current_setting('no_such_setting', false)
+
+statement error 42704 unrecognized configuration parameter "no_such_setting"
+SELECT set_config('no_such_setting', 'x', false)
+
+# is_local = true only lasts until the end of the transaction
+statement ok
+BEGIN
+
+query
+SELECT set_config('application_name', 'tx_local', true)
+----
+set_config:text
+tx_local
+
+query
+SHOW application_name
+----
+application_name:text
+tx_local
+
+statement ok
+COMMIT
+
+query
+SELECT current_setting('application_name') = 'tx_local'
+----
+?column?:bool
+f
+
+statement ok
+BEGIN
+
+query
+SELECT set_config('myapp.request_id', 'r-1', true)
+----
+set_config:text
+r-1
+
+statement ok
+COMMIT
+
+query
+SELECT current_setting('myapp.request_id', true)
+----
+current_setting:text
+(empty)
+
+# invalid values
+statement error 22023 -5 ms is outside the valid range for parameter "statement_timeout" (0 ms .. 2147483647 ms)
+SET statement_timeout = '-5'
+
+statement error 22023 invalid value for parameter "statement_timeout": "abc"
+SELECT set_config('statement_timeout', 'abc', false)
+
+statement error 22023 invalid value for parameter "client_min_messages": "chatty"
+SET client_min_messages = 'chatty'
+
+statement error 22023 parameter "standard_conforming_strings" requires a Boolean value
+SET standard_conforming_strings = 'maybe'
+
+statement error 22023 invalid value for parameter "extra_float_digits": "many"
+SET extra_float_digits = 'many'
+
+statement error 22023 invalid value for parameter "DateStyle": "Whatever"
+SET DateStyle = 'Whatever'
+
+statement error 22023 invalid value for parameter "TimeZone": "Nowhere/Land"
+SET TimeZone = 'Nowhere/Land'
+
+# read-only and restricted settings
+statement error 55P02 parameter "server_version" cannot be changed
+SET server_version = '1.0'
+
+statement error 55P02 parameter "max_connections" cannot be changed without restarting the server
+SET max_connections = 10
+
+statement error 42704 unrecognized configuration parameter "no_such_setting"
+RESET no_such_setting
+
+# boolean spellings
+statement ok
+SET enable_seqscan = off
+
+query
+SHOW enable_seqscan
+----
+enable_seqscan:text
+off
+
+statement ok
+SET enable_seqscan TO 'yes'
+
+query
+SHOW enable_seqscan
+----
+enable_seqscan:text
+on
+
+statement ok
+SET enable_seqscan = 0
+
+query
+SHOW enable_seqscan
+----
+enable_seqscan:text
+off
+
+statement ok
+RESET enable_seqscan
+
+# memory and time units
+statement ok
+SET work_mem = '64MB'
+
+query
+SHOW work_mem
+----
+work_mem:text
+64MB
+
+statement ok
+SET work_mem = 2048
+
+query
+SHOW work_mem
+----
+work_mem:text
+2MB
+
+query
+SELECT setting, unit FROM pg_settings WHERE name = 'work_mem'
+----
+setting:text | unit:text
+2048 | kB
+
+statement ok
+SET statement_timeout = '1h'
+
+query
+SHOW statement_timeout
+----
+statement_timeout:text
+1h
+
+statement ok
+SET statement_timeout = '90s'
+
+query
+SHOW statement_timeout
+----
+statement_timeout:text
+90s
+
+query
+SELECT current_setting('statement_timeout')
+----
+current_setting:text
+90s

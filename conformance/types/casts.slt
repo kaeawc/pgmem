@@ -1,0 +1,240 @@
+# Explicit casts, implicit coercion, and invalid-input errors.
+
+# :: , CAST, and typed-literal forms
+query
+SELECT '42'::int, CAST('42' AS integer), int4 '42', integer '42', '42'::int4::text
+----
+int4:int4 | int4:int4 | int4:int4 | int4:int4 | text:text
+42 | 42 | 42 | 42 | 42
+
+query
+SELECT pg_typeof('x'), pg_typeof('x'::unknown::text), pg_typeof(NULL), pg_typeof(CAST(NULL AS int))
+----
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+unknown | text | unknown | integer
+
+# Numeric casts
+query
+SELECT 1.9::int, -1.9::int, '1.9'::numeric::int, 1::numeric(3,1), 3.7::float8::numeric(3,0)
+----
+int4:int4 | ?column?:int4 | int4:int4 | numeric:numeric | numeric:numeric
+2 | -2 | 2 | 1.0 | 4
+
+query
+SELECT 10::text, 10.50::text, 1e3::float8::text, true::text, 'abc'::varchar(2)
+----
+text:text | text:text | text:text | text:text | varchar:varchar
+10 | 10.50 | 1000 | true | ab
+
+# Text to numbers: whitespace allowed, garbage rejected
+query
+SELECT '  12  '::int, '-007'::int, '1e3'::float8, '0x1F'::int, '0o17'::int, '0b101'::int
+----
+int4:int4 | int4:int4 | float8:float8 | int4:int4 | int4:int4 | int4:int4
+12 | -7 | 1000 | 31 | 15 | 5
+
+statement error 22P02 invalid input syntax for type integer: "12abc"
+SELECT '12abc'::int
+
+statement error 22P02 invalid input syntax for type integer: "1 2"
+SELECT '1 2'::int
+
+statement error 22003 value "9999999999" is out of range for type integer
+SELECT '9999999999'::int
+
+statement error 22003 smallint out of range
+SELECT 99999::int2
+
+statement error 22003 integer out of range
+SELECT 1e10::int4
+
+statement error 0A000 cannot convert NaN to integer
+SELECT 'NaN'::numeric::int
+
+statement error 22003 bigint out of range
+SELECT 'Infinity'::float8::int8
+
+# Error messages carry the type and value
+statement error 22P02 invalid input syntax for type bigint: "x"
+SELECT CAST('x' AS bigint)
+
+statement error 22P02 invalid input syntax for type boolean: "x"
+SELECT 'x'::boolean
+
+statement error 22007 invalid input syntax for type date: "x"
+SELECT 'x'::date
+
+statement error 22007 invalid input syntax for type timestamp with time zone: "x"
+SELECT 'x'::timestamptz
+
+statement error 22007 invalid input syntax for type interval: "x"
+SELECT 'x'::interval
+
+statement error 22P02 invalid input syntax for type uuid: "x"
+SELECT 'x'::uuid
+
+statement error 22P02 invalid input syntax for type json
+SELECT 'x'::json
+
+statement error 22P02 invalid input syntax for type inet: "x"
+SELECT 'x'::inet
+
+# Casts that don't exist
+statement error 42846 cannot cast type integer to date
+SELECT 1::date
+
+statement error 42846 cannot cast type boolean to numeric
+SELECT true::numeric
+
+statement error 42846 cannot cast type date to integer
+SELECT '2024-01-01'::date::int
+
+# Implicit coercion of literals in INSERT
+statement ok
+CREATE TABLE c (i int, n numeric(6,2), t text, d date, b bool, f float8, v varchar(3))
+
+statement ok
+INSERT INTO c VALUES ('1', '2.345', 3, '2024-01-01', 'yes', '1e2', 'ab')
+
+# Assignment casts: numeric to int, int to text
+statement ok
+INSERT INTO c (i, t, f) VALUES (2.5, 123, 7)
+
+query
+SELECT i, n, t, d, b, f, v FROM c ORDER BY i
+----
+i:int4 | n:numeric | t:text | d:date | b:bool | f:float8 | v:varchar
+1 | 2.35 | 3 | 2024-01-01 | t | 100 | ab
+3 | NULL | 123 | NULL | NULL | 7 | NULL
+
+# A typed text expression is not implicitly cast to int
+statement error 42804 column "i" is of type integer but expression is of type text
+INSERT INTO c (i) VALUES ('5'::text)
+
+statement error 42804 column "d" is of type date but expression is of type integer
+INSERT INTO c (d) VALUES (20240101)
+
+statement error 42804 column "b" is of type boolean but expression is of type integer
+INSERT INTO c (b) VALUES (1)
+
+statement error 22P02 invalid input syntax for type integer: "abc"
+INSERT INTO c (i) VALUES ('abc')
+
+statement error 22003 numeric field overflow
+INSERT INTO c (n) VALUES (99999)
+
+# Implicit casts in UPDATE and WHERE
+statement ok
+UPDATE c SET n = '1.005' WHERE i = '1'
+
+query
+SELECT n FROM c WHERE i = 1
+----
+n:numeric
+1.01
+
+statement error 22P02 invalid input syntax for type integer: "abc"
+SELECT * FROM c WHERE i = 'abc'
+
+statement error 42883 operator does not exist: text = integer
+SELECT * FROM c WHERE t = 1
+
+# Operator resolution with unknown literals
+query
+SELECT 1 + '2', '3' || 4, 1.5 + '1', date '2024-01-01' + 1
+----
+?column?:int4 | ?column?:text | ?column?:numeric | ?column?:date
+3 | 34 | 2.5 | 2024-01-02
+
+statement error 22P02 invalid input syntax for type integer: "a"
+SELECT 'a' + 1
+
+# Function argument coercion
+query
+SELECT length(123::text), round(2::int), abs('-3'::int), substr('hello', 2::int8::int)
+----
+length:int4 | round:float8 | abs:int4 | substr:text
+3 | 2 | 3 | ello
+
+statement error 42883 function length(integer) does not exist
+SELECT length(123)
+
+# CASE / COALESCE / UNION type resolution
+query
+SELECT pg_typeof(CASE WHEN true THEN 1 ELSE 2.5 END), pg_typeof(COALESCE(1, 2::int8)), pg_typeof(COALESCE(NULL, 'x'))
+----
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+numeric | bigint | text
+
+statement error 42804 CASE types text and integer cannot be matched
+SELECT CASE WHEN true THEN 1 ELSE 'x'::text END
+
+query
+SELECT x, pg_typeof(x) FROM (SELECT 1 AS x UNION ALL SELECT 2.5) s ORDER BY x
+----
+x:numeric | pg_typeof:regtype
+1 | numeric
+2.5 | numeric
+
+query
+SELECT x, pg_typeof(x) FROM (SELECT 'a' AS x UNION SELECT 'b') s ORDER BY x
+----
+x:text | pg_typeof:regtype
+a | text
+b | text
+
+statement error 42804 UNION types integer and text cannot be matched
+SELECT 1 UNION SELECT 'x'::text
+
+query
+SELECT x FROM (VALUES (1), (2.5), (NULL)) v(x) ORDER BY x
+----
+x:numeric
+1
+2.5
+NULL
+
+# Casts on columns of other types
+query
+SELECT '192.168.0.1/24'::inet, '10.0.0.0/8'::cidr, '08:00:2b:01:02:03'::macaddr, '$1,234.50'::money
+----
+inet:inet | cidr:cidr | macaddr:macaddr | money:money
+192.168.0.1/24 | 10.0.0.0/8 | 08:00:2b:01:02:03 | $1,234.50
+
+query
+SELECT 'public.c'::regclass::text, 'int4'::regtype, 'pg_catalog.initcap'::regproc::text
+----
+text:text | regtype:regtype | text:text
+c | integer | initcap
+
+statement error 42725 more than one function named "pg_catalog.lower"
+SELECT 'pg_catalog.lower'::regproc
+
+statement error 42P01 relation "nosuchtable" does not exist
+SELECT 'nosuchtable'::regclass
+
+# to_number / to_char round trip
+query
+SELECT to_char(1234.5, 'FM9,999.00'), to_number('1,234.50', '9G999D99'), to_char(-0.5, '0.0')
+----
+to_char:text | to_number:numeric | to_char:text
+1,234.50 | 1234.50 | -0.5
+
+# Bit strings
+query
+SELECT B'1010', B'1010'::bit(6), 'x0F'::bit(8), 5::bit(4), B'1010'::bit(4)::int
+----
+?column?:bit | bit:bit | bit:bit | bit:bit | int4:int4
+1010 | 101000 | 00001111 | 0101 | 10
+
+statement error 22P02 "2" is not a valid binary digit
+SELECT B'102'
+
+query
+SELECT B'10101'::bit(3), x'1'::bit(8)
+----
+bit:bit | bit:bit
+101 | 00010000
+
+statement error 22001 value too long for type character varying(3)
+INSERT INTO c (v) VALUES (B'1'::text || 'abcd')

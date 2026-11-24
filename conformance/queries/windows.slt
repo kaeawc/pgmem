@@ -1,0 +1,358 @@
+# Window functions.
+statement ok
+CREATE TABLE scores (id int PRIMARY KEY, team text, player text, pts int)
+
+statement ok
+INSERT INTO scores VALUES (1, 'red', 'ann', 10), (2, 'red', 'bob', 20), (3, 'red', 'cat', 20), (4, 'blue', 'dan', 5), (5, 'blue', 'eve', 15), (6, 'blue', 'fay', NULL), (7, 'green', 'gus', 30)
+
+# Ranking
+query
+SELECT player, pts, row_number() OVER (ORDER BY pts DESC NULLS LAST, id), rank() OVER (ORDER BY pts DESC NULLS LAST), dense_rank() OVER (ORDER BY pts DESC NULLS LAST) FROM scores ORDER BY id
+----
+player:text | pts:int4 | row_number:int8 | rank:int8 | dense_rank:int8
+ann | 10 | 5 | 5 | 4
+bob | 20 | 2 | 2 | 2
+cat | 20 | 3 | 2 | 2
+dan | 5 | 6 | 6 | 5
+eve | 15 | 4 | 4 | 3
+fay | NULL | 7 | 7 | 6
+gus | 30 | 1 | 1 | 1
+
+query
+SELECT player, team, rank() OVER (PARTITION BY team ORDER BY pts DESC) FROM scores ORDER BY team, id
+----
+player:text | team:text | rank:int8
+dan | blue | 3
+eve | blue | 2
+fay | blue | 1
+gus | green | 1
+ann | red | 3
+bob | red | 1
+cat | red | 1
+
+query
+SELECT player, percent_rank() OVER (ORDER BY pts), cume_dist() OVER (ORDER BY pts) FROM scores ORDER BY id
+----
+player:text | percent_rank:float8 | cume_dist:float8
+ann | 0.16666666666666666 | 0.2857142857142857
+bob | 0.5 | 0.7142857142857143
+cat | 0.5 | 0.7142857142857143
+dan | 0 | 0.14285714285714285
+eve | 0.3333333333333333 | 0.42857142857142855
+fay | 1 | 1
+gus | 0.8333333333333334 | 0.8571428571428571
+
+query
+SELECT player, ntile(3) OVER (ORDER BY id), ntile(2) OVER (PARTITION BY team ORDER BY id) FROM scores ORDER BY id
+----
+player:text | ntile:int4 | ntile:int4
+ann | 1 | 1
+bob | 1 | 1
+cat | 1 | 2
+dan | 2 | 1
+eve | 2 | 1
+fay | 3 | 2
+gus | 3 | 1
+
+query
+SELECT pg_typeof(row_number() OVER ()), pg_typeof(rank() OVER ()), pg_typeof(percent_rank() OVER ()), pg_typeof(ntile(2) OVER ())
+----
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+bigint | bigint | double precision | integer
+
+# Aggregates as window functions
+query
+SELECT player, team, sum(pts) OVER (PARTITION BY team), count(*) OVER (PARTITION BY team), avg(pts) OVER () FROM scores ORDER BY id
+----
+player:text | team:text | sum:int8 | count:int8 | avg:numeric
+ann | red | 50 | 3 | 16.6666666666666667
+bob | red | 50 | 3 | 16.6666666666666667
+cat | red | 50 | 3 | 16.6666666666666667
+dan | blue | 20 | 3 | 16.6666666666666667
+eve | blue | 20 | 3 | 16.6666666666666667
+fay | blue | 20 | 3 | 16.6666666666666667
+gus | green | 30 | 1 | 16.6666666666666667
+
+query
+SELECT player, sum(pts) OVER (ORDER BY id) AS running FROM scores ORDER BY id
+----
+player:text | running:int8
+ann | 10
+bob | 30
+cat | 50
+dan | 55
+eve | 70
+fay | 70
+gus | 100
+
+query
+SELECT player, sum(pts) OVER (ORDER BY pts) AS peers FROM scores ORDER BY id
+----
+player:text | peers:int8
+ann | 15
+bob | 70
+cat | 70
+dan | 5
+eve | 30
+fay | 100
+gus | 100
+
+query
+SELECT team, player, max(pts) OVER (PARTITION BY team ORDER BY id) FROM scores ORDER BY id
+----
+team:text | player:text | max:int4
+red | ann | 10
+red | bob | 20
+red | cat | 20
+blue | dan | 5
+blue | eve | 15
+blue | fay | 15
+green | gus | 30
+
+# lag / lead
+query
+SELECT player, lag(pts) OVER (ORDER BY id), lead(pts) OVER (ORDER BY id) FROM scores ORDER BY id
+----
+player:text | lag:int4 | lead:int4
+ann | NULL | 20
+bob | 10 | 20
+cat | 20 | 5
+dan | 20 | 15
+eve | 5 | NULL
+fay | 15 | 30
+gus | NULL | NULL
+
+query
+SELECT player, lag(pts, 2, 0) OVER (ORDER BY id), lead(player, 1, 'none') OVER (PARTITION BY team ORDER BY id) FROM scores ORDER BY id
+----
+player:text | lag:int4 | lead:text
+ann | 0 | bob
+bob | 0 | cat
+cat | 10 | none
+dan | 20 | eve
+eve | 20 | fay
+fay | 5 | none
+gus | 15 | none
+
+# first_value / last_value / nth_value
+query
+SELECT player, first_value(player) OVER w, last_value(player) OVER w, nth_value(player, 2) OVER w FROM scores WINDOW w AS (PARTITION BY team ORDER BY id) ORDER BY id
+----
+player:text | first_value:text | last_value:text | nth_value:text
+ann | ann | ann | NULL
+bob | ann | bob | bob
+cat | ann | cat | bob
+dan | dan | dan | NULL
+eve | dan | eve | eve
+fay | dan | fay | eve
+gus | gus | gus | NULL
+
+query
+SELECT player, last_value(player) OVER (PARTITION BY team ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM scores ORDER BY id
+----
+player:text | last_value:text
+ann | cat
+bob | cat
+cat | cat
+dan | fay
+eve | fay
+fay | fay
+gus | gus
+
+# Frames: ROWS
+query
+SELECT id, sum(pts) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM scores ORDER BY id
+----
+id:int4 | sum:int8
+1 | 30
+2 | 50
+3 | 45
+4 | 40
+5 | 20
+6 | 45
+7 | 30
+
+query
+SELECT id, sum(pts) OVER (ORDER BY id ROWS 2 PRECEDING) FROM scores ORDER BY id
+----
+id:int4 | sum:int8
+1 | 10
+2 | 30
+3 | 50
+4 | 45
+5 | 40
+6 | 20
+7 | 45
+
+query
+SELECT id, count(*) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) FROM scores ORDER BY id
+----
+id:int4 | count:int8
+1 | 7
+2 | 6
+3 | 5
+4 | 4
+5 | 3
+6 | 2
+7 | 1
+
+# Frames: RANGE
+query
+SELECT id, pts, sum(pts) OVER (ORDER BY pts RANGE BETWEEN 5 PRECEDING AND 5 FOLLOWING) FROM scores WHERE pts IS NOT NULL ORDER BY id
+----
+id:int4 | pts:int4 | sum:int8
+1 | 10 | 30
+2 | 20 | 55
+3 | 20 | 55
+4 | 5 | 15
+5 | 15 | 65
+7 | 30 | 30
+
+query
+SELECT id, pts, count(*) OVER (ORDER BY pts RANGE BETWEEN CURRENT ROW AND CURRENT ROW) FROM scores ORDER BY id
+----
+id:int4 | pts:int4 | count:int8
+1 | 10 | 1
+2 | 20 | 2
+3 | 20 | 2
+4 | 5 | 1
+5 | 15 | 1
+6 | NULL | 1
+7 | 30 | 1
+
+query
+SELECT d, count(*) OVER (ORDER BY d RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW) FROM (VALUES (DATE '2024-01-01'), (DATE '2024-01-02'), (DATE '2024-01-04'), (DATE '2024-01-05')) v(d) ORDER BY d
+----
+d:date | count:int8
+2024-01-01 | 1
+2024-01-02 | 2
+2024-01-04 | 1
+2024-01-05 | 2
+
+# Frames: GROUPS and EXCLUDE
+query
+SELECT id, pts, sum(pts) OVER (ORDER BY pts GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM scores WHERE pts IS NOT NULL ORDER BY id
+----
+id:int4 | pts:int4 | sum:int8
+1 | 10 | 15
+2 | 20 | 55
+3 | 20 | 55
+4 | 5 | 5
+5 | 15 | 25
+7 | 30 | 70
+
+query
+SELECT id, sum(pts) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW) FROM scores ORDER BY id
+----
+id:int4 | sum:int8
+1 | 20
+2 | 30
+3 | 25
+4 | 35
+5 | 5
+6 | 45
+7 | NULL
+
+query
+SELECT id, pts, sum(pts) OVER (ORDER BY pts ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING EXCLUDE GROUP) FROM scores WHERE team = 'red' ORDER BY id
+----
+id:int4 | pts:int4 | sum:int8
+1 | 10 | 40
+2 | 20 | 10
+3 | 20 | 10
+
+query
+SELECT id, pts, sum(pts) OVER (ORDER BY pts RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING EXCLUDE TIES) FROM scores WHERE team = 'red' ORDER BY id
+----
+id:int4 | pts:int4 | sum:int8
+1 | 10 | 50
+2 | 20 | 30
+3 | 20 | 30
+
+# Named windows
+query
+SELECT player, sum(pts) OVER w, row_number() OVER (w ORDER BY id) FROM scores WINDOW w AS (PARTITION BY team) ORDER BY id
+----
+player:text | sum:int8 | row_number:int8
+ann | 50 | 1
+bob | 50 | 2
+cat | 50 | 3
+dan | 20 | 1
+eve | 20 | 2
+fay | 20 | 3
+gus | 30 | 1
+
+query
+SELECT player, avg(pts) OVER w2 FROM scores WINDOW w1 AS (PARTITION BY team), w2 AS (w1 ORDER BY id ROWS UNBOUNDED PRECEDING) ORDER BY id
+----
+player:text | avg:numeric
+ann | 10.0000000000000000
+bob | 15.0000000000000000
+cat | 16.6666666666666667
+dan | 5.0000000000000000
+eve | 10.0000000000000000
+fay | 10.0000000000000000
+gus | 30.0000000000000000
+
+# FILTER in window aggregates, window over aggregates
+query
+SELECT player, count(*) FILTER (WHERE pts > 10) OVER (PARTITION BY team) FROM scores ORDER BY id
+----
+player:text | count:int8
+ann | 2
+bob | 2
+cat | 2
+dan | 1
+eve | 1
+fay | 1
+gus | 1
+
+query
+SELECT team, sum(pts), rank() OVER (ORDER BY sum(pts) DESC NULLS LAST) FROM scores GROUP BY team ORDER BY team
+----
+team:text | sum:int8 | rank:int8
+blue | 20 | 3
+green | 30 | 2
+red | 50 | 1
+
+query
+SELECT team, sum(pts) * 100 / sum(sum(pts)) OVER () AS share FROM scores GROUP BY team ORDER BY team
+----
+team:text | share:numeric
+blue | 20.0000000000000000
+green | 30.0000000000000000
+red | 50.0000000000000000
+
+# Top-N per group
+query
+SELECT team, player FROM (SELECT team, player, row_number() OVER (PARTITION BY team ORDER BY pts DESC NULLS LAST, id) AS rn FROM scores) s WHERE rn = 1 ORDER BY team
+----
+team:text | player:text
+blue | eve
+green | gus
+red | bob
+
+# Errors
+statement error 42P20 window functions are not allowed in WHERE
+SELECT player FROM scores WHERE row_number() OVER () > 1
+
+statement error 42803 aggregate function calls cannot contain window function calls
+SELECT sum(row_number() OVER ()) FROM scores
+
+statement error 22014 argument of ntile must be greater than zero
+SELECT ntile(0) OVER () FROM scores
+
+statement error 42704 window "w" does not exist
+SELECT player, sum(pts) OVER w FROM scores
+
+statement error 22016 argument of nth_value must be greater than zero
+SELECT nth_value(player, 0) OVER (ORDER BY id) FROM scores
+
+statement error 0A000 RANGE with offset PRECEDING/FOLLOWING is not supported for column type text
+SELECT sum(pts) OVER (ORDER BY team RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM scores
+
+statement error 42P20 frame start cannot be UNBOUNDED FOLLOWING
+SELECT sum(pts) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED FOLLOWING AND CURRENT ROW) FROM scores
+
+statement error 22013 frame starting offset must not be negative
+SELECT sum(pts) OVER (ORDER BY id ROWS -1 PRECEDING) FROM scores

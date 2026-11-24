@@ -1,0 +1,150 @@
+# COMMENT ON and obj_description / col_description / pg_description.
+
+statement ok
+CREATE TABLE notes (id int PRIMARY KEY, body text)
+
+statement ok
+COMMENT ON TABLE notes IS 'User notes'
+
+statement ok
+COMMENT ON COLUMN notes.body IS 'Markdown body'
+
+query
+SELECT obj_description('notes'::regclass, 'pg_class')
+----
+obj_description:text
+User notes
+
+query
+SELECT obj_description('notes'::regclass)
+----
+obj_description:text
+User notes
+
+query
+SELECT col_description('notes'::regclass, 2), col_description('notes'::regclass, 1)
+----
+col_description:text | col_description:text
+Markdown body | NULL
+
+query
+SELECT a.attname, col_description(a.attrelid, a.attnum)
+FROM pg_attribute a
+WHERE a.attrelid = 'notes'::regclass AND a.attnum > 0
+ORDER BY a.attnum
+----
+attname:name | col_description:text
+id | NULL
+body | Markdown body
+
+query
+SELECT d.objsubid, d.description
+FROM pg_description d
+WHERE d.objoid = 'notes'::regclass AND d.classoid = 'pg_class'::regclass
+ORDER BY d.objsubid
+----
+objsubid:int4 | description:text
+0 | User notes
+2 | Markdown body
+
+# changing and removing comments
+statement ok
+COMMENT ON TABLE notes IS 'Notes v2'
+
+query
+SELECT obj_description('notes'::regclass, 'pg_class')
+----
+obj_description:text
+Notes v2
+
+statement ok
+COMMENT ON COLUMN notes.body IS NULL
+
+query
+SELECT col_description('notes'::regclass, 2)
+----
+col_description:text
+NULL
+
+statement ok
+COMMENT ON TABLE notes IS ''
+
+query
+SELECT obj_description('notes'::regclass, 'pg_class')
+----
+obj_description:text
+NULL
+
+# other object kinds
+statement ok
+CREATE SCHEMA docs
+
+statement ok
+COMMENT ON SCHEMA docs IS 'Documentation schema'
+
+query
+SELECT obj_description('docs'::regnamespace, 'pg_namespace')
+----
+obj_description:text
+Documentation schema
+
+statement ok
+CREATE VIEW note_ids AS SELECT id FROM notes
+
+statement ok
+COMMENT ON VIEW note_ids IS 'Just ids'
+
+query
+SELECT obj_description('note_ids'::regclass, 'pg_class')
+----
+obj_description:text
+Just ids
+
+statement ok
+CREATE TYPE level AS ENUM ('low', 'high')
+
+statement ok
+COMMENT ON TYPE level IS 'Priority level'
+
+query
+SELECT obj_description('level'::regtype, 'pg_type')
+----
+obj_description:text
+Priority level
+
+statement ok
+COMMENT ON CONSTRAINT notes_pkey ON notes IS 'pk'
+
+query
+SELECT obj_description(oid, 'pg_constraint') FROM pg_constraint WHERE conname = 'notes_pkey'
+----
+obj_description:text
+pk
+
+statement ok
+CREATE FUNCTION f1() RETURNS int LANGUAGE sql AS 'SELECT 1'
+
+statement ok
+COMMENT ON FUNCTION f1() IS 'returns one'
+
+query
+SELECT obj_description('f1'::regproc, 'pg_proc')
+----
+obj_description:text
+returns one
+
+statement error 42P01 relation "nosuch" does not exist
+COMMENT ON TABLE nosuch IS 'x'
+
+statement error 42703 column "nosuch" of relation "notes" does not exist
+COMMENT ON COLUMN notes.nosuch IS 'x'
+
+# comments are dropped with the object
+statement ok
+DROP TABLE notes CASCADE
+
+query
+SELECT count(*) FROM pg_description d JOIN pg_class c ON c.oid = d.objoid WHERE c.relname = 'notes'
+----
+count:int8
+0

@@ -1,0 +1,240 @@
+# INSERT: column lists, defaults, multi-row, INSERT ... SELECT, RETURNING.
+statement ok
+CREATE TABLE items (id serial PRIMARY KEY, name text NOT NULL, qty int DEFAULT 1, price numeric(10,2), added date DEFAULT '2024-01-01', tags text[])
+
+# Basic forms
+query rowsort
+INSERT INTO items (name) VALUES ('apple') RETURNING id, name, qty, price, added, tags
+----
+id:int4 | name:text | qty:int4 | price:numeric | added:date | tags:_text
+1 | apple | 1 | NULL | 2024-01-01 | NULL
+
+query rowsort
+INSERT INTO items (name, qty, price) VALUES ('pear', 3, 1.5), ('plum', 2, 0.25), ('fig', DEFAULT, NULL) RETURNING *
+----
+id:int4 | name:text | qty:int4 | price:numeric | added:date | tags:_text
+2 | pear | 3 | 1.50 | 2024-01-01 | NULL
+3 | plum | 2 | 0.25 | 2024-01-01 | NULL
+4 | fig | 1 | NULL | 2024-01-01 | NULL
+
+query rowsort
+INSERT INTO items VALUES (DEFAULT, 'kiwi', DEFAULT, 2, DEFAULT, '{a,b}') RETURNING id, tags, tags[2]
+----
+id:int4 | tags:_text | tags:text
+5 | {a,b} | b
+
+query rowsort
+INSERT INTO items (price, name) VALUES (9.99, 'mango') RETURNING id, name, price
+----
+id:int4 | name:text | price:numeric
+6 | mango | 9.99
+
+statement error 23502 null value in column "name" of relation "items" violates not-null constraint
+INSERT INTO items DEFAULT VALUES
+
+# RETURNING with expressions and aliases
+query rowsort
+INSERT INTO items (name, qty, price) VALUES ('grape', 4, 2.5) RETURNING qty * price AS total, upper(name) AS shout, id > 0 AS positive, 'x' || name
+----
+total:numeric | shout:text | positive:bool | ?column?:text
+10.00 | GRAPE | t | xgrape
+
+query rowsort
+INSERT INTO items AS i (name, qty) VALUES ('lime', 7) RETURNING i.name, i.qty + 1 AS next
+----
+name:text | next:int4
+lime | 8
+
+# The failed DEFAULT VALUES insert above consumed id 7; a parse-time coercion error consumes nothing
+statement error 22P02 invalid input syntax for type integer: "many"
+INSERT INTO items (name, qty) VALUES ('bad', 'many')
+
+query rowsort
+INSERT INTO items (name) VALUES ('after-error') RETURNING id
+----
+id:int4
+10
+
+# INSERT ... SELECT
+statement ok
+CREATE TABLE copy (id int, name text, qty int)
+
+query rowsort
+INSERT INTO copy SELECT id, name, qty FROM items WHERE qty > 1 ORDER BY id RETURNING id, name
+----
+id:int4 | name:text
+2 | pear
+3 | plum
+8 | grape
+9 | lime
+
+query rowsort
+INSERT INTO copy (id, name) SELECT g, 'gen' || g FROM generate_series(100, 103) g RETURNING *
+----
+id:int4 | name:text | qty:int4
+100 | gen100 | NULL
+101 | gen101 | NULL
+102 | gen102 | NULL
+103 | gen103 | NULL
+
+query rowsort
+INSERT INTO copy (name, id) SELECT name, id + 1000 FROM items ORDER BY id DESC LIMIT 2 RETURNING id, name
+----
+id:int4 | name:text
+1010 | after-error
+1009 | lime
+
+statement ok
+INSERT INTO copy SELECT * FROM copy WHERE id >= 100
+
+query
+SELECT id, count(*) FROM copy WHERE id >= 100 GROUP BY id ORDER BY id
+----
+id:int4 | count:int8
+100 | 2
+101 | 2
+102 | 2
+103 | 2
+1009 | 2
+1010 | 2
+
+query rowsort
+INSERT INTO copy (id, name) VALUES ((SELECT max(id) FROM items), (SELECT min(name) FROM items)) RETURNING id, name
+----
+id:int4 | name:text
+10 | after-error
+
+# Column count and name errors
+statement error 42601 INSERT has more target columns than expressions
+INSERT INTO items (name, qty) VALUES ('only-one')
+
+statement error 42601 INSERT has more expressions than target columns
+INSERT INTO items (name) VALUES ('a', 1)
+
+statement error 42703 column "nope" of relation "items" does not exist
+INSERT INTO items (nope) VALUES (1)
+
+statement error 42701 column "name" specified more than once
+INSERT INTO items (name, name) VALUES ('a', 'b')
+
+statement error 42P01 relation "missing_table" does not exist
+INSERT INTO missing_table VALUES (1)
+
+# Assignment coercion
+statement ok
+CREATE TABLE coerce (i int, s smallint, v varchar(3), n numeric(6,2), b boolean, j jsonb)
+
+query rowsort
+INSERT INTO coerce VALUES ('42', 7, 'abc', 1.005, 'yes', '{"a": [1, 2]}') RETURNING *
+----
+i:int4 | s:int2 | v:varchar | n:numeric | b:bool | j:jsonb
+42 | 7 | abc | 1.01 | t | {"a": [1, 2]}
+
+query rowsort
+INSERT INTO coerce (i, n) VALUES (1.6, 2.499), (2.5, -1.5) RETURNING i, n
+----
+i:int4 | n:numeric
+2 | 2.50
+3 | -1.50
+
+query rowsort
+INSERT INTO coerce (v) VALUES ('abcdef'::varchar(3)), ('ab   ') RETURNING v, length(v)
+----
+v:varchar | length:int4
+abc | 3
+ab  | 3
+
+statement error 22001 value too long for type character varying(3)
+INSERT INTO coerce (v) VALUES ('abcd')
+
+statement error 22003 integer out of range
+INSERT INTO coerce (i) VALUES (3000000000)
+
+statement error 22003 smallint out of range
+INSERT INTO coerce (s) VALUES (40000)
+
+statement error 22003 numeric field overflow
+INSERT INTO coerce (n) VALUES (12345.678)
+
+statement error 22P02 invalid input syntax for type boolean: "maybe"
+INSERT INTO coerce (b) VALUES ('maybe')
+
+statement error 22P02 invalid input syntax for type json
+INSERT INTO coerce (j) VALUES ('{bad json')
+
+statement error 42804 column "i" is of type integer but expression is of type boolean
+INSERT INTO coerce (i) VALUES (true)
+
+query rowsort
+INSERT INTO coerce (i, s) VALUES (1, 2), (3.7, 4) RETURNING i, s
+----
+i:int4 | s:int2
+1 | 2
+4 | 4
+
+# DEFAULT VALUES on a table where every column has a default
+statement ok
+CREATE TABLE defaults (id int GENERATED ALWAYS AS IDENTITY, flag boolean DEFAULT false, label text DEFAULT 'none', n int)
+
+query rowsort
+INSERT INTO defaults DEFAULT VALUES RETURNING *
+----
+id:int4 | flag:bool | label:text | n:int4
+1 | f | none | NULL
+
+query rowsort
+INSERT INTO defaults (n) VALUES (5), (6) RETURNING id, flag, label, n
+----
+id:int4 | flag:bool | label:text | n:int4
+2 | f | none | 5
+3 | f | none | 6
+
+statement error 428C9 cannot insert a non-DEFAULT value into column "id"
+INSERT INTO defaults (id, n) VALUES (99, 1)
+
+query rowsort
+INSERT INTO defaults (id, n) OVERRIDING SYSTEM VALUE VALUES (99, 1) RETURNING id, n
+----
+id:int4 | n:int4
+99 | 1
+
+query rowsort
+INSERT INTO defaults (id, n) VALUES (DEFAULT, 7) RETURNING id, n
+----
+id:int4 | n:int4
+4 | 7
+
+# Generated columns
+statement ok
+CREATE TABLE lines (qty int, unit numeric(8,2), total numeric(10,2) GENERATED ALWAYS AS (qty * unit) STORED)
+
+query rowsort
+INSERT INTO lines (qty, unit) VALUES (3, 1.25), (2, NULL) RETURNING qty, unit, total
+----
+qty:int4 | unit:numeric | total:numeric
+3 | 1.25 | 3.75
+2 | NULL | NULL
+
+statement error 428C9 cannot insert a non-DEFAULT value into column "total"
+INSERT INTO lines (qty, unit, total) VALUES (1, 1, 1)
+
+query rowsort
+INSERT INTO lines VALUES (4, 0.5, DEFAULT) RETURNING total
+----
+total:numeric
+2.00
+
+# Final state
+query
+SELECT id, name, qty, price FROM items ORDER BY id
+----
+id:int4 | name:text | qty:int4 | price:numeric
+1 | apple | 1 | NULL
+2 | pear | 3 | 1.50
+3 | plum | 2 | 0.25
+4 | fig | 1 | NULL
+5 | kiwi | 1 | 2.00
+6 | mango | 1 | 9.99
+8 | grape | 4 | 2.50
+9 | lime | 7 | NULL
+10 | after-error | 1 | NULL

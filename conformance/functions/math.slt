@@ -1,0 +1,343 @@
+# Mathematical functions and operators; result types matter.
+
+# abs / sign
+query
+SELECT abs(-5), abs(-5::bigint), abs(-5.5), abs(-5.5::float8), abs(-5::smallint)
+----
+abs:int4 | abs:int8 | abs:numeric | abs:float8 | abs:int2
+5 | 5 | 5.5 | 5.5 | 5
+
+statement error 22003 integer out of range
+SELECT abs(-2147483648)
+
+query
+SELECT sign(-8.4), sign(0), sign(3::float8)
+----
+sign:numeric | sign:float8 | sign:float8
+-1 | 0 | 1
+
+
+# ceil / floor
+query
+SELECT ceil(42.2), ceil(-42.8), ceiling(1.0001), floor(42.8), floor(-42.8)
+----
+ceil:numeric | ceil:numeric | ceiling:numeric | floor:numeric | floor:numeric
+43 | -42 | 2 | 42 | -43
+
+query
+SELECT ceil(42.2::float8), floor(-42.8::float8), ceil(5)
+----
+ceil:float8 | floor:float8 | ceil:float8
+43 | -43 | 5
+
+
+# round / trunc
+query
+SELECT round(42.4), round(42.5), round(-42.5), round(2.5::float8), round(3.5::float8), round(-2.5::float8)
+----
+round:numeric | round:numeric | round:numeric | round:float8 | round:float8 | round:float8
+42 | 43 | -43 | 2 | 4 | -2
+
+query
+SELECT round(42.4382, 2), round(1234.5678, -2), round(5.5, 0), round(0.0005, 3)
+----
+round:numeric | round:numeric | round:numeric | round:numeric
+42.44 | 1200 | 6 | 0.001
+
+query
+SELECT round(1.5::numeric(10,1)), round(15, -1)
+----
+round:numeric | round:numeric
+2 | 20
+
+statement error 42883 function round(double precision, integer) does not exist
+SELECT round(42.4382::float8, 2)
+
+query
+SELECT trunc(42.8), trunc(-42.8), trunc(42.4382, 2), trunc(1234.5678, -2), trunc(42.8::float8)
+----
+trunc:numeric | trunc:numeric | trunc:numeric | trunc:numeric | trunc:float8
+42 | -42 | 42.43 | 1200 | 42
+
+
+# mod / div / operators
+query
+SELECT mod(9, 4), mod(-9, 4), mod(9, -4), mod(10.5, 3), mod(9::bigint, 4::smallint)
+----
+mod:int4 | mod:int4 | mod:int4 | mod:numeric | mod:int8
+1 | -1 | 1 | 1.5 | 1
+
+query
+SELECT 9 % 4, -9 % 4, 5.5 % 2
+----
+?column?:int4 | ?column?:int4 | ?column?:numeric
+1 | -1 | 1.5
+
+query
+SELECT div(9, 4), div(-9, 4), div(9.9, 2.2)
+----
+div:numeric | div:numeric | div:numeric
+2 | -2 | 4
+
+query
+SELECT 7 / 2, -7 / 2, 7.0 / 2, 7 / 2.0, 7::float8 / 2
+----
+?column?:int4 | ?column?:int4 | ?column?:numeric | ?column?:numeric | ?column?:float8
+3 | -3 | 3.5000000000000000 | 3.5000000000000000 | 3.5
+
+statement error 22012 division by zero
+SELECT mod(1, 0)
+
+statement error 22012 division by zero
+SELECT 1.0 / 0
+
+statement error 22012 division by zero
+SELECT 1::float8 / 0
+
+query
+SELECT 2 ^ 10, 2.0 ^ 0.5, |/ 25, ||/ 27, @ -5
+----
+?column?:float8 | ?column?:numeric | ?column?:float8 | ?column?:float8 | ?column?:int4
+1024 | 1.4142135623730950 | 5 | 3.0000000000000004 | 5
+
+query
+SELECT 1 << 4, 256 >> 2, 5 & 3, 5 | 3, 5 # 3, ~5
+----
+?column?:int4 | ?column?:int4 | ?column?:int4 | ?column?:int4 | ?column?:int4 | ?column?:int4
+16 | 64 | 1 | 7 | 6 | -6
+
+
+# power / sqrt / cbrt
+query
+SELECT power(2, 10), power(2.0, 3), power(9, 0.5), power(2::float8, -1)
+----
+power:float8 | power:numeric | power:numeric | power:float8
+1024 | 8.0000000000000000 | 3.0000000000000000 | 0.5
+
+query
+SELECT pow(2, 3), power(-8::float8, 3), power(-8, 3.0)
+----
+pow:float8 | power:float8 | power:numeric
+8 | -512 | -512.00000000000000
+
+statement error 2201F a negative number raised to a non-integer power yields a complex result
+SELECT power(-8.0, 0.5)
+
+statement error 2201F zero raised to a negative power is undefined
+SELECT power(0, -1)
+
+query
+SELECT sqrt(2), sqrt(2::numeric), sqrt(16), cbrt(27), cbrt(-8::float8)
+----
+sqrt:float8 | sqrt:numeric | sqrt:float8 | cbrt:float8 | cbrt:float8
+1.4142135623730951 | 1.414213562373095 | 4 | 3.0000000000000004 | -2
+
+statement error 2201F cannot take square root of a negative number
+SELECT sqrt(-1)
+
+
+# exp / ln / log
+query
+SELECT exp(1), exp(1.0), exp(0)
+----
+exp:float8 | exp:numeric | exp:float8
+2.718281828459045 | 2.7182818284590452 | 1
+
+query
+SELECT ln(2.718281828459045), ln(10), ln(10::numeric)
+----
+ln:numeric | ln:float8 | ln:numeric
+0.9999999999999999 | 2.302585092994046 | 2.3025850929940457
+
+query
+SELECT log(100), log(2, 64), log(100::float8), log10(1000), log(2.0, 8.0)
+----
+log:float8 | log:numeric | log:float8 | log10:float8 | log:numeric
+2 | 6.0000000000000000 | 2 | 3 | 3.0000000000000000
+
+statement error 2201E cannot take logarithm of zero
+SELECT ln(0)
+
+statement error 2201E cannot take logarithm of a negative number
+SELECT log(-1)
+
+
+# gcd / lcm / factorial
+query
+SELECT gcd(1071, 462), gcd(0, 0), gcd(-12, 18), lcm(4, 6), lcm(0, 5), gcd(12.5, 7.5)
+----
+gcd:int4 | gcd:int4 | gcd:int4 | lcm:int4 | lcm:int4 | gcd:numeric
+21 | 0 | 6 | 12 | 0 | 2.5
+
+query
+SELECT factorial(5), factorial(20), factorial(0)
+----
+factorial:numeric | factorial:numeric | factorial:numeric
+120 | 2432902008176640000 | 1
+
+statement error 22003 factorial of a negative number is undefined
+SELECT factorial(-1)
+
+statement error 22003 integer out of range
+SELECT lcm(2147483647, 2147483646)
+
+
+# width_bucket
+query
+SELECT width_bucket(5.35, 0.024, 10.06, 5), width_bucket(-1, 0, 10, 5), width_bucket(10, 0, 10, 5), width_bucket(3::float8, 0, 10, 2)
+----
+width_bucket:int4 | width_bucket:int4 | width_bucket:int4 | width_bucket:int4
+3 | 0 | 6 | 1
+
+query
+SELECT width_bucket(now_val, ARRAY[1, 5, 10]) FROM (VALUES (0), (1), (7), (10), (11)) v(now_val)
+----
+width_bucket:int4
+0
+1
+2
+3
+3
+
+statement error 2201G count must be greater than zero
+SELECT width_bucket(5, 0, 10, 0)
+
+
+# greatest / least
+query
+SELECT greatest(1, 5, 3), least(1, 5, 3), greatest(1, 2.5), least(NULL, 2, 1), greatest(NULL::int, NULL)
+----
+greatest:int4 | least:int4 | greatest:numeric | least:int4 | greatest:int4
+5 | 1 | 2.5 | 1 | NULL
+
+query
+SELECT greatest('apple', 'banana'), least(1::smallint, 2::bigint)
+----
+greatest:text | least:int8
+banana | 1
+
+statement error 22P02 invalid input syntax for type integer: "x"
+SELECT greatest(1, 'x')
+
+
+# trigonometry
+query
+SELECT pi(), degrees(pi()), radians(180)
+----
+pi:float8 | degrees:float8 | radians:float8
+3.141592653589793 | 180 | 3.141592653589793
+
+query
+SELECT sin(0), cos(0), tan(0), asin(1), acos(1), atan(1), atan2(1, 1)
+----
+sin:float8 | cos:float8 | tan:float8 | asin:float8 | acos:float8 | atan:float8 | atan2:float8
+0 | 1 | 0 | 1.5707963267948966 | 0 | 0.7853981633974483 | 0.7853981633974483
+
+query
+SELECT sind(30), cosd(60), tand(45), asind(0.5), acosd(0.5), atand(1), atan2d(1, 0), cotd(45)
+----
+sind:float8 | cosd:float8 | tand:float8 | asind:float8 | acosd:float8 | atand:float8 | atan2d:float8 | cotd:float8
+0.5 | 0.5 | 1 | 30 | 60 | 45 | 90 | 1
+
+query
+SELECT sinh(0), cosh(0), tanh(0), asinh(0), acosh(1), atanh(0)
+----
+sinh:float8 | cosh:float8 | tanh:float8 | asinh:float8 | acosh:float8 | atanh:float8
+0 | 1 | 0 | 0 | 0 | 0
+
+statement error 22003 input is out of range
+SELECT asin(2)
+
+
+# numeric introspection
+query
+SELECT scale(8.4100), min_scale(8.4100), trim_scale(8.4100), trim_scale(0.000)
+----
+scale:int4 | min_scale:int4 | trim_scale:numeric | trim_scale:numeric
+4 | 2 | 8.41 | 0
+
+query
+SELECT 1.10::numeric + 2.205, 1.1::float8 + 2.2, 0.1::float4 + 0.2::float4
+----
+?column?:numeric | ?column?:float8 | ?column?:float4
+3.305 | 3.3000000000000003 | 0.3
+
+query
+SELECT 10::numeric / 3, 1::numeric / 3 * 3, 2::numeric / 3
+----
+?column?:numeric | ?column?:numeric | ?column?:numeric
+3.3333333333333333 | 0.99999999999999999999 | 0.66666666666666666667
+
+query
+SELECT '1e20'::float8, 1e20::numeric, 'NaN'::float8, '-Infinity'::numeric
+----
+float8:float8 | numeric:numeric | float8:float8 | numeric:numeric
+1e+20 | 100000000000000000000 | NaN | -Infinity
+
+query
+SELECT 9223372036854775807::bigint, (-9223372036854775808)::bigint, '-9223372036854775808'::bigint
+----
+int8:int8 | int8:int8 | int8:int8
+9223372036854775807 | -9223372036854775808 | -9223372036854775808
+
+statement error 22003 bigint out of range
+SELECT 9223372036854775807::bigint + 1
+
+statement error 22003 smallint out of range
+SELECT 32767::smallint + 1::smallint
+
+query
+SELECT pg_typeof(1 + 1::bigint), pg_typeof(1 + 1.5), pg_typeof(1 + 1.5::float4), pg_typeof(1::smallint + 1::smallint), pg_typeof(1.5::float4 * 2::numeric)
+----
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+bigint | numeric | double precision | smallint | double precision
+
+query
+SELECT pg_typeof(abs(1::smallint)), pg_typeof(round(1::int)), pg_typeof(ceil(1::int)), pg_typeof(sqrt(4)), pg_typeof(power(2, 2))
+----
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+smallint | double precision | double precision | double precision | double precision
+
+
+# aggregates over numbers
+query
+SELECT sum(x), avg(x), min(x), max(x), count(x) FROM (VALUES (1), (2), (4)) v(x)
+----
+sum:int8 | avg:numeric | min:int4 | max:int4 | count:int8
+7 | 2.3333333333333333 | 1 | 4 | 3
+
+query
+SELECT pg_typeof(sum(x)), pg_typeof(avg(x)), pg_typeof(sum(x::bigint)), pg_typeof(sum(x::float4)) FROM (VALUES (1)) v(x)
+----
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+bigint | numeric | numeric | real
+
+query
+SELECT stddev(x), stddev_pop(x), variance(x), var_pop(x) FROM (VALUES (1), (2), (4)) v(x)
+----
+stddev:numeric | stddev_pop:numeric | variance:numeric | var_pop:numeric
+1.5275252316519467 | 1.2472191289246471 | 2.3333333333333333 | 1.5555555555555556
+
+query
+SELECT stddev(x::float8), variance(x::float8) FROM (VALUES (1), (2), (4)) v(x)
+----
+stddev:float8 | variance:float8
+1.5275252316519468 | 2.3333333333333335
+
+query
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x), percentile_disc(0.5) WITHIN GROUP (ORDER BY x), mode() WITHIN GROUP (ORDER BY x) FROM (VALUES (1), (2), (2), (4)) v(x)
+----
+percentile_cont:float8 | percentile_disc:int4 | mode:int4
+2 | 2 | 2
+
+query
+SELECT corr(x, y), covar_pop(x, y), regr_slope(y, x), regr_intercept(y, x) FROM (VALUES (1, 2), (2, 4), (3, 7)) v(x, y)
+----
+corr:float8 | covar_pop:float8 | regr_slope:float8 | regr_intercept:float8
+0.9933992677987828 | 1.6666666666666667 | 2.5 | -0.6666666666666666
+
+query
+SELECT bit_and(x), bit_or(x), bit_xor(x) FROM (VALUES (12), (10)) v(x)
+----
+bit_and:int4 | bit_or:int4 | bit_xor:int4
+8 | 14 | 6

@@ -1,0 +1,183 @@
+# regclass / regtype / regproc casts, to_reg* lookups and format_type.
+
+statement ok
+CREATE TABLE t (id int)
+
+statement ok
+CREATE SCHEMA other
+
+statement ok
+CREATE TABLE other.thing (x int)
+
+statement ok
+CREATE TABLE "Mixed Case" (x int)
+
+# regclass
+query
+SELECT 't'::regclass::text
+----
+text:text
+t
+
+query
+SELECT 'public.t'::regclass::text
+----
+text:text
+t
+
+query
+SELECT 'other.thing'::regclass::text
+----
+text:text
+other.thing
+
+query
+SELECT '"Mixed Case"'::regclass::text
+----
+text:text
+"Mixed Case"
+
+statement error 42P01 relation "missing_table" does not exist
+SELECT 'missing_table'::regclass
+
+query
+SELECT to_regclass('t')::text, to_regclass('missing_table')
+----
+to_regclass:text | to_regclass:regclass
+t | NULL
+
+query
+SELECT to_regclass('other.thing') IS NOT NULL, to_regclass('thing') IS NULL
+----
+?column?:bool | ?column?:bool
+t | t
+
+query
+SELECT 'pg_class'::regclass::text, 'pg_catalog.pg_type'::regclass::text
+----
+text:text | text:text
+pg_class | pg_type
+
+# search_path changes regclass display
+statement ok
+SET search_path TO other, public
+
+query
+SELECT 'other.thing'::regclass::text, 't'::regclass::text
+----
+text:text | text:text
+thing | t
+
+statement ok
+RESET search_path
+
+# regtype
+query
+SELECT 'int4'::regtype::text, 'integer'::regtype::text, 'int'::regtype::text
+----
+text:text | text:text | text:text
+integer | integer | integer
+
+query
+SELECT 'varchar'::regtype::text, 'timestamptz'::regtype::text, 'bool'::regtype::text
+----
+text:text | text:text | text:text
+character varying | timestamp with time zone | boolean
+
+query
+SELECT 'text[]'::regtype::text, '_int4'::regtype::text, 'double precision'::regtype::text
+----
+text:text | text:text | text:text
+text[] | integer[] | double precision
+
+statement error 42704 type "nosuchtype" does not exist
+SELECT 'nosuchtype'::regtype
+
+query
+SELECT to_regtype('int8')::text, to_regtype('nosuchtype')
+----
+to_regtype:text | to_regtype:regtype
+bigint | NULL
+
+query
+SELECT 't'::regtype::text
+----
+text:text
+t
+
+# format_type
+query
+SELECT format_type('int4'::regtype, NULL), format_type('numeric'::regtype, 655366)
+----
+format_type:text | format_type:text
+integer | numeric(10,2)
+
+query
+SELECT format_type('varchar'::regtype, 36), format_type('bpchar'::regtype, 14)
+----
+format_type:text | format_type:text
+character varying(32) | character(10)
+
+query
+SELECT format_type('timestamptz'::regtype, 3), format_type('_text'::regtype, -1)
+----
+format_type:text | format_type:text
+timestamp(3) with time zone | text[]
+
+# pg_typeof
+query
+SELECT pg_typeof(1)::text, pg_typeof(1.5)::text, pg_typeof('x'::text)::text, pg_typeof(now())::text
+----
+pg_typeof:text | pg_typeof:text | pg_typeof:text | pg_typeof:text
+integer | numeric | text | timestamp with time zone
+
+query
+SELECT pg_typeof(ARRAY[1,2])::text, pg_typeof(NULL)::text
+----
+pg_typeof:text | pg_typeof:text
+integer[] | unknown
+
+# regproc / regprocedure / regnamespace
+query
+SELECT 'now'::regproc::text, 'lower(text)'::regprocedure::text
+----
+text:text | text:text
+now | lower(text)
+
+query
+SELECT 'public'::regnamespace::text, to_regnamespace('nope')
+----
+text:text | to_regnamespace:regnamespace
+public | NULL
+
+query
+SELECT to_regproc('upper')::text, to_regprocedure('abs(integer)')::text
+----
+to_regproc:text | to_regprocedure:text
+NULL | abs(integer)
+
+# casts between reg types and oid compare equal
+query
+SELECT 't'::regclass = (SELECT oid FROM pg_class WHERE relname = 't')
+----
+?column?:bool
+t
+
+query
+SELECT 'int4'::regtype = 23::oid
+----
+?column?:bool
+t
+
+# pg_table_is_visible / pg_type_is_visible
+query
+SELECT pg_table_is_visible('t'::regclass), pg_table_is_visible('other.thing'::regclass)
+----
+pg_table_is_visible:bool | pg_table_is_visible:bool
+t | f
+
+query
+SELECT pg_type_is_visible('int4'::regtype)
+----
+pg_type_is_visible:bool
+t

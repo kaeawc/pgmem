@@ -1,0 +1,19 @@
+[package]
+name = "pgmem-conformance"
+description = "SQL conformance corpus runner: compares pgmem against results recorded from PostgreSQL."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "pgmem-conformance"
+path = "src/main.rs"
+
+[dependencies]
+pgmem = { workspace = true }
+postgres = { workspace = true }
+
+[lints]
+workspace = true

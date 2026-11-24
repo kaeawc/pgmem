@@ -1,0 +1,346 @@
+# ORDER BY, DISTINCT ON, LIMIT / OFFSET / FETCH.
+statement ok
+CREATE TABLE p (id int PRIMARY KEY, cat text, val int, name text)
+
+statement ok
+INSERT INTO p VALUES (1, 'a', 30, 'x'), (2, 'b', NULL, 'Y'), (3, 'a', 10, 'z'), (4, 'c', 20, 'w'), (5, 'b', 20, 'v'), (6, NULL, 5, 'u')
+
+# NULLS FIRST / LAST defaults
+query
+SELECT id, val FROM p ORDER BY val, id
+----
+id:int4 | val:int4
+6 | 5
+3 | 10
+4 | 20
+5 | 20
+1 | 30
+2 | NULL
+
+query
+SELECT id, val FROM p ORDER BY val DESC, id
+----
+id:int4 | val:int4
+2 | NULL
+1 | 30
+4 | 20
+5 | 20
+3 | 10
+6 | 5
+
+query
+SELECT id, val FROM p ORDER BY val NULLS FIRST, id
+----
+id:int4 | val:int4
+2 | NULL
+6 | 5
+3 | 10
+4 | 20
+5 | 20
+1 | 30
+
+query
+SELECT id, val FROM p ORDER BY val DESC NULLS LAST, id
+----
+id:int4 | val:int4
+1 | 30
+4 | 20
+5 | 20
+3 | 10
+6 | 5
+2 | NULL
+
+# Ordering by expressions, aliases, ordinals, unselected columns
+query
+SELECT id, val FROM p ORDER BY coalesce(val, 0) * -1, id
+----
+id:int4 | val:int4
+1 | 30
+4 | 20
+5 | 20
+3 | 10
+6 | 5
+2 | NULL
+
+query
+SELECT id, val * 2 AS dbl FROM p ORDER BY dbl NULLS FIRST, id
+----
+id:int4 | dbl:int4
+2 | NULL
+6 | 10
+3 | 20
+4 | 40
+5 | 40
+1 | 60
+
+query
+SELECT id, name FROM p ORDER BY 2
+----
+id:int4 | name:text
+2 | Y
+6 | u
+5 | v
+4 | w
+1 | x
+3 | z
+
+query
+SELECT name FROM p ORDER BY id DESC
+----
+name:text
+u
+v
+w
+z
+Y
+x
+
+query
+SELECT cat, id FROM p ORDER BY cat DESC NULLS LAST, 2 DESC
+----
+cat:text | id:int4
+c | 4
+b | 5
+b | 2
+a | 3
+a | 1
+NULL | 6
+
+query
+SELECT id FROM p ORDER BY (val IS NULL), val DESC, id
+----
+id:int4
+1
+4
+5
+3
+6
+2
+
+query
+SELECT id, name FROM p ORDER BY name COLLATE "C"
+----
+id:int4 | name:text
+2 | Y
+6 | u
+5 | v
+4 | w
+1 | x
+3 | z
+
+query
+SELECT id, name FROM p ORDER BY lower(name)
+----
+id:int4 | name:text
+6 | u
+5 | v
+4 | w
+1 | x
+2 | Y
+3 | z
+
+query
+SELECT id FROM p ORDER BY CASE cat WHEN 'c' THEN 0 ELSE 1 END, id
+----
+id:int4
+4
+1
+2
+3
+5
+6
+
+statement error 42P10 ORDER BY position 3 is not in select list
+SELECT id FROM p ORDER BY 3
+
+statement error 42703 column "dbl" does not exist
+SELECT id FROM p ORDER BY dbl + 1
+
+statement error 42P10 for SELECT DISTINCT, ORDER BY expressions must appear in select list
+SELECT DISTINCT cat FROM p ORDER BY id
+
+# Text ordering is byte order in C collation
+query
+SELECT x FROM (VALUES ('b'), ('B'), ('a'), ('A'), ('_'), ('1'), ('')) v(x) ORDER BY x
+----
+x:text
+(empty)
+1
+A
+B
+_
+a
+b
+
+# Ordering mixed numeric values and arrays
+query
+SELECT x FROM (VALUES (1.5::numeric), (-2), (10), (1.50)) v(x) ORDER BY x, x::text
+----
+x:numeric
+-2
+1.5
+1.50
+10
+
+query
+SELECT x FROM (VALUES ('NaN'::float8), ('Infinity'), ('-Infinity'), (0), (NULL)) v(x) ORDER BY x
+----
+x:float8
+-Infinity
+0
+Infinity
+NaN
+NULL
+
+query
+SELECT x FROM (VALUES (ARRAY[1,2]), (ARRAY[1]), (ARRAY[1,2,0]), (ARRAY[0,9])) v(x) ORDER BY x
+----
+x:_int4
+{0,9}
+{1}
+{1,2}
+{1,2,0}
+
+# DISTINCT ON
+query
+SELECT DISTINCT ON (cat) cat, id, val FROM p ORDER BY cat, val DESC NULLS LAST
+----
+cat:text | id:int4 | val:int4
+a | 1 | 30
+b | 5 | 20
+c | 4 | 20
+NULL | 6 | 5
+
+query
+SELECT DISTINCT ON (cat) cat, id FROM p ORDER BY cat NULLS FIRST, id DESC
+----
+cat:text | id:int4
+NULL | 6
+a | 3
+b | 5
+c | 4
+
+statement error 42P10 SELECT DISTINCT ON expressions must match initial ORDER BY expressions
+SELECT DISTINCT ON (cat) cat, id FROM p ORDER BY id
+
+# LIMIT / OFFSET
+query
+SELECT id FROM p ORDER BY id LIMIT 2
+----
+id:int4
+1
+2
+
+query
+SELECT id FROM p ORDER BY id LIMIT 2 OFFSET 3
+----
+id:int4
+4
+5
+
+query
+SELECT id FROM p ORDER BY id OFFSET 4
+----
+id:int4
+5
+6
+
+query
+SELECT id FROM p ORDER BY id LIMIT 0
+----
+id:int4
+
+query
+SELECT id FROM p ORDER BY id LIMIT ALL OFFSET 5
+----
+id:int4
+6
+
+query
+SELECT id FROM p ORDER BY id LIMIT NULL
+----
+id:int4
+1
+2
+3
+4
+5
+6
+
+query
+SELECT id FROM p ORDER BY id OFFSET 100
+----
+id:int4
+
+query
+SELECT id FROM p ORDER BY id LIMIT 1 + 1
+----
+id:int4
+1
+2
+
+statement error 2201W LIMIT must not be negative
+SELECT id FROM p LIMIT -1
+
+statement error 2201X OFFSET must not be negative
+SELECT id FROM p OFFSET -1
+
+statement error 22P02 invalid input syntax for type bigint: "a"
+SELECT id FROM p LIMIT 'a'
+
+# FETCH FIRST
+query
+SELECT id FROM p ORDER BY id FETCH FIRST 3 ROWS ONLY
+----
+id:int4
+1
+2
+3
+
+query
+SELECT id FROM p ORDER BY id OFFSET 1 ROW FETCH NEXT ROW ONLY
+----
+id:int4
+2
+
+query
+SELECT id, val FROM p ORDER BY val FETCH FIRST 2 ROWS WITH TIES
+----
+id:int4 | val:int4
+6 | 5
+3 | 10
+
+query
+SELECT id, val FROM p ORDER BY val DESC NULLS LAST FETCH FIRST 3 ROWS WITH TIES
+----
+id:int4 | val:int4
+1 | 30
+4 | 20
+5 | 20
+
+statement error 42601 WITH TIES cannot be specified without ORDER BY clause
+SELECT id FROM p FETCH FIRST 2 ROWS WITH TIES
+
+# ORDER BY in subqueries and aggregates
+query
+SELECT string_agg(name, '' ORDER BY val DESC NULLS FIRST, id) FROM p
+----
+string_agg:text
+Yxwvzu
+
+query
+SELECT * FROM (SELECT id FROM p ORDER BY id DESC LIMIT 3) s ORDER BY id
+----
+id:int4
+4
+5
+6
+
+query
+SELECT cat, count(*) FROM p GROUP BY cat ORDER BY count(*) DESC, cat NULLS FIRST
+----
+cat:text | count:int8
+a | 2
+b | 2
+NULL | 1
+c | 1

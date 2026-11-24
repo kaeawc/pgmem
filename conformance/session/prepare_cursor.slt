@@ -1,0 +1,328 @@
+# SQL-level PREPARE / EXECUTE / DEALLOCATE, DISCARD, and cursors.
+
+statement ok
+CREATE TABLE items (id int PRIMARY KEY, name text, price numeric(8,2))
+
+statement ok
+INSERT INTO items SELECT g, 'item' || g, g * 1.5 FROM generate_series(1, 10) g
+
+# PREPARE / EXECUTE
+statement ok
+PREPARE get_item (int) AS SELECT id, name, price FROM items WHERE id = $1
+
+query
+EXECUTE get_item(3)
+----
+id:int4 | name:text | price:numeric
+3 | item3 | 4.50
+
+query
+EXECUTE get_item(42)
+----
+id:int4 | name:text | price:numeric
+
+statement ok
+PREPARE add_item (int, text, numeric) AS INSERT INTO items VALUES ($1, $2, $3)
+
+statement ok
+EXECUTE add_item(11, 'eleven', 9.99)
+
+query
+EXECUTE get_item(11)
+----
+id:int4 | name:text | price:numeric
+11 | eleven | 9.99
+
+statement ok
+PREPARE count_items AS SELECT count(*) FROM items
+
+query
+EXECUTE count_items
+----
+count:int8
+11
+
+statement ok
+PREPARE typed_guess AS SELECT $1::int + 1
+
+query
+EXECUTE typed_guess('41')
+----
+?column?:int4
+42
+
+query
+SELECT name, statement, parameter_types::text[], from_sql
+FROM pg_prepared_statements
+WHERE name IN ('get_item', 'count_items')
+ORDER BY name
+----
+name:text | statement:text | parameter_types:_text | from_sql:bool
+count_items | PREPARE count_items AS SELECT count(*) FROM items | {} | t
+get_item | PREPARE get_item (int) AS SELECT id, name, price FROM items WHERE id = $1 | {integer} | t
+
+statement error 42P05 prepared statement "get_item" already exists
+PREPARE get_item AS SELECT 1
+
+statement error 42601 wrong number of parameters for prepared statement "get_item"
+EXECUTE get_item
+
+statement error 22P02 invalid input syntax for type integer: "abc"
+EXECUTE get_item('abc')
+
+statement error 26000 prepared statement "nope" does not exist
+EXECUTE nope
+
+statement ok
+DEALLOCATE get_item
+
+statement error 26000 prepared statement "get_item" does not exist
+EXECUTE get_item(1)
+
+statement error 26000 prepared statement "get_item" does not exist
+DEALLOCATE get_item
+
+statement ok
+DEALLOCATE PREPARE count_items
+
+statement ok
+DEALLOCATE ALL
+
+query
+SELECT count(*) FROM pg_prepared_statements
+----
+count:int8
+0
+
+# prepared statements are per session
+statement ok
+PREPARE mine AS SELECT 1
+
+connection other
+statement error 26000 prepared statement "mine" does not exist
+EXECUTE mine
+
+# DISCARD
+statement ok
+SET application_name = 'before_discard'
+
+statement ok
+DISCARD ALL
+
+query
+SELECT count(*) FROM pg_prepared_statements
+----
+count:int8
+0
+
+query
+SHOW application_name
+----
+application_name:text
+(empty)
+
+statement ok
+DISCARD PLANS
+
+statement ok
+DISCARD SEQUENCES
+
+statement ok
+DISCARD TEMP
+
+statement ok
+CREATE TEMP TABLE scratch (x int)
+
+statement ok
+DISCARD TEMPORARY
+
+statement error 42P01 relation "scratch" does not exist
+SELECT * FROM scratch
+
+statement ok
+BEGIN
+
+statement error 25001 DISCARD ALL cannot run inside a transaction block
+DISCARD ALL
+
+statement ok
+ROLLBACK
+
+# cursors
+statement ok
+BEGIN
+
+statement ok
+DECLARE c CURSOR FOR SELECT id, name FROM items ORDER BY id
+
+query
+FETCH 3 FROM c
+----
+id:int4 | name:text
+1 | item1
+2 | item2
+3 | item3
+
+query
+FETCH NEXT FROM c
+----
+id:int4 | name:text
+4 | item4
+
+query
+FETCH c
+----
+id:int4 | name:text
+5 | item5
+
+query
+FETCH FORWARD 2 FROM c
+----
+id:int4 | name:text
+6 | item6
+7 | item7
+
+query
+FETCH ALL FROM c
+----
+id:int4 | name:text
+8 | item8
+9 | item9
+10 | item10
+11 | eleven
+
+query
+FETCH NEXT FROM c
+----
+id:int4 | name:text
+
+statement ok
+CLOSE c
+
+statement error 34000 cursor "c" does not exist
+FETCH NEXT FROM c
+
+statement ok
+ROLLBACK
+
+# scroll cursors
+statement ok
+BEGIN
+
+statement ok
+DECLARE sc SCROLL CURSOR FOR SELECT id FROM items WHERE id <= 5 ORDER BY id
+
+query
+FETCH LAST FROM sc
+----
+id:int4
+5
+
+query
+FETCH PRIOR FROM sc
+----
+id:int4
+4
+
+query
+FETCH FIRST FROM sc
+----
+id:int4
+1
+
+query
+FETCH ABSOLUTE 4 FROM sc
+----
+id:int4
+4
+
+query
+FETCH RELATIVE -2 FROM sc
+----
+id:int4
+2
+
+statement ok
+MOVE FORWARD 2 IN sc
+
+query
+FETCH NEXT FROM sc
+----
+id:int4
+5
+
+query
+FETCH BACKWARD 2 FROM sc
+----
+id:int4
+4
+3
+
+query
+SELECT name, is_holdable, is_scrollable, is_binary FROM pg_cursors ORDER BY name
+----
+name:text | is_holdable:bool | is_scrollable:bool | is_binary:bool
+sc | f | t | f
+
+statement ok
+CLOSE ALL
+
+statement ok
+COMMIT
+
+# a NO SCROLL cursor cannot go backwards
+statement ok
+BEGIN
+
+statement ok
+DECLARE ns NO SCROLL CURSOR FOR SELECT id FROM items ORDER BY id
+
+query
+FETCH 2 FROM ns
+----
+id:int4
+1
+2
+
+statement error 55000 cursor can only scan forward
+FETCH PRIOR FROM ns
+
+statement ok
+ROLLBACK
+
+# WITH HOLD cursors survive commit
+statement ok
+BEGIN
+
+statement ok
+DECLARE h CURSOR WITH HOLD FOR SELECT id FROM items ORDER BY id DESC
+
+statement ok
+COMMIT
+
+query
+FETCH 2 FROM h
+----
+id:int4
+11
+10
+
+statement ok
+CLOSE h
+
+# a cursor without HOLD needs a transaction
+statement error 25P01 DECLARE CURSOR can only be used in transaction blocks
+DECLARE outside CURSOR FOR SELECT 1
+
+# cursor dies with the transaction
+statement ok
+BEGIN
+
+statement ok
+DECLARE gone CURSOR FOR SELECT 1
+
+statement ok
+COMMIT
+
+statement error 34000 cursor "gone" does not exist
+FETCH gone

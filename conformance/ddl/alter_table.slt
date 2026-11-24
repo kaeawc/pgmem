@@ -1,0 +1,194 @@
+# ALTER TABLE.
+
+statement ok
+CREATE TABLE t (id int PRIMARY KEY, name text); INSERT INTO t VALUES (1, 'a'), (2, 'b')
+
+# ADD COLUMN
+statement ok
+ALTER TABLE t ADD COLUMN age int; ALTER TABLE t ADD COLUMN status text NOT NULL DEFAULT 'active'; ALTER TABLE t ADD score int DEFAULT 10, ADD COLUMN tag text
+
+query
+SELECT id, name, age, status, score, tag FROM t ORDER BY id
+----
+id:int4 | name:text | age:int4 | status:text | score:int4 | tag:text
+1 | a | NULL | active | 10 | NULL
+2 | b | NULL | active | 10 | NULL
+
+statement error 42701 column "name" of relation "t" already exists
+ALTER TABLE t ADD COLUMN name text
+
+statement ok
+ALTER TABLE t ADD COLUMN IF NOT EXISTS name text
+
+statement error 23502 column "must" of relation "t" contains null values
+ALTER TABLE t ADD COLUMN must int NOT NULL
+
+statement error 42P01 relation "nosuch" does not exist
+ALTER TABLE nosuch ADD COLUMN x int
+
+# DROP COLUMN
+statement ok
+ALTER TABLE t DROP COLUMN tag
+
+statement error 42703 column "tag" of relation "t" does not exist
+ALTER TABLE t DROP COLUMN tag
+
+query
+SELECT column_name FROM information_schema.columns WHERE table_name = 't' ORDER BY ordinal_position
+----
+column_name:name
+id
+name
+age
+status
+score
+
+# RENAME COLUMN
+statement ok
+ALTER TABLE t RENAME COLUMN age TO years
+
+statement error 42701 column "status" of relation "t" already exists
+ALTER TABLE t RENAME COLUMN name TO status
+
+statement error 42703 column "age" does not exist
+SELECT age FROM t
+
+# SET / DROP DEFAULT
+statement ok
+ALTER TABLE t ALTER COLUMN score SET DEFAULT 99; INSERT INTO t (id, name) VALUES (3, 'c'); ALTER TABLE t ALTER COLUMN score DROP DEFAULT; INSERT INTO t (id, name) VALUES (4, 'd')
+
+query
+SELECT id, score FROM t WHERE id IN (3, 4) ORDER BY id
+----
+id:int4 | score:int4
+3 | 99
+4 | NULL
+
+# SET / DROP NOT NULL
+statement error 23502 column "score" of relation "t" contains null values
+ALTER TABLE t ALTER COLUMN score SET NOT NULL
+
+statement ok
+UPDATE t SET score = 0 WHERE score IS NULL; ALTER TABLE t ALTER COLUMN score SET NOT NULL
+
+statement error 23502 null value in column "score" of relation "t" violates not-null constraint
+INSERT INTO t (id, name) VALUES (5, 'e')
+
+statement ok
+ALTER TABLE t ALTER COLUMN score DROP NOT NULL; INSERT INTO t (id, name) VALUES (5, 'e')
+
+query
+SELECT column_name, is_nullable, column_default FROM information_schema.columns WHERE table_name = 't' ORDER BY ordinal_position
+----
+column_name:name | is_nullable:varchar | column_default:varchar
+id | NO | NULL
+name | YES | NULL
+years | YES | NULL
+status | NO | 'active'::text
+score | YES | NULL
+
+# Column type changes, with and without USING
+statement ok
+CREATE TABLE ty (a int, b text, c varchar(10)); INSERT INTO ty VALUES (1, '10', 'hello'), (2, '20', 'world'); ALTER TABLE ty ALTER COLUMN a TYPE bigint
+
+statement error 42804 column "b" cannot be cast automatically to type integer
+ALTER TABLE ty ALTER COLUMN b TYPE int
+
+statement ok
+ALTER TABLE ty ALTER COLUMN b TYPE int USING b::int; ALTER TABLE ty ALTER COLUMN b SET DATA TYPE numeric(10,2) USING b * 1.5
+
+statement error 22001 value too long for type character varying(3)
+ALTER TABLE ty ALTER COLUMN c TYPE varchar(3)
+
+statement ok
+ALTER TABLE ty ALTER COLUMN c TYPE varchar(50)
+
+query
+SELECT a, b, c FROM ty ORDER BY a
+----
+a:int8 | b:numeric | c:varchar
+1 | 15.00 | hello
+2 | 30.00 | world
+
+query
+SELECT column_name, data_type, numeric_precision, numeric_scale, character_maximum_length FROM information_schema.columns WHERE table_name = 'ty' ORDER BY ordinal_position
+----
+column_name:name | data_type:varchar | numeric_precision:int4 | numeric_scale:int4 | character_maximum_length:int4
+a | bigint | 64 | 0 | NULL
+b | numeric | 10 | 2 | NULL
+c | character varying | NULL | NULL | 50
+
+# RENAME TABLE and SET SCHEMA
+statement ok
+ALTER TABLE ty RENAME TO ty2
+
+statement error 42P07 relation "t" already exists
+ALTER TABLE ty2 RENAME TO t
+
+statement ok
+CREATE SCHEMA other; ALTER TABLE ty2 SET SCHEMA other
+
+query
+SELECT count(*) FROM other.ty2
+----
+count:int8
+2
+
+# RENAME / DROP CONSTRAINT
+statement ok
+ALTER TABLE t ADD CONSTRAINT score_nonneg CHECK (score >= 0); ALTER TABLE t RENAME CONSTRAINT score_nonneg TO score_positive
+
+statement error 23514 new row for relation "t" violates check constraint "score_positive"
+INSERT INTO t (id, name, score) VALUES (6, 'f', -1)
+
+statement ok
+ALTER TABLE t DROP CONSTRAINT score_positive
+
+statement error 42704 constraint "score_positive" of relation "t" does not exist
+ALTER TABLE t DROP CONSTRAINT score_positive
+
+# Several actions in one statement
+statement ok
+ALTER TABLE t ADD COLUMN x int, ALTER COLUMN name SET NOT NULL, DROP COLUMN years
+
+query
+SELECT column_name, is_nullable FROM information_schema.columns WHERE table_name = 't' ORDER BY ordinal_position
+----
+column_name:name | is_nullable:varchar
+id | NO
+name | NO
+status | NO
+score | YES
+x | YES
+
+# ALTER TABLE inside a rolled back transaction leaves no trace
+statement ok
+BEGIN; ALTER TABLE t ADD COLUMN temp_col int; ROLLBACK
+
+statement error 42703 column "temp_col" does not exist
+SELECT temp_col FROM t
+
+# Dependent objects: indexes go silently, views block
+statement ok
+CREATE INDEX t_name_idx ON t (name); ALTER TABLE t DROP COLUMN name
+
+query
+SELECT count(*) FROM pg_indexes WHERE indexname = 't_name_idx'
+----
+count:int8
+0
+
+statement ok
+CREATE VIEW tv AS SELECT id, x FROM t
+
+statement error 2BP01 cannot drop column x of table t because other objects depend on it
+ALTER TABLE t DROP COLUMN x
+
+statement error 0A000 cannot alter type of a column used by a view or rule
+ALTER TABLE t ALTER COLUMN x TYPE bigint
+
+statement ok
+ALTER TABLE t DROP COLUMN x CASCADE
+
+statement error 42P01 relation "tv" does not exist
+SELECT * FROM tv

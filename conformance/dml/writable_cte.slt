@@ -1,0 +1,125 @@
+# Data-modifying statements in WITH
+statement ok
+CREATE TABLE orders (id serial PRIMARY KEY, customer text NOT NULL, total numeric(8,2), status text DEFAULT 'open')
+
+statement ok
+CREATE TABLE order_archive (id int PRIMARY KEY, customer text, total numeric(8,2), status text)
+
+statement ok
+CREATE TABLE order_line (order_id int REFERENCES orders, sku text, qty int)
+
+statement ok
+INSERT INTO orders (customer, total, status) VALUES ('ann', 10, 'done'), ('bob', 20, 'open'), ('ann', 30, 'done'), ('cid', 40, 'open')
+
+# Move rows between tables
+query rowsort
+WITH moved AS (DELETE FROM orders WHERE status = 'done' RETURNING *) INSERT INTO order_archive SELECT * FROM moved RETURNING id, customer
+----
+id:int4 | customer:text
+1 | ann
+3 | ann
+
+query
+SELECT id, customer FROM orders ORDER BY id
+----
+id:int4 | customer:text
+2 | bob
+4 | cid
+
+# Read the RETURNING output of an INSERT
+query rowsort
+WITH ins AS (INSERT INTO orders (customer, total) VALUES ('dee', 5), ('eve', 6) RETURNING id, customer) SELECT customer, id FROM ins ORDER BY id
+----
+customer:text | id:int4
+dee | 5
+eve | 6
+
+query rowsort
+WITH upd AS (UPDATE orders SET total = total * 2 WHERE status = 'open' RETURNING id, total) SELECT count(*), sum(total) FROM upd
+----
+count:int8 | sum:numeric
+4 | 142.00
+
+# Parent and child in one statement
+query rowsort
+WITH o AS (INSERT INTO orders (customer, total) VALUES ('fay', 1) RETURNING id), l AS (INSERT INTO order_line SELECT o.id, s, 1 FROM o, unnest(ARRAY['x', 'y']) s RETURNING *) SELECT sku, qty FROM l ORDER BY sku
+----
+sku:text | qty:int4
+x | 1
+y | 1
+
+# The main query sees the snapshot from before the CTE ran
+query rowsort
+WITH ins AS (INSERT INTO orders (customer, total) VALUES ('gus', 2) RETURNING id) SELECT count(*) FROM orders WHERE customer = 'gus'
+----
+count:int8
+0
+
+query
+SELECT count(*) FROM orders WHERE customer = 'gus'
+----
+count:int8
+1
+
+# An unreferenced data-modifying CTE still runs
+statement ok
+WITH d AS (DELETE FROM orders WHERE customer = 'gus') SELECT 1
+
+query
+SELECT count(*) FROM orders WHERE customer = 'gus'
+----
+count:int8
+0
+
+# UPDATE / DELETE driven by a CTE
+query rowsort
+WITH big AS (SELECT id FROM orders WHERE total >= 40) UPDATE orders SET status = 'big' FROM big WHERE orders.id = big.id RETURNING orders.id, orders.status
+----
+id:int4 | status:text
+2 | big
+4 | big
+
+query rowsort
+WITH gone AS (SELECT id FROM orders WHERE customer IN ('dee', 'eve')) DELETE FROM orders USING gone WHERE orders.id = gone.id RETURNING orders.customer
+----
+customer:text
+dee
+eve
+
+# INSERT fed by a recursive CTE
+query rowsort
+INSERT INTO order_line (order_id, sku, qty) WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 3) SELECT (SELECT min(id) FROM orders), 'r' || i, i FROM n RETURNING sku, qty
+----
+sku:text | qty:int4
+r1 | 1
+r2 | 2
+r3 | 3
+
+# Chained deletes that respect a foreign key
+query rowsort
+WITH l AS (DELETE FROM order_line WHERE sku IN ('x', 'y') RETURNING order_id), o AS (DELETE FROM orders WHERE id IN (SELECT order_id FROM l) RETURNING customer) SELECT customer FROM o
+----
+customer:text
+fay
+
+# Data-modifying WITH must be at the top level
+statement error 0A000 WITH clause containing a data-modifying statement must be at the top level
+SELECT * FROM (WITH d AS (DELETE FROM orders RETURNING id) SELECT id FROM d) s
+
+statement error 0A000 WITH clause containing a data-modifying statement must be at the top level
+WITH x AS (SELECT 1) SELECT * FROM x WHERE EXISTS (WITH d AS (DELETE FROM orders RETURNING 1) SELECT 1 FROM d)
+
+query
+SELECT id, customer, total, status FROM orders ORDER BY id
+----
+id:int4 | customer:text | total:numeric | status:text
+2 | bob | 40.00 | big
+4 | cid | 80.00 | big
+
+query
+SELECT order_id IS NOT NULL AS has_order, sku, qty FROM order_line ORDER BY sku
+----
+has_order:bool | sku:text | qty:int4
+t | r1 | 1
+t | r2 | 2
+t | r3 | 3

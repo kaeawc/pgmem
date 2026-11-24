@@ -1,0 +1,247 @@
+# UPDATE: expressions, FROM joins, subqueries, row constructors, RETURNING.
+statement ok
+CREATE TABLE dept (id int PRIMARY KEY, name text NOT NULL, budget numeric(12,2))
+
+statement ok
+CREATE TABLE emp (id int PRIMARY KEY, name text NOT NULL, dept_id int REFERENCES dept, salary numeric(10,2), bonus numeric(10,2) DEFAULT 0, tags text[], meta jsonb)
+
+statement ok
+INSERT INTO dept VALUES (1, 'eng', 1000), (2, 'ops', 500), (3, 'empty', 0)
+
+statement ok
+INSERT INTO emp VALUES (1, 'ann', 1, 100, 0, '{a,b}', '{"level": 1}'), (2, 'bob', 1, 80, 5, NULL, NULL), (3, 'cid', 2, 60, 0, '{}', '{"level": 2}'), (4, 'dee', NULL, 50, NULL, NULL, NULL)
+
+# Expressions and RETURNING
+query rowsort
+UPDATE emp SET salary = salary * 1.1 WHERE dept_id = 1 RETURNING id, salary
+----
+id:int4 | salary:numeric
+1 | 110.00
+2 | 88.00
+
+query rowsort
+UPDATE emp SET bonus = coalesce(bonus, 0) + 1, name = upper(name) WHERE id = 4 RETURNING *
+----
+id:int4 | name:text | dept_id:int4 | salary:numeric | bonus:numeric | tags:_text | meta:jsonb
+4 | DEE | NULL | 50.00 | 1.00 | NULL | NULL
+
+query rowsort
+UPDATE emp SET salary = CASE WHEN salary > 100 THEN salary - 10 ELSE salary + 10 END RETURNING id, salary
+----
+id:int4 | salary:numeric
+3 | 70.00
+1 | 100.00
+2 | 98.00
+4 | 60.00
+
+query rowsort
+UPDATE emp SET salary = 0 WHERE false RETURNING id
+----
+id:int4
+
+# The right-hand sides all see the old row
+query rowsort
+UPDATE emp SET salary = bonus, bonus = salary WHERE id = 2 RETURNING salary, bonus
+----
+salary:numeric | bonus:numeric
+5.00 | 98.00
+
+# SET col = DEFAULT
+query rowsort
+UPDATE emp SET bonus = DEFAULT WHERE id = 2 RETURNING bonus
+----
+bonus:numeric
+0.00
+
+# Row constructors
+query rowsort
+UPDATE emp SET (salary, bonus) = (70, 7) WHERE id = 3 RETURNING id, salary, bonus
+----
+id:int4 | salary:numeric | bonus:numeric
+3 | 70.00 | 7.00
+
+query rowsort
+UPDATE emp SET (salary, bonus) = (SELECT budget / 10, budget / 100 FROM dept WHERE dept.id = emp.dept_id) WHERE id = 1 RETURNING salary, bonus
+----
+salary:numeric | bonus:numeric
+100.00 | 10.00
+
+query rowsort
+UPDATE emp SET (name, bonus) = ROW('ann2', DEFAULT) WHERE id = 1 RETURNING name, bonus
+----
+name:text | bonus:numeric
+ann2 | 0.00
+
+statement error 42601 number of columns does not match number of values
+UPDATE emp SET (salary, bonus) = (1, 2, 3) WHERE id = 1
+
+statement error 21000 more than one row returned by a subquery used as an expression
+UPDATE emp SET (salary, bonus) = (SELECT budget, budget FROM dept) WHERE id = 1
+
+# Correlated subqueries
+query rowsort
+UPDATE emp e SET bonus = (SELECT count(*) FROM emp o WHERE o.dept_id = e.dept_id) WHERE e.dept_id IS NOT NULL RETURNING e.id, e.bonus
+----
+id:int4 | bonus:numeric
+2 | 2.00
+3 | 1.00
+1 | 2.00
+
+query rowsort
+UPDATE emp SET salary = salary + 1 WHERE dept_id IN (SELECT id FROM dept WHERE name = 'ops') RETURNING id, salary
+----
+id:int4 | salary:numeric
+3 | 71.00
+
+query rowsort
+UPDATE emp SET salary = salary + 1 WHERE EXISTS (SELECT 1 FROM dept d WHERE d.id = emp.dept_id AND d.budget > 600) RETURNING id
+----
+id:int4
+2
+1
+
+statement error 21000 more than one row returned by a subquery used as an expression
+UPDATE emp SET salary = (SELECT budget FROM dept) WHERE id = 1
+
+# UPDATE ... FROM
+query rowsort
+UPDATE emp SET salary = d.budget / 20 FROM dept d WHERE emp.dept_id = d.id AND d.name = 'eng' RETURNING emp.id, emp.salary, d.name
+----
+id:int4 | salary:numeric | name:text
+2 | 50.00 | eng
+1 | 50.00 | eng
+
+query rowsort
+UPDATE dept SET budget = budget - s.total FROM (SELECT dept_id, sum(salary) AS total FROM emp GROUP BY dept_id) s WHERE dept.id = s.dept_id RETURNING dept.id, dept.budget
+----
+id:int4 | budget:numeric
+1 | 900.00
+2 | 429.00
+
+query rowsort
+UPDATE emp SET name = v.name FROM (VALUES (1, 'ANN'), (3, 'CID')) AS v(id, name) WHERE emp.id = v.id RETURNING emp.id, emp.name
+----
+id:int4 | name:text
+1 | ANN
+3 | CID
+
+statement error 42P01 missing FROM-clause entry for table "nope"
+UPDATE emp SET salary = 1 FROM dept WHERE emp.dept_id = nope.id
+
+# Qualifying the target column with the table name is an error
+statement error 42703 column "e" of relation "emp" does not exist
+UPDATE emp e SET e.salary = 1 WHERE id = 1
+
+statement error 42703 column "nope" of relation "emp" does not exist
+UPDATE emp SET nope = 1
+
+# Arrays and jsonb
+query rowsort
+UPDATE emp SET tags[2] = 'z' WHERE id = 1 RETURNING tags
+----
+tags:_text
+{a,z}
+
+query rowsort
+UPDATE emp SET tags = array_append(tags, 'n') WHERE id = 3 RETURNING tags
+----
+tags:_text
+{n}
+
+query rowsort
+UPDATE emp SET meta = jsonb_set(meta, '{level}', '5') WHERE id = 1 RETURNING meta
+----
+meta:jsonb
+{"level": 5}
+
+query rowsort
+UPDATE emp SET meta = coalesce(meta, '{}') || '{"x": true}' WHERE id IN (2, 3) RETURNING id, meta
+----
+id:int4 | meta:jsonb
+2 | {"x": true}
+3 | {"x": true, "level": 2}
+
+# Constraint and type errors
+statement error 23505 duplicate key value violates unique constraint "emp_pkey"
+UPDATE emp SET id = 2 WHERE id = 1
+
+statement error 23502 null value in column "name" of relation "emp" violates not-null constraint
+UPDATE emp SET name = NULL WHERE id = 1
+
+statement error 23503 insert or update on table "emp" violates foreign key constraint "emp_dept_id_fkey"
+UPDATE emp SET dept_id = 99 WHERE id = 1
+
+statement error 22P02 invalid input syntax for type numeric: "abc"
+UPDATE emp SET salary = 'abc'
+
+statement error 22003 numeric field overflow
+UPDATE emp SET salary = 123456789
+
+# Generated columns are recomputed and cannot be assigned
+statement ok
+CREATE TABLE box (w int, h int, area int GENERATED ALWAYS AS (w * h) STORED)
+
+statement ok
+INSERT INTO box VALUES (2, 3)
+
+query rowsort
+UPDATE box SET w = 10 RETURNING w, h, area
+----
+w:int4 | h:int4 | area:int4
+10 | 3 | 30
+
+statement error 428C9 column "area" can only be updated to DEFAULT
+UPDATE box SET area = 1
+
+query rowsort
+UPDATE box SET area = DEFAULT, h = 4 RETURNING area
+----
+area:int4
+40
+
+# RETURNING old and new (PostgreSQL 18)
+query rowsort
+UPDATE emp SET salary = salary * 2 WHERE id = 3 RETURNING old.salary AS before, new.salary AS after
+----
+before:numeric | after:numeric
+71.00 | 142.00
+
+query rowsort
+UPDATE emp SET bonus = 9 WHERE id = 4 RETURNING old.bonus, new.bonus, bonus
+----
+bonus:numeric | bonus:numeric | bonus:numeric
+1.00 | 9.00 | 9.00
+
+query rowsort
+UPDATE emp SET salary = salary + 1 WHERE id = 3 RETURNING WITH (OLD AS o, NEW AS n) o.salary, n.salary
+----
+salary:numeric | salary:numeric
+142.00 | 143.00
+
+# UPDATE ... WHERE CURRENT OF
+statement ok
+BEGIN
+
+statement ok
+DECLARE c CURSOR FOR SELECT id FROM emp ORDER BY id FOR UPDATE
+
+statement ok
+FETCH 2 FROM c
+
+query rowsort
+UPDATE emp SET name = 'current' WHERE CURRENT OF c RETURNING id, name
+----
+id:int4 | name:text
+2 | current
+
+statement ok
+COMMIT
+
+query
+SELECT id, name, dept_id, salary, bonus FROM emp ORDER BY id
+----
+id:int4 | name:text | dept_id:int4 | salary:numeric | bonus:numeric
+1 | ANN | 1 | 50.00 | 2.00
+2 | current | 1 | 50.00 | 2.00
+3 | CID | 2 | 143.00 | 1.00
+4 | DEE | NULL | 60.00 | 9.00

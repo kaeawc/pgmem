@@ -1,0 +1,201 @@
+# Common query errors.
+statement ok
+CREATE TABLE t1 (id int PRIMARY KEY, name text, n int)
+
+statement ok
+CREATE TABLE t2 (id int PRIMARY KEY, name text)
+
+statement ok
+INSERT INTO t1 VALUES (1, 'a', 1), (2, 'b', 0)
+
+statement ok
+INSERT INTO t2 VALUES (1, 'x')
+
+# 42703 undefined column
+statement error 42703 column "nope" does not exist
+SELECT nope FROM t1
+
+statement error 42703 column t1.nope does not exist
+SELECT t1.nope FROM t1
+
+statement error 42703 column "nope" does not exist
+SELECT id FROM t1 WHERE nope = 1
+
+statement error 42703 column "nope" does not exist
+SELECT id FROM t1 ORDER BY nope
+
+statement error 42703 column "ID" does not exist
+SELECT "ID" FROM t1
+
+statement error 42P01 invalid reference to FROM-clause entry for table "t1"
+SELECT t1.id FROM t1 AS x
+
+# 42P01 undefined table
+statement error 42P01 relation "missing_table" does not exist
+SELECT * FROM missing_table
+
+statement error 42P01 missing FROM-clause entry for table "missing"
+SELECT missing.id FROM t1
+
+# 42702 ambiguous column
+statement error 42702 column reference "id" is ambiguous
+SELECT id FROM t1, t2
+
+statement error 42702 column reference "name" is ambiguous
+SELECT name FROM t1 JOIN t2 ON t1.id = t2.id
+
+statement error 42702 column reference "id" is ambiguous
+SELECT t1.id FROM t1 JOIN t2 ON id = 1
+
+# 42803 grouping errors
+statement error 42803 column "t1.id" must appear in the GROUP BY clause or be used in an aggregate function
+SELECT id, count(*) FROM t1
+
+statement error 42803 column "t1.name" must appear in the GROUP BY clause or be used in an aggregate function
+SELECT name FROM t1 GROUP BY id + 1
+
+statement error 42803 column "t1.n" must appear in the GROUP BY clause or be used in an aggregate function
+SELECT n, count(*) FROM t1 GROUP BY name
+
+statement error 42803 column "t1.id" must appear in the GROUP BY clause or be used in an aggregate function
+SELECT id FROM t1 GROUP BY name HAVING n > 0
+
+statement error 42803 aggregate functions are not allowed in GROUP BY
+SELECT count(*) FROM t1 GROUP BY count(*)
+
+# 42883 undefined function / operator
+statement error 42883 operator does not exist: text + integer
+SELECT 'a'::text + 1
+
+statement error 42883 operator does not exist: text - integer
+SELECT name - 1 FROM t1
+
+statement error 42883 function no_such_function(integer) does not exist
+SELECT no_such_function(1)
+
+statement error 42883 function length(integer, integer, integer) does not exist
+SELECT length(1, 2, 3)
+
+statement error 42883 operator does not exist: boolean + boolean
+SELECT true + true
+
+statement error 42883 operator does not exist: integer[] || text
+SELECT ARRAY[1] || 'x'::text || ARRAY[true]
+
+# 42601 syntax errors
+statement error 42601 syntax error at or near "SELEC"
+SELEC 1
+
+statement error 42601 syntax error at or near "WHERE"
+SELECT FROM WHERE
+
+statement error 42601 syntax error at end of input
+SELECT 1,
+
+statement error 42601 syntax error at end of input
+SELECT * FROM t1 WHERE
+
+statement error 42601 syntax error at end of input
+SELECT (1
+
+statement error 42601 unterminated quoted string at or near "'unterminated"
+SELECT 'unterminated
+
+statement error 42601 syntax error at end of input
+SELECT * FROM t1 ORDER
+
+# 42804 datatype mismatch
+statement error 42804 argument of WHERE must be type boolean, not type integer
+SELECT id FROM t1 WHERE 1
+
+statement error 42804 CASE types text and integer cannot be matched
+SELECT CASE WHEN true THEN 1 ELSE 'x'::text END
+
+statement error 42804 COALESCE types integer and text cannot be matched
+SELECT coalesce(1, 'a'::text)
+
+# 22012 division by zero
+statement error 22012 division by zero
+SELECT 1 / 0
+
+statement error 22012 division by zero
+SELECT id / n FROM t1 ORDER BY id
+
+statement error 22012 division by zero
+SELECT 1.0 / 0
+
+statement error 22012 division by zero
+SELECT 5 % 0
+
+statement error 22012 division by zero
+SELECT 1.0::float8 / 0 IS NULL
+
+# 22003 numeric out of range
+statement error 22003 smallint out of range
+SELECT 32767::int2 + 1::int2
+
+statement error 22003 bigint out of range
+SELECT 9223372036854775807 + 1
+
+statement error 22003 "1e400" is out of range for type double precision
+SELECT '1e400'::float8
+
+# 22P02 invalid text representation
+statement error 22P02 invalid input syntax for type integer: "x"
+SELECT 'x'::int
+
+statement error 22P02 invalid input syntax for type integer: "1.5"
+SELECT '1.5'::int
+
+statement error 22P02 invalid input syntax for type boolean: "maybe"
+SELECT 'maybe'::boolean
+
+# 21000 subquery returns more than one row
+statement error 21000 more than one row returned by a subquery used as an expression
+SELECT (SELECT id FROM t1)
+
+statement error 21000 more than one row returned by a subquery used as an expression
+SELECT id FROM t2 WHERE id = (SELECT id FROM t1)
+
+# 42P10 invalid column reference
+statement error 42P10 for SELECT DISTINCT, ORDER BY expressions must appear in select list
+SELECT DISTINCT name FROM t1 ORDER BY n
+
+statement error 42P10 ORDER BY position 0 is not in select list
+SELECT id FROM t1 ORDER BY 0
+
+statement error 42P10 GROUP BY position 5 is not in select list
+SELECT id FROM t1 GROUP BY 5
+
+# Unknown-typed literals
+query
+SELECT pg_typeof(NULL)
+----
+pg_typeof:regtype
+unknown
+
+statement error 42883 operator does not exist: text > integer
+SELECT array_agg(x) FROM (SELECT NULL AS x UNION SELECT NULL) s HAVING max(x) > 1
+
+# 42712 duplicate alias
+statement error 42712 table name "a" specified more than once
+SELECT * FROM t1 a, t2 a
+
+# Errors in an aborted transaction
+statement ok
+BEGIN
+
+statement error 22012 division by zero
+SELECT 1 / 0
+
+statement error 25P02 current transaction is aborted, commands ignored until end of transaction block
+SELECT 1
+
+statement ok
+ROLLBACK
+
+query
+SELECT 1
+----
+?column?:int4
+1
