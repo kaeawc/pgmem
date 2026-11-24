@@ -32,6 +32,7 @@ pub fn encode(v: &Value, ty: &Type) -> SqlResult<String> {
         (Value::TimeTz(t, z), _) => format_timetz(*t, *z),
         (Value::Interval(iv), _) => format_interval(iv),
         (Value::Jsonb(j), _) => j.to_string(),
+        (Value::Json(s), _) => s.clone(),
         (Value::Oid(o), _) => o.to_string(),
         (Value::Reg(_, _, name), _) => name.clone(),
         (Value::Enum(t, label), _) => crate::usertype::enum_label(*t, *label)?,
@@ -62,7 +63,7 @@ pub fn decode(s: &str, ty: &Type) -> SqlResult<Value> {
         Type::Char => Ok(Value::Text(s.chars().next().map(String::from).unwrap_or_default())),
         Type::Json => {
             Jsonb::parse(s)?;
-            Ok(Value::Text(s.to_owned()))
+            Ok(Value::Json(s.to_owned()))
         }
         Type::Oid => parse_oid(s).map(Value::Oid),
         // reg* input needs the catalog; the executor resolves names (see pgmem-exec `reg`).
@@ -92,6 +93,7 @@ pub fn decode(s: &str, ty: &Type) -> SqlResult<Value> {
         Type::TimeTz => parse_timetz(s).map(|(t, z)| Value::TimeTz(t, z)),
         Type::Interval => parse_interval(s).map(Value::Interval),
         Type::Jsonb => Jsonb::parse(s).map(Value::Jsonb),
+        Type::JsonPath => crate::jsonpath::normalize(s).map(Value::Text),
         Type::Array(elem) => parse_array(s, elem).map(Value::Array),
         Type::Enum(oid) => crate::usertype::parse_enum(s, *oid),
         Type::Composite(oid) => crate::usertype::parse_record(s, *oid),

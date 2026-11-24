@@ -31,6 +31,8 @@ pub enum Value {
     Timestamptz(i64),
     Interval(Interval),
     Jsonb(Jsonb),
+    /// A `json` value: validated text, kept exactly as written.
+    Json(String),
     Oid(u32),
     /// A `reg*` value: the OID and the name it prints as (resolved when the value was made,
     /// so output needs no catalog).
@@ -79,7 +81,7 @@ impl Value {
 
     pub fn as_str(&self) -> Option<&str> {
         match self {
-            Value::Text(s) => Some(s),
+            Value::Text(s) | Value::Json(s) => Some(s),
             _ => None,
         }
     }
@@ -110,6 +112,7 @@ impl Value {
             Value::Timestamptz(_) => "timestamp with time zone",
             Value::Interval(_) => "interval",
             Value::Jsonb(_) => "jsonb",
+            Value::Json(_) => "json",
             Value::Oid(_) => "oid",
             Value::Reg(k, ..) => k.typname(),
             Value::Array(_) => "array",
@@ -148,6 +151,7 @@ impl Value {
             Value::TimeTz(t, z) => GroupKey::Int(*t - i64::from(*z) * 1_000_000),
             Value::Interval(iv) => GroupKey::Int128(iv.total_micros_i128()),
             Value::Jsonb(j) => GroupKey::Text(j.to_string()),
+            Value::Json(s) => GroupKey::Text(s.clone()),
             Value::Oid(o) | Value::Reg(_, o, _) => GroupKey::Int(i64::from(*o)),
             Value::Array(items) | Value::Record(_, items) => GroupKey::Array(items.iter().map(Value::group_key).collect()),
             Value::Enum(_, label) => GroupKey::Int(i64::from(*label)),
@@ -194,6 +198,7 @@ pub fn compare_values(a: &Value, b: &Value) -> SqlResult<Ordering> {
         (TimeTz(x, zx), TimeTz(y, zy)) => (*x - i64::from(*zx) * 1_000_000).cmp(&(*y - i64::from(*zy) * 1_000_000)),
         (Interval(x), Interval(y)) => x.cmp(y),
         (Jsonb(x), Jsonb(y)) => x.total_cmp(y),
+        (Json(x), Json(y)) => x.as_bytes().cmp(y.as_bytes()),
         (Oid(x) | Reg(_, x, _), Oid(y) | Reg(_, y, _)) => x.cmp(y),
         (Enum(t, x), Enum(u, y)) if t == u => crate::usertype::compare_enum(*t, *x, *y),
         // Composite values compare field by field; two NULL fields are equal and NULL sorts
@@ -259,6 +264,7 @@ impl Value {
             Value::Timestamptz(_) => Type::Timestamptz,
             Value::Interval(_) => Type::Interval,
             Value::Jsonb(_) => Type::Jsonb,
+            Value::Json(_) => Type::Json,
             Value::Oid(_) => Type::Oid,
             Value::Reg(k, ..) => Type::Reg(*k),
             Value::Array(items) => {
@@ -267,6 +273,7 @@ impl Value {
             }
             Value::Enum(t, _) => Type::Enum(*t),
             Value::Record(crate::usertype::RECORD_OID, _) => Type::Record,
+            Value::Record(t, _) if crate::usertype::is_blessed(*t) => Type::Record,
             Value::Record(t, _) => Type::Composite(*t),
         }
     }

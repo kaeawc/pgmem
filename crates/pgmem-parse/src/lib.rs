@@ -13,6 +13,7 @@ mod ddl;
 mod dml;
 mod expr;
 mod query;
+mod sqljson;
 mod typeddl;
 
 use pgmem_ir::{IsolationLevel, ObjectName, ObjectType, Statement, TransactionStmt};
@@ -27,6 +28,9 @@ pub fn parse(sql: &str) -> SqlResult<Vec<Statement>> {
     if sql.trim().trim_matches(';').trim().is_empty() {
         return Ok(vec![Statement::Empty]);
     }
+    // SQL/JSON query functions are rewritten up front (sqlparser can't parse their clauses).
+    let json_rewritten = sqljson::rewrite(sql);
+    let sql = json_rewritten.as_deref().unwrap_or(sql);
     let parsed = parse_statements(sql).map(|s| (s, sql.to_owned())).or_else(|err| match rewrite_unsupported(sql) {
         // Retry Postgres syntax sqlparser lacks after rewriting it to an equivalent form.
         Some(rewritten) => parse_statements(&rewritten).map(|s| (s, rewritten)).map_err(|_| err),

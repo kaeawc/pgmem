@@ -150,7 +150,7 @@ fn convert(v: Value, to: &Type) -> SqlResult<Value> {
         return Ok(v);
     }
     Ok(match (v, to) {
-        (V::Text(s), t) => text::decode(&s, t)?,
+        (V::Text(s) | V::Json(s), t) => text::decode(&s, t)?,
         (V::Oid(o) | V::Reg(_, o, _), Type::Oid) => V::Oid(o),
         (V::Oid(o) | V::Reg(_, o, _), Type::Int8) => V::Int8(i64::from(o)),
         #[allow(clippy::cast_possible_wrap)]

@@ -256,6 +256,9 @@ pub enum SelectItem {
 pub struct TableAlias {
     pub name: String,
     pub columns: Vec<String>,
+    /// A column definition list (`AS t(a int, b text)`, for functions returning `record`):
+    /// one type per column, or empty.
+    pub column_types: Vec<TypeName>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -377,7 +380,7 @@ pub enum Literal {
     String(String),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypeName {
     /// Lower-cased base type name as written (`int4`, `varchar`, `double precision`, ...).
     pub name: String,

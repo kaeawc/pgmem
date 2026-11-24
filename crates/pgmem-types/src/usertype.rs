@@ -114,13 +114,47 @@ impl Registry {
     }
 }
 
-/// Looks a user type up in the current context's registry.
+/// Looks a user type up in the current context's registry (or among blessed record shapes).
 pub fn lookup(oid: u32) -> Option<Arc<UserType>> {
+    if is_blessed(oid) {
+        return blessed(oid);
+    }
     crate::context::with_types(|r| r.get(oid).cloned())
 }
 
-/// A user type's name as `format_type` prints it: quoted when it is not a plain lower-case
-/// identifier, `???` when the type is not visible.
+/// Anonymous record types with field names are given OIDs from here up, like Postgres'
+/// `BlessTupleDesc` typmods: a whole-row reference to a subquery keeps its column names for
+/// `row_to_json` and friends, while the value's SQL type stays `record`.
+pub const BLESSED_BASE: u32 = 0xF000_0000;
+
+static BLESSED: std::sync::Mutex<Vec<Arc<UserType>>> = std::sync::Mutex::new(Vec::new());
+
+pub fn is_blessed(oid: u32) -> bool {
+    oid >= BLESSED_BASE
+}
+
+/// The OID of the anonymous record shape with these fields (interned).
+pub fn bless(fields: Vec<Field>) -> u32 {
+    let mut all = BLESSED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(i) = all.iter().position(|t| t.fields() == fields.as_slice()) {
+        return BLESSED_BASE + u32::try_from(i).unwrap_or(0);
+    }
+    let oid = BLESSED_BASE + u32::try_from(all.len()).unwrap_or(0);
+    all.push(Arc::new(UserType {
+        oid,
+        array_oid: 0,
+        name: "record".into(),
+        schema: "pg_catalog".into(),
+        kind: UserKind::Composite { fields, relid: 0 },
+    }));
+    oid
+}
+
+fn blessed(oid: u32) -> Option<Arc<UserType>> {
+    let all = BLESSED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    all.get(usize::try_from(oid - BLESSED_BASE).ok()?).cloned()
+}
+
 /// `format_type`'s name for a user type: schema-qualified when the search path doesn't find
 /// it by name (`TypeIsVisible`).
 pub fn type_name(oid: u32) -> String {

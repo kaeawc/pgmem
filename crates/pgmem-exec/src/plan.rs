@@ -366,6 +366,14 @@ pub enum AggKind {
     ArrayAgg,
     JsonbAgg,
     JsonbObjectAgg,
+    /// `json_agg` / `json_object_agg`: json text output.
+    JsonAgg,
+    JsonObjectAgg,
+    /// The `_strict` variants skip NULL values.
+    JsonbAggStrict,
+    JsonAggStrict,
+    JsonbObjectAggStrict,
+    JsonObjectAggStrict,
     StddevSamp,
     StddevPop,
     VarSamp,

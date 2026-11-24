@@ -12,9 +12,11 @@ pub struct Jsonb(pub J);
 
 impl Jsonb {
     pub fn parse(text: &str) -> SqlResult<Jsonb> {
-        let v: J = serde_json::from_str(text).map_err(|e| {
-            SqlError::new(code::INVALID_TEXT_REPRESENTATION, "invalid input syntax for type json").with_detail(e.to_string())
-        })?;
+        let v = parse_json(text)?;
+        if has_nul(&v) {
+            return Err(SqlError::new(code::UNTRANSLATABLE_CHARACTER, "unsupported Unicode escape sequence")
+                .with_detail("\\u0000 cannot be converted to text."));
+        }
         Ok(Jsonb::from_value(v))
     }
 
@@ -63,6 +65,68 @@ impl Jsonb {
     }
 }
 
+/// Parses JSON text (`json_in`'s validation).
+pub fn parse_json(text: &str) -> SqlResult<J> {
+    serde_json::from_str(text)
+        .map_err(|e| SqlError::new(code::INVALID_TEXT_REPRESENTATION, "invalid input syntax for type json").with_detail(e.to_string()))
+}
+
+fn has_nul(v: &J) -> bool {
+    match v {
+        J::String(s) => s.contains('\0'),
+        J::Array(items) => items.iter().any(has_nul),
+        J::Object(m) => m.iter().any(|(k, v)| k.contains('\0') || has_nul(v)),
+        _ => false,
+    }
+}
+
+/// jsonb stores numbers as numeric: `1e3` is 1000, `-0` is 0, `2.50` keeps its scale.
+fn normalize_number(n: &Number) -> Number {
+    let text = n.to_string();
+    crate::Numeric::parse(&text).ok().and_then(|num| num.to_string().parse::<Number>().ok()).unwrap_or_else(|| n.clone())
+}
+
+/// `jsonb_pretty`: four-space indentation, one member per line (an empty container still
+/// breaks the line, as Postgres prints it).
+pub fn write_pretty(out: &mut String, v: &J, level: usize) {
+    let indent = |out: &mut String, n: usize| (0..n).for_each(|_| out.push_str("    "));
+    match v {
+        J::Array(items) => {
+            out.push_str("[\n");
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(",\n");
+                }
+                indent(out, level + 1);
+                write_pretty(out, item, level + 1);
+            }
+            if !items.is_empty() {
+                out.push('\n');
+            }
+            indent(out, level);
+            out.push(']');
+        }
+        J::Object(map) => {
+            out.push_str("{\n");
+            for (i, (k, v)) in map.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(",\n");
+                }
+                indent(out, level + 1);
+                write_json_string(out, k);
+                out.push_str(": ");
+                write_pretty(out, v, level + 1);
+            }
+            if !map.is_empty() {
+                out.push('\n');
+            }
+            indent(out, level);
+            out.push('}');
+        }
+        other => write_json(out, other),
+    }
+}
+
 fn contains(l: &J, r: &J, top: bool) -> bool {
     match (l, r) {
         (J::Object(lm), J::Object(rm)) => rm.iter().all(|(k, rv)| lm.get(k).is_some_and(|lv| contains(lv, rv, false))),
@@ -93,6 +157,7 @@ fn normalize(v: J) -> J {
             J::Object(out)
         }
         J::Array(items) => J::Array(items.into_iter().map(normalize).collect()),
+        J::Number(n) => J::Number(normalize_number(&n)),
         other => other,
     }
 }
@@ -228,6 +293,20 @@ mod tests {
         assert_eq!(j.to_string(), r#"{"a": 2, "bb": 1}"#);
         let j = Jsonb::parse(r#"[1, "x", {"k":[]}]"#).expect("parse");
         assert_eq!(j.to_string(), r#"[1, "x", {"k": []}]"#);
+    }
+
+    #[test]
+    fn numbers_are_numeric() {
+        assert_eq!(Jsonb::parse("[1, 2.50, 1e2, -0, 1.000]").expect("parse").to_string(), "[1, 2.50, 100, 0, 1.000]");
+        assert_eq!(Jsonb::parse(r#""\u0000""#).expect_err("nul").code, "22P05");
+    }
+
+    #[test]
+    fn pretty_matches_postgres() {
+        let j = Jsonb::parse(r#"{"a": 1, "b": [1, 2], "c": {}}"#).expect("parse");
+        let mut out = String::new();
+        write_pretty(&mut out, j.as_value(), 0);
+        assert_eq!(out, "{\n    \"a\": 1,\n    \"b\": [\n        1,\n        2\n    ],\n    \"c\": {\n    }\n}");
     }
 
     #[test]

@@ -232,7 +232,13 @@ pub(crate) fn lower_table_with_joins(t: sq::TableWithJoins) -> SqlResult<TableRe
 }
 
 fn lower_alias(a: Option<sq::TableAlias>) -> Option<TableAlias> {
-    a.map(|a| TableAlias { name: ident(&a.name), columns: a.columns.iter().map(|c| ident(&c.name)).collect() })
+    let a = a?;
+    let column_types = if a.columns.iter().all(|c| c.data_type.is_some()) && !a.columns.is_empty() {
+        a.columns.iter().filter_map(|c| c.data_type.as_ref()).filter_map(|t| crate::expr::lower_type(t).ok()).collect()
+    } else {
+        Vec::new()
+    };
+    Some(TableAlias { name: ident(&a.name), columns: a.columns.iter().map(|c| ident(&c.name)).collect(), column_types })
 }
 
 fn lower_table_factor(f: sq::TableFactor) -> SqlResult<TableRef> {

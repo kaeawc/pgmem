@@ -48,8 +48,12 @@ impl Accumulator {
             AggKind::Min | AggKind::Max => Accumulator::MinMax(None),
             AggKind::BoolAnd | AggKind::BoolOr => Accumulator::Bool(None),
             AggKind::StringAgg => Accumulator::StringAgg(None),
-            AggKind::ArrayAgg | AggKind::JsonbAgg => Accumulator::Values(Vec::new()),
-            AggKind::JsonbObjectAgg => Accumulator::Pairs(Vec::new()),
+            AggKind::ArrayAgg | AggKind::JsonbAgg | AggKind::JsonAgg | AggKind::JsonbAggStrict | AggKind::JsonAggStrict => {
+                Accumulator::Values(Vec::new())
+            }
+            AggKind::JsonbObjectAgg | AggKind::JsonObjectAgg | AggKind::JsonbObjectAggStrict | AggKind::JsonObjectAggStrict => {
+                Accumulator::Pairs(Vec::new())
+            }
             AggKind::StddevSamp | AggKind::StddevPop | AggKind::VarSamp | AggKind::VarPop => Accumulator::Stats(Vec::new(), Vec::new()),
             AggKind::BitAnd | AggKind::BitOr => Accumulator::Bits(None),
         }
@@ -135,12 +139,19 @@ impl Accumulator {
                     return Err(SqlError::feature_not_supported("string_agg(bytea) is not supported by pgmem"));
                 }
             }
-            Accumulator::Values(items) => items.push(first),
+            Accumulator::Values(items) => {
+                if !(first.is_null() && matches!(call.kind, AggKind::JsonbAggStrict | AggKind::JsonAggStrict)) {
+                    items.push(first);
+                }
+            }
             Accumulator::Pairs(items) => {
                 if first.is_null() {
                     return Err(SqlError::new("22004", "field name must not be null"));
                 }
-                items.push((first, args.get(1).cloned().unwrap_or(Value::Null)));
+                let v = args.get(1).cloned().unwrap_or(Value::Null);
+                if !(v.is_null() && matches!(call.kind, AggKind::JsonbObjectAggStrict | AggKind::JsonObjectAggStrict)) {
+                    items.push((first, v));
+                }
             }
             Accumulator::Stats(floats, nums) => match &first {
                 Value::Null => {}
@@ -207,16 +218,21 @@ impl Accumulator {
                 if items.is_empty() {
                     return Ok(Value::Null);
                 }
-                if call.kind == AggKind::JsonbAgg {
-                    let arr = items.iter().map(crate::funcs::json::to_json_value).collect::<SqlResult<Vec<_>>>()?;
-                    Value::Jsonb(Jsonb::from_value(serde_json::Value::Array(arr)))
-                } else {
-                    Value::Array(items.clone())
+                match call.kind {
+                    AggKind::JsonbAgg | AggKind::JsonbAggStrict => {
+                        let arr = items.iter().map(crate::funcs::json::to_json_value).collect::<SqlResult<Vec<_>>>()?;
+                        Value::Jsonb(Jsonb::from_value(serde_json::Value::Array(arr)))
+                    }
+                    AggKind::JsonAgg | AggKind::JsonAggStrict => Value::Json(crate::funcs::json::json_agg_text(items)?),
+                    _ => Value::Array(items.clone()),
                 }
             }
             Accumulator::Pairs(items) => {
                 if items.is_empty() {
                     return Ok(Value::Null);
+                }
+                if matches!(call.kind, AggKind::JsonObjectAgg | AggKind::JsonObjectAggStrict) {
+                    return Ok(Value::Json(crate::funcs::json::json_object_agg_text(items)?));
                 }
                 let mut map = serde_json::Map::new();
                 for (k, v) in items {
@@ -315,7 +331,7 @@ pub fn aggregate_rows(call: &AggCall, rows: &[&Row], ctx: &EvalCtx) -> SqlResult
             // DISTINCT ignores NULL inputs for strict aggregates like count(DISTINCT x).
             seen.insert(args.iter().map(Value::group_key).collect::<Vec<GroupKey>>())
         });
-        if !matches!(call.kind, AggKind::ArrayAgg | AggKind::JsonbAgg) {
+        if !matches!(call.kind, AggKind::ArrayAgg | AggKind::JsonbAgg | AggKind::JsonAgg) {
             inputs.retain(|a| a.first().is_some_and(|v| !v.is_null()));
         }
     }
@@ -344,8 +360,23 @@ pub fn run_aggregate(rows: &[Row], group: &[Expr], aggs: &[AggCall], ctx: &EvalC
     if group.is_empty() && order.is_empty() {
         order.push((Vec::new(), Vec::new()));
     }
+    // Postgres (16+) sorts a group's input for the first ordered aggregate, so aggregates
+    // without ORDER BY see the rows in that order too.
+    let presort = aggs.iter().find(|c| !c.order_by.is_empty()).map(|c| c.order_by.clone());
     let mut out = Vec::with_capacity(order.len());
     for (keys, members) in order {
+        let sorted: Option<Vec<Row>> = match &presort {
+            Some(sort_keys) => {
+                let mut rows: Vec<Row> = members.iter().map(|r| (*r).clone()).collect();
+                sort_rows(&mut rows, sort_keys, ctx)?;
+                Some(rows)
+            }
+            None => None,
+        };
+        let members: Vec<&Row> = match &sorted {
+            Some(rows) => rows.iter().collect(),
+            None => members,
+        };
         let mut r = keys;
         for call in aggs {
             r.push(aggregate_rows(call, &members, ctx)?);

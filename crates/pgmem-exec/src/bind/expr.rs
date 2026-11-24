@@ -163,6 +163,13 @@ pub fn output_name(e: &ir::Expr) -> String {
 fn figure_colname(e: &ir::Expr) -> Option<(String, u8)> {
     match e {
         ir::Expr::Column(parts) => parts.last().filter(|p| p.as_str() != "*").map(|p| (p.clone(), 2)),
+        // SQL/JSON constructs bound as internal functions keep their SQL names.
+        ir::Expr::Function(f) if f.name.base() == "__pgmem_is_json" => None,
+        ir::Expr::Function(f) if f.name.base().starts_with("__pgmem_json_") => {
+            let rest = &f.name.base()["__pgmem_".len()..];
+            let name = rest.strip_suffix("_absent").or_else(|| rest.strip_suffix("_strict")).unwrap_or(rest);
+            Some((name.to_owned(), 2))
+        }
         ir::Expr::Function(f) => Some((f.name.base().to_owned(), 2)),
         ir::Expr::Cast { expr, ty } => match figure_colname(expr) {
             Some((name, 2)) => Some((name, 2)),
@@ -245,8 +252,14 @@ fn aggregate_kind(name: &str) -> Option<AggKind> {
         "bool_or" => AggKind::BoolOr,
         "string_agg" => AggKind::StringAgg,
         "array_agg" => AggKind::ArrayAgg,
-        "jsonb_agg" | "json_agg" => AggKind::JsonbAgg,
-        "jsonb_object_agg" | "json_object_agg" => AggKind::JsonbObjectAgg,
+        "jsonb_agg" => AggKind::JsonbAgg,
+        "json_agg" | "__pgmem_json_arrayagg" => AggKind::JsonAgg,
+        "jsonb_agg_strict" => AggKind::JsonbAggStrict,
+        "json_agg_strict" | "__pgmem_json_arrayagg_strict" => AggKind::JsonAggStrict,
+        "jsonb_object_agg" => AggKind::JsonbObjectAgg,
+        "json_object_agg" | "__pgmem_json_objectagg" => AggKind::JsonObjectAgg,
+        "jsonb_object_agg_strict" => AggKind::JsonbObjectAggStrict,
+        "json_object_agg_strict" | "__pgmem_json_objectagg_strict" => AggKind::JsonObjectAggStrict,
         "stddev" | "stddev_samp" => AggKind::StddevSamp,
         "stddev_pop" => AggKind::StddevPop,
         "variance" | "var_samp" => AggKind::VarSamp,
@@ -326,10 +339,14 @@ fn aggregate_types(kind: AggKind, name: &str, args: &[Type]) -> SqlResult<(Vec<T
             }
             (vec![t.clone()], Type::array_of(t))
         }
-        AggKind::JsonbAgg => (vec![if first == Type::Unknown { Type::Text } else { first }], Type::Jsonb),
-        AggKind::JsonbObjectAgg => {
+        AggKind::JsonbAgg | AggKind::JsonbAggStrict | AggKind::JsonAgg | AggKind::JsonAggStrict => {
+            let ret = if matches!(kind, AggKind::JsonAgg | AggKind::JsonAggStrict) { Type::Json } else { Type::Jsonb };
+            (vec![if first == Type::Unknown { Type::Text } else { first }], ret)
+        }
+        AggKind::JsonbObjectAgg | AggKind::JsonbObjectAggStrict | AggKind::JsonObjectAgg | AggKind::JsonObjectAggStrict => {
+            let ret = if matches!(kind, AggKind::JsonObjectAgg | AggKind::JsonObjectAggStrict) { Type::Json } else { Type::Jsonb };
             let v = args.get(1).cloned().unwrap_or(Type::Text);
-            (vec![if first == Type::Unknown { Type::Text } else { first }, if v == Type::Unknown { Type::Text } else { v }], Type::Jsonb)
+            (vec![if first == Type::Unknown { Type::Text } else { first }, if v == Type::Unknown { Type::Text } else { v }], ret)
         }
         AggKind::StddevSamp | AggKind::StddevPop | AggKind::VarSamp | AggKind::VarPop => {
             let t = numeric_arg(&first);
@@ -509,6 +526,24 @@ impl Binder<'_> {
             }
             ir::Expr::Subscript { expr, index } => {
                 let (arr, t) = self.bind_expr(expr, ctx)?;
+                if t == Type::Jsonb {
+                    // jsonb subscripts are `->` steps: text keys or integer indexes.
+                    let ir::Subscript::Index(i) = index else {
+                        return Err(SqlError::datatype_mismatch("jsonb subscript does not support slices"));
+                    };
+                    let (k, kt) = self.bind_expr(i, ctx)?;
+                    let kt2 = if kt.is_integer() {
+                        Type::Int4
+                    } else if kt == Type::Unknown || kt.is_string() {
+                        Type::Text
+                    } else {
+                        return Err(SqlError::datatype_mismatch(format!("subscript type {} is not supported", kt.name()))
+                            .with_hint("jsonb subscript must be coercible to either integer or text."));
+                    };
+                    let k = coerce(self, k, &kt, &kt2, CoercionContext::Implicit)?;
+                    let func = funcs::lenient("jsonb_subscript", |a, _| crate::funcs::json::subscript(&a[0], &a[1]));
+                    return Ok((Expr::Call { func, args: vec![arr, k] }, Type::Jsonb));
+                }
                 // int2vector / oidvector subscripts start at 0.
                 let zero_based = matches!(t, Type::Int2Vector | Type::OidVector);
                 let elem = match &t {
@@ -703,7 +738,12 @@ impl Binder<'_> {
                 let oid = crate::catalog_views::rowtype_oid_of(t.oid);
                 (Expr::Row { fields, types, type_oid: oid }, Type::Composite(oid))
             }
-            None => (Expr::Row { fields, types, type_oid: RECORD_OID }, Type::Record),
+            None => {
+                // A subquery's or function's row keeps its column names (a blessed record).
+                let named = cols.iter().map(|c| pgmem_types::usertype::Field { name: c.name.clone(), ty: c.ty.clone(), typmod: c.typmod });
+                let oid = pgmem_types::usertype::bless(named.collect());
+                (Expr::Row { fields, types, type_oid: oid }, Type::Record)
+            }
         }
     }
 
@@ -963,7 +1003,15 @@ impl Binder<'_> {
         if f.star {
             return Err(SqlError::syntax(format!("{name}(*) specified, but {name} is not an aggregate function")));
         }
-        let bound = f.args.iter().map(|a| self.bind_expr(a, ctx)).collect::<SqlResult<Vec<_>>>()?;
+        let mut bound = f.args.iter().map(|a| self.bind_expr(a, ctx)).collect::<SqlResult<Vec<_>>>()?;
+        // SQL/JSON query functions also get their RETURNING type's OID (the 4th argument's
+        // type), to coerce results at run time under ON ERROR.
+        if matches!(name, "__pgmem_json_value" | "__pgmem_json_query" | "__pgmem_json_exists")
+            && let Some((_, t)) = bound.get(3)
+        {
+            let oid = t.oid();
+            bound.push((Expr::Const(Value::Oid(oid)), Type::Oid));
+        }
         match name {
             "coalesce" | "greatest" | "least" => {
                 if bound.is_empty() {
@@ -1051,7 +1099,11 @@ impl Binder<'_> {
         let types: Vec<Type> = bound.iter().map(|(_, t)| t.clone()).collect();
         let expected_args = match kind {
             AggKind::CountStar => 0,
-            AggKind::StringAgg | AggKind::JsonbObjectAgg => 2,
+            AggKind::StringAgg
+            | AggKind::JsonbObjectAgg
+            | AggKind::JsonObjectAgg
+            | AggKind::JsonbObjectAggStrict
+            | AggKind::JsonObjectAggStrict => 2,
             _ => 1,
         };
         if bound.len() != expected_args {

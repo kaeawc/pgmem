@@ -7,7 +7,7 @@ PostgreSQL 18; CI re-verifies every record against PostgreSQL and runs it agains
 A record passes when pgmem returns the same column names, column types and text values, or
 the same SQLSTATE and error message.
 
-pgmem passes **2467 / 3309 records (74.6%)**.
+pgmem passes **2518 / 3309 records (76.1%)**.
 
 | Area | Records | Pass | Rate |
 |---|---:|---:|---:|
@@ -15,12 +15,12 @@ pgmem passes **2467 / 3309 records (74.6%)**.
 | constraints | 171 | 101 | 59.1% |
 | ddl | 386 | 231 | 59.8% |
 | dml | 282 | 215 | 76.2% |
-| functions | 445 | 307 | 69.0% |
-| queries | 440 | 404 | 91.8% |
+| functions | 445 | 346 | 77.8% |
+| queries | 440 | 405 | 92.0% |
 | session | 419 | 239 | 57.0% |
 | smoke | 7 | 7 | 100.0% |
 | transactions | 522 | 434 | 83.1% |
-| types | 411 | 342 | 83.2% |
+| types | 411 | 353 | 85.9% |
 
 ## By file
 
@@ -60,11 +60,11 @@ pgmem passes **2467 / 3309 records (74.6%)**.
 | functions/arrays.slt | 49 | 25 | 51.0% |
 | functions/conditional_misc.slt | 49 | 39 | 79.6% |
 | functions/datetime.slt | 99 | 80 | 80.8% |
-| functions/json.slt | 85 | 39 | 45.9% |
+| functions/json.slt | 85 | 78 | 91.8% |
 | functions/math.slt | 61 | 45 | 73.8% |
 | functions/regex.slt | 34 | 21 | 61.8% |
 | functions/string.slt | 68 | 58 | 85.3% |
-| queries/aggregates.slt | 53 | 35 | 66.0% |
+| queries/aggregates.slt | 53 | 36 | 67.9% |
 | queries/cte.slt | 36 | 28 | 77.8% |
 | queries/errors.slt | 60 | 60 | 100.0% |
 | queries/joins.slt | 45 | 45 | 100.0% |
@@ -99,7 +99,7 @@ pgmem passes **2467 / 3309 records (74.6%)**.
 | types/enums_domains.slt | 58 | 43 | 74.1% |
 | types/float.slt | 24 | 24 | 100.0% |
 | types/integers.slt | 36 | 36 | 100.0% |
-| types/json.slt | 34 | 23 | 67.6% |
+| types/json.slt | 34 | 34 | 100.0% |
 | types/numeric.slt | 27 | 27 | 100.0% |
 | types/text.slt | 29 | 29 | 100.0% |
 | types/uuid.slt | 18 | 18 | 100.0% |

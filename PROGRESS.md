@@ -8,10 +8,10 @@ and what comes next. Updated with every PR.
 | Metric | Value | How it is measured |
 |---|---|---|
 | pgmem-go parity | **564 / 564** Go tests ported | `scripts/parity.py check` ([PARITY.md](PARITY.md)) |
-| Integration suite on pgmem | **566 / 566** pass | `cargo nextest run -p pgmem --test it` |
-| Integration suite on real PostgreSQL 18 | **566 / 566** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
+| Integration suite on pgmem | **571 / 571** pass | `cargo nextest run -p pgmem --test it` |
+| Integration suite on real PostgreSQL 18 | **571 / 571** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
 | Go pgx example suites (sqlc) against the Rust binary | **27 / 27** pass | `make examples` (CI `pgx-examples`) |
-| **SQL conformance corpus** (3309 records, 9 areas) | **2467 / 3309 (74.6%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
+| **SQL conformance corpus** (3309 records, 9 areas) | **2518 / 3309 (76.1%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
 
 ### Conformance history
 
@@ -33,6 +33,7 @@ and what comes next. Updated with every PR.
 | 2026-11-24 | #119 enums, domains and composite types | 564/564 | 2368/3309 (71.6%) |
 | 2026-11-24 | #120 FULL JOIN USING, set-op typing, WITH TIES, numeric infinity, bytea/uuid functions | 564/564 | 2429/3309 (73.4%) |
 | 2026-11-24 | schemas, search_path, temporary tables | 564/564 | 2467/3309 (74.6%) |
+| 2026-11-24 | json fidelity, jsonpath, SQL/JSON | 564/564 | 2518/3309 (76.1%) |
 
 ## Supported
 
@@ -43,8 +44,9 @@ and what comes next. Updated with every PR.
   fields (SQLSTATE, detail, hint, schema/table/column/constraint).
 - **Types**: bool, int2/4/8, float4/8, numeric (arbitrary precision, Postgres scale rules),
   text, varchar(n), char(n) (blank-padded, trailing spaces insignificant), name, "char", bytea,
-  uuid, date, time, timetz, timestamp, timestamptz, interval, json (input text kept as written),
-  jsonb, oid, regclass/regtype/regnamespace/regproc (name ↔ OID through the catalog), void,
+  uuid, date, time, timetz, timestamp, timestamptz, interval, json (input text kept as written;
+  operators return pieces of it verbatim), jsonb (numbers normalized as numeric), jsonpath
+  (canonical text form), oid, regclass/regtype/regnamespace/regproc (name ↔ OID through the catalog), void,
   enums, domains (NOT NULL / CHECK), composite types and table row types, one-dimensional
   arrays; text and binary formats; Postgres' result-column naming for casts. numeric has NaN
   and ±Infinity and accepts negative / large scales (`numeric(5,-2)`); `bytea_output` hex or
@@ -90,7 +92,12 @@ and what comes next. Updated with every PR.
   `to_regclass`, privilege checks; int2vector/oidvector with zero-based subscripts.
 - **Functions**: string, regex (`~`, regexp_* ), LIKE/ILIKE/SIMILAR TO, math, date/time (extract,
   date_trunc, age, make_*, to_char/to_date/to_timestamp, AT TIME ZONE with named zones),
-  jsonb operators and functions, array operators and functions, bytea (get/set_byte/bit,
+  json/jsonb operators and functions with Postgres' json formatting (`json_build_object`,
+  `row_to_json`, `json_agg`, ...), jsonb subscripting, jsonpath (lax/strict, filters, methods,
+  `like_regex`, variables; `@?`, `@@`, `jsonb_path_*`), SQL/JSON (`IS JSON`, `JSON_OBJECT`,
+  `JSON_ARRAY`, `JSON_ARRAYAGG`, `JSON_OBJECTAGG`, `JSON_VALUE`, `JSON_QUERY`, `JSON_EXISTS`,
+  `JSON_TABLE`, `JSON()`), `json(b)_populate_record(set)` / `json(b)_to_record(set)` with column
+  definition lists, array operators and functions, bytea (get/set_byte/bit,
   convert_to/from), sequences, session information, gen_random_uuid/uuidv4/uuidv7 and
   uuid_extract_version/timestamp.
 
@@ -113,21 +120,18 @@ and what comes next. Updated with every PR.
 Hill-climb, ordered by conformance records recovered per unit of work and by what blocks real
 clients. Each item names the corpus area it moves (see CONFORMANCE.md for per-file rates).
 
-1. **JSON fidelity**: json-typed results from `json_build_object`/`to_json`/`json_agg`/
-   `row_to_json`/`json_array_elements` with Postgres' json formatting; SQL/JSON (`IS JSON`,
-   `JSON_VALUE`, `JSON_TABLE`), jsonpath.
-2. **Set-returning functions in the select list**, multidimensional arrays, array element
+1. **Set-returning functions in the select list**, multidimensional arrays, array element
    assignment, `ROW(...)` constructors and row comparisons.
-3. **Settings fidelity**: validation (22023/42704), value normalisation, custom `x.y` settings,
+2. **Settings fidelity**: validation (22023/42704), value normalisation, custom `x.y` settings,
    `SET LOCAL`/savepoint scoping, DateStyle/IntervalStyle output styles.
-4. **Statements**: SQL-level PREPARE/EXECUTE, cursors, LISTEN/NOTIFY, MERGE, writable CTEs,
+3. **Statements**: SQL-level PREPARE/EXECUTE, cursors, LISTEN/NOTIFY, MERGE, writable CTEs,
    `RETURNING old/new`, GROUPING SETS/ROLLUP/CUBE, ordered-set aggregates, window `RANGE` offsets
    and `EXCLUDE`, CTE `SEARCH`/`CYCLE`.
-5. **Types**: range types (and EXCLUDE constraints), network types, bit strings.
-6. **Transactions and constraints**: deferred constraints, per-row unique checks, row locks with
+4. **Types**: range types (and EXCLUDE constraints), network types, bit strings.
+5. **Transactions and constraints**: deferred constraints, per-row unique checks, row locks with
    NOWAIT/SKIP LOCKED between sessions, advisory locks shared across sessions, READ ONLY
    transactions, SERIALIZABLE write-skew detection, dependency errors (2BP01).
-7. **Functions/procedures/triggers** (SQL and PL/pgSQL), `DO` blocks — large; most of ddl/migrations.
-8. Client matrix in CI: psql, tokio-postgres, sqlx and JDBC (Go pgx is covered by `examples/`).
+6. **Functions/procedures/triggers** (SQL and PL/pgSQL), `DO` blocks — large; most of ddl/migrations.
+7. Client matrix in CI: psql, tokio-postgres and sqlx (Go pgx is covered by `examples/`).
 
-System columns (`xmin`/`xmax`/`ctid`/`tableoid`) belong with item 4 (RETURNING semantics).
+System columns (`xmin`/`xmax`/`ctid`/`tableoid`) belong with item 3 (RETURNING semantics).

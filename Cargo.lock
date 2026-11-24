@@ -507,6 +507,7 @@ dependencies = [
  "num-bigint",
  "num-integer",
  "num-traits",
+ "regex",
  "serde_json",
 ]
 

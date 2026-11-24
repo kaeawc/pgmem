@@ -10,6 +10,8 @@ pub mod error;
 #[cfg(test)]
 mod go_port;
 pub mod json;
+pub mod jsonpath;
+pub mod jsontext;
 pub mod numeric;
 pub mod text;
 pub mod usertype;
@@ -47,6 +49,8 @@ pub enum Type {
     Timestamptz,
     Interval,
     Jsonb,
+    /// `jsonpath`: an SQL/JSON path expression, kept in its canonical text form.
+    JsonPath,
     /// `character varying`: text with an optional length limit (the typmod).
     Varchar,
     /// `character` (`bpchar`): blank-padded to its length; trailing spaces are insignificant.
@@ -125,6 +129,7 @@ impl Type {
             Type::TimeTz => 1266,
             Type::Uuid => 2950,
             Type::Jsonb => 3802,
+            Type::JsonPath => 4072,
             Type::Varchar => 1043,
             Type::Bpchar => 1042,
             Type::Name => 19,
@@ -158,6 +163,7 @@ impl Type {
                 Type::Interval => 1187,
                 Type::Uuid => 2951,
                 Type::Jsonb => 3807,
+                Type::JsonPath => 4073,
                 Type::Varchar => 1015,
                 Type::Bpchar => 1014,
                 Type::Name => 1003,
@@ -208,6 +214,7 @@ impl Type {
             1186 => Some(Type::Interval),
             2950 => Some(Type::Uuid),
             3802 => Some(Type::Jsonb),
+            4072 => Some(Type::JsonPath),
             705 => Some(Type::Unknown),
             usertype::RECORD_OID => Some(Type::Record),
             _ => None,
@@ -243,6 +250,7 @@ impl Type {
             1187 => Type::Interval,
             2951 => Type::Uuid,
             3807 => Type::Jsonb,
+            4073 => Type::JsonPath,
             usertype::RECORD_ARRAY_OID => Type::Record,
             _ => return usertype::type_for_oid(oid),
         };
@@ -264,7 +272,15 @@ impl Type {
             Type::Int2Vector | Type::OidVector | Type::Composite(_) | Type::Record => -1,
             Type::Enum(_) => 4,
             Type::Domain(_) => self.base().size(),
-            Type::Numeric | Type::Text | Type::Bytea | Type::Jsonb | Type::Array(_) | Type::Varchar | Type::Bpchar | Type::Json => -1,
+            Type::Numeric
+            | Type::Text
+            | Type::Bytea
+            | Type::Jsonb
+            | Type::JsonPath
+            | Type::Array(_)
+            | Type::Varchar
+            | Type::Bpchar
+            | Type::Json => -1,
         }
     }
 
@@ -297,6 +313,7 @@ impl Type {
             Type::Timestamptz => "timestamp with time zone",
             Type::Interval => "interval",
             Type::Jsonb => "jsonb",
+            Type::JsonPath => "jsonpath",
             Type::Varchar => "character varying",
             Type::Bpchar => "character",
             Type::Name => "name",
@@ -334,6 +351,7 @@ impl Type {
             Type::Timestamptz => "timestamptz".into(),
             Type::Interval => "interval".into(),
             Type::Jsonb => "jsonb".into(),
+            Type::JsonPath => "jsonpath".into(),
             Type::Varchar => "varchar".into(),
             Type::Bpchar => "bpchar".into(),
             Type::Name => "name".into(),
@@ -403,6 +421,7 @@ impl Type {
             "timetz" | "time with time zone" => Type::TimeTz,
             "interval" => Type::Interval,
             "jsonb" => Type::Jsonb,
+            "jsonpath" => Type::JsonPath,
             "unknown" => Type::Unknown,
             _ => return None,
         };
@@ -461,7 +480,7 @@ impl Type {
             Type::Enum(_) => 'E',
             Type::Composite(_) | Type::Record => 'C',
             Type::Domain(_) => self.base().category(),
-            Type::Bytea | Type::Uuid | Type::Jsonb => 'U',
+            Type::Bytea | Type::Uuid | Type::Jsonb | Type::JsonPath => 'U',
         }
     }
 }
