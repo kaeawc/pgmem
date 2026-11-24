@@ -446,7 +446,6 @@ functions/arrays.slt:c2fe718cdc0a43c9  # SELECT id, tags FROM t ORDER BY id
 functions/arrays.slt:9a9006940458022b  # SELECT id, tags FROM t WHERE tags && ARRAY['z', 'c'] ORDER BY id
 functions/conditional_misc.slt:0279d94087ccfd1f  # SELECT generate_series(1.5, 3.0, 0.5)
 functions/conditional_misc.slt:979c86d38764c5b0  # SELECT generate_series(1::bigint, 3::bigint), pg_typeof(generate_series(1::bigint, 1))
-functions/conditional_misc.slt:8330a6241dbe7de0  # SELECT * FROM generate_series(timestamptz '2024-03-09', timestamptz '2024-03-12', interval '1 day', 'America/New_York')
 functions/conditional_misc.slt:85ec463ae213a964  # SELECT generate_subscripts(ARRAY['a', 'b', 'c'], 1)
 functions/conditional_misc.slt:7e28717042d08aa6  # SELECT generate_subscripts('[3:5]={x,y,z}'::text[], 1), generate_subscripts(ARRAY[1, 2], 1, true)
 functions/conditional_misc.slt:cc51e3db8447f1f2  # SELECT generate_subscripts(ARRAY[[1, 2, 3], [4, 5, 6]], 2)
@@ -458,10 +457,6 @@ functions/conditional_misc.slt:38d2a338c483f4bb  # SELECT pg_column_size(1::int4
 functions/conditional_misc.slt:b5355bcb6afee2be  # SELECT pg_get_viewdef('pg_roles'::regclass) IS NOT NULL
 functions/conditional_misc.slt:14bbaf437abd0a9c  # SELECT uuid_extract_version('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11')
 functions/conditional_misc.slt:f9afb9740dc2477b  # SELECT 1 IS DISTINCT FROM NULL, NULL IS NOT DISTINCT FROM NULL, 2 BETWEEN 1 AND 3, 2 BETWEEN SYMMETRIC 3 AND 1
-functions/datetime.slt:f3fc0dfd9fbc8199  # SELECT date_trunc('day', timestamptz '2024-03-15 02:30+00', 'America/New_York')
-functions/datetime.slt:3faacd492aca4642  # SELECT date_trunc('month', timestamptz '2024-03-01 03:00+00', 'Asia/Tokyo')
-functions/datetime.slt:37d2fd921bbf7884  # SELECT date_trunc('fortnight', timestamp '2024-01-01')
-functions/datetime.slt:70deb1e1fbfbacbc  # SELECT make_timestamptz(2024, 3, 15, 14, 30, 0, 'America/New_York'), make_timestamptz(2024, 7, 1, 0, 0, 0, '+02')
 functions/datetime.slt:d4ebc931d41119e7  # SELECT make_interval(days => 10), make_interval(1, 2, 3, 4, 5, 6, 7.5), make_interval(hours => -3, mins => 30)
 functions/datetime.slt:7d90991c5bd46695  # SELECT to_char(125, '999'), to_char(-125.8, '999D99S'), to_char(1234567.891, '9,999,999.99')
 functions/datetime.slt:47a5139e38b623ec  # SELECT to_char(5.2, 'FM9990.00'), to_char(0.5, '0.99'), to_char(12, '0009'), to_char(485, 'RN')
@@ -470,19 +465,7 @@ functions/datetime.slt:3ebaf061acaffa0e  # SELECT to_char(1234, 'S9999'), to_cha
 functions/datetime.slt:0c6020f6c4f6d478  # SELECT to_date('March 15, 2024', 'Month DD, YYYY'), to_date('2024-075', 'YYYY-DDD')
 functions/datetime.slt:ee3c8003a0460b6a  # SELECT to_timestamp('2024-03-15 14:30:45.123', 'YYYY-MM-DD HH24:MI:SS.MS'), to_timestamp('2024-03-15 14:30 +05', 'YYYY-MM-DD HH24:MI TZH')
 functions/datetime.slt:943bd325c7acad11  # SELECT justify_days(interval '35 days'), justify_hours(interval '27 hours'), justify_interval(interval '1 mon -1 hour')
-functions/datetime.slt:1a23484ccd8920de  # SELECT date_bin('15 minutes', timestamp '2020-02-11 15:44:17', timestamp '2001-01-01')
-functions/datetime.slt:6ed35bd1cf3466ab  # SELECT date_bin('15 minutes', timestamp '2020-02-11 15:44:17', timestamp '2001-01-01 00:02:30')
-functions/datetime.slt:fd96c2b75866bdfc  # SELECT date_bin('1 day', timestamptz '2024-03-15 14:30+00', timestamptz '2024-01-01 06:00+00')
-functions/datetime.slt:caf2e2e69fc7807c  # SELECT date_bin('1 month', timestamp '2024-03-15', timestamp '2024-01-01')
-functions/datetime.slt:2819a33dd4bc8dd3  # SELECT timestamptz '2024-03-15 12:00+00' AT TIME ZONE 'America/New_York', timestamptz '2024-01-15 12:00+00' AT TIME ZONE 'America/New_York'
-functions/datetime.slt:0ee93beb1559475f  # SELECT timestamp '2024-03-15 12:00' AT TIME ZONE 'America/New_York', timestamp '2024-07-01 12:00' AT TIME ZONE 'Europe/Paris'
-functions/datetime.slt:14bcebe8e9c7ff52  # SELECT timestamptz '2024-03-15 12:00+00' AT TIME ZONE 'UTC', timestamptz '2024-03-15 12:00+00' AT TIME ZONE '+05', timestamptz '2024-03-15 12:00+00' AT TIME ZONE interval '-03:30'
-functions/datetime.slt:9b07b0a818c58cbf  # SELECT timestamp '2024-03-10 02:30' AT TIME ZONE 'America/New_York', timestamp '2024-11-03 01:30' AT TIME ZONE 'America/New_York'
-functions/datetime.slt:783545d9e7961331  # SELECT timezone('Asia/Kolkata', timestamptz '2024-03-15 12:00+00'), timestamptz '2024-03-15 12:00+00' AT LOCAL
 functions/datetime.slt:10ee424d79472e00  # SELECT timestamptz '2024-03-15 12:00 America/Los_Angeles', timestamptz '2024-03-15 12:00 EST', timestamptz '2024-06-15 12:00 Europe/London'
-functions/datetime.slt:36334faa88b1322d  # SET TIME ZONE 'America/New_York'
-functions/datetime.slt:ecd4c250da5de147  # SELECT timestamptz '2024-03-15 12:00+00', timestamptz '2024-12-15 12:00+00', timestamp '2024-03-15 12:00'::timestamptz
-functions/datetime.slt:a5cf8c5a48a4b5cb  # SELECT date_trunc('day', timestamptz '2024-03-10 12:00+00'), extract(hour FROM timestamptz '2024-03-15 12:00+00'), to_char(timestamptz '2024-03-15 12:00+00', 'HH24 TZ OF')
 functions/datetime.slt:932a6ee49c28fd13  # SELECT timestamptz '2024-03-09 12:00' + interval '1 day', timestamptz '2024-03-09 12:00' + interval '24 hours'
 functions/datetime.slt:698ce51c507f358f  # SELECT (date '2024-03-15', date '2024-03-20') OVERLAPS (date '2024-03-18', date '2024-03-25')
 functions/datetime.slt:2a522709b877315c  # SELECT isfinite(date '2024-03-15'), isfinite(date 'infinity'), isfinite(timestamp '-infinity'), isfinite(interval '1 day'), isfinite(interval 'infinity')
@@ -664,7 +647,6 @@ session/config_functions.slt:f48c9817f0a821fc  # SET client_min_messages = 'chat
 session/config_functions.slt:bb4aa685c451ca13  # SET standard_conforming_strings = 'maybe'
 session/config_functions.slt:e25761fbd5e3f44d  # SET extra_float_digits = 'many'
 session/config_functions.slt:85983d46758a4bf5  # SET DateStyle = 'Whatever'
-session/config_functions.slt:cc5b7fe178831021  # SET TimeZone = 'Nowhere/Land'
 session/config_functions.slt:adde9212eb6366fb  # SET server_version = '1.0'
 session/config_functions.slt:e4199fb6243d49af  # SET max_connections = 10
 session/config_functions.slt:7788132bd64960a6  # RESET no_such_setting
@@ -792,20 +774,7 @@ session/roles.slt:c212a265a798fcdf  # DROP ROLE conf_sess_writer
 session/roles.slt:c212a265a798fcdf#2  # DROP ROLE conf_sess_writer
 session/roles.slt:4704b79a683ed8c5  # DROP ROLE conf_sess_login
 session/roles.slt:dfbf7fb3babe5bd0#2  # DROP ROLE IF EXISTS conf_sess_login
-session/set_show.slt:36334faa88b1322d  # SET TIME ZONE 'America/New_York'
-session/set_show.slt:d4465dc31f6c35fd  # SHOW timezone
-session/set_show.slt:76b878d021197b41  # SELECT '2024-06-01 12:00:00+00'::timestamptz, '2024-01-15 12:00:00+00'::timestamptz
-session/set_show.slt:96b290bae6c5fc4d  # SET TIME ZONE 'Europe/Berlin'
-session/set_show.slt:534638a41a16c1a3  # SELECT '2024-06-01 12:00:00+00'::timestamptz::text
 session/set_show.slt:fdf3322cbf447175  # SELECT '2024-06-01 12:00:00'::timestamptz AT TIME ZONE 'UTC'
-session/set_show.slt:04e4c6b7eea0eb87  # SET TIME ZONE LOCAL
-session/set_show.slt:e195399f0b431905  # SET TIME ZONE INTERVAL '+05:30' HOUR TO MINUTE
-session/set_show.slt:887a628950d5a978#2  # SELECT '2024-06-01 12:00:00+00'::timestamptz
-session/set_show.slt:5fa2f6146c9292f0  # SET TIME ZONE -3
-session/set_show.slt:58e579de894de9fd#2  # SHOW TimeZone
-session/set_show.slt:5cfff553ee884474  # SET timezone TO 'Asia/Tokyo'
-session/set_show.slt:e69022f5d022c8eb  # SELECT current_setting('TimeZone'), '2024-06-01 00:00:00+00'::timestamptz
-session/set_show.slt:f8d35507b11666cb  # SET TIME ZONE 'Mars/Olympus_Mons'
 session/set_show.slt:931b505be3f262c7#2  # SHOW DateStyle
 session/set_show.slt:20f8d7e7e3a98920  # SELECT '2024-03-04'::date
 session/set_show.slt:375d199f2c0fee30  # SELECT '2024-03-04'::date, '05/06/2024'::date::text
@@ -934,8 +903,6 @@ transactions/settings.slt:c00a76ba8b0997bc#3  # SHOW search_path
 transactions/settings.slt:2002d2f4939e1a30  # SELECT current_setting('app.user_id')
 transactions/settings.slt:3c53b4b86cfc19e6  # SELECT current_setting('app.user_id') AS after_commit
 transactions/settings.slt:71422171cee215a1  # SHOW app.tenant
-transactions/settings.slt:3763afe376d4ae6c  # SET LOCAL TIME ZONE 'America/New_York'
-transactions/settings.slt:728ff67f7f7ffc95  # SELECT '2024-06-01 12:00:00+00'::timestamptz AS ts
 transactions/settings.slt:881d1a37758faef2  # SET LOCAL no_such_setting = 1
 transactions/settings.slt:ff6207f64133e1f3  # SET work_mem = 'lots'
 types/arrays.slt:69f9c8b1b5c9e429  # SELECT ARRAY[[1, 2], [3, 4]], '{{a,b},{c,d}}'::text[], array_dims(ARRAY[[1, 2, 3], [4, 5, 6]]), array_ndims(ARRAY[[1]])
@@ -976,16 +943,11 @@ types/datetime.slt:5756f1b61ea0fa24  # SELECT '12:34:56.789'::time(1), '12:34:56
 types/datetime.slt:577b06d9381a2871  # SELECT '25:00:00'::time
 types/datetime.slt:5b99b80723bd1af1  # SELECT '2024-06-15 13:45:30.1234567'::timestamp, '2024-06-15 13:45:30.555'::timestamp(2)
 types/datetime.slt:271b83418549b5f6  # SELECT '2024-06-15 13:45:30+05'::timestamptz, '2024-06-15 13:45:30 America/New_York'::timestamptz
-types/datetime.slt:36334faa88b1322d  # SET TIME ZONE 'America/New_York'
-types/datetime.slt:bee7b705bc86853d  # SELECT '2024-01-15 12:00:00+00'::timestamptz, '2024-07-15 12:00:00+00'::timestamptz
 types/datetime.slt:8afedc23e0c8b88b  # SELECT '2024-01-15 12:00:00'::timestamptz
 types/datetime.slt:48c8dd623084c98f  # SELECT '2024-03-10 01:30'::timestamptz + interval '1 hour', '2024-03-10 01:30'::timestamptz + interval '1 day'
-types/datetime.slt:576d98797c187048  # SELECT timestamptz '2024-06-15 12:00:00+00' AT TIME ZONE 'Asia/Tokyo', timestamp '2024-06-15 12:00:00' AT TIME ZONE 'Asia/Tokyo'
-types/datetime.slt:1ac3e7a3f5e46302  # SELECT timestamp '2024-06-15 12:00:00' AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Paris'
 types/datetime.slt:3bec26f49463d29a  # SELECT '2024-06-15 25:00:00'::timestamp
 types/datetime.slt:a23a4d339e32b4b6  # SELECT interval '25 hours', justify_hours(interval '25 hours'), justify_days(interval '35 days'), justify_interval(interval '1 mon -1 hour')
 types/datetime.slt:e6c892a0418f0b69  # SELECT 'infinity'::interval, '-infinity'::interval, 'infinity'::timestamp - '2024-01-01'::timestamp
-types/datetime.slt:50f0c63d0bff7635  # SELECT date_trunc('day', timestamptz '2024-06-15 13:45:30+00', 'Asia/Tokyo')
 types/datetime.slt:06ff5e5c264ab748  # SELECT make_date(2024, 2, 29), make_time(13, 45, 30.5), make_timestamp(2024, 6, 15, 13, 45, 30), make_interval(days => 10, hours => 2)
 types/datetime.slt:c278ab0040c2def6  # SELECT (date '2024-01-01', date '2024-02-01') OVERLAPS (date '2024-01-15', date '2024-03-01'), date '2024-01-01' = timestamp '2024-01-01 00:00', timestamp '2024-01-01' < timestamptz '2024-01-01 00:00:01+00'
 types/datetime.slt:3873b9f28787e416  # SELECT id, d, ts, tstz, dur FROM events ORDER BY id

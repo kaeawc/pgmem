@@ -7,7 +7,7 @@ PostgreSQL 18; CI re-verifies every record against PostgreSQL and runs it agains
 A record passes when pgmem returns the same column names, column types and text values, or
 the same SQLSTATE and error message.
 
-pgmem passes **2238 / 3309 records (67.6%)**.
+pgmem passes **2276 / 3309 records (68.8%)**.
 
 | Area | Records | Pass | Rate |
 |---|---:|---:|---:|
@@ -15,12 +15,12 @@ pgmem passes **2238 / 3309 records (67.6%)**.
 | constraints | 171 | 98 | 57.3% |
 | ddl | 386 | 205 | 53.1% |
 | dml | 282 | 209 | 74.1% |
-| functions | 445 | 278 | 62.5% |
+| functions | 445 | 295 | 66.3% |
 | queries | 440 | 373 | 84.8% |
-| session | 419 | 224 | 53.5% |
+| session | 419 | 238 | 56.8% |
 | smoke | 7 | 7 | 100.0% |
-| transactions | 522 | 432 | 82.8% |
-| types | 411 | 278 | 67.6% |
+| transactions | 522 | 434 | 83.1% |
+| types | 411 | 283 | 68.9% |
 
 ## By file
 
@@ -58,8 +58,8 @@ pgmem passes **2238 / 3309 records (67.6%)**.
 | dml/update.slt | 48 | 33 | 68.8% |
 | dml/writable_cte.slt | 21 | 5 | 23.8% |
 | functions/arrays.slt | 49 | 24 | 49.0% |
-| functions/conditional_misc.slt | 49 | 35 | 71.4% |
-| functions/datetime.slt | 99 | 64 | 64.6% |
+| functions/conditional_misc.slt | 49 | 36 | 73.5% |
+| functions/datetime.slt | 99 | 80 | 80.8% |
 | functions/json.slt | 85 | 38 | 44.7% |
 | functions/math.slt | 61 | 39 | 63.9% |
 | functions/regex.slt | 34 | 21 | 61.8% |
@@ -74,12 +74,12 @@ pgmem passes **2238 / 3309 records (67.6%)**.
 | queries/subqueries.slt | 39 | 36 | 92.3% |
 | queries/where_operators.slt | 51 | 47 | 92.2% |
 | queries/windows.slt | 39 | 28 | 71.8% |
-| session/config_functions.slt | 45 | 27 | 60.0% |
+| session/config_functions.slt | 45 | 28 | 62.2% |
 | session/extensions.slt | 46 | 23 | 50.0% |
 | session/listen_notify.slt | 24 | 5 | 20.8% |
 | session/prepare_cursor.slt | 77 | 23 | 29.9% |
 | session/roles.slt | 46 | 21 | 45.7% |
-| session/set_show.slt | 133 | 95 | 71.4% |
+| session/set_show.slt | 133 | 108 | 81.2% |
 | session/utility.slt | 48 | 30 | 62.5% |
 | smoke/basics.slt | 7 | 7 | 100.0% |
 | transactions/advisory.slt | 38 | 26 | 68.4% |
@@ -89,13 +89,13 @@ pgmem passes **2238 / 3309 records (67.6%)**.
 | transactions/row_locks.slt | 61 | 40 | 65.6% |
 | transactions/savepoints.slt | 86 | 86 | 100.0% |
 | transactions/serialization.slt | 59 | 49 | 83.1% |
-| transactions/settings.slt | 52 | 42 | 80.8% |
+| transactions/settings.slt | 52 | 44 | 84.6% |
 | transactions/visibility.slt | 55 | 55 | 100.0% |
 | types/arrays.slt | 37 | 21 | 56.8% |
 | types/boolean.slt | 17 | 17 | 100.0% |
 | types/bytea.slt | 18 | 14 | 77.8% |
 | types/casts.slt | 55 | 47 | 85.5% |
-| types/datetime.slt | 58 | 34 | 58.6% |
+| types/datetime.slt | 58 | 39 | 67.2% |
 | types/enums_domains.slt | 58 | 0 | 0.0% |
 | types/float.slt | 24 | 21 | 87.5% |
 | types/integers.slt | 36 | 35 | 97.2% |
