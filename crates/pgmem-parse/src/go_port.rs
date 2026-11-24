@@ -199,7 +199,7 @@ fn parse_insert_returning() {
 
 fn join_of(sql: &str) -> (JoinKind, JoinConstraint, TableRef, TableRef) {
     match select(sql).from.into_iter().next() {
-        Some(TableRef::Join { left, right, kind, constraint }) => (kind, constraint, *left, *right),
+        Some(TableRef::Join { left, right, kind, constraint, .. }) => (kind, constraint, *left, *right),
         other => panic!("{sql}: {other:?}"),
     }
 }

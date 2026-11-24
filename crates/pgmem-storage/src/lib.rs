@@ -112,6 +112,7 @@ impl Database {
             catalog_base_version: 0,
             changes: HashMap::new(),
             savepoints: Vec::new(),
+            seq_undo: SeqUndo { db: Arc::clone(self), entries: Vec::new() },
         }
     }
 
@@ -150,8 +151,21 @@ impl Database {
     }
 
     /// Resets a sequence to its start (`TRUNCATE ... RESTART IDENTITY`, `ALTER SEQUENCE ... RESTART`).
-    pub fn reset_sequence(&self, seq: &SequenceDef) {
-        lock(&self.sequences).remove(&seq.oid);
+    /// Returns its previous last value.
+    pub fn reset_sequence(&self, seq: &SequenceDef) -> Option<i64> {
+        lock(&self.sequences).remove(&seq.oid).and_then(|s| s.last)
+    }
+
+    fn restore_sequence(&self, oid: Oid, last: Option<i64>) {
+        let mut seqs = lock(&self.sequences);
+        match last {
+            Some(v) => {
+                seqs.insert(oid, SeqState { last: Some(v) });
+            }
+            None => {
+                seqs.remove(&oid);
+            }
+        }
     }
 
     /// Appends rows to a table outside any transaction (the `Server::seed` test helper).
@@ -192,6 +206,33 @@ struct Savepoint {
     name: String,
     catalog: Option<Catalog>,
     changes: HashMap<Oid, TableChanges>,
+    /// `seq_undo` length when the savepoint was set.
+    seq_undo: usize,
+}
+
+/// Sequence states to restore if the transaction rolls back: a transactional sequence reset
+/// (`TRUNCATE ... RESTART IDENTITY`) gives the sequence a new relfilenode in Postgres, so on
+/// rollback it returns to its state before the reset, discarding later `nextval` calls too.
+#[derive(Debug)]
+struct SeqUndo {
+    db: Arc<Database>,
+    entries: Vec<(Oid, Option<i64>)>,
+}
+
+impl SeqUndo {
+    fn undo_to(&mut self, len: usize) {
+        while self.entries.len() > len {
+            if let Some((oid, last)) = self.entries.pop() {
+                self.db.restore_sequence(oid, last);
+            }
+        }
+    }
+}
+
+impl Drop for SeqUndo {
+    fn drop(&mut self) {
+        self.undo_to(0);
+    }
 }
 
 /// A transaction. Dropping it without committing rolls it back.
@@ -207,9 +248,17 @@ pub struct Txn {
     catalog_base_version: u64,
     changes: HashMap<Oid, TableChanges>,
     savepoints: Vec<Savepoint>,
+    seq_undo: SeqUndo,
 }
 
 impl Txn {
+    /// Resets a sequence to its start, undone if the transaction (or the enclosing savepoint)
+    /// rolls back.
+    pub fn reset_sequence(&mut self, seq: &SequenceDef) {
+        let prev = self.db.reset_sequence(seq);
+        self.seq_undo.entries.push((seq.oid, prev));
+    }
+
     pub fn isolation(&self) -> Isolation {
         self.isolation
     }
@@ -337,7 +386,12 @@ impl Txn {
     }
 
     pub fn savepoint(&mut self, name: &str) {
-        self.savepoints.push(Savepoint { name: name.to_owned(), catalog: self.catalog.clone(), changes: self.changes.clone() });
+        self.savepoints.push(Savepoint {
+            name: name.to_owned(),
+            catalog: self.catalog.clone(),
+            changes: self.changes.clone(),
+            seq_undo: self.seq_undo.entries.len(),
+        });
     }
 
     fn find_savepoint(&self, name: &str) -> SqlResult<usize> {
@@ -353,6 +407,7 @@ impl Txn {
         let sp = self.savepoints[idx].clone();
         self.catalog = sp.catalog;
         self.changes = sp.changes;
+        self.seq_undo.undo_to(sp.seq_undo);
         self.savepoints.truncate(idx + 1);
         Ok(())
     }
@@ -365,7 +420,16 @@ impl Txn {
     }
 
     /// Applies this transaction's effects to the latest committed state.
-    pub fn commit(self) -> SqlResult<()> {
+    pub fn commit(mut self) -> SqlResult<()> {
+        let undo = std::mem::take(&mut self.seq_undo.entries);
+        let result = self.commit_changes();
+        if result.is_err() {
+            self.seq_undo.entries = undo;
+        }
+        result
+    }
+
+    fn commit_changes(&mut self) -> SqlResult<()> {
         if !self.has_writes() {
             return Ok(());
         }
@@ -373,7 +437,7 @@ impl Txn {
         let _guard = lock(&db.commit_lock);
         let cur = db.current();
         let mut next = (*cur).clone();
-        if let Some(catalog) = self.catalog {
+        if let Some(catalog) = self.catalog.take() {
             if cur.catalog_version != self.catalog_base_version {
                 return Err(SqlError::new(code::SERIALIZATION_FAILURE, "could not serialize access due to concurrent schema change"));
             }
@@ -381,7 +445,7 @@ impl Txn {
             next.catalog = Arc::new(catalog);
             next.catalog_version += 1;
         }
-        for (oid, ch) in self.changes {
+        for (oid, ch) in std::mem::take(&mut self.changes) {
             let Some(def) = next.catalog.table_by_oid(oid).cloned() else {
                 continue; // dropped in this transaction
             };

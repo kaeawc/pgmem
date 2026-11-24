@@ -47,6 +47,12 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
         "upper" => text_fn(strict("upper", |a, _| Ok(Value::Text(s(&a[0]).to_uppercase()))), 1, Type::Text),
         "initcap" => text_fn(strict("initcap", initcap), 1, Type::Text),
         "substring" | "substr" => match args {
+            [Type::Bytea, t] if t.is_integer() || *t == Type::Unknown => {
+                resolved(strict("substring", substring), vec![Type::Bytea, Type::Int4], Type::Bytea)
+            }
+            [Type::Bytea, t, u] if (t.is_integer() || *t == Type::Unknown) && (u.is_integer() || *u == Type::Unknown) => {
+                resolved(strict("substring", substring), vec![Type::Bytea, Type::Int4, Type::Int4], Type::Bytea)
+            }
             [_, t] if t.is_integer() || (name == "substr" && *t == Type::Unknown) => {
                 resolved(strict("substring", substring), vec![Type::Text, Type::Int4], Type::Text)
             }
@@ -162,6 +168,17 @@ fn resolve_more(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
             4 => resolved(strict("overlay", overlay), vec![Type::Text, Type::Text, Type::Int4, Type::Int4], Type::Text),
             _ => Err(err()),
         },
+        "get_byte" if n == 2 => resolved(strict("get_byte", get_byte), vec![Type::Bytea, Type::Int4], Type::Int4),
+        "set_byte" if n == 3 => resolved(strict("set_byte", set_byte), vec![Type::Bytea, Type::Int4, Type::Int4], Type::Bytea),
+        "get_bit" if n == 2 && matches!(args[0], Type::Bytea | Type::Unknown) => {
+            resolved(strict("get_bit", get_bit), vec![Type::Bytea, Type::Int8], Type::Int4)
+        }
+        "set_bit" if n == 3 && matches!(args[0], Type::Bytea | Type::Unknown) => {
+            resolved(strict("set_bit", set_bit), vec![Type::Bytea, Type::Int8, Type::Int4], Type::Bytea)
+        }
+        "convert_to" if n == 2 => resolved(strict("convert_to", convert_to), vec![Type::Text, Type::Name], Type::Bytea),
+        "convert_from" if n == 2 => resolved(strict("convert_from", convert_from), vec![Type::Bytea, Type::Name], Type::Text),
+        "convert" if n == 3 => resolved(strict("convert", convert), vec![Type::Bytea, Type::Name, Type::Name], Type::Bytea),
         "encode" if n == 2 => resolved(strict("encode", encode), vec![Type::Bytea, Type::Text], Type::Text),
         "decode" if n == 2 => resolved(strict("decode", decode), texts(2), Type::Bytea),
         "regexp_replace" => match n {
@@ -205,6 +222,11 @@ pub fn resolve_operator(op: &str, l: &Type, r: &Type) -> SqlResult<Option<Resolv
         "!~" => strict("!~", |a, _| Ok(Value::Bool(!compile(s(&a[1]), "")?.is_match(s(&a[0]))))),
         "!~*" => strict("!~*", |a, _| Ok(Value::Bool(!compile(s(&a[1]), "i")?.is_match(s(&a[0]))))),
         "^@" => strict("^@", |a, _| Ok(Value::Bool(s(&a[0]).starts_with(s(&a[1]))))),
+        // Only reached for `x ~~ ANY (...)`; a plain `~~` is bound as LIKE.
+        "~~" => strict("~~", like_fn),
+        "~~*" => strict("~~*", ilike_fn),
+        "!~~" => strict("!~~", |a, c| like_fn(a, c).map(|v| Value::Bool(!v.is_true()))),
+        "!~~*" => strict("!~~*", |a, c| ilike_fn(a, c).map(|v| Value::Bool(!v.is_true()))),
         _ => return Ok(None),
     };
     if !both_text {
@@ -407,27 +429,36 @@ fn initcap(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
 }
 
 /// `substring(text, start[, count])` with Postgres' handling of out-of-range starts.
+/// `substring(text|bytea, start [, count])`: characters of text, bytes of bytea.
 fn substring(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
-    let chars: Vec<char> = s(&a[0]).chars().collect();
     let start = int(&a[1]);
-    let end = match a.get(2) {
-        Some(c) => {
-            let count = int(c);
-            if count < 0 {
-                return Err(SqlError::new("22011", "negative substring length not allowed"));
-            }
-            start.saturating_add(count)
-        }
+    let (lo, hi) = substring_range(
+        start,
+        a.get(2).map(int),
+        match &a[0] {
+            Value::Bytea(b) => b.len(),
+            v => s(v).chars().count(),
+        },
+    )?;
+    Ok(match &a[0] {
+        Value::Bytea(b) => Value::Bytea(b[lo..hi].to_vec()),
+        v => Value::Text(s(v).chars().skip(lo).take(hi - lo).collect()),
+    })
+}
+
+/// The 0-based `[lo, hi)` range `substring(x, start, count)` selects from `len` items.
+fn substring_range(start: i64, count: Option<i64>, len: usize) -> SqlResult<(usize, usize)> {
+    let end = match count {
+        Some(count) if count < 0 => return Err(SqlError::new("22011", "negative substring length not allowed")),
+        Some(count) => start.saturating_add(count),
         None => i64::MAX,
     };
     let lo = start.max(1);
-    let len = i64::try_from(chars.len()).unwrap_or(i64::MAX);
-    let hi = end.min(len + 1);
+    let hi = end.min(i64::try_from(len).unwrap_or(i64::MAX) + 1);
     if hi <= lo {
-        return Ok(Value::Text(String::new()));
+        return Ok((0, 0));
     }
-    let (lo, hi) = (usize::try_from(lo - 1).unwrap_or(0), usize::try_from(hi - 1).unwrap_or(0));
-    Ok(Value::Text(chars[lo..hi].iter().collect()))
+    Ok((usize::try_from(lo - 1).unwrap_or(0), usize::try_from(hi - 1).unwrap_or(0)))
 }
 
 /// `substring(text FROM pattern)`: the first parenthesized group, or the whole match.
@@ -736,7 +767,7 @@ const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012
 fn encode(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     let Value::Bytea(b) = &a[0] else { return Err(SqlError::internal("encode expects bytea")) };
     Ok(Value::Text(match s(&a[1]).to_ascii_lowercase().as_str() {
-        "hex" => text::format_bytea(b)[2..].to_owned(),
+        "hex" => text::format_bytea_hex(b)[2..].to_owned(),
         "base64" => {
             let mut out = String::new();
             for (i, chunk) in b.chunks(3).enumerate() {
@@ -879,4 +910,130 @@ mod tests {
         assert_eq!(replacement(r"[\1]"), "[${1}]");
         assert_eq!(replacement(r"\&!"), "${0}!");
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// bytea byte/bit access and encoding conversion
+// ---------------------------------------------------------------------------------------------
+
+fn bytes_of(v: &Value) -> &[u8] {
+    match v {
+        Value::Bytea(b) => b,
+        Value::Text(t) => t.as_bytes(),
+        _ => &[],
+    }
+}
+
+fn byte_index(b: &[u8], n: i64, unit: i64) -> SqlResult<usize> {
+    let len = i64::try_from(b.len()).unwrap_or(i64::MAX) * unit;
+    if n < 0 || n >= len {
+        return Err(SqlError::new("2202E", format!("index {n} out of valid range, 0..{}", len - 1)));
+    }
+    Ok(usize::try_from(n).unwrap_or(0))
+}
+
+fn get_byte(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let b = bytes_of(&a[0]);
+    let i = byte_index(b, a[1].as_i64().unwrap_or(0), 1)?;
+    Ok(Value::Int4(i32::from(b[i])))
+}
+
+fn set_byte(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let mut b = bytes_of(&a[0]).to_vec();
+    let i = byte_index(&b, a[1].as_i64().unwrap_or(0), 1)?;
+    // set_byte keeps the low 8 bits of the new value.
+    b[i] = u8::try_from(a[2].as_i64().unwrap_or(0) & 0xff).unwrap_or(0);
+    Ok(Value::Bytea(b))
+}
+
+/// Bits are numbered from the least significant bit of the first byte.
+fn get_bit(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let b = bytes_of(&a[0]);
+    let n = byte_index(b, a[1].as_i64().unwrap_or(0), 8)?;
+    Ok(Value::Int4(i32::from((b[n / 8] >> (n % 8)) & 1)))
+}
+
+fn set_bit(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let mut b = bytes_of(&a[0]).to_vec();
+    let n = byte_index(&b, a[1].as_i64().unwrap_or(0), 8)?;
+    match a[2].as_i64() {
+        Some(0) => b[n / 8] &= !(1 << (n % 8)),
+        Some(1) => b[n / 8] |= 1 << (n % 8),
+        _ => return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, "new bit must be 0 or 1")),
+    }
+    Ok(Value::Bytea(b))
+}
+
+/// The encodings pgmem converts between, by Postgres' (case- and punctuation-insensitive) name.
+#[derive(Clone, Copy, PartialEq)]
+enum Encoding {
+    Utf8,
+    Latin1,
+    SqlAscii,
+}
+
+fn encoding(name: &str, what: &str) -> SqlResult<Encoding> {
+    let norm: String = name.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase();
+    Ok(match norm.as_str() {
+        "utf8" | "unicode" => Encoding::Utf8,
+        "latin1" | "iso88591" => Encoding::Latin1,
+        "sqlascii" => Encoding::SqlAscii,
+        _ => return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, format!("invalid {what} encoding name \"{name}\""))),
+    })
+}
+
+fn invalid_utf8(b: &[u8], at: usize) -> SqlError {
+    let seq: Vec<String> = b[at..b.len().min(at + 2)].iter().map(|x| format!("0x{x:02x}")).collect();
+    SqlError::new("22021", format!("invalid byte sequence for encoding \"UTF8\": {}", seq.join(" ")))
+}
+
+/// Decodes `b` from `enc` into a string.
+fn decode_from(b: &[u8], enc: Encoding) -> SqlResult<String> {
+    match enc {
+        Encoding::Utf8 | Encoding::SqlAscii => match std::str::from_utf8(b) {
+            Ok(s) if !s.contains('\0') => Ok(s.to_owned()),
+            Ok(s) => Err(invalid_utf8(b, s.find('\0').unwrap_or(0))),
+            Err(e) => Err(invalid_utf8(b, e.valid_up_to())),
+        },
+        Encoding::Latin1 => Ok(b.iter().map(|&x| char::from(x)).collect()),
+    }
+}
+
+/// Encodes `s` into `enc`.
+fn encode_to(s: &str, enc: Encoding) -> SqlResult<Vec<u8>> {
+    match enc {
+        Encoding::Utf8 | Encoding::SqlAscii => Ok(s.as_bytes().to_vec()),
+        Encoding::Latin1 => s
+            .chars()
+            .map(|c| {
+                u8::try_from(u32::from(c)).map_err(|_| {
+                    let bytes: Vec<String> = c.to_string().bytes().map(|x| format!("0x{x:02x}")).collect();
+                    SqlError::new(
+                        "22P05",
+                        format!(
+                            "character with byte sequence {} in encoding \"UTF8\" has no equivalent in encoding \"LATIN1\"",
+                            bytes.join(" ")
+                        ),
+                    )
+                })
+            })
+            .collect(),
+    }
+}
+
+fn convert_to(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let enc = encoding(s(&a[1]), "destination")?;
+    Ok(Value::Bytea(encode_to(s(&a[0]), enc)?))
+}
+
+fn convert_from(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let enc = encoding(s(&a[1]), "source")?;
+    Ok(Value::Text(decode_from(bytes_of(&a[0]), enc)?))
+}
+
+fn convert(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let from = encoding(s(&a[1]), "source")?;
+    let to = encoding(s(&a[2]), "destination")?;
+    let text = decode_from(bytes_of(&a[0]), from)?;
+    Ok(Value::Bytea(encode_to(&text, to)?))
 }

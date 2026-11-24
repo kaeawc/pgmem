@@ -1,7 +1,7 @@
 //! `numeric`: arbitrary-precision decimal with Postgres' display-scale rules.
 //!
 //! A value is `mantissa / 10^scale` where `scale` is Postgres' `dscale` (the number of digits
-//! shown after the decimal point), plus NaN. Arithmetic follows `numeric.c`: addition keeps the
+//! shown after the decimal point), plus NaN and ±Infinity (Postgres 14+). Arithmetic follows `numeric.c`: addition keeps the
 //! larger scale, multiplication adds scales, and division picks its result scale with
 //! `select_div_scale` and rounds half away from zero.
 
@@ -20,6 +20,8 @@ const NUMERIC_MAX_PRECISION: u32 = 1000;
 pub enum Numeric {
     Value { mantissa: BigInt, scale: u32 },
     NaN,
+    PosInf,
+    NegInf,
 }
 
 fn pow10(n: u32) -> BigInt {
@@ -43,10 +45,23 @@ impl Numeric {
         matches!(self, Numeric::NaN)
     }
 
+    pub fn is_infinite(&self) -> bool {
+        matches!(self, Numeric::PosInf | Numeric::NegInf)
+    }
+
+    /// A finite value (neither NaN nor infinite).
+    pub fn is_finite(&self) -> bool {
+        matches!(self, Numeric::Value { .. })
+    }
+
+    fn inf(negative: bool) -> Numeric {
+        if negative { Numeric::NegInf } else { Numeric::PosInf }
+    }
+
     pub fn scale(&self) -> u32 {
         match self {
             Numeric::Value { scale, .. } => *scale,
-            Numeric::NaN => 0,
+            _ => 0,
         }
     }
 
@@ -57,8 +72,10 @@ impl Numeric {
         if s.eq_ignore_ascii_case("nan") {
             return Ok(Numeric::NaN);
         }
-        if s.eq_ignore_ascii_case("infinity") || s.eq_ignore_ascii_case("-infinity") || s.eq_ignore_ascii_case("+infinity") {
-            return Err(SqlError::feature_not_supported("numeric infinity is not supported by pgmem"));
+        match s.to_ascii_lowercase().as_str() {
+            "infinity" | "+infinity" | "inf" | "+inf" => return Ok(Numeric::PosInf),
+            "-infinity" | "-inf" => return Ok(Numeric::NegInf),
+            _ => {}
         }
         let (neg, body) = match s.as_bytes().first() {
             Some(b'-') => (true, &s[1..]),
@@ -102,12 +119,55 @@ impl Numeric {
             return Ok(Numeric::NaN);
         }
         if f.is_infinite() {
-            return Err(SqlError::feature_not_supported("cannot convert infinity to numeric"));
+            return Ok(Numeric::inf(f < 0.0));
         }
         // Postgres rounds to DBL_DIG (15) significant digits.
         let s = format!("{f:.prec$e}", prec = 14);
         let n = Numeric::parse(&s)?;
         Ok(n.strip_trailing_zeros())
+    }
+
+    /// `trim_scale`: the value with trailing fractional zeros removed.
+    pub fn trim_scale(&self) -> Numeric {
+        self.clone().strip_trailing_zeros()
+    }
+
+    /// `min_scale`: the smallest scale that represents the value exactly.
+    pub fn min_scale(&self) -> u32 {
+        self.trim_scale().scale()
+    }
+
+    /// `gcd(numeric, numeric)`: computed on both values at their common scale.
+    pub fn gcd(&self, other: &Numeric) -> Numeric {
+        match self.align(other) {
+            Some((a, b, s)) => Numeric::Value { mantissa: a.gcd(&b), scale: s },
+            None => Numeric::NaN,
+        }
+    }
+
+    /// `lcm(numeric, numeric)`.
+    pub fn lcm(&self, other: &Numeric) -> Numeric {
+        match self.align(other) {
+            Some((a, b, s)) if a.is_zero() || b.is_zero() => Numeric::Value { mantissa: BigInt::zero(), scale: s },
+            Some((a, b, s)) => Numeric::Value { mantissa: a.lcm(&b), scale: s },
+            None => Numeric::NaN,
+        }
+    }
+
+    /// `factorial(n)`.
+    pub fn factorial(n: i64) -> SqlResult<Numeric> {
+        if n < 0 {
+            return Err(SqlError::new(code::NUMERIC_VALUE_OUT_OF_RANGE, "factorial of a negative number is undefined"));
+        }
+        // 32177! is the largest factorial below numeric's 131072-digit limit.
+        if n > 32177 {
+            return Err(SqlError::new(code::NUMERIC_VALUE_OUT_OF_RANGE, "value overflows numeric format"));
+        }
+        let mut acc = BigInt::one();
+        for i in 2..=n {
+            acc *= i;
+        }
+        Ok(Numeric::Value { mantissa: acc, scale: 0 })
     }
 
     fn strip_trailing_zeros(self) -> Numeric {
@@ -127,6 +187,8 @@ impl Numeric {
     pub fn to_f64(&self) -> f64 {
         match self {
             Numeric::NaN => f64::NAN,
+            Numeric::PosInf => f64::INFINITY,
+            Numeric::NegInf => f64::NEG_INFINITY,
             Numeric::Value { .. } => self.to_string().parse().unwrap_or(f64::NAN),
         }
     }
@@ -135,7 +197,7 @@ impl Numeric {
     pub fn to_i64(&self) -> Option<i64> {
         match self.round(0) {
             Numeric::Value { mantissa, .. } => mantissa.to_i64(),
-            Numeric::NaN => None,
+            _ => None,
         }
     }
 
@@ -150,17 +212,20 @@ impl Numeric {
     }
 
     pub fn add(&self, other: &Numeric) -> Numeric {
-        match self.align(other) {
-            Some((a, b, s)) => Numeric::Value { mantissa: a + b, scale: s },
-            None => Numeric::NaN,
+        use Numeric::{NaN, NegInf, PosInf};
+        match (self, other) {
+            (NaN, _) | (_, NaN) | (PosInf, NegInf) | (NegInf, PosInf) => NaN,
+            (PosInf, _) | (_, PosInf) => PosInf,
+            (NegInf, _) | (_, NegInf) => NegInf,
+            _ => match self.align(other) {
+                Some((a, b, s)) => Numeric::Value { mantissa: a + b, scale: s },
+                None => NaN,
+            },
         }
     }
 
     pub fn sub(&self, other: &Numeric) -> Numeric {
-        match self.align(other) {
-            Some((a, b, s)) => Numeric::Value { mantissa: a - b, scale: s },
-            None => Numeric::NaN,
-        }
+        self.add(&other.neg())
     }
 
     pub fn mul(&self, other: &Numeric) -> Numeric {
@@ -168,7 +233,10 @@ impl Numeric {
             (Numeric::Value { mantissa: a, scale: sa }, Numeric::Value { mantissa: b, scale: sb }) => {
                 Numeric::Value { mantissa: a * b, scale: sa + sb }
             }
-            _ => Numeric::NaN,
+            (Numeric::NaN, _) | (_, Numeric::NaN) => Numeric::NaN,
+            // Infinity times zero is NaN; otherwise the signs multiply.
+            _ if self.signum() == 0 || other.signum() == 0 => Numeric::NaN,
+            _ => Numeric::inf(self.signum() * other.signum() < 0),
         }
     }
 
@@ -176,13 +244,16 @@ impl Numeric {
         match self {
             Numeric::Value { mantissa, scale } => Numeric::Value { mantissa: -mantissa.clone(), scale: *scale },
             Numeric::NaN => Numeric::NaN,
+            Numeric::PosInf => Numeric::NegInf,
+            Numeric::NegInf => Numeric::PosInf,
         }
     }
 
     pub fn abs(&self) -> Numeric {
         match self {
             Numeric::Value { mantissa, scale } => Numeric::Value { mantissa: mantissa.abs(), scale: *scale },
-            Numeric::NaN => Numeric::NaN,
+            Numeric::NegInf => Numeric::PosInf,
+            other => other.clone(),
         }
     }
 
@@ -198,6 +269,8 @@ impl Numeric {
                 Sign::Plus => 1,
             },
             Numeric::NaN => 0,
+            Numeric::PosInf => 1,
+            Numeric::NegInf => -1,
         }
     }
 
@@ -240,8 +313,22 @@ impl Numeric {
         if other.is_zero() {
             return Err(SqlError::division_by_zero());
         }
+        if let Some(v) = self.div_special(other) {
+            return Ok(v);
+        }
         let rscale = self.div_scale(other);
         Ok(self.div_to_scale(other, rscale))
+    }
+
+    /// Division involving an infinity (the divisor is known to be nonzero and neither is NaN):
+    /// inf/inf is NaN, inf/x is a signed infinity, x/inf is zero.
+    fn div_special(&self, other: &Numeric) -> Option<Numeric> {
+        match (self.is_infinite(), other.is_infinite()) {
+            (true, true) => Some(Numeric::NaN),
+            (true, false) => Some(Numeric::inf(self.signum() * other.signum() < 0)),
+            (false, true) => Some(Numeric::zero()),
+            (false, false) => None,
+        }
     }
 
     /// Exact division rounded half away from zero to `rscale` digits.
@@ -261,8 +348,14 @@ impl Numeric {
 
     /// Truncating integer division (`div(a, b)`).
     pub fn div_trunc(&self, other: &Numeric) -> SqlResult<Numeric> {
+        if self.is_nan() || other.is_nan() {
+            return Ok(Numeric::NaN);
+        }
         if other.is_zero() {
             return Err(SqlError::division_by_zero());
+        }
+        if let Some(v) = self.div_special(other) {
+            return Ok(v);
         }
         match self.align(other) {
             Some((a, b, _)) => Ok(Numeric::Value { mantissa: a / b, scale: 0 }),
@@ -272,8 +365,18 @@ impl Numeric {
 
     /// `mod(a, b)`: sign follows the dividend.
     pub fn rem(&self, other: &Numeric) -> SqlResult<Numeric> {
+        if self.is_nan() || other.is_nan() {
+            return Ok(Numeric::NaN);
+        }
         if other.is_zero() {
             return Err(SqlError::division_by_zero());
+        }
+        // mod(inf, x) is NaN; mod(x, inf) is x.
+        if self.is_infinite() {
+            return Ok(Numeric::NaN);
+        }
+        if other.is_infinite() {
+            return Ok(self.clone());
         }
         match self.align(other) {
             Some((a, b, s)) => Ok(Numeric::Value { mantissa: a % b, scale: s }),
@@ -292,7 +395,7 @@ impl Numeric {
     }
 
     fn rescale(&self, s: i32, round: bool) -> Numeric {
-        let Numeric::Value { mantissa, scale } = self else { return Numeric::NaN };
+        let Numeric::Value { mantissa, scale } = self else { return self.clone() };
         let target = i64::from(s);
         let cur = i64::from(*scale);
         if target >= cur {
@@ -320,19 +423,25 @@ impl Numeric {
         if self.signum() < 0 && t.cmp_num(self) != Ordering::Equal { t.sub(&Numeric::from_i64(1)) } else { t }
     }
 
-    /// Applies a `numeric(precision, scale)` type modifier, as on assignment to a column.
-    pub fn apply_typmod(&self, precision: u32, scale: u32) -> SqlResult<Numeric> {
-        if precision > NUMERIC_MAX_PRECISION {
+    /// Applies a `numeric(precision, scale)` type modifier, as on assignment to a column. The
+    /// scale may be negative (rounding left of the decimal point) or exceed the precision.
+    pub fn apply_typmod(&self, precision: i32, scale: i32) -> SqlResult<Numeric> {
+        if !(1..=NUMERIC_MAX_PRECISION as i32).contains(&precision) {
             return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, format!("NUMERIC precision {precision} must be between 1 and 1000")));
         }
-        let rounded = self.round(i32::try_from(scale).unwrap_or(0));
-        if let Numeric::Value { mantissa, .. } = &rounded
+        if self.is_infinite() {
+            return Err(SqlError::new(code::NUMERIC_VALUE_OUT_OF_RANGE, "numeric field overflow")
+                .with_detail(format!("A field with precision {precision}, scale {scale} cannot hold an infinite value.")));
+        }
+        let rounded = self.round(scale);
+        if let Numeric::Value { mantissa, scale: shown } = &rounded
             && !mantissa.is_zero()
         {
-            let digits = u32::try_from(mantissa.abs().to_string().len()).unwrap_or(u32::MAX);
-            let int_digits = digits.saturating_sub(scale);
-            if int_digits > precision - scale {
-                let max_int = precision - scale;
+            // Digits left of the decimal point (a negative scale leaves `shown` at 0).
+            let digits = i64::try_from(mantissa.abs().to_string().len()).unwrap_or(i64::MAX);
+            let int_digits = digits - i64::from(*shown);
+            let max_int = i64::from(precision) - i64::from(scale);
+            if int_digits > max_int {
                 return Err(SqlError::new(code::NUMERIC_VALUE_OUT_OF_RANGE, "numeric field overflow").with_detail(format!(
                     "A field with precision {precision}, scale {scale} must round to an absolute value less than {}.",
                     if max_int == 0 { "1".to_owned() } else { format!("10^{max_int}") }
@@ -342,16 +451,19 @@ impl Numeric {
         Ok(rounded)
     }
 
-    /// Postgres numeric ordering: NaN is greater than every number and equal to itself.
+    /// Postgres numeric ordering: -Infinity < numbers < Infinity < NaN (NaN equals itself).
     pub fn cmp_num(&self, other: &Numeric) -> Ordering {
-        match (self, other) {
-            (Numeric::NaN, Numeric::NaN) => Ordering::Equal,
-            (Numeric::NaN, _) => Ordering::Greater,
-            (_, Numeric::NaN) => Ordering::Less,
-            _ => match self.align(other) {
-                Some((a, b, _)) => a.cmp(&b),
-                None => Ordering::Equal,
-            },
+        fn rank(n: &Numeric) -> u8 {
+            match n {
+                Numeric::NegInf => 0,
+                Numeric::Value { .. } => 1,
+                Numeric::PosInf => 2,
+                Numeric::NaN => 3,
+            }
+        }
+        match self.align(other) {
+            Some((a, b, _)) => a.cmp(&b),
+            None => rank(self).cmp(&rank(other)),
         }
     }
 
@@ -362,8 +474,8 @@ impl Numeric {
 
     /// `sqrt(numeric)` with Postgres' result scale rule.
     pub fn sqrt(&self) -> SqlResult<Numeric> {
-        if self.is_nan() {
-            return Ok(Numeric::NaN);
+        if self.is_nan() || *self == Numeric::PosInf {
+            return Ok(self.clone());
         }
         if self.signum() < 0 {
             return Err(SqlError::new("2201F", "cannot take square root of a negative number"));
@@ -390,9 +502,14 @@ impl Numeric {
     pub fn to_binary(&self) -> Vec<u8> {
         let mut out = Vec::new();
         let Numeric::Value { mantissa, scale } = self else {
+            let sign: u16 = match self {
+                Numeric::PosInf => 0xD000,
+                Numeric::NegInf => 0xF000,
+                _ => 0xC000,
+            };
             out.extend_from_slice(&0i16.to_be_bytes());
             out.extend_from_slice(&0i16.to_be_bytes());
-            out.extend_from_slice(&0xC000u16.to_be_bytes());
+            out.extend_from_slice(&sign.to_be_bytes());
             out.extend_from_slice(&0u16.to_be_bytes());
             return out;
         };
@@ -449,8 +566,11 @@ impl Numeric {
         let weight = rd(2)? as i16;
         let sign = rd(4)?;
         let dscale = rd(6)?;
-        if sign == 0xC000 {
-            return Ok(Numeric::NaN);
+        match sign {
+            0xC000 => return Ok(Numeric::NaN),
+            0xD000 => return Ok(Numeric::PosInf),
+            0xF000 => return Ok(Numeric::NegInf),
+            _ => {}
         }
         let mut mantissa = BigInt::zero();
         for i in 0..ndigits {
@@ -488,6 +608,8 @@ impl fmt::Display for Numeric {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Numeric::NaN => f.write_str("NaN"),
+            Numeric::PosInf => f.write_str("Infinity"),
+            Numeric::NegInf => f.write_str("-Infinity"),
             Numeric::Value { mantissa, scale } => {
                 let neg = mantissa.sign() == Sign::Minus;
                 let abs = mantissa.abs().to_string();
@@ -546,11 +668,27 @@ mod tests {
     fn typmod() {
         assert_eq!(n("3.14159").apply_typmod(5, 2).expect("ok").to_string(), "3.14");
         assert_eq!(n("1000").apply_typmod(5, 2).expect_err("overflow").code, "22003");
+        assert_eq!(n("12345").apply_typmod(5, -2).expect("ok").to_string(), "12300");
+        assert_eq!(n("0.0123").apply_typmod(3, 4).expect("ok").to_string(), "0.0123");
+        assert_eq!(n("0.123").apply_typmod(3, 4).expect_err("overflow").code, "22003");
+        assert_eq!(n("Infinity").apply_typmod(5, 2).expect_err("overflow").code, "22003");
+    }
+
+    #[test]
+    fn infinities() {
+        assert_eq!(n("inf").add(&n("1")).to_string(), "Infinity");
+        assert_eq!(n("inf").add(&n("-inf")).to_string(), "NaN");
+        assert_eq!(n("-inf").mul(&n("-2")).to_string(), "Infinity");
+        assert_eq!(n("inf").mul(&n("0")).to_string(), "NaN");
+        assert_eq!(n("1").div(&n("inf")).expect("div").to_string(), "0");
+        assert_eq!(n("inf").cmp_num(&n("1e100")), Ordering::Greater);
+        assert_eq!(n("NaN").cmp_num(&n("inf")), Ordering::Greater);
+        assert_eq!(n("-inf").cmp_num(&n("-1e100")), Ordering::Less);
     }
 
     #[test]
     fn binary_round_trip() {
-        for s in ["0", "1", "-1.50", "12345.6789", "0.0001", "100000000", "3.14159265358979", "NaN", "0.000"] {
+        for s in ["0", "1", "-1.50", "12345.6789", "0.0001", "100000000", "3.14159265358979", "NaN", "0.000", "Infinity", "-Infinity"] {
             let v = n(s);
             let back = Numeric::from_binary(&v.to_binary()).expect("decode");
             assert_eq!(back.to_string(), v.to_string(), "{s}");

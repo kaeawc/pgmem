@@ -524,6 +524,8 @@ pub enum Rel {
         input: Box<Rel>,
         limit: Option<Expr>,
         offset: Option<Expr>,
+        /// WITH TIES: also emit following rows equal to the last one on these keys.
+        ties: Option<Vec<SortKey>>,
     },
     Distinct {
         input: Box<Rel>,

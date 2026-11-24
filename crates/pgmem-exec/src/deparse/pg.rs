@@ -128,8 +128,8 @@ pub fn format_type(t: &Type, typmod: i32) -> String {
         Type::Bpchar => format!("character({})", typmod - 4),
         Type::Varchar if typmod >= 4 => format!("character varying({})", typmod - 4),
         Type::Numeric if typmod >= 4 => {
-            let m = typmod - 4;
-            format!("numeric({},{})", (m >> 16) & 0xffff, m & 0xffff)
+            let (p, s) = crate::cast::numeric_typmod_parts(typmod);
+            format!("numeric({p},{s})")
         }
         other => other.name(),
     }

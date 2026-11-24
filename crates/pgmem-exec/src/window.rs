@@ -4,7 +4,7 @@ use crate::agg::aggregate_rows;
 use crate::eval::{EvalCtx, eval};
 use crate::plan::{FrameBound, FrameUnits, Row, WinCall, WinKind};
 use crate::run::compare_sort;
-use pgmem_types::{GroupKey, SqlError, SqlResult, Value, code};
+use pgmem_types::{GroupKey, SqlError, SqlResult, Value};
 use std::cmp::Ordering;
 
 /// Appends one column per window call to every row, keeping the input order.
@@ -142,11 +142,9 @@ fn compute_partition(
             #[allow(clippy::cast_precision_loss)]
             WinKind::CumeDist => Value::Float8(peer_end[pos] as f64 / len as f64),
             WinKind::Ntile => {
-                let buckets = arg(pos, 0)?
-                    .as_i64()
-                    .ok_or_else(|| SqlError::new(code::INVALID_PARAMETER_VALUE, "argument of ntile must be greater than zero"))?;
+                let buckets = arg(pos, 0)?.as_i64().ok_or_else(|| SqlError::new("22014", "argument of ntile must be greater than zero"))?;
                 if buckets <= 0 {
-                    return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, "argument of ntile must be greater than zero"));
+                    return Err(SqlError::new("22014", "argument of ntile must be greater than zero"));
                 }
                 let b = usize::try_from(buckets).unwrap_or(usize::MAX);
                 let per = len / b;

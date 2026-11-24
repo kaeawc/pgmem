@@ -6,7 +6,7 @@ use pgmem_ir::{
     Cte, Distinct, Expr, FrameBound, FrameExclude, FrameUnits, FunctionCall, JoinConstraint, JoinKind, LockClause, LockStrength,
     NamedWindow, OrderByExpr, Query, Select, SelectItem, SetExpr, SetOperator, TableAlias, TableRef, WindowFrame, WindowSpec, With,
 };
-use pgmem_types::{SqlError, SqlResult};
+use pgmem_types::{SqlError, SqlResult, code};
 use sqlparser::ast as sq;
 
 pub(crate) fn lower_query(q: sq::Query) -> SqlResult<Query> {
@@ -34,10 +34,15 @@ pub(crate) fn lower_query(q: sq::Query) -> SqlResult<Query> {
         }
         Some(sq::LimitClause::OffsetCommaLimit { .. }) => return Err(SqlError::syntax("LIMIT #,# syntax is not supported")),
     }
+    let mut with_ties = false;
     if let Some(fetch) = q.fetch {
-        if fetch.percent || fetch.with_ties {
-            return Err(unsupported("FETCH ... PERCENT / WITH TIES"));
+        if fetch.percent {
+            return Err(unsupported("FETCH ... PERCENT"));
         }
+        if fetch.with_ties && order_by.is_empty() {
+            return Err(SqlError::syntax("WITH TIES cannot be specified without ORDER BY clause"));
+        }
+        with_ties = fetch.with_ties;
         limit = Some(match fetch.quantity {
             Some(e) => lower_expr(e)?,
             None => Expr::Literal(pgmem_ir::Literal::Integer("1".into())),
@@ -58,7 +63,7 @@ pub(crate) fn lower_query(q: sq::Query) -> SqlResult<Query> {
             })
         })
         .collect::<SqlResult<Vec<_>>>()?;
-    Ok(Query { with, body, order_by, limit, offset, locking })
+    Ok(Query { with, body, order_by, limit, offset, with_ties, locking })
 }
 
 /// `LIMIT ALL` and `LIMIT NULL` both mean "no limit".
@@ -185,6 +190,20 @@ fn lower_select_item(item: sq::SelectItem) -> SqlResult<SelectItem> {
 pub(crate) fn lower_table_with_joins(t: sq::TableWithJoins) -> SqlResult<TableRef> {
     let mut left = lower_table_factor(t.relation)?;
     for join in t.joins {
+        // `a JOIN b` needs ON/USING (sqlparser accepts it bare).
+        if matches!(
+            join.join_operator,
+            sq::JoinOperator::Join(sq::JoinConstraint::None)
+                | sq::JoinOperator::Inner(sq::JoinConstraint::None)
+                | sq::JoinOperator::Left(sq::JoinConstraint::None)
+                | sq::JoinOperator::LeftOuter(sq::JoinConstraint::None)
+                | sq::JoinOperator::Right(sq::JoinConstraint::None)
+                | sq::JoinOperator::RightOuter(sq::JoinConstraint::None)
+                | sq::JoinOperator::FullOuter(sq::JoinConstraint::None)
+        ) {
+            use sqlparser::ast::Spanned;
+            return Err(crate::syntax_error_at(join.relation.span().end));
+        }
         let right = lower_table_factor(join.relation)?;
         let (kind, constraint) = match join.join_operator {
             sq::JoinOperator::Join(c) | sq::JoinOperator::Inner(c) => (JoinKind::Inner, c),
@@ -194,6 +213,7 @@ pub(crate) fn lower_table_with_joins(t: sq::TableWithJoins) -> SqlResult<TableRe
             sq::JoinOperator::CrossJoin(c) => (JoinKind::Cross, c),
             _ => return Err(unsupported("this join type")),
         };
+        let mut using_alias = None;
         let constraint = match constraint {
             sq::JoinConstraint::On(e) => JoinConstraint::On(lower_expr(e)?),
             sq::JoinConstraint::Using(cols) => {
@@ -201,9 +221,12 @@ pub(crate) fn lower_table_with_joins(t: sq::TableWithJoins) -> SqlResult<TableRe
             }
             sq::JoinConstraint::Natural => JoinConstraint::Natural,
             sq::JoinConstraint::None => JoinConstraint::None,
-            sq::JoinConstraint::UsingAlias(..) => return Err(unsupported("USING ... AS alias")),
+            sq::JoinConstraint::UsingAlias(cols, alias) => {
+                using_alias = Some(ident(&alias));
+                JoinConstraint::Using(cols.iter().map(|c| object_name(c).map(|n| n.base().to_owned())).collect::<SqlResult<Vec<_>>>()?)
+            }
         };
-        left = TableRef::Join { left: Box::new(left), right: Box::new(right), kind, constraint };
+        left = TableRef::Join { left: Box::new(left), right: Box::new(right), kind, constraint, using_alias, alias: None };
     }
     Ok(left)
 }
@@ -258,10 +281,14 @@ fn lower_table_factor(f: sq::TableFactor) -> SqlResult<TableRef> {
             _ => return Err(unsupported("this table function")),
         },
         sq::TableFactor::NestedJoin { table_with_joins, alias } => {
-            if alias.is_some() {
-                return Err(unsupported("aliased parenthesized joins"));
+            let inner = lower_table_with_joins(*table_with_joins)?;
+            match (inner, lower_alias(alias)) {
+                (TableRef::Join { left, right, kind, constraint, using_alias, .. }, Some(a)) => {
+                    TableRef::Join { left, right, kind, constraint, using_alias, alias: Some(a) }
+                }
+                (inner, None) => inner,
+                (_, Some(_)) => return Err(unsupported("aliased parenthesized FROM item")),
             }
-            lower_table_with_joins(*table_with_joins)?
         }
         _ => return Err(unsupported("this FROM item")),
     })
@@ -296,15 +323,26 @@ pub(crate) fn lower_window_spec(spec: sq::WindowSpec) -> SqlResult<WindowSpec> {
                     sq::WindowFrameBound::Following(Some(e)) => FrameBound::Following(Box::new(lower_expr(*e)?)),
                 })
             };
-            Ok(WindowFrame {
-                units,
-                start: bound(f.start_bound)?,
-                end: match f.end_bound {
-                    Some(e) => bound(e)?,
-                    None => FrameBound::CurrentRow,
-                },
-                exclude: FrameExclude::NoOthers,
-            })
+            let start = bound(f.start_bound)?;
+            let end = match f.end_bound {
+                Some(e) => bound(e)?,
+                None => FrameBound::CurrentRow,
+            };
+            // The frame-bound combinations Postgres' grammar rejects (42P20).
+            let invalid = match (&start, &end) {
+                (FrameBound::UnboundedFollowing, _) => Some("frame start cannot be UNBOUNDED FOLLOWING"),
+                (_, FrameBound::UnboundedPreceding) => Some("frame end cannot be UNBOUNDED PRECEDING"),
+                (FrameBound::CurrentRow, FrameBound::Preceding(_)) => Some("frame starting from current row cannot have preceding rows"),
+                (FrameBound::Following(_), FrameBound::CurrentRow) => Some("frame starting from following row cannot end with current row"),
+                (FrameBound::Following(_), FrameBound::Preceding(_)) => {
+                    Some("frame starting from following row cannot have preceding rows")
+                }
+                _ => None,
+            };
+            if let Some(msg) = invalid {
+                return Err(SqlError::new(code::WINDOWING_ERROR, msg));
+            }
+            Ok(WindowFrame { units, start, end, exclude: FrameExclude::NoOthers })
         })
         .transpose()?;
     Ok(WindowSpec {

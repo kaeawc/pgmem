@@ -253,10 +253,15 @@ impl Binder<'_> {
 
 /// Finds the unique index matching an ON CONFLICT column list (order-insensitive), as
 /// Postgres' `infer_arbiter_indexes` does.
-fn arbiter_for(rules: &RowRules, table: &TableDef, target: &ir::ConflictTarget) -> SqlResult<Option<UniqueCheck>> {
+fn arbiter_for(b: &Binder, rules: &RowRules, table: &Arc<TableDef>, target: &ir::ConflictTarget) -> SqlResult<Option<UniqueCheck>> {
     match target {
         ir::ConflictTarget::None => Ok(None),
-        ir::ConflictTarget::Columns { columns, .. } => {
+        ir::ConflictTarget::Columns { columns, selection } => {
+            // A partial unique index is only inferred when the ON CONFLICT WHERE clause
+            // matches its predicate (Postgres accepts any clause that implies it).
+            let row_level = Level::new(physical_scope(table, &table.name));
+            let row_ctx = Ctx::new(&row_level).with_clause(Clause::Check);
+            let selection = selection.as_ref().map(|s| b.bind_predicate(s, "WHERE", &row_ctx)).transpose()?;
             let mut wanted = Vec::new();
             for c in columns {
                 wanted.push(table.column_index(c).ok_or_else(|| SqlError::undefined_column(&format!("\"{c}\"")))?);
@@ -267,7 +272,7 @@ fn arbiter_for(rules: &RowRules, table: &TableDef, target: &ir::ConflictTarget) 
                 .uniques
                 .iter()
                 .find(|u| {
-                    u.exprs.is_empty() && {
+                    u.exprs.is_empty() && (u.predicate.is_none() || u.predicate == selection) && {
                         let mut cols = u.columns.clone();
                         cols.sort_unstable();
                         cols == wanted
@@ -300,7 +305,7 @@ pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<Inser
             let idx =
                 table.column_index(c).ok_or_else(|| SqlError::undefined_column(&format!("\"{c}\" of relation \"{}\"", table.name)))?;
             if out.contains(&idx) {
-                return Err(SqlError::syntax(format!("column \"{c}\" specified more than once")));
+                return Err(SqlError::new(code::DUPLICATE_COLUMN, format!("column \"{c}\" specified more than once")));
             }
             out.push(idx);
         }
@@ -360,7 +365,7 @@ pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<Inser
     let on_conflict = match &ins.on_conflict {
         None => None,
         Some(oc) => {
-            let arbiter = arbiter_for(&rules, &table, &oc.target)?;
+            let arbiter = arbiter_for(b, &rules, &table, &oc.target)?;
             let update = match &oc.action {
                 ir::ConflictAction::Nothing => None,
                 ir::ConflictAction::Update { assignments, selection } => {

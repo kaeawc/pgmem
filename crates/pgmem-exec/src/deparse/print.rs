@@ -753,7 +753,7 @@ impl Printer {
                 self.push(&format!(" {}", quote_ident(refname)));
                 self.column_aliases(colnames);
             }
-            FromItem::Join { left, right, kind, on, using } => {
+            FromItem::Join { left, right, kind, on, using, using_alias, alias } => {
                 self.push("(");
                 self.print_from_item(left);
                 let kw = match kind {
@@ -768,6 +768,9 @@ impl Printer {
                 if !using.is_empty() {
                     let names: Vec<String> = using.iter().map(|c| quote_ident(c)).collect();
                     self.push(&format!(" USING ({})", names.join(", ")));
+                    if let Some(a) = using_alias {
+                        self.push(&format!(" AS {}", quote_ident(a)));
+                    }
                 } else if let Some(on) = on {
                     self.push(" ON (");
                     self.expr(on, false);
@@ -776,6 +779,14 @@ impl Printer {
                     self.push(" ON TRUE");
                 }
                 self.push(")");
+                if let Some((name, cols)) = alias {
+                    self.push(" ");
+                    self.push(&quote_ident(name));
+                    if !cols.is_empty() {
+                        let names: Vec<String> = cols.iter().map(|c| quote_ident(c)).collect();
+                        self.push(&format!("({})", names.join(", ")));
+                    }
+                }
             }
         }
     }

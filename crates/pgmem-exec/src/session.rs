@@ -299,7 +299,8 @@ impl Session {
             Some(t) => crate::usertypes::registry(t.catalog()),
             None => crate::usertypes::registry(&self.db.current().catalog),
         };
-        Context { zone, date_order, now: self.clock.now_micros(), types }
+        let bytea_escape = self.settings.get("bytea_output").is_some_and(|v| v.eq_ignore_ascii_case("escape"));
+        Context { zone, date_order, now: self.clock.now_micros(), types, bytea_escape }
     }
 
     /// Analyzes a statement without running it: parameter types and result columns.

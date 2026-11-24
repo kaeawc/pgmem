@@ -436,8 +436,13 @@ impl Binder<'_> {
             }
             ir::Expr::InList { expr, list, negated } => self.bind_in_list(expr, list, *negated, ctx),
             ir::Expr::InSubquery { expr, query, negated } => {
+                if let ir::Expr::Row(items) = &**expr {
+                    return self.bind_row_in_subquery(items, query, *negated, ctx);
+                }
                 let (probe, pt) = self.bind_expr(expr, ctx)?;
-                let (plan, ct, correlated) = self.bind_subquery_column(query, ctx)?;
+                let (plan, ct, correlated) = self.bind_subquery_column(query, ctx).map_err(|e| {
+                    if e.message == "subquery must return only one column" { SqlError::syntax("subquery has too many columns") } else { e }
+                })?;
                 let t = common_type(&pt, &ct).ok_or_else(|| funcs::no_operator("=", Some(&pt), &ct))?;
                 let probe = coerce(self, probe, &pt, &t, CoercionContext::Implicit)?;
                 let plan = cast_plan_column(plan, &ct, &t);
@@ -650,7 +655,27 @@ impl Binder<'_> {
             }
         }
         match qualifier {
-            Some(q) if !qualifier_seen => Err(SqlError::new(code::UNDEFINED_TABLE, format!("missing FROM-clause entry for table \"{q}\""))),
+            Some(q) if !qualifier_seen => {
+                // `FROM t AS x` hides the name t: Postgres points at the alias.
+                for level in ctx.levels.iter().rev() {
+                    let aliased = level.scope.cols.iter().find(|c| {
+                        c.table_oid != 0
+                            && c.qualifier.as_deref() != Some(q)
+                            && self.catalog.table_by_oid(c.table_oid).is_some_and(|t| t.name == q)
+                    });
+                    if let Some(c) = aliased {
+                        return Err(SqlError::new(
+                            code::UNDEFINED_TABLE,
+                            format!("invalid reference to FROM-clause entry for table \"{q}\""),
+                        )
+                        .with_hint(format!(
+                            "Perhaps you meant to reference the table alias \"{}\".",
+                            c.qualifier.as_deref().unwrap_or("")
+                        )));
+                    }
+                }
+                Err(SqlError::new(code::UNDEFINED_TABLE, format!("missing FROM-clause entry for table \"{q}\"")))
+            }
             Some(q) => Err(SqlError::undefined_column(&format!("{q}.{name}"))),
             None => Err(SqlError::undefined_column(&format!("\"{name}\""))),
         }
@@ -759,7 +784,7 @@ impl Binder<'_> {
     }
 
     fn bind_any_all(&self, left: &ir::Expr, op: &str, right: &ir::AnyAllRight, all: bool, ctx: &Ctx) -> SqlResult<Bound> {
-        let cmp = comparison(op).ok_or_else(|| feature(&format!("operator {op} with ANY/ALL")))?;
+        let Some(cmp) = comparison(op) else { return self.bind_any_all_operator(left, op, right, all, ctx) };
         let (l, lt) = self.bind_expr(left, ctx)?;
         match right {
             ir::AnyAllRight::Array(arr) => {
@@ -1155,6 +1180,89 @@ impl Binder<'_> {
         let nested = ctx.nested(&level);
         let bound = self.bind_query(q, &nested)?;
         Ok((bound.rel, level.correlated.get()))
+    }
+
+    /// `x op ANY/ALL (...)` for a boolean operator other than a comparison (`~~`, `~`, `@>`...):
+    /// the operator is resolved on the left type and the element type.
+    fn bind_any_all_operator(&self, left: &ir::Expr, op: &str, right: &ir::AnyAllRight, all: bool, ctx: &Ctx) -> SqlResult<Bound> {
+        let (l, lt) = self.bind_expr(left, ctx)?;
+        let check = |res: &funcs::Resolved| {
+            if res.ret == Type::Bool {
+                Ok(())
+            } else {
+                Err(SqlError::datatype_mismatch("op ANY/ALL (array) requires operator to yield boolean"))
+            }
+        };
+        match right {
+            ir::AnyAllRight::Array(arr) => {
+                let (a, at) = self.bind_expr(arr, ctx)?;
+                let elem = match &at {
+                    Type::Array(e) => (**e).clone(),
+                    Type::Unknown => Type::Unknown,
+                    other => {
+                        return Err(SqlError::datatype_mismatch(format!(
+                            "op ANY/ALL (array) requires array on right side, not {}",
+                            other.name()
+                        )));
+                    }
+                };
+                let res = funcs::resolve_binary(op, &lt, &elem)?;
+                check(&res)?;
+                let l = coerce(self, l, &lt, &res.args[0], CoercionContext::Implicit)?;
+                let a = coerce(self, a, &at, &Type::array_of(res.args[1].clone()), CoercionContext::Implicit)?;
+                Ok((Expr::AnyAll { left: Box::new(l), array: Box::new(a), cmp: res.func, all }, Type::Bool))
+            }
+            ir::AnyAllRight::Subquery(q) => {
+                let (plan, ct, correlated) = self.bind_subquery_column(q, ctx)?;
+                let res = funcs::resolve_binary(op, &lt, &ct)?;
+                check(&res)?;
+                let l = coerce(self, l, &lt, &res.args[0], CoercionContext::Implicit)?;
+                let plan = cast_plan_column(plan, &ct, &res.args[1]);
+                let kind = SubqueryKind::Quantified { probe: Box::new(l), cmp: res.func, all };
+                Ok((Expr::Subquery { id: self.fresh_id(), plan: Box::new(plan), kind, correlated }, Type::Bool))
+            }
+        }
+    }
+
+    /// `(a, b) IN (SELECT x, y ...)`: compares row values against the subquery's rows.
+    fn bind_row_in_subquery(&self, items: &[ir::Expr], q: &ir::Query, negated: bool, ctx: &Ctx) -> SqlResult<Bound> {
+        let level = Level::new(super::Scope::default());
+        let nested = ctx.nested(&level);
+        let bound = self.bind_query(q, &nested)?;
+        match bound.columns.len().cmp(&items.len()) {
+            std::cmp::Ordering::Greater => return Err(SqlError::syntax("subquery has too many columns")),
+            std::cmp::Ordering::Less => return Err(SqlError::syntax("subquery has too few columns")),
+            std::cmp::Ordering::Equal => {}
+        }
+        let mut probe = Vec::new();
+        let mut cols = Vec::new();
+        let mut types = Vec::new();
+        for (i, (item, c)) in items.iter().zip(&bound.columns).enumerate() {
+            let (e, t) = self.bind_expr(item, ctx)?;
+            let common = common_type(&t, &c.ty).ok_or_else(|| funcs::no_operator("=", Some(&t), &c.ty))?;
+            probe.push(coerce(self, e, &t, &common, CoercionContext::Implicit)?);
+            cols.push(if c.ty == common {
+                Expr::Col(i)
+            } else {
+                Expr::Cast { expr: Box::new(Expr::Col(i)), to: common.clone(), typmod: -1 }
+            });
+            types.push(common);
+        }
+        let plan = crate::plan::Rel::Project {
+            input: Box::new(bound.rel),
+            exprs: vec![Expr::Row { fields: cols, types: types.clone(), type_oid: RECORD_OID }],
+        };
+        let sub = Expr::Subquery {
+            id: self.fresh_id(),
+            plan: Box::new(plan),
+            kind: SubqueryKind::Quantified {
+                probe: Box::new(Expr::Row { fields: probe, types, type_oid: RECORD_OID }),
+                cmp: EQ,
+                all: false,
+            },
+            correlated: level.correlated.get(),
+        };
+        Ok((if negated { Expr::Not(Box::new(sub)) } else { sub }, Type::Bool))
     }
 
     fn bind_subquery_column(&self, q: &ir::Query, ctx: &Ctx) -> SqlResult<(crate::plan::Rel, Type, bool)> {

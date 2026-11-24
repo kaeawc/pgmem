@@ -417,8 +417,14 @@ pub fn resolve_operator(op: &str, l: &Type, r: &Type) -> SqlResult<Option<Resolv
                 let t = super::common_type(l, r).ok_or_else(|| no_operator(op, Some(l), r))?;
                 resolved(super::lenient("||", array_cat), vec![t.clone(), t.clone()], t)
             } else if la {
+                if super::common_type(&elem_of(l), r).is_none() {
+                    return Err(no_operator(op, Some(l), r));
+                }
                 resolved(super::lenient("||", array_append), vec![l.clone(), elem_of(l)], l.clone())
             } else {
+                if *l != Type::Unknown && super::common_type(l, &elem_of(r)).is_none() {
+                    return Err(no_operator(op, Some(l), r));
+                }
                 resolved(super::lenient("||", array_prepend), vec![elem_of(r), r.clone()], r.clone())
             }
         }
