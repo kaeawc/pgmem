@@ -9,6 +9,7 @@ pub mod datetime;
 pub mod json;
 pub mod math;
 pub mod misc;
+pub mod sqljson;
 pub mod string;
 
 use crate::cast::{CoercionContext, can_coerce};
@@ -77,6 +78,9 @@ pub fn resolve_function(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>
     if let Some(r) = json::resolve(name, args)? {
         return Ok(Some(r));
     }
+    if let Some(r) = sqljson::resolve(name, args)? {
+        return Ok(Some(r));
+    }
     if let Some(r) = array::resolve(name, args)? {
         return Ok(Some(r));
     }
@@ -87,12 +91,10 @@ pub fn resolve_function(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>
 }
 
 /// The type an overload lookup sees for an argument: the string types resolve through
-/// `text` and `json` through `jsonb` (their implicit and assignment casts).
+/// `text` (their implicit casts). `json` stays itself: json and jsonb have separate
+/// functions and operators.
 fn lookup_type(t: &Type) -> Type {
-    match t {
-        Type::Json => Type::Jsonb,
-        other => other.lookup_type(),
-    }
+    t.lookup_type()
 }
 
 /// Rank used to pick the common numeric type of mixed operands.

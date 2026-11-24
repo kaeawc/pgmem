@@ -384,52 +384,13 @@ functions/datetime.slt:9419360dbef61a79  # SELECT timestamp '2024-03-15 25:00'
 functions/datetime.slt:6bfbc20c44a673cb  # SELECT date '2024-03-15', timestamp '2024-03-15 14:30', timestamptz '2024-03-15 14:30+00'
 functions/datetime.slt:9b1bf1235a6082cb  # SELECT interval '1 year 2 months 3 days 4 hours 5 minutes 6.5 seconds', interval '-1 day'
 functions/datetime.slt:66a879e60640dbdb  # SELECT interval '1 year 2 months', interval '3 days 04:05:06'
-functions/json.slt:1b1662d2cdd3b1f1  # SELECT '{"a": [1, 2]}'::json -> 'a', '{"a": [1, 2]}'::json ->> 'a', pg_typeof('{"a": 1}'::json -> 'a')
-functions/json.slt:8443da63df7c9548  # SELECT ('{"a": {"b": 5}}'::jsonb)['a']['b'], ('[10, 20]'::jsonb)[1]
-functions/json.slt:18c96a5245903615  # SELECT '{"a": 1}'::jsonb @? '$.a ? (@ > 0)', '{"a": 1}'::jsonb @@ '$.a == 1'
-functions/json.slt:2fef74448c812e06  # SELECT jsonb_set_lax('{"a": 1}', '{a}', NULL), jsonb_set_lax('{"a": 1, "b": 2}', '{a}', NULL, true, 'delete_key')
-functions/json.slt:a88bd3eeb4e29589  # SELECT jsonb_insert('{"a": [0, 1, 2]}', '{a,1}', '"new"'), jsonb_insert('{"a": [0, 1, 2]}', '{a,1}', '"new"', true)
-functions/json.slt:657e7a9689a1a89d  # SELECT jsonb_insert('{"a": 1}', '{a}', '2')
-functions/json.slt:937efa948ee6c359  # SELECT jsonb_pretty('{"a": 1, "b": [1, 2], "c": {}}')
-functions/json.slt:36d9eec182aa69d3  # SELECT json_build_object('a', 1, 'b', 'two', 'c', NULL, 'd', true), jsonb_build_object('b', 1, 'a', 2)
-functions/json.slt:da6a71f90ff30a79  # SELECT json_build_array(1, 'a', NULL, 2.5), jsonb_build_array()
-functions/json.slt:52407d7461342de9  # SELECT json_object('{a, 1, b, 2}'), jsonb_object(ARRAY['k1', 'k2'], ARRAY['v1', 'v2'])
-functions/json.slt:3bd6aaa0cd02dd8d  # SELECT to_json('text with "quotes"'::text), to_jsonb(42), to_jsonb(ARRAY[1, 2]), to_jsonb(true), to_json(NULL::text)
-functions/json.slt:6e68039459e82d4d  # SELECT row_to_json(r) FROM (SELECT 1 AS id, 'x' AS name, NULL::int AS z) r
-functions/json.slt:f1afb0fddc2ff0ce  # SELECT to_jsonb(r) FROM (SELECT 1 AS id, ARRAY['a'] AS tags) r
-functions/json.slt:9a60d55fc52ae5fb  # SELECT row_to_json(ROW(1, 'foo'))
 functions/json.slt:6b33eb9d27dab8bb  # SELECT array_to_json(ARRAY[[1, 2], [3, 4]])
-functions/json.slt:51ca61b9bfa9f51e  # SELECT JSON_OBJECT('a' VALUE 1, 'b' : 2), JSON_ARRAY(1, 'x', NULL), JSON_ARRAY(1, NULL NULL ON NULL)
-functions/json.slt:45226f32d62f5217  # SELECT json_agg(x ORDER BY x), jsonb_agg(x ORDER BY x DESC) FROM (VALUES (3), (1), (2)) v(x)
-functions/json.slt:530fc580d527f910  # SELECT json_agg(r) FROM (VALUES (1, 'a'), (2, 'b')) r(id, name)
-functions/json.slt:7ea83ff15ccb4512  # SELECT json_object_agg(k, v ORDER BY k), jsonb_object_agg(k, v) FROM (VALUES ('b', 2), ('a', 1)) t(k, v)
-functions/json.slt:970dc0a22ced8931  # SELECT JSON_ARRAYAGG(x ORDER BY x), JSON_OBJECTAGG(k VALUE x) FROM (VALUES ('a', 1), ('b', 2)) t(k, x)
-functions/json.slt:aa22be4add9abc3f  # SELECT jsonb_agg_strict(x) FROM (VALUES (1), (NULL), (2)) v(x)
-functions/json.slt:873d5757ef6c6029  # SELECT * FROM json_array_elements('[true, [1]]')
-functions/json.slt:3eae9ee4c9dcba70  # SELECT * FROM jsonb_array_elements('{"a": 1}')
-functions/json.slt:7729d972e024d34a  # SELECT '  [1,2,   3]  '::jsonb, '1.000'::jsonb, '1e3'::jsonb, '"\u00e9"'::jsonb
 functions/json.slt:dcac2c81b250ea67  # SELECT jsonb_path_query('{"a": [1, 2, 3, 4]}', '$.a[*] ? (@ > 2)')
-functions/json.slt:8557137f3ffc64f0  # SELECT jsonb_path_query_array('{"a": [1, 2, 3]}', '$.a[*] ? (@ > 1)'), jsonb_path_query_first('{"a": [1, 2]}', '$.a[last]')
-functions/json.slt:6079885350741731  # SELECT jsonb_path_exists('{"a": [1, 2]}', '$.a[*] ? (@ == 2)'), jsonb_path_match('{"a": 1}', '$.a == 1')
 functions/json.slt:4a91b69c9b4b4366  # SELECT jsonb_path_query('{"x": [1, 5, 9]}', '$.x[*] ? (@ >= $min)', '{"min": 5}')
 functions/json.slt:8185e7ea9538ca00  # SELECT jsonb_path_query('{"a": "abc"}', '$.a.type()'), jsonb_path_query('[1, 2, 3]', '$.size()'), jsonb_path_query('{"a": -2.5}', '$.a.abs().floor()')
 functions/json.slt:0c30050061595a48  # SELECT jsonb_path_query('{"a": {"b": {"c": 1}}}', 'strict $.**.c'), jsonb_path_query('{"s": "Hello"}', '$.s ? (@ like_regex "^h" flag "i")')
 functions/json.slt:ea3b65fe3b0cf660  # SELECT jsonb_path_query('{"a": 1}', 'strict $.b')
 functions/json.slt:46e01978561407c2  # SELECT jsonb_path_query('{"a": 1}', 'lax $.b')
-functions/json.slt:91de709f56aab8f3  # SELECT '{"a": 1}' IS JSON, '[1]' IS JSON ARRAY, '{"a": 1}' IS JSON SCALAR, 'abc' IS JSON, '{"a": 1, "a": 2}' IS JSON WITH UNIQUE KEYS
-functions/json.slt:3876219cab812f53  # SELECT JSON_EXISTS(jsonb '{"a": [1, 2]}', '$.a[1]'), JSON_EXISTS(jsonb '{"a": [1, 2]}', '$.b')
-functions/json.slt:fa272cb81c972a90  # SELECT JSON_VALUE(jsonb '{"a": "x"}', '$.a'), JSON_VALUE(jsonb '{"a": 42}', '$.a' RETURNING int), JSON_VALUE(jsonb '{"a": [1]}', '$.a')
-functions/json.slt:91af3fb291134998  # SELECT JSON_VALUE(jsonb '{"a": "x"}', '$.b' DEFAULT 'none' ON EMPTY)
-functions/json.slt:5ed9838294677036  # SELECT JSON_VALUE(jsonb '{"a": [1]}', '$.a' ERROR ON ERROR)
-functions/json.slt:ebc38ada9c609036  # SELECT JSON_QUERY(jsonb '{"a": [1, 2]}', '$.a'), JSON_QUERY(jsonb '{"a": [1, 2]}', '$.a[*]' WITH WRAPPER)
-functions/json.slt:0ab0378274a60f2f  # SELECT * FROM JSON_TABLE(jsonb '[{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]', '$[*]' COLUMNS (id int PATH '$.id', name text PATH '$.name'))
-functions/json.slt:d921c1d2f8b850c3  # SELECT * FROM JSON_TABLE(jsonb '{"items": [{"x": 1}, {"x": 2}]}', '$.items[*]' COLUMNS (ord FOR ORDINALITY, x int PATH '$.x', missing text PATH '$.nope'))
-functions/json.slt:fdfc0e37e1604642  # SELECT JSON('{"a": 1}'), JSON_SCALAR(42), JSON_SERIALIZE(json '{"a": 1}')
-functions/json.slt:2f2eb6cf9db67538  # SELECT * FROM json_populate_record(NULL::person, '{"name": "Ann", "age": 30, "tags": ["x", "y"], "extra": 1}')
-functions/json.slt:29e3503193087ec2  # SELECT * FROM jsonb_populate_recordset(NULL::person, '[{"name": "A", "age": 1}, {"name": "B"}]')
-functions/json.slt:a720891e6f66a9b6  # SELECT * FROM jsonb_to_record('{"a": 1, "b": "x", "c": [1, 2]}') AS t(a int, b text, c int[])
-functions/json.slt:54f4f986b3916a68  # SELECT * FROM json_to_recordset('[{"a": 1}, {"a": 2, "b": true}]') AS t(a int, b bool)
-functions/json.slt:a21b6737e0708ba9  # SELECT * FROM jsonb_populate_record(NULL::person, '{"age": "old"}')
 functions/math.slt:1a316f33e11f949b  # SELECT round(42.4382::float8, 2)
 functions/math.slt:2681d4921ef27f8d  # SELECT 2 ^ 10, 2.0 ^ 0.5, |/ 25, ||/ 27, @ -5
 functions/math.slt:b8e6916f63b47117  # SELECT power(2, 10), power(2.0, 3), power(9, 0.5), power(2::float8, -1)
@@ -476,7 +437,6 @@ queries/aggregates.slt:6b45eac0144dda72  # SELECT percentile_cont(ARRAY[0.25, 0.
 queries/aggregates.slt:61f164f717b5db2a  # SELECT mode() WITHIN GROUP (ORDER BY product), mode() WITHIN GROUP (ORDER BY region) FROM sales
 queries/aggregates.slt:b54dc58f0cfa157c  # SELECT region, percentile_cont(0.5) WITHIN GROUP (ORDER BY qty) FROM sales GROUP BY region ORDER BY region
 queries/aggregates.slt:05769ca19681fe1b  # SELECT rank(5) WITHIN GROUP (ORDER BY qty), dense_rank(5) WITHIN GROUP (ORDER BY qty), percent_rank(5) WITHIN GROUP (ORDER BY qty) FROM sales
-queries/aggregates.slt:6a781fd9677f2ca9  # SELECT json_agg(product ORDER BY id), jsonb_object_agg(id, qty ORDER BY id) FROM sales WHERE id <= 3
 queries/aggregates.slt:d3239e5218a86a1d  # SELECT region, product, sum(qty) FROM sales GROUP BY GROUPING SETS ((region), (product), ()) ORDER BY region NULLS LAST, product NULLS LAST
 queries/aggregates.slt:3832d5309aff50a7  # SELECT region, product, sum(qty), grouping(region, product) FROM sales GROUP BY ROLLUP (region, product) ORDER BY region NULLS LAST, product NULLS LAST
 queries/aggregates.slt:896efd16af3ec417  # SELECT region, product, count(*), grouping(region), grouping(product) FROM sales GROUP BY CUBE (region, product) ORDER BY 4, 5, region NULLS LAST, product NULLS LAST
@@ -831,14 +791,3 @@ types/enums_domains.slt:20d1a46f867c4ae1  # INSERT INTO booking VALUES (1, '[202
 types/enums_domains.slt:2d88abba11666041  # INSERT INTO booking VALUES (1, '[2024-01-01 11:00, 2024-01-01 13:00)')
 types/enums_domains.slt:5f4686a99eb6a2f4  # INSERT INTO booking VALUES (1, '[2024-01-01 12:00, 2024-01-01 13:00)')
 types/enums_domains.slt:e1c54ea571fc5d65  # SELECT during FROM booking ORDER BY during
-types/json.slt:c6f229bf61f9e632  # SELECT '{"z":1,"aa":2,"b":3}'::jsonb, '[1, 2.50, 1e2, -0]'::jsonb
-types/json.slt:dc1e2a2617316fac  # SELECT '"\u0000"'::jsonb
-types/json.slt:194b66a4dd62f489  # SELECT pg_typeof('{"a":1}'::jsonb -> 'a'), pg_typeof('{"a":1}'::jsonb ->> 'a'), pg_typeof('{"a":1}'::json -> 'a')
-types/json.slt:8c0274b815e97c0b  # SELECT jsonb_set('{"a":{"b":1}}', '{a,b}', '2'), jsonb_set('{"a":1}', '{c}', '"new"'), jsonb_insert('[1,3]', '{1}', '2')
-types/json.slt:396b43bed0bf8ac5  # SELECT to_jsonb('text'::text), to_json(1.5), to_jsonb(ARRAY[1,2]), to_jsonb(NULL::text), json_build_object('a', 1, 'b', NULL), jsonb_build_array(1, 'x', true)
-types/json.slt:4d8743f778340d09  # SELECT row_to_json(r) FROM (SELECT 1 AS id, 'x' AS name, NULL::int AS n) r
-types/json.slt:5e5615648e12b751  # SELECT to_jsonb(timestamptz '2024-06-15 12:00:00+00'), to_json(date '2024-06-15'), to_jsonb('NaN'::float8), to_jsonb('Infinity'::numeric)
-types/json.slt:8d377b866ff69f2f  # SELECT jsonb_agg(x ORDER BY x), json_agg(x), jsonb_object_agg(x::text, x * 2) FROM (VALUES (2), (1)) v(x)
-types/json.slt:128be0cea38e7be8  # SELECT jsonb_path_query_array('{"a":[1,2,3,4]}', '$.a[*] ? (@ > 2)'), jsonb_path_exists('{"a":1}', '$.a'), '{"a":[1,2]}'::jsonb @? '$.a[*] ? (@ == 2)'
-types/json.slt:939280a255ec728c  # SELECT '{"a":1}' IS JSON, '[1' IS JSON, '[1]' IS JSON ARRAY, JSON_OBJECT('a': 1), JSON_ARRAY(1, 'x')
-types/json.slt:fad4bf4cfc02fa5f  # SELECT JSON_VALUE('{"a":"x"}'::jsonb, '$.a'), JSON_QUERY('{"a":[1,2]}'::jsonb, '$.a'), JSON_EXISTS('{"a":1}'::jsonb, '$.b')

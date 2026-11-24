@@ -34,7 +34,7 @@ pub fn encode(v: &Value, ty: &Type) -> SqlResult<Vec<u8>> {
             },
         },
         Type::Text | Type::Unknown | Type::Varchar | Type::Bpchar | Type::Name | Type::Char | Type::Json | Type::Void => match v {
-            Value::Text(s) => s.as_bytes().to_vec(),
+            Value::Text(s) | Value::Json(s) => s.as_bytes().to_vec(),
             other => crate::text::encode(other, &other.natural_type())?.into_bytes(),
         },
         Type::Bytea => match v {
@@ -80,6 +80,11 @@ pub fn encode(v: &Value, ty: &Type) -> SqlResult<Vec<u8>> {
             }
             _ => return Err(mismatch()),
         },
+        Type::JsonPath => {
+            let mut out = vec![1u8];
+            out.extend_from_slice(crate::text::encode(v, ty)?.as_bytes());
+            out
+        }
         Type::Oid | Type::Reg(_) => match v {
             Value::Oid(o) | Value::Reg(_, o, _) => o.to_be_bytes().to_vec(),
             _ => return Err(mismatch()),
@@ -231,6 +236,14 @@ pub fn decode(b: &[u8], ty: &Type) -> SqlResult<Value> {
             }
             let text = std::str::from_utf8(rest).map_err(|_| bad(ty, "invalid UTF-8"))?;
             Value::Jsonb(Jsonb::parse(text)?)
+        }
+        Type::JsonPath => {
+            let (version, rest) = b.split_first().ok_or_else(|| bad(ty, "empty"))?;
+            if *version != 1 {
+                return Err(SqlError::new(code::INVALID_BINARY_REPRESENTATION, format!("unsupported jsonpath version number: {version}")));
+            }
+            let text = std::str::from_utf8(rest).map_err(|_| bad(ty, "invalid UTF-8"))?;
+            crate::text::decode(text, ty)?
         }
         Type::Array(elem) => Value::Array(decode_array(b, elem, ty)?),
         Type::Int2Vector | Type::OidVector => Value::Array(decode_array(b, ty.element().unwrap_or(&Type::Int2), ty)?),

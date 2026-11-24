@@ -25,6 +25,21 @@ pub(crate) fn lower_expr(e: sq::Expr) -> SqlResult<Expr> {
         E::IsNotFalse(x) => Expr::IsBool { expr: b(lower_expr(*x)?), value: Some(false), negated: true },
         E::IsUnknown(x) => Expr::IsBool { expr: b(lower_expr(*x)?), value: None, negated: false },
         E::IsNotUnknown(x) => Expr::IsBool { expr: b(lower_expr(*x)?), value: None, negated: true },
+        E::IsJson { expr, kind, unique_keys, negated } => {
+            let kind = match kind {
+                Some(sq::JsonPredicateType::Scalar) => "scalar",
+                Some(sq::JsonPredicateType::Array) => "array",
+                Some(sq::JsonPredicateType::Object) => "object",
+                Some(sq::JsonPredicateType::Value) | None => "value",
+            };
+            let unique = matches!(unique_keys, Some(sq::JsonKeyUniqueness::WithUniqueKeys));
+            let call = FunctionCall::new(
+                "__pgmem_is_json",
+                vec![lower_expr(*expr)?, Expr::Literal(Literal::String(kind.into())), Expr::Literal(Literal::Bool(unique))],
+            );
+            let e = Expr::Function(Box::new(call));
+            if negated { Expr::Not(b(e)) } else { e }
+        }
         E::IsDistinctFrom(l, r) => Expr::IsDistinctFrom { left: b(lower_expr(*l)?), right: b(lower_expr(*r)?), negated: false },
         E::IsNotDistinctFrom(l, r) => Expr::IsDistinctFrom { left: b(lower_expr(*l)?), right: b(lower_expr(*r)?), negated: true },
         E::In { expr, target, negated, .. } => {
@@ -470,6 +485,64 @@ fn lower_interval(iv: sq::Interval) -> SqlResult<Expr> {
     Ok(Expr::TypedString { ty: TypeName::simple("interval"), value })
 }
 
+/// Lowers an SQL/JSON constructor to the internal function implementing its NULL handling,
+/// cast to its RETURNING type.
+fn lower_json_constructor(base: &str, list: sq::FunctionArgumentList, filter: Option<Box<sq::Expr>>, over: bool) -> SqlResult<Expr> {
+    if over {
+        return Err(unsupported("SQL/JSON aggregates as window functions"));
+    }
+    let mut args = Vec::new();
+    for arg in list.args {
+        match arg {
+            sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Expr(e)) => args.push(lower_expr(e)?),
+            sq::FunctionArg::ExprNamed { name, arg: sq::FunctionArgExpr::Expr(v), .. } => {
+                args.push(lower_expr(name)?);
+                args.push(lower_expr(v)?);
+            }
+            sq::FunctionArg::Named { name, arg: sq::FunctionArgExpr::Expr(v), .. } => {
+                args.push(Expr::Column(vec![ident(&name)]));
+                args.push(lower_expr(v)?);
+            }
+            _ => return Err(unsupported(&format!("this {} argument", base.to_uppercase()))),
+        }
+    }
+    // Defaults: JSON_OBJECT / JSON_OBJECTAGG keep NULLs, JSON_ARRAY / JSON_ARRAYAGG drop them.
+    let mut absent = matches!(base, "json_array" | "json_arrayagg");
+    let mut returning = None;
+    let mut order_by = Vec::new();
+    for clause in list.clauses {
+        match clause {
+            sq::FunctionArgumentClause::JsonNullClause(sq::JsonNullClause::AbsentOnNull) => absent = true,
+            sq::FunctionArgumentClause::JsonNullClause(sq::JsonNullClause::NullOnNull) => absent = false,
+            sq::FunctionArgumentClause::JsonReturningClause(r) => returning = Some(lower_type(&r.data_type)?),
+            sq::FunctionArgumentClause::OrderBy(items) => {
+                order_by = items.into_iter().map(lower_order_by_expr).collect::<SqlResult<Vec<_>>>()?;
+            }
+            other => return Err(unsupported(&format!("{} clause {other}", base.to_uppercase()))),
+        }
+    }
+    let internal = match (base, absent) {
+        ("json_object", false) => "__pgmem_json_object",
+        ("json_object", true) => "__pgmem_json_object_absent",
+        ("json_array", false) => "__pgmem_json_array",
+        ("json_array", true) => "__pgmem_json_array_absent",
+        ("json_arrayagg", false) => "__pgmem_json_arrayagg",
+        ("json_arrayagg", true) => "__pgmem_json_arrayagg_strict",
+        ("json_objectagg", false) => "__pgmem_json_objectagg",
+        _ => "__pgmem_json_objectagg_strict",
+    };
+    let mut call = FunctionCall::new(internal, args);
+    call.order_by = order_by;
+    if let Some(f) = filter {
+        call.filter = Some(b(lower_expr(*f)?));
+    }
+    let e = Expr::Function(Box::new(call));
+    Ok(match returning {
+        Some(ty) if ty.name != "json" => Expr::Cast { expr: b(e), ty },
+        _ => e,
+    })
+}
+
 fn lower_function(f: sq::Function) -> SqlResult<Expr> {
     let name = object_name(&f.name)?;
     let base = name.base().to_owned();
@@ -485,6 +558,16 @@ fn lower_function(f: sq::Function) -> SqlResult<Expr> {
         }
         sq::FunctionArguments::List(list) => {
             call.distinct = matches!(list.duplicate_treatment, Some(sq::DuplicateTreatment::Distinct));
+            // SQL/JSON constructors: `JSON_OBJECT(k VALUE v, k : v ... [NULL|ABSENT ON NULL]
+            // [RETURNING type])`, `JSON_ARRAY(...)`, `JSON_ARRAYAGG(...)`, `JSON_OBJECTAGG(...)`.
+            if matches!(base.as_str(), "json_object" | "json_array" | "json_arrayagg" | "json_objectagg")
+                && (base != "json_object"
+                    || list.args.is_empty()
+                    || list.args.iter().any(|a| matches!(a, sq::FunctionArg::Named { .. } | sq::FunctionArg::ExprNamed { .. }))
+                    || !list.clauses.is_empty())
+            {
+                return lower_json_constructor(&base, list, f.filter, f.over.is_some());
+            }
             for arg in list.args {
                 match arg {
                     sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Expr(e)) => call.args.push(lower_expr(e)?),

@@ -295,6 +295,7 @@ fn string_op(op: &str, l: &Type, r: &Type) -> Option<(Type, Type, Type)> {
 fn unknown_peer(op: &str, other: &Type, unknown_on_right: bool) -> Type {
     match (op, other) {
         ("->" | "->>" | "?", Type::Jsonb | Type::Json) if unknown_on_right => Type::Text,
+        ("@?" | "@@", Type::Jsonb) if unknown_on_right => Type::JsonPath,
         ("#>" | "#>>" | "?|" | "?&" | "#-", Type::Jsonb | Type::Json) if unknown_on_right => Type::array_of(Type::Text),
         ("+" | "-", Type::Date | Type::Timestamp | Type::Timestamptz | Type::Time | Type::TimeTz) => Type::Interval,
         ("||", t) if !matches!(t, Type::Array(_) | Type::Jsonb) => Type::Text,
@@ -334,7 +335,7 @@ pub fn resolve_binary(op: &str, l: &Type, r: &Type) -> (Type, Type, Type) {
             let t = if l == Type::Numeric || r == Type::Numeric { Type::Numeric } else { Type::Float8 };
             (t.clone(), t.clone(), t)
         }
-        "&&" | "@>" | "<@" | "@@" => (l.clone(), r, Type::Bool),
+        "&&" | "@>" | "<@" | "@@" | "@?" => (l.clone(), r, Type::Bool),
         _ => (l.clone(), r, l),
     }
 }

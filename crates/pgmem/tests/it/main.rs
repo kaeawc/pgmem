@@ -74,6 +74,7 @@ mod is_distinct;
 mod is_null;
 mod join;
 mod join_left_cross;
+mod json_fidelity;
 mod jsonb;
 mod jsonb_arrow;
 mod jsonb_construction;

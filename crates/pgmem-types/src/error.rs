@@ -190,6 +190,7 @@ pub mod code {
     pub const DUPLICATE_DATABASE: &str = "42P04";
     pub const DUPLICATE_PREPARED_STATEMENT: &str = "42P05";
     pub const DUPLICATE_SCHEMA: &str = "42P06";
+    pub const UNTRANSLATABLE_CHARACTER: &str = "22P05";
     pub const DUPLICATE_TABLE: &str = "42P07";
     pub const DUPLICATE_ALIAS: &str = "42712";
     pub const DUPLICATE_OBJECT: &str = "42710";

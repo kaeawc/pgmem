@@ -709,13 +709,20 @@ impl Binder<'_> {
             .with_clause(Clause::FromFunction);
         let bound = call.args.iter().map(|a| self.bind_expr(a, &fctx)).collect::<SqlResult<Vec<_>>>()?;
         let types: Vec<Type> = bound.iter().map(|(_, t)| t.clone()).collect();
+        if let Some(kind) = crate::funcs::json::record_function(name) {
+            let correlated = !left.cols.is_empty() && own_level.correlated.get();
+            let (rel, scope) = self.bind_json_record_scan(kind, name, bound, alias, ordinality)?;
+            return Ok((rel, scope, correlated));
+        }
         let (out_cols, targets, srf): (Vec<(String, Type)>, Vec<Type>, crate::plan::SrfFn) =
             if let Some((outs, targets, f)) = crate::funcs::array::resolve_srf(name, &types)? {
                 let names: Vec<String> =
                     if outs.len() == 1 { vec![name.to_owned()] } else { (0..outs.len()).map(|_| name.to_owned()).collect() };
                 (names.into_iter().zip(outs).collect(), targets, f)
             } else if let Some((cols, f)) = crate::funcs::json::resolve_srf(name, &types) {
-                (cols.into_iter().map(|(n, t)| (n.to_owned(), t)).collect(), vec![Type::Jsonb], f)
+                (cols.into_iter().map(|(n, t)| (n.to_owned(), t)).collect(), vec![crate::funcs::json::srf_arg_type(name)], f)
+            } else if let Some((cols, targets, f)) = crate::funcs::json::resolve_path_srf(name, &types) {
+                (cols.into_iter().map(|(n, t)| (n.to_owned(), t)).collect(), targets, f)
             } else {
                 // A scalar function in FROM yields one row with one column.
                 let (e, t) = self.bind_expr(&ir::Expr::Function(Box::new(call.clone())), &fctx)?;
@@ -749,6 +756,96 @@ impl Binder<'_> {
         }
         let correlated = !left.cols.is_empty() && own_level.correlated.get();
         Ok((Rel::FuncScan { srf: crate::plan::Srf { name: "srf", f: srf }, args, ordinality }, Scope::from_cols(cols), correlated))
+    }
+
+    /// `json(b)_populate_record(set)` / `json(b)_to_record(set)`: output columns come from the
+    /// base argument's composite type or from the column definition list.
+    fn bind_json_record_scan(
+        &self,
+        kind: crate::funcs::json::RecordFn,
+        name: &str,
+        mut bound: Vec<(Expr, Type)>,
+        alias: Option<&ir::TableAlias>,
+        ordinality: bool,
+    ) -> SqlResult<(Rel, Scope)> {
+        use crate::funcs::json::RecordFn;
+        let doc_type = if name.starts_with("jsonb") { Type::Jsonb } else { Type::Json };
+        let arg_types: Vec<Type> = bound.iter().map(|(_, t)| t.clone()).collect();
+        let wrong = || crate::funcs::no_function(name, &arg_types);
+        let (fields, doc, base) = match kind {
+            RecordFn::Populate { .. } => {
+                if bound.len() != 2 {
+                    return Err(wrong());
+                }
+                let (doc, dt) = bound.pop().ok_or_else(wrong)?;
+                let (base, bt) = bound.pop().ok_or_else(wrong)?;
+                let Type::Composite(oid) = bt else {
+                    return Err(SqlError::datatype_mismatch(format!("first argument of {name} must be a row type")));
+                };
+                (crate::usertypes::composite_fields(oid), super::coerce(self, doc, &dt, &doc_type, CoercionContext::Implicit)?, Some(base))
+            }
+            RecordFn::ToRecord { .. } | RecordFn::JsonTable => {
+                let expected = if kind == RecordFn::JsonTable { 5 } else { 1 };
+                if bound.len() != expected {
+                    return Err(wrong());
+                }
+                let defs = alias
+                    .filter(|a| !a.column_types.is_empty())
+                    .ok_or_else(|| SqlError::syntax("a column definition list is required for functions returning \"record\""))?;
+                let mut fields = Vec::new();
+                for (n, t) in defs.columns.iter().zip(&defs.column_types) {
+                    let (ty, typmod) = super::resolve_type_name(self.catalog, t)?;
+                    fields.push(pgmem_types::usertype::Field { name: n.clone(), ty, typmod });
+                }
+                if kind == RecordFn::JsonTable {
+                    // (ctx, path, vars, spec, on_error) + the descriptor.
+                    let targets = [Type::Jsonb, Type::JsonPath, Type::Jsonb, Type::Text, Type::Int4];
+                    let mut args = Vec::new();
+                    for ((e, t), target) in std::mem::take(&mut bound).into_iter().zip(targets) {
+                        args.push(super::coerce(self, e, &t, &target, CoercionContext::Explicit)?);
+                    }
+                    let desc = pgmem_types::usertype::bless(fields.clone());
+                    args.push(Expr::Const(Value::Record(desc, Vec::new())));
+                    return self.record_scan_result(kind, name, fields, args, alias, ordinality);
+                }
+                let (doc, dt) = bound.pop().ok_or_else(wrong)?;
+                (fields, super::coerce(self, doc, &dt, &doc_type, CoercionContext::Implicit)?, None)
+            }
+        };
+        let desc = pgmem_types::usertype::bless(fields.clone());
+        let mut args = vec![doc, Expr::Const(Value::Record(desc, Vec::new()))];
+        args.extend(base);
+        self.record_scan_result(kind, name, fields, args, alias, ordinality)
+    }
+
+    fn record_scan_result(
+        &self,
+        kind: crate::funcs::json::RecordFn,
+        name: &str,
+        fields: Vec<pgmem_types::usertype::Field>,
+        args: Vec<Expr>,
+        alias: Option<&ir::TableAlias>,
+        ordinality: bool,
+    ) -> SqlResult<(Rel, Scope)> {
+        let qualifier = alias.map_or_else(|| name.to_owned(), |a| a.name.clone());
+        let mut cols: Vec<ScopeCol> = fields
+            .iter()
+            .map(|f| {
+                let mut c = ScopeCol::new(Some(qualifier.clone()), f.name.clone(), f.ty.clone());
+                c.typmod = f.typmod;
+                c
+            })
+            .collect();
+        if ordinality {
+            cols.push(ScopeCol::new(Some(qualifier.clone()), "ordinality", Type::Int8));
+        }
+        if let Some(a) = alias
+            && a.column_types.is_empty()
+        {
+            apply_column_aliases(&mut cols, &a.columns, &a.name)?;
+        }
+        let srf = crate::plan::Srf { name: "srf", f: crate::funcs::json::record_srf(kind) };
+        Ok((Rel::FuncScan { srf, args, ordinality }, Scope::from_cols(cols)))
     }
 
     /// A named relation in FROM: CTE, table, view, or virtual catalog table.
