@@ -106,17 +106,17 @@ postgres	array_agg_unnest_test.go	TestArrayAgg_Int	crates/pgmem/tests/it/array_a
 postgres	array_agg_unnest_test.go	TestArrayAgg_Text	crates/pgmem/tests/it/array_agg_unnest.rs::array_agg_text	ported	
 postgres	array_agg_unnest_test.go	TestUnnest_Int	crates/pgmem/tests/it/array_agg_unnest.rs::unnest_int	ported	
 postgres	array_agg_unnest_test.go	TestUnnest_Text	crates/pgmem/tests/it/array_agg_unnest.rs::unnest_text	ported	
-postgres	array_string_funcs_test.go	TestArrayLength_Empty	crates/pgmem/tests/it/array_string_funcs.rs::array_length_empty	pending	
-postgres	array_string_funcs_test.go	TestArrayLength_NonEmpty	crates/pgmem/tests/it/array_string_funcs.rs::array_length_non_empty	pending	
-postgres	array_string_funcs_test.go	TestArrayToString_IntArray	crates/pgmem/tests/it/array_string_funcs.rs::array_to_string_int_array	pending	
-postgres	array_string_funcs_test.go	TestArrayToString_PlainSep	crates/pgmem/tests/it/array_string_funcs.rs::array_to_string_plain_sep	pending	
-postgres	array_string_funcs_test.go	TestCardinality	crates/pgmem/tests/it/array_string_funcs.rs::cardinality	pending	
-postgres	array_string_funcs_test.go	TestRepeat	crates/pgmem/tests/it/array_string_funcs.rs::repeat	pending	
-postgres	array_string_funcs_test.go	TestReverse	crates/pgmem/tests/it/array_string_funcs.rs::reverse	pending	
-postgres	array_string_funcs_test.go	TestSplitPart_Negative	crates/pgmem/tests/it/array_string_funcs.rs::split_part_negative	pending	
-postgres	array_string_funcs_test.go	TestSplitPart_OutOfRange	crates/pgmem/tests/it/array_string_funcs.rs::split_part_out_of_range	pending	
-postgres	array_string_funcs_test.go	TestSplitPart_Positive	crates/pgmem/tests/it/array_string_funcs.rs::split_part_positive	pending	
-postgres	array_string_funcs_test.go	TestStringToArray_Basic	crates/pgmem/tests/it/array_string_funcs.rs::string_to_array_basic	pending	
+postgres	array_string_funcs_test.go	TestArrayLength_Empty	crates/pgmem/tests/it/array_string_funcs.rs::array_length_empty	ported	
+postgres	array_string_funcs_test.go	TestArrayLength_NonEmpty	crates/pgmem/tests/it/array_string_funcs.rs::array_length_non_empty	ported	
+postgres	array_string_funcs_test.go	TestArrayToString_IntArray	crates/pgmem/tests/it/array_string_funcs.rs::array_to_string_int_array	ported	
+postgres	array_string_funcs_test.go	TestArrayToString_PlainSep	crates/pgmem/tests/it/array_string_funcs.rs::array_to_string_plain_sep	ported	
+postgres	array_string_funcs_test.go	TestCardinality	crates/pgmem/tests/it/array_string_funcs.rs::cardinality	ported	
+postgres	array_string_funcs_test.go	TestRepeat	crates/pgmem/tests/it/array_string_funcs.rs::repeat	ported	
+postgres	array_string_funcs_test.go	TestReverse	crates/pgmem/tests/it/array_string_funcs.rs::reverse	ported	
+postgres	array_string_funcs_test.go	TestSplitPart_Negative	crates/pgmem/tests/it/array_string_funcs.rs::split_part_negative	ported	
+postgres	array_string_funcs_test.go	TestSplitPart_OutOfRange	crates/pgmem/tests/it/array_string_funcs.rs::split_part_out_of_range	ported	
+postgres	array_string_funcs_test.go	TestSplitPart_Positive	crates/pgmem/tests/it/array_string_funcs.rs::split_part_positive	ported	
+postgres	array_string_funcs_test.go	TestStringToArray_Basic	crates/pgmem/tests/it/array_string_funcs.rs::string_to_array_basic	ported	
 postgres	array_test.go	TestArray_AnyBigint	crates/pgmem/tests/it/array.rs::array_any_bigint	ported	
 postgres	array_test.go	TestArray_AnyText	crates/pgmem/tests/it/array.rs::array_any_text	ported	
 postgres	array_test.go	TestArray_BigintLiteral	crates/pgmem/tests/it/array.rs::array_bigint_literal	ported	
@@ -155,12 +155,12 @@ postgres	column_default_test.go	TestColumnDefault_ExplicitNullKeepsNull	crates/p
 postgres	column_default_test.go	TestColumnDefault_ExplicitValueWins	crates/pgmem/tests/it/column_default.rs::column_default_explicit_value_wins	ported	
 postgres	column_default_test.go	TestColumnDefault_LiteralFillsOmittedColumn	crates/pgmem/tests/it/column_default.rs::column_default_literal_fills_omitted_column	ported	
 postgres	column_default_test.go	TestColumnDefault_NowFillsTimestamp	crates/pgmem/tests/it/column_default.rs::column_default_now_fills_timestamp	ported	
-postgres	concat_test.go	TestConcatWs_Basic	crates/pgmem/tests/it/concat.rs::concat_ws_basic	pending	
-postgres	concat_test.go	TestConcatWs_NullSepIsNull	crates/pgmem/tests/it/concat.rs::concat_ws_null_sep_is_null	pending	
-postgres	concat_test.go	TestConcatWs_NullsSkippedNoLeadingSep	crates/pgmem/tests/it/concat.rs::concat_ws_nulls_skipped_no_leading_sep	pending	
-postgres	concat_test.go	TestConcat_Basic	crates/pgmem/tests/it/concat.rs::concat_basic	pending	
-postgres	concat_test.go	TestConcat_MixedTypes	crates/pgmem/tests/it/concat.rs::concat_mixed_types	pending	
-postgres	concat_test.go	TestConcat_NullsSkipped	crates/pgmem/tests/it/concat.rs::concat_nulls_skipped	pending	
+postgres	concat_test.go	TestConcatWs_Basic	crates/pgmem/tests/it/concat.rs::concat_ws_basic	ported	
+postgres	concat_test.go	TestConcatWs_NullSepIsNull	crates/pgmem/tests/it/concat.rs::concat_ws_null_sep_is_null	ported	
+postgres	concat_test.go	TestConcatWs_NullsSkippedNoLeadingSep	crates/pgmem/tests/it/concat.rs::concat_ws_nulls_skipped_no_leading_sep	ported	
+postgres	concat_test.go	TestConcat_Basic	crates/pgmem/tests/it/concat.rs::concat_basic	ported	
+postgres	concat_test.go	TestConcat_MixedTypes	crates/pgmem/tests/it/concat.rs::concat_mixed_types	ported	
+postgres	concat_test.go	TestConcat_NullsSkipped	crates/pgmem/tests/it/concat.rs::concat_nulls_skipped	ported	
 postgres	correlated_test.go	TestCorrelatedExists_FiltersByOuterRow	crates/pgmem/tests/it/correlated.rs::correlated_exists_filters_by_outer_row	ported	
 postgres	correlated_test.go	TestCorrelatedExists_NotExists	crates/pgmem/tests/it/correlated.rs::correlated_exists_not_exists	ported	
 postgres	correlated_test.go	TestCorrelatedScalarSubquery	crates/pgmem/tests/it/correlated.rs::correlated_scalar_subquery	ported	
@@ -178,18 +178,18 @@ postgres	current_timestamp_test.go	TestCurrentDate_TruncatedToMidnight	crates/pg
 postgres	current_timestamp_test.go	TestCurrentTime_DateAtEpoch	crates/pgmem/tests/it/current_timestamp.rs::current_time_date_at_epoch	deviation	current_time is timetz in Postgres (text "12:30:45+00"), not a timestamptz on 1970-01-01; pinned-clock check pgmem-only
 postgres	current_timestamp_test.go	TestCurrentTimestamp_AsDefault	crates/pgmem/tests/it/current_timestamp.rs::current_timestamp_as_default	ported	pinned-clock check pgmem-only; real Postgres checks value is near the wall clock
 postgres	current_timestamp_test.go	TestCurrentTimestamp_NoParens	crates/pgmem/tests/it/current_timestamp.rs::current_timestamp_no_parens	ported	pinned-clock check pgmem-only; real Postgres checks value is near the wall clock
-postgres	date_trunc_test.go	TestDateTrunc_Day	crates/pgmem/tests/it/date_trunc.rs::date_trunc_day	pending	
-postgres	date_trunc_test.go	TestDateTrunc_Hour	crates/pgmem/tests/it/date_trunc.rs::date_trunc_hour	pending	
-postgres	date_trunc_test.go	TestDateTrunc_Month	crates/pgmem/tests/it/date_trunc.rs::date_trunc_month	pending	
-postgres	date_trunc_test.go	TestDateTrunc_NullPropagates	crates/pgmem/tests/it/date_trunc.rs::date_trunc_null_propagates	pending	
-postgres	date_trunc_test.go	TestDateTrunc_Week_AnchorsToMonday	crates/pgmem/tests/it/date_trunc.rs::date_trunc_week_anchors_to_monday	pending	
-postgres	datetime_funcs_test.go	TestAge_OneArg	crates/pgmem/tests/it/datetime_funcs.rs::age_one_arg	pending	Go expected current_date + age(t) = t; in Postgres age(past t) is positive, so current_date - age(t) = t (asserted, plus age > 0); result is timestamp not timestamptz
-postgres	datetime_funcs_test.go	TestAge_TwoArgs	crates/pgmem/tests/it/datetime_funcs.rs::age_two_args	pending	result is timestamp (NaiveDateTime) not timestamptz; additionally asserts the interval itself = 1 day
-postgres	datetime_funcs_test.go	TestMakeDate	crates/pgmem/tests/it/datetime_funcs.rs::make_date	pending	make_date returns date (NaiveDate), pgmem-go approximated with timestamptz
-postgres	datetime_funcs_test.go	TestMakeTime	crates/pgmem/tests/it/datetime_funcs.rs::make_time	pending	make_time returns time (NaiveTime), pgmem-go approximated with timestamptz
-postgres	datetime_funcs_test.go	TestMakeTimestamp	crates/pgmem/tests/it/datetime_funcs.rs::make_timestamp	pending	make_timestamp returns timestamp (NaiveDateTime), pgmem-go approximated with timestamptz
-postgres	datetime_funcs_test.go	TestMakeTimestamp_BadArity	crates/pgmem/tests/it/datetime_funcs.rs::make_timestamp_bad_arity	pending	asserts SQLSTATE 42883 (Go only checked for an error)
-postgres	datetime_funcs_test.go	TestToTimestamp_UnixSeconds	crates/pgmem/tests/it/datetime_funcs.rs::to_timestamp_unix_seconds	pending	
+postgres	date_trunc_test.go	TestDateTrunc_Day	crates/pgmem/tests/it/date_trunc.rs::date_trunc_day	ported	
+postgres	date_trunc_test.go	TestDateTrunc_Hour	crates/pgmem/tests/it/date_trunc.rs::date_trunc_hour	ported	
+postgres	date_trunc_test.go	TestDateTrunc_Month	crates/pgmem/tests/it/date_trunc.rs::date_trunc_month	ported	
+postgres	date_trunc_test.go	TestDateTrunc_NullPropagates	crates/pgmem/tests/it/date_trunc.rs::date_trunc_null_propagates	ported	
+postgres	date_trunc_test.go	TestDateTrunc_Week_AnchorsToMonday	crates/pgmem/tests/it/date_trunc.rs::date_trunc_week_anchors_to_monday	ported	
+postgres	datetime_funcs_test.go	TestAge_OneArg	crates/pgmem/tests/it/datetime_funcs.rs::age_one_arg	deviation	Go expected current_date + age(t) = t; in Postgres age(past t) is positive, so current_date - age(t) = t (asserted, plus age > 0); result is timestamp not timestamptz
+postgres	datetime_funcs_test.go	TestAge_TwoArgs	crates/pgmem/tests/it/datetime_funcs.rs::age_two_args	deviation	result is timestamp (NaiveDateTime) not timestamptz; additionally asserts the interval itself = 1 day
+postgres	datetime_funcs_test.go	TestMakeDate	crates/pgmem/tests/it/datetime_funcs.rs::make_date	deviation	make_date returns date (NaiveDate), pgmem-go approximated with timestamptz
+postgres	datetime_funcs_test.go	TestMakeTime	crates/pgmem/tests/it/datetime_funcs.rs::make_time	deviation	make_time returns time (NaiveTime), pgmem-go approximated with timestamptz
+postgres	datetime_funcs_test.go	TestMakeTimestamp	crates/pgmem/tests/it/datetime_funcs.rs::make_timestamp	deviation	make_timestamp returns timestamp (NaiveDateTime), pgmem-go approximated with timestamptz
+postgres	datetime_funcs_test.go	TestMakeTimestamp_BadArity	crates/pgmem/tests/it/datetime_funcs.rs::make_timestamp_bad_arity	ported	asserts SQLSTATE 42883 (Go only checked for an error)
+postgres	datetime_funcs_test.go	TestToTimestamp_UnixSeconds	crates/pgmem/tests/it/datetime_funcs.rs::to_timestamp_unix_seconds	ported	
 postgres	delete_test.go	TestDelete_OverWire	crates/pgmem/tests/it/delete.rs::delete_over_wire	ported	
 postgres	delete_test.go	TestDelete_Returning_OverWire	crates/pgmem/tests/it/delete.rs::delete_returning_over_wire	ported	
 postgres	derived_table_test.go	TestDerivedTable_AS	crates/pgmem/tests/it/derived_table.rs::derived_table_as	ported	
@@ -211,12 +211,12 @@ postgres	exists_test.go	TestExists_AsFilter	crates/pgmem/tests/it/exists.rs::exi
 postgres	exists_test.go	TestExists_False	crates/pgmem/tests/it/exists.rs::exists_false	ported	
 postgres	exists_test.go	TestExists_True	crates/pgmem/tests/it/exists.rs::exists_true	ported	
 postgres	exists_test.go	TestNotExists	crates/pgmem/tests/it/exists.rs::not_exists	ported	
-postgres	extract_test.go	TestDatePart_FunctionForm	crates/pgmem/tests/it/extract.rs::date_part_function_form	pending	date_part returns float8
-postgres	extract_test.go	TestExtract_Epoch	crates/pgmem/tests/it/extract.rs::extract_epoch	pending	extract returns numeric '1704067200.000000'; read via Text
-postgres	extract_test.go	TestExtract_HourMinuteSecond	crates/pgmem/tests/it/extract.rs::extract_hour_minute_second	pending	extract returns numeric; second is '30.000000'; read via Text
-postgres	extract_test.go	TestExtract_NullPropagates	crates/pgmem/tests/it/extract.rs::extract_null_propagates	pending	
-postgres	extract_test.go	TestExtract_UnknownFieldErrors	crates/pgmem/tests/it/extract.rs::extract_unknown_field_errors	pending	asserts SQLSTATE 22023 and Postgres message (Go only checked for an error)
-postgres	extract_test.go	TestExtract_YearMonthDay	crates/pgmem/tests/it/extract.rs::extract_year_month_day	pending	extract returns numeric; read via Text
+postgres	extract_test.go	TestDatePart_FunctionForm	crates/pgmem/tests/it/extract.rs::date_part_function_form	ported	date_part returns float8
+postgres	extract_test.go	TestExtract_Epoch	crates/pgmem/tests/it/extract.rs::extract_epoch	ported	extract returns numeric '1704067200.000000'; read via Text
+postgres	extract_test.go	TestExtract_HourMinuteSecond	crates/pgmem/tests/it/extract.rs::extract_hour_minute_second	ported	extract returns numeric; second is '30.000000'; read via Text
+postgres	extract_test.go	TestExtract_NullPropagates	crates/pgmem/tests/it/extract.rs::extract_null_propagates	ported	
+postgres	extract_test.go	TestExtract_UnknownFieldErrors	crates/pgmem/tests/it/extract.rs::extract_unknown_field_errors	ported	asserts SQLSTATE 22023 and Postgres message (Go only checked for an error)
+postgres	extract_test.go	TestExtract_YearMonthDay	crates/pgmem/tests/it/extract.rs::extract_year_month_day	ported	extract returns numeric; read via Text
 postgres	float_test.go	TestFloat_Arithmetic	crates/pgmem/tests/it/float.rs::float_arithmetic	deviation	SELECT 0.1 + 0.2 is numeric in Postgres (exactly 0.3, read as Text), not float8 ~0.3 as in pgmem-go
 postgres	float_test.go	TestFloat_Comparison	crates/pgmem/tests/it/float.rs::float_comparison	ported	
 postgres	float_test.go	TestFloat_DivByZero	crates/pgmem/tests/it/float.rs::float_div_by_zero	ported	asserts SQLSTATE 22012 (Go only required an error)
@@ -333,25 +333,25 @@ postgres	locking_test.go	TestLocking_ForUpdate	crates/pgmem/tests/it/locking.rs:
 postgres	locking_test.go	TestLocking_ForUpdateSkipLocked	crates/pgmem/tests/it/locking.rs::locking_for_update_skip_locked	ported	
 postgres	m2_test.go	TestM2_CreateInsertSelect	crates/pgmem/tests/it/m2.rs::m2_create_insert_select	ported	
 postgres	m2_test.go	TestM2_OrderAscWithOffset	crates/pgmem/tests/it/m2.rs::m2_order_asc_with_offset	ported	
-postgres	math_funcs_test.go	TestAbs	crates/pgmem/tests/it/math_funcs.rs::abs	pending	
-postgres	math_funcs_test.go	TestGreatestLeast	crates/pgmem/tests/it/math_funcs.rs::greatest_least	pending	
-postgres	math_funcs_test.go	TestGreatest_AllNullsIsNull	crates/pgmem/tests/it/math_funcs.rs::greatest_all_nulls_is_null	pending	
-postgres	math_funcs_test.go	TestGreatest_NullsSkipped	crates/pgmem/tests/it/math_funcs.rs::greatest_nulls_skipped	pending	
-postgres	math_funcs_test.go	TestMod_DivByZero	crates/pgmem/tests/it/math_funcs.rs::mod_div_by_zero	pending	
-postgres	math_funcs_test.go	TestMod_PG	crates/pgmem/tests/it/math_funcs.rs::mod_pg	pending	
-postgres	math_text_funcs_test.go	TestCeil	crates/pgmem/tests/it/math_text_funcs.rs::ceil	pending	ceil(numeric) returns numeric; read via Text (pgx scanned into float64)
-postgres	math_text_funcs_test.go	TestFloor	crates/pgmem/tests/it/math_text_funcs.rs::floor	pending	floor(numeric) returns numeric; read via Text (pgx scanned into float64)
-postgres	math_text_funcs_test.go	TestLpad_CustomFill	crates/pgmem/tests/it/math_text_funcs.rs::lpad_custom_fill	pending	
-postgres	math_text_funcs_test.go	TestLpad_Default	crates/pgmem/tests/it/math_text_funcs.rs::lpad_default	pending	
-postgres	math_text_funcs_test.go	TestLpad_Truncates	crates/pgmem/tests/it/math_text_funcs.rs::lpad_truncates	pending	
-postgres	math_text_funcs_test.go	TestPi	crates/pgmem/tests/it/math_text_funcs.rs::pi	pending	
-postgres	math_text_funcs_test.go	TestPower	crates/pgmem/tests/it/math_text_funcs.rs::power	pending	
-postgres	math_text_funcs_test.go	TestRandom	crates/pgmem/tests/it/math_text_funcs.rs::random	pending	
-postgres	math_text_funcs_test.go	TestRound_Default	crates/pgmem/tests/it/math_text_funcs.rs::round_default	pending	round(numeric) returns numeric; read via Text (pgx scanned into float64)
-postgres	math_text_funcs_test.go	TestRound_Scale	crates/pgmem/tests/it/math_text_funcs.rs::round_scale	pending	round(numeric,int) returns numeric '3.14'; read via Text
-postgres	math_text_funcs_test.go	TestRpad	crates/pgmem/tests/it/math_text_funcs.rs::rpad	pending	
-postgres	math_text_funcs_test.go	TestSign	crates/pgmem/tests/it/math_text_funcs.rs::sign	pending	
-postgres	math_text_funcs_test.go	TestSqrt	crates/pgmem/tests/it/math_text_funcs.rs::sqrt	pending	
+postgres	math_funcs_test.go	TestAbs	crates/pgmem/tests/it/math_funcs.rs::abs	ported	
+postgres	math_funcs_test.go	TestGreatestLeast	crates/pgmem/tests/it/math_funcs.rs::greatest_least	ported	
+postgres	math_funcs_test.go	TestGreatest_AllNullsIsNull	crates/pgmem/tests/it/math_funcs.rs::greatest_all_nulls_is_null	ported	
+postgres	math_funcs_test.go	TestGreatest_NullsSkipped	crates/pgmem/tests/it/math_funcs.rs::greatest_nulls_skipped	ported	
+postgres	math_funcs_test.go	TestMod_DivByZero	crates/pgmem/tests/it/math_funcs.rs::mod_div_by_zero	ported	
+postgres	math_funcs_test.go	TestMod_PG	crates/pgmem/tests/it/math_funcs.rs::mod_pg	ported	
+postgres	math_text_funcs_test.go	TestCeil	crates/pgmem/tests/it/math_text_funcs.rs::ceil	ported	ceil(numeric) returns numeric; read via Text (pgx scanned into float64)
+postgres	math_text_funcs_test.go	TestFloor	crates/pgmem/tests/it/math_text_funcs.rs::floor	ported	floor(numeric) returns numeric; read via Text (pgx scanned into float64)
+postgres	math_text_funcs_test.go	TestLpad_CustomFill	crates/pgmem/tests/it/math_text_funcs.rs::lpad_custom_fill	ported	
+postgres	math_text_funcs_test.go	TestLpad_Default	crates/pgmem/tests/it/math_text_funcs.rs::lpad_default	ported	
+postgres	math_text_funcs_test.go	TestLpad_Truncates	crates/pgmem/tests/it/math_text_funcs.rs::lpad_truncates	ported	
+postgres	math_text_funcs_test.go	TestPi	crates/pgmem/tests/it/math_text_funcs.rs::pi	ported	
+postgres	math_text_funcs_test.go	TestPower	crates/pgmem/tests/it/math_text_funcs.rs::power	ported	
+postgres	math_text_funcs_test.go	TestRandom	crates/pgmem/tests/it/math_text_funcs.rs::random	ported	
+postgres	math_text_funcs_test.go	TestRound_Default	crates/pgmem/tests/it/math_text_funcs.rs::round_default	ported	round(numeric) returns numeric; read via Text (pgx scanned into float64)
+postgres	math_text_funcs_test.go	TestRound_Scale	crates/pgmem/tests/it/math_text_funcs.rs::round_scale	ported	round(numeric,int) returns numeric '3.14'; read via Text
+postgres	math_text_funcs_test.go	TestRpad	crates/pgmem/tests/it/math_text_funcs.rs::rpad	ported	
+postgres	math_text_funcs_test.go	TestSign	crates/pgmem/tests/it/math_text_funcs.rs::sign	ported	
+postgres	math_text_funcs_test.go	TestSqrt	crates/pgmem/tests/it/math_text_funcs.rs::sqrt	ported	
 postgres	migration_noops_test.go	TestMigrationNoop_AnalyzeVacuum	crates/pgmem/tests/it/migration_noops.rs::migration_noop_analyze_vacuum	ported	
 postgres	migration_noops_test.go	TestMigrationNoop_CommentOn	crates/pgmem/tests/it/migration_noops.rs::migration_noop_comment_on	deviation	COMMENT ON EXTENSION "uuid-ossp" fails (42704) on Postgres unless the extension exists; test creates it first.
 postgres	migration_noops_test.go	TestMigrationNoop_CreateDropSchema	crates/pgmem/tests/it/migration_noops.rs::migration_noop_create_drop_schema	ported	
@@ -379,10 +379,10 @@ postgres	on_conflict_test.go	TestOnConflict_DoUpdate_NewRowStillInserts	crates/p
 postgres	on_conflict_test.go	TestOnConflict_DoUpdate_ReferencesExisting	crates/pgmem/tests/it/on_conflict.rs::on_conflict_do_update_references_existing	deviation	unqualified `name` in DO UPDATE SET expression is ambiguous in Postgres (42702); asserts that error, then the t.name-qualified upsert yields "alice / bob".
 postgres	on_conflict_test.go	TestOnConflict_DoUpdate_Returning	crates/pgmem/tests/it/on_conflict.rs::on_conflict_do_update_returning	ported	
 postgres	on_conflict_test.go	TestOnConflict_Returning_OnlyForActualInserts	crates/pgmem/tests/it/on_conflict.rs::on_conflict_returning_only_for_actual_inserts	ported	
-postgres	position_test.go	TestPosition_Found	crates/pgmem/tests/it/position.rs::position_found	pending	
-postgres	position_test.go	TestPosition_NotFound	crates/pgmem/tests/it/position.rs::position_not_found	pending	
-postgres	position_test.go	TestPosition_NullPropagates	crates/pgmem/tests/it/position.rs::position_null_propagates	pending	
-postgres	position_test.go	TestPosition_Unicode	crates/pgmem/tests/it/position.rs::position_unicode	pending	
+postgres	position_test.go	TestPosition_Found	crates/pgmem/tests/it/position.rs::position_found	ported	
+postgres	position_test.go	TestPosition_NotFound	crates/pgmem/tests/it/position.rs::position_not_found	ported	
+postgres	position_test.go	TestPosition_NullPropagates	crates/pgmem/tests/it/position.rs::position_null_propagates	ported	
+postgres	position_test.go	TestPosition_Unicode	crates/pgmem/tests/it/position.rs::position_unicode	ported	
 postgres	qualified_star_test.go	TestQualifiedStar_AllFromOneSide	crates/pgmem/tests/it/qualified_star.rs::qualified_star_all_from_one_side	ported	
 postgres	qualified_star_test.go	TestQualifiedStar_BothSides	crates/pgmem/tests/it/qualified_star.rs::qualified_star_both_sides	ported	
 postgres	qualified_star_test.go	TestQualifiedStar_MixedWithExpr	crates/pgmem/tests/it/qualified_star.rs::qualified_star_mixed_with_expr	ported	
@@ -395,15 +395,15 @@ postgres	regex_test.go	TestRegex_CaseInsensitive	crates/pgmem/tests/it/regex.rs:
 postgres	regex_test.go	TestRegex_CaseSensitive	crates/pgmem/tests/it/regex.rs::regex_case_sensitive	ported	
 postgres	regex_test.go	TestRegex_NotMatch	crates/pgmem/tests/it/regex.rs::regex_not_match	ported	
 postgres	regex_test.go	TestRegex_NotMatchCaseInsensitive	crates/pgmem/tests/it/regex.rs::regex_not_match_case_insensitive	ported	
-postgres	regexp_funcs_test.go	TestRegexpMatch_Groups	crates/pgmem/tests/it/regexp_funcs.rs::regexp_match_groups	pending	
-postgres	regexp_funcs_test.go	TestRegexpMatch_NoGroupReturnsWholeMatch	crates/pgmem/tests/it/regexp_funcs.rs::regexp_match_no_group_returns_whole_match	pending	
-postgres	regexp_funcs_test.go	TestRegexpMatch_NoMatchReturnsNull	crates/pgmem/tests/it/regexp_funcs.rs::regexp_match_no_match_returns_null	pending	
-postgres	regexp_funcs_test.go	TestRegexpReplace_BackReference	crates/pgmem/tests/it/regexp_funcs.rs::regexp_replace_back_reference	pending	Go expected replacement '$2 $1' to expand back references; in Postgres it is literal ('$2 $1'); back references are \2 \1 (also asserted)
-postgres	regexp_funcs_test.go	TestRegexpReplace_BadPattern	crates/pgmem/tests/it/regexp_funcs.rs::regexp_replace_bad_pattern	pending	asserts SQLSTATE 2201B (Go only checked for an error)
-postgres	regexp_funcs_test.go	TestRegexpReplace_CaseInsensitive	crates/pgmem/tests/it/regexp_funcs.rs::regexp_replace_case_insensitive	pending	
-postgres	regexp_funcs_test.go	TestRegexpReplace_FirstMatchByDefault	crates/pgmem/tests/it/regexp_funcs.rs::regexp_replace_first_match_by_default	pending	
-postgres	regexp_funcs_test.go	TestRegexpReplace_GlobalFlag	crates/pgmem/tests/it/regexp_funcs.rs::regexp_replace_global_flag	pending	
-postgres	regexp_funcs_test.go	TestRegexpSplitToArray	crates/pgmem/tests/it/regexp_funcs.rs::regexp_split_to_array	pending	
+postgres	regexp_funcs_test.go	TestRegexpMatch_Groups	crates/pgmem/tests/it/regexp_funcs.rs::regexp_match_groups	ported	
+postgres	regexp_funcs_test.go	TestRegexpMatch_NoGroupReturnsWholeMatch	crates/pgmem/tests/it/regexp_funcs.rs::regexp_match_no_group_returns_whole_match	ported	
+postgres	regexp_funcs_test.go	TestRegexpMatch_NoMatchReturnsNull	crates/pgmem/tests/it/regexp_funcs.rs::regexp_match_no_match_returns_null	ported	
+postgres	regexp_funcs_test.go	TestRegexpReplace_BackReference	crates/pgmem/tests/it/regexp_funcs.rs::regexp_replace_back_reference	deviation	Go expected replacement '$2 $1' to expand back references; in Postgres it is literal ('$2 $1'); back references are \2 \1 (also asserted)
+postgres	regexp_funcs_test.go	TestRegexpReplace_BadPattern	crates/pgmem/tests/it/regexp_funcs.rs::regexp_replace_bad_pattern	ported	asserts SQLSTATE 2201B (Go only checked for an error)
+postgres	regexp_funcs_test.go	TestRegexpReplace_CaseInsensitive	crates/pgmem/tests/it/regexp_funcs.rs::regexp_replace_case_insensitive	ported	
+postgres	regexp_funcs_test.go	TestRegexpReplace_FirstMatchByDefault	crates/pgmem/tests/it/regexp_funcs.rs::regexp_replace_first_match_by_default	ported	
+postgres	regexp_funcs_test.go	TestRegexpReplace_GlobalFlag	crates/pgmem/tests/it/regexp_funcs.rs::regexp_replace_global_flag	ported	
+postgres	regexp_funcs_test.go	TestRegexpSplitToArray	crates/pgmem/tests/it/regexp_funcs.rs::regexp_split_to_array	ported	
 postgres	returning_star_test.go	TestReturningStar_Delete	crates/pgmem/tests/it/returning_star.rs::returning_star_delete	ported	
 postgres	returning_star_test.go	TestReturningStar_Insert	crates/pgmem/tests/it/returning_star.rs::returning_star_insert	ported	
 postgres	returning_star_test.go	TestReturningStar_MixedWithExpr	crates/pgmem/tests/it/returning_star.rs::returning_star_mixed_with_expr	ported	
@@ -429,16 +429,16 @@ postgres	setnow_test.go	TestSetNow_ZeroTimeRevertsToWallClock	crates/pgmem/tests
 postgres	string_agg_test.go	TestStringAgg_AllNullsIsNull	crates/pgmem/tests/it/string_agg.rs::string_agg_all_nulls_is_null	ported	
 postgres	string_agg_test.go	TestStringAgg_Grouped	crates/pgmem/tests/it/string_agg.rs::string_agg_grouped	ported	order-independent compare
 postgres	string_agg_test.go	TestStringAgg_Scalar	crates/pgmem/tests/it/string_agg.rs::string_agg_scalar	ported	order-independent compare
-postgres	string_funcs_more_test.go	TestReplace	crates/pgmem/tests/it/string_funcs_more.rs::replace	pending	
-postgres	string_funcs_more_test.go	TestStringFunctions_NullArgsReturnNull	crates/pgmem/tests/it/string_funcs_more.rs::string_functions_null_args_return_null	pending	also checks trim(NULL::text) which Go replaced by trim(NULL) for lack of cast support
-postgres	string_funcs_more_test.go	TestStrpos	crates/pgmem/tests/it/string_funcs_more.rs::strpos	pending	
-postgres	string_funcs_more_test.go	TestSubstring_TwoAndThreeArg	crates/pgmem/tests/it/string_funcs_more.rs::substring_two_and_three_arg	pending	
-postgres	string_funcs_more_test.go	TestTrim	crates/pgmem/tests/it/string_funcs_more.rs::trim	pending	Go expected trim(e'\t\nmixed\r\n')='mixed'; Postgres trim() strips only spaces by default, so the string is unchanged
-postgres	strings_test.go	TestStringConcat_BasicAndImplicitCast	crates/pgmem/tests/it/strings.rs::string_concat_basic_and_implicit_cast	pending	
-postgres	strings_test.go	TestStringConcat_NullPropagates	crates/pgmem/tests/it/strings.rs::string_concat_null_propagates	pending	
-postgres	strings_test.go	TestStringConcat_OnColumns	crates/pgmem/tests/it/strings.rs::string_concat_on_columns	pending	
-postgres	strings_test.go	TestStringFunctions_LowerUpperLength	crates/pgmem/tests/it/strings.rs::string_functions_lower_upper_length	pending	
-postgres	strings_test.go	TestStringFunctions_NullIsNull	crates/pgmem/tests/it/strings.rs::string_functions_null_is_null	pending	
+postgres	string_funcs_more_test.go	TestReplace	crates/pgmem/tests/it/string_funcs_more.rs::replace	ported	
+postgres	string_funcs_more_test.go	TestStringFunctions_NullArgsReturnNull	crates/pgmem/tests/it/string_funcs_more.rs::string_functions_null_args_return_null	ported	also checks trim(NULL::text) which Go replaced by trim(NULL) for lack of cast support
+postgres	string_funcs_more_test.go	TestStrpos	crates/pgmem/tests/it/string_funcs_more.rs::strpos	ported	
+postgres	string_funcs_more_test.go	TestSubstring_TwoAndThreeArg	crates/pgmem/tests/it/string_funcs_more.rs::substring_two_and_three_arg	ported	
+postgres	string_funcs_more_test.go	TestTrim	crates/pgmem/tests/it/string_funcs_more.rs::trim	deviation	Go expected trim(e'\t\nmixed\r\n')='mixed'; Postgres trim() strips only spaces by default, so the string is unchanged
+postgres	strings_test.go	TestStringConcat_BasicAndImplicitCast	crates/pgmem/tests/it/strings.rs::string_concat_basic_and_implicit_cast	ported	
+postgres	strings_test.go	TestStringConcat_NullPropagates	crates/pgmem/tests/it/strings.rs::string_concat_null_propagates	ported	
+postgres	strings_test.go	TestStringConcat_OnColumns	crates/pgmem/tests/it/strings.rs::string_concat_on_columns	ported	
+postgres	strings_test.go	TestStringFunctions_LowerUpperLength	crates/pgmem/tests/it/strings.rs::string_functions_lower_upper_length	ported	
+postgres	strings_test.go	TestStringFunctions_NullIsNull	crates/pgmem/tests/it/strings.rs::string_functions_null_is_null	ported	
 postgres	subquery_test.go	TestInList_OverWire	crates/pgmem/tests/it/subquery.rs::in_list_over_wire	ported	
 postgres	subquery_test.go	TestInSubquery_OverWire	crates/pgmem/tests/it/subquery.rs::in_subquery_over_wire	ported	
 postgres	subquery_test.go	TestInSubquery_WithParameter	crates/pgmem/tests/it/subquery.rs::in_subquery_with_parameter	ported	
@@ -454,19 +454,19 @@ postgres	table_fk_test.go	TestTableFK_MultiColumnRejected	crates/pgmem/tests/it/
 postgres	table_fk_test.go	TestTableFK_Named	crates/pgmem/tests/it/table_fk.rs::table_fk_named	ported	additionally asserts SQLSTATE 23503 and constraint name posts_author_fk.
 postgres	table_fk_test.go	TestTableFK_OnDeleteCascade	crates/pgmem/tests/it/table_fk.rs::table_fk_on_delete_cascade	ported	
 postgres	table_fk_test.go	TestTableFK_UnknownColumn	crates/pgmem/tests/it/table_fk.rs::table_fk_unknown_column	ported	error cases additionally assert the real Postgres SQLSTATE.
-postgres	text_numeric_funcs_test.go	TestAscii	crates/pgmem/tests/it/text_numeric_funcs.rs::ascii	pending	
-postgres	text_numeric_funcs_test.go	TestAscii_Empty	crates/pgmem/tests/it/text_numeric_funcs.rs::ascii_empty	pending	
-postgres	text_numeric_funcs_test.go	TestChr	crates/pgmem/tests/it/text_numeric_funcs.rs::chr	pending	
-postgres	text_numeric_funcs_test.go	TestChr_RejectsZero	crates/pgmem/tests/it/text_numeric_funcs.rs::chr_rejects_zero	pending	asserts SQLSTATE 54000 (Go only checked for an error)
-postgres	text_numeric_funcs_test.go	TestFormat_IdentifierAndLiteral	crates/pgmem/tests/it/text_numeric_funcs.rs::format_identifier_and_literal	pending	
-postgres	text_numeric_funcs_test.go	TestFormat_NullLAsNULL	crates/pgmem/tests/it/text_numeric_funcs.rs::format_null_las_null	pending	
-postgres	text_numeric_funcs_test.go	TestFormat_NullSAsEmpty	crates/pgmem/tests/it/text_numeric_funcs.rs::format_null_sas_empty	pending	
-postgres	text_numeric_funcs_test.go	TestFormat_PercentLiteral	crates/pgmem/tests/it/text_numeric_funcs.rs::format_percent_literal	pending	
-postgres	text_numeric_funcs_test.go	TestFormat_PlainString	crates/pgmem/tests/it/text_numeric_funcs.rs::format_plain_string	pending	
-postgres	text_numeric_funcs_test.go	TestMD5	crates/pgmem/tests/it/text_numeric_funcs.rs::md5	pending	
-postgres	text_numeric_funcs_test.go	TestSHA256_Bytea	crates/pgmem/tests/it/text_numeric_funcs.rs::sha256_bytea	pending	
-postgres	text_numeric_funcs_test.go	TestSHA512_Bytea	crates/pgmem/tests/it/text_numeric_funcs.rs::sha512_bytea	pending	
-postgres	text_numeric_funcs_test.go	TestToHex	crates/pgmem/tests/it/text_numeric_funcs.rs::to_hex	pending	
+postgres	text_numeric_funcs_test.go	TestAscii	crates/pgmem/tests/it/text_numeric_funcs.rs::ascii	ported	
+postgres	text_numeric_funcs_test.go	TestAscii_Empty	crates/pgmem/tests/it/text_numeric_funcs.rs::ascii_empty	ported	
+postgres	text_numeric_funcs_test.go	TestChr	crates/pgmem/tests/it/text_numeric_funcs.rs::chr	ported	
+postgres	text_numeric_funcs_test.go	TestChr_RejectsZero	crates/pgmem/tests/it/text_numeric_funcs.rs::chr_rejects_zero	ported	asserts SQLSTATE 54000 (Go only checked for an error)
+postgres	text_numeric_funcs_test.go	TestFormat_IdentifierAndLiteral	crates/pgmem/tests/it/text_numeric_funcs.rs::format_identifier_and_literal	ported	
+postgres	text_numeric_funcs_test.go	TestFormat_NullLAsNULL	crates/pgmem/tests/it/text_numeric_funcs.rs::format_null_las_null	ported	
+postgres	text_numeric_funcs_test.go	TestFormat_NullSAsEmpty	crates/pgmem/tests/it/text_numeric_funcs.rs::format_null_sas_empty	ported	
+postgres	text_numeric_funcs_test.go	TestFormat_PercentLiteral	crates/pgmem/tests/it/text_numeric_funcs.rs::format_percent_literal	ported	
+postgres	text_numeric_funcs_test.go	TestFormat_PlainString	crates/pgmem/tests/it/text_numeric_funcs.rs::format_plain_string	ported	
+postgres	text_numeric_funcs_test.go	TestMD5	crates/pgmem/tests/it/text_numeric_funcs.rs::md5	ported	
+postgres	text_numeric_funcs_test.go	TestSHA256_Bytea	crates/pgmem/tests/it/text_numeric_funcs.rs::sha256_bytea	ported	
+postgres	text_numeric_funcs_test.go	TestSHA512_Bytea	crates/pgmem/tests/it/text_numeric_funcs.rs::sha512_bytea	ported	
+postgres	text_numeric_funcs_test.go	TestToHex	crates/pgmem/tests/it/text_numeric_funcs.rs::to_hex	ported	
 postgres	timestamptz_test.go	TestTimestamptz_AcceptsExplicitValue	crates/pgmem/tests/it/timestamptz.rs::timestamptz_accepts_explicit_value	ported	
 postgres	timestamptz_test.go	TestTimestamptz_NowRoundTrip	crates/pgmem/tests/it/timestamptz.rs::timestamptz_now_round_trip	ported	
 postgres	timestamptz_test.go	TestTimestamptz_OrderByWorks	crates/pgmem/tests/it/timestamptz.rs::timestamptz_order_by_works	ported	
@@ -475,14 +475,14 @@ postgres	transactions_test.go	TestTxn_CommitAfterErrorActsAsRollback	crates/pgme
 postgres	transactions_test.go	TestTxn_CommitPersistsInsert	crates/pgmem/tests/it/transactions.rs::txn_commit_persists_insert	ported	
 postgres	transactions_test.go	TestTxn_ImplicitAutocommit	crates/pgmem/tests/it/transactions.rs::txn_implicit_autocommit	ported	
 postgres	transactions_test.go	TestTxn_RollbackUndoesInsert	crates/pgmem/tests/it/transactions.rs::txn_rollback_undoes_insert	ported	
-postgres	trim_length_test.go	TestBtrim_Cutset	crates/pgmem/tests/it/trim_length.rs::btrim_cutset	pending	
-postgres	trim_length_test.go	TestCharLength	crates/pgmem/tests/it/trim_length.rs::char_length	pending	
-postgres	trim_length_test.go	TestLtrim_Cutset	crates/pgmem/tests/it/trim_length.rs::ltrim_cutset	pending	
-postgres	trim_length_test.go	TestLtrim_Default	crates/pgmem/tests/it/trim_length.rs::ltrim_default	pending	
-postgres	trim_length_test.go	TestOctetLength_Bytea	crates/pgmem/tests/it/trim_length.rs::octet_length_bytea	pending	
-postgres	trim_length_test.go	TestOctetLength_Text	crates/pgmem/tests/it/trim_length.rs::octet_length_text	pending	
-postgres	trim_length_test.go	TestRtrim_Default	crates/pgmem/tests/it/trim_length.rs::rtrim_default	pending	
-postgres	trim_length_test.go	TestTrim_NullPropagates	crates/pgmem/tests/it/trim_length.rs::trim_null_propagates	pending	
+postgres	trim_length_test.go	TestBtrim_Cutset	crates/pgmem/tests/it/trim_length.rs::btrim_cutset	ported	
+postgres	trim_length_test.go	TestCharLength	crates/pgmem/tests/it/trim_length.rs::char_length	ported	
+postgres	trim_length_test.go	TestLtrim_Cutset	crates/pgmem/tests/it/trim_length.rs::ltrim_cutset	ported	
+postgres	trim_length_test.go	TestLtrim_Default	crates/pgmem/tests/it/trim_length.rs::ltrim_default	ported	
+postgres	trim_length_test.go	TestOctetLength_Bytea	crates/pgmem/tests/it/trim_length.rs::octet_length_bytea	ported	
+postgres	trim_length_test.go	TestOctetLength_Text	crates/pgmem/tests/it/trim_length.rs::octet_length_text	ported	
+postgres	trim_length_test.go	TestRtrim_Default	crates/pgmem/tests/it/trim_length.rs::rtrim_default	ported	
+postgres	trim_length_test.go	TestTrim_NullPropagates	crates/pgmem/tests/it/trim_length.rs::trim_null_propagates	ported	
 postgres	truncate_test.go	TestTruncate_Multiple	crates/pgmem/tests/it/truncate.rs::truncate_multiple	ported	
 postgres	truncate_test.go	TestTruncate_SingleTable	crates/pgmem/tests/it/truncate.rs::truncate_single_table	ported	
 postgres	truncate_test.go	TestTruncate_TableKeyword	crates/pgmem/tests/it/truncate.rs::truncate_table_keyword	ported	
