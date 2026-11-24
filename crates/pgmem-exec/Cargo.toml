@@ -1,0 +1,25 @@
+[package]
+name = "pgmem-exec"
+description = "pgmem's binder (names, types, operator resolution) and executor (relational operators, DML, DDL, builtins)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+pgmem-catalog = { workspace = true }
+pgmem-ir = { workspace = true }
+pgmem-storage = { workspace = true }
+pgmem-types = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }
+getrandom = { workspace = true }
+md-5 = { workspace = true }
+sha2 = { workspace = true }
+
+[lints]
+workspace = true

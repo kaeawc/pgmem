@@ -1,0 +1,634 @@
+//! DDL execution against the transaction's catalog.
+
+use crate::bind::ddl::{AlterOutcome, CreateTablePlan, Validation};
+use crate::bind::{self, Binder, Ctx, Level, Scope};
+use crate::cast::cast_value_ctx;
+use crate::eval::{EvalCtx, StatementState, eval, eval_pred};
+use crate::session::{Notice, QueryResult, SessionEnv};
+use pgmem_catalog::{Catalog, ConstraintKind, Relation, TableDef};
+use pgmem_ir::{self as ir, ObjectType, Statement};
+use pgmem_storage::Txn;
+use pgmem_types::{GroupKey, SqlError, SqlResult, Value, code, text};
+use std::sync::Arc;
+
+fn tag(t: &str) -> QueryResult {
+    QueryResult { tag: t.to_owned(), ..Default::default() }
+}
+
+fn notice(t: &str, msg: String) -> QueryResult {
+    QueryResult { tag: t.to_owned(), notices: vec![Notice { severity: "NOTICE", code: "00000", message: msg }], ..Default::default() }
+}
+
+pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &SessionEnv, state: &StatementState) -> SqlResult<QueryResult> {
+    match stmt {
+        Statement::CreateTable(ct) => {
+            let Some(CreateTablePlan { mut table, sequences }) = bind::bind_create_table(binder, ct)? else {
+                let name = binder.catalog.normalize(&ct.name)?;
+                return Ok(notice("CREATE TABLE", format!("relation \"{name}\" already exists, skipping")));
+            };
+            let cat = txn.catalog_mut();
+            for mut seq in sequences {
+                seq.oid = cat.alloc_oid();
+                cat.create_sequence(seq)?;
+            }
+            assign_oids(cat, &mut table);
+            let oid = table.oid;
+            cat.create_table(table)?;
+            txn.created_table(oid);
+            Ok(tag("CREATE TABLE"))
+        }
+        Statement::CreateView(cv) => {
+            let mut def = bind::bind_create_view(binder, cv)?;
+            let cat = txn.catalog_mut();
+            def.oid = cat.alloc_oid();
+            cat.create_view(def, cv.or_replace)?;
+            Ok(tag("CREATE VIEW"))
+        }
+        Statement::CreateSequence(cs) => {
+            let Some(mut seq) = bind::bind_create_sequence(binder, cs)? else {
+                let name = binder.catalog.normalize(&cs.name)?;
+                return Ok(notice("CREATE SEQUENCE", format!("relation \"{name}\" already exists, skipping")));
+            };
+            let cat = txn.catalog_mut();
+            seq.oid = cat.alloc_oid();
+            cat.create_sequence(seq)?;
+            Ok(tag("CREATE SEQUENCE"))
+        }
+        Statement::CreateIndex(ci) => {
+            let Some((tname, mut idx)) = bind::bind_create_index(binder, ci)? else {
+                return Ok(notice(
+                    "CREATE INDEX",
+                    format!("relation \"{}\" already exists, skipping", ci.name.clone().unwrap_or_default()),
+                ));
+            };
+            let table = txn.catalog().table(&tname).cloned().ok_or_else(|| SqlError::undefined_table(&tname))?;
+            let mut def = (*table).clone();
+            idx.oid = txn.catalog_mut().alloc_oid();
+            let unique = idx.unique;
+            let name = idx.name.clone();
+            def.indexes.push(idx);
+            if unique {
+                validate_unique(txn, &def, &name, env, state)?;
+            }
+            txn.catalog_mut().replace_table(&tname, def);
+            Ok(tag("CREATE INDEX"))
+        }
+        Statement::AlterTable(at) => {
+            let name = binder.catalog.normalize(&at.name)?.to_owned();
+            if txn.catalog().table(&name).is_none() {
+                if at.if_exists {
+                    return Ok(notice("ALTER TABLE", format!("relation \"{name}\" does not exist, skipping")));
+                }
+                return Err(match txn.catalog().relation(&name) {
+                    Some(r) => SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{name}\" is not a table (it is a {})", r.kind_name())),
+                    None => SqlError::undefined_table(&name),
+                });
+            }
+            let mut current = name;
+            for action in &at.actions {
+                let table = txn.catalog().table(&current).cloned().ok_or_else(|| SqlError::undefined_table(&current))?;
+                let has_rows = !txn.scan(table.oid).is_empty();
+                let snapshot = txn.catalog().clone();
+                let b = Binder::new(&snapshot, &[]);
+                match bind::bind_alter_table(&b, &table, action, has_rows)? {
+                    AlterOutcome::Nothing => {}
+                    AlterOutcome::Replace { def, rename_from, sequences, validate } => {
+                        let mut def = *def;
+                        assign_oids(txn.catalog_mut(), &mut def);
+                        let mut renamed_seqs = Vec::new();
+                        for mut seq in sequences {
+                            seq.oid = txn.catalog_mut().alloc_oid();
+                            renamed_seqs.push(seq);
+                        }
+                        for seq in renamed_seqs {
+                            txn.catalog_mut().create_sequence(seq)?;
+                        }
+                        if let ir::AlterTableAction::RenameColumn { old, new } = action {
+                            rename_column_refs(&mut def, old, new);
+                            rename_fk_column_refs(txn.catalog_mut(), &def.name, old, new);
+                        }
+                        apply_validation(txn, &table, &def, validate, &snapshot, env, state)?;
+                        if let Some(old) = &rename_from {
+                            rename_table_refs(txn.catalog_mut(), old, &def.name);
+                        }
+                        let new_name = def.name.clone();
+                        txn.catalog_mut().replace_table(rename_from.as_deref().unwrap_or(&current), def);
+                        current = new_name;
+                    }
+                }
+            }
+            Ok(tag("ALTER TABLE"))
+        }
+        Statement::Drop(d) => drop(d, txn, binder),
+        Statement::Truncate(t) => truncate(t, txn, binder),
+        other => Err(SqlError::feature_not_supported(format!("statement {other:?} is not supported by pgmem"))),
+    }
+}
+
+fn assign_oids(cat: &mut Catalog, table: &mut TableDef) {
+    if table.oid == 0 {
+        table.oid = cat.alloc_oid();
+    }
+    for c in &mut table.constraints {
+        if c.oid == 0 {
+            c.oid = cat.alloc_oid();
+        }
+    }
+    for i in &mut table.indexes {
+        if i.oid == 0 {
+            i.oid = cat.alloc_oid();
+        }
+    }
+}
+
+fn display(v: &Value) -> String {
+    if v.is_null() { "null".into() } else { text::encode(v, &v.natural_type()).unwrap_or_default() }
+}
+
+fn padded_rows(txn: &Txn, def: &TableDef) -> Vec<(u64, Vec<Value>)> {
+    txn.scan(def.oid)
+        .into_iter()
+        .map(|(id, mut r)| {
+            while r.len() < def.columns.len() {
+                r.push(def.columns[r.len()].missing.clone());
+            }
+            (id, r)
+        })
+        .collect()
+}
+
+/// `CREATE UNIQUE INDEX` / `ADD PRIMARY KEY` over existing rows.
+fn validate_unique(txn: &Txn, def: &TableDef, index: &str, env: &SessionEnv, state: &StatementState) -> SqlResult<()> {
+    let mut catalog = txn.catalog().clone();
+    catalog.replace_table(&def.name, def.clone());
+    let b = Binder::new(&catalog, &[]);
+    let rules = b.bind_row_rules(&Arc::new(def.clone()))?;
+    let Some(u) = rules.uniques.iter().find(|u| u.name == index) else { return Ok(()) };
+    let ctx = EvalCtx::new(txn, &[], env, state);
+    let mut seen = std::collections::HashSet::new();
+    for (_, row) in padded_rows(txn, def) {
+        if let Some(p) = &u.predicate
+            && !eval_pred(p, &row, &ctx)?
+        {
+            continue;
+        }
+        let vals: Vec<Value> = if u.exprs.is_empty() {
+            u.columns.iter().map(|c| row[*c].clone()).collect()
+        } else {
+            u.exprs.iter().map(|e| eval(e, &row, &ctx)).collect::<SqlResult<_>>()?
+        };
+        if !u.nulls_not_distinct && vals.iter().any(Value::is_null) {
+            continue;
+        }
+        let key: Vec<GroupKey> = vals.iter().map(Value::group_key).collect();
+        if !seen.insert(key) {
+            let cols: Vec<String> =
+                if u.exprs.is_empty() { u.columns.iter().map(|c| def.columns[*c].name.clone()).collect() } else { vec!["expr".into()] };
+            return Err(SqlError::new(code::UNIQUE_VIOLATION, format!("could not create unique index \"{index}\"")).with_detail(format!(
+                "Key ({})=({}) is duplicated.",
+                cols.join(", "),
+                vals.iter().map(display).collect::<Vec<_>>().join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn apply_validation(
+    txn: &mut Txn,
+    old: &TableDef,
+    def: &TableDef,
+    validate: Validation,
+    snapshot: &Catalog,
+    env: &SessionEnv,
+    state: &StatementState,
+) -> SqlResult<()> {
+    match validate {
+        Validation::None => Ok(()),
+        Validation::NotNull(slot) => {
+            if padded_rows(txn, def).iter().any(|(_, r)| r[slot].is_null()) {
+                return Err(SqlError::new(
+                    code::NOT_NULL_VIOLATION,
+                    format!("column \"{}\" of relation \"{}\" contains null values", def.columns[slot].name, def.name),
+                ));
+            }
+            Ok(())
+        }
+        Validation::Constraint(name) => {
+            let con = def.constraints.iter().find(|c| c.name == name).cloned().ok_or_else(|| SqlError::internal("constraint vanished"))?;
+            match &con.kind {
+                ConstraintKind::Check { expr } => {
+                    let mut catalog = snapshot.clone();
+                    catalog.replace_table(&def.name, def.clone());
+                    let b = Binder::new(&catalog, &[]);
+                    let level = Level::new(bind::dml::physical_scope(def, &def.name));
+                    let pred = b.bind_predicate(expr, "CHECK", &Ctx::new(&level))?;
+                    let ctx = EvalCtx::new(txn, &[], env, state);
+                    for (_, row) in padded_rows(txn, def) {
+                        if matches!(eval(&pred, &row, &ctx)?, Value::Bool(false)) {
+                            return Err(SqlError::new(
+                                code::CHECK_VIOLATION,
+                                format!("check constraint \"{name}\" of relation \"{}\" is violated by some row", def.name),
+                            ));
+                        }
+                    }
+                    Ok(())
+                }
+                ConstraintKind::PrimaryKey { columns } | ConstraintKind::Unique { columns, .. } => {
+                    if matches!(con.kind, ConstraintKind::PrimaryKey { .. }) {
+                        for (_, row) in padded_rows(txn, def) {
+                            if let Some(c) = columns.iter().find(|c| row[**c].is_null()) {
+                                return Err(SqlError::new(
+                                    code::NOT_NULL_VIOLATION,
+                                    format!("column \"{}\" of relation \"{}\" contains null values", def.columns[*c].name, def.name),
+                                ));
+                            }
+                        }
+                    }
+                    validate_unique(txn, def, &name, env, state)
+                }
+                ConstraintKind::ForeignKey { columns, ref_table, ref_columns, .. } => {
+                    let parent = if ref_table == &def.name {
+                        Arc::new(def.clone())
+                    } else {
+                        txn.catalog().table(ref_table).cloned().ok_or_else(|| SqlError::undefined_table(ref_table))?
+                    };
+                    let parents = padded_rows(txn, &parent);
+                    for (_, row) in padded_rows(txn, def) {
+                        let key: Vec<Value> = columns.iter().map(|c| row[*c].clone()).collect();
+                        if key.iter().any(Value::is_null) {
+                            continue;
+                        }
+                        let found = parents.iter().any(|(_, p)| {
+                            ref_columns.iter().zip(&key).all(|(rc, k)| pgmem_types::compare_values(&p[*rc], k).is_ok_and(|o| o.is_eq()))
+                        });
+                        if !found {
+                            let names: Vec<&str> = columns.iter().map(|c| def.columns[*c].name.as_str()).collect();
+                            return Err(SqlError::new(
+                                code::FOREIGN_KEY_VIOLATION,
+                                format!("insert or update on table \"{}\" violates foreign key constraint \"{name}\"", def.name),
+                            )
+                            .with_detail(format!(
+                                "Key ({})=({}) is not present in table \"{ref_table}\".",
+                                names.join(", "),
+                                key.iter().map(display).collect::<Vec<_>>().join(", ")
+                            )));
+                        }
+                    }
+                    Ok(())
+                }
+            }
+        }
+        Validation::ConvertColumn { slot, using } => {
+            let column = def.columns[slot].clone();
+            // Compute new values with an immutable view, then rewrite.
+            let mut catalog = snapshot.clone();
+            catalog.replace_table(&old.name, old.clone());
+            let b = Binder::new(&catalog, &[]);
+            let new_slot = slot >= old.columns.len();
+            let (using_expr, default_expr, generated_expr) = {
+                let level = Level::new(bind::dml::physical_scope(old, &old.name));
+                let ctx = Ctx::new(&level);
+                let u = using.as_ref().map(|u| b.bind_expr(u, &ctx)).transpose()?;
+                let rules_def = Arc::new(def.clone());
+                let mut cat2 = snapshot.clone();
+                cat2.replace_table(&def.name, def.clone());
+                let b2 = Binder::new(&cat2, &[]);
+                let rules = b2.bind_row_rules(&rules_def)?;
+                (u, rules.defaults[slot].clone(), rules.generated[slot].clone())
+            };
+            let rows = padded_rows(txn, old);
+            let mut new_values = Vec::with_capacity(rows.len());
+            {
+                let ctx = EvalCtx::new(txn, &[], env, state);
+                for (_, row) in &rows {
+                    let v = if new_slot {
+                        let mut r = row.clone();
+                        r.push(Value::Null);
+                        match (&generated_expr, &default_expr) {
+                            (Some(g), _) => eval(g, &r, &ctx)?,
+                            (None, Some(d)) => eval(d, &[], &ctx)?,
+                            (None, None) => Value::Null,
+                        }
+                    } else {
+                        let src = match &using_expr {
+                            Some((e, _)) => eval(e, row, &ctx)?,
+                            None => row[slot].clone(),
+                        };
+                        cast_value_ctx(src, &column.ty, column.typmod, false).map_err(|e| {
+                            if e.code == code::CANNOT_COERCE {
+                                SqlError::datatype_mismatch(format!(
+                                    "column \"{}\" cannot be cast automatically to type {}",
+                                    column.name,
+                                    column.ty.name()
+                                ))
+                                .with_hint(format!(
+                                    "You might need to specify \"USING {}::{}\".",
+                                    column.name,
+                                    column.ty.name()
+                                ))
+                            } else {
+                                e
+                            }
+                        })?
+                    };
+                    if column.not_null && v.is_null() {
+                        return Err(SqlError::new(
+                            code::NOT_NULL_VIOLATION,
+                            format!("column \"{}\" of relation \"{}\" contains null values", column.name, def.name),
+                        ));
+                    }
+                    new_values.push(v);
+                }
+            }
+            let mut i = 0;
+            txn.rewrite(old.oid, |row| {
+                while row.len() < old.columns.len() {
+                    row.push(old.columns[row.len()].missing.clone());
+                }
+                if new_slot {
+                    row.push(new_values.get(i).cloned().unwrap_or(Value::Null));
+                } else if let Some(v) = new_values.get(i) {
+                    row[slot] = v.clone();
+                }
+                i += 1;
+            });
+            Ok(())
+        }
+    }
+}
+
+fn rename_in_expr(e: &mut ir::Expr, table: &str, old: &str, new: &str) {
+    if let ir::Expr::Column(parts) = e {
+        let n = parts.len();
+        if parts[n - 1] == old && (n == 1 || parts[n - 2] == table) {
+            parts[n - 1] = new.to_owned();
+        }
+        return;
+    }
+    // Walk children via Debug-free structural recursion.
+    match e {
+        ir::Expr::Unary { expr, .. }
+        | ir::Expr::Not(expr)
+        | ir::Expr::IsNull { expr, .. }
+        | ir::Expr::IsBool { expr, .. }
+        | ir::Expr::Cast { expr, .. }
+        | ir::Expr::Collate { expr, .. } => rename_in_expr(expr, table, old, new),
+        ir::Expr::Binary { left, right, .. }
+        | ir::Expr::And(left, right)
+        | ir::Expr::Or(left, right)
+        | ir::Expr::IsDistinctFrom { left, right, .. } => {
+            rename_in_expr(left, table, old, new);
+            rename_in_expr(right, table, old, new);
+        }
+        ir::Expr::Between { expr, low, high, .. } => {
+            rename_in_expr(expr, table, old, new);
+            rename_in_expr(low, table, old, new);
+            rename_in_expr(high, table, old, new);
+        }
+        ir::Expr::InList { expr, list, .. } => {
+            rename_in_expr(expr, table, old, new);
+            list.iter_mut().for_each(|x| rename_in_expr(x, table, old, new));
+        }
+        ir::Expr::Like { expr, pattern, .. } | ir::Expr::SimilarTo { expr, pattern, .. } => {
+            rename_in_expr(expr, table, old, new);
+            rename_in_expr(pattern, table, old, new);
+        }
+        ir::Expr::Case { operand, whens, else_result } => {
+            if let Some(o) = operand {
+                rename_in_expr(o, table, old, new);
+            }
+            for (w, t) in whens {
+                rename_in_expr(w, table, old, new);
+                rename_in_expr(t, table, old, new);
+            }
+            if let Some(x) = else_result {
+                rename_in_expr(x, table, old, new);
+            }
+        }
+        ir::Expr::Function(f) => f.args.iter_mut().for_each(|x| rename_in_expr(x, table, old, new)),
+        ir::Expr::Array(items) | ir::Expr::Row(items) => items.iter_mut().for_each(|x| rename_in_expr(x, table, old, new)),
+        ir::Expr::AnyAll { left, right, .. } => {
+            rename_in_expr(left, table, old, new);
+            if let ir::AnyAllRight::Array(a) = right {
+                rename_in_expr(a, table, old, new);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Keeps stored expressions pointing at a renamed column (Postgres stores attnums).
+fn rename_column_refs(def: &mut TableDef, old: &str, new: &str) {
+    let table = def.name.clone();
+    for c in &mut def.columns {
+        if let Some(d) = &mut c.default {
+            rename_in_expr(d, &table, old, new);
+        }
+        if let Some(g) = &mut c.generated {
+            rename_in_expr(g, &table, old, new);
+        }
+    }
+    for con in &mut def.constraints {
+        if let ConstraintKind::Check { expr } = &mut con.kind {
+            rename_in_expr(expr, &table, old, new);
+        }
+    }
+    for idx in &mut def.indexes {
+        idx.exprs.iter_mut().for_each(|e| rename_in_expr(e, &table, old, new));
+        if let Some(p) = &mut idx.predicate {
+            rename_in_expr(p, &table, old, new);
+        }
+    }
+}
+
+fn rename_fk_column_refs(_cat: &mut Catalog, _table: &str, _old: &str, _new: &str) {
+    // Foreign keys reference columns by position, so nothing to do.
+}
+
+/// Updates references to a renamed table in other tables' foreign keys and sequence owners.
+fn rename_table_refs(cat: &mut Catalog, old: &str, new: &str) {
+    let tables: Vec<TableDef> = cat.tables().map(|t| (**t).clone()).collect();
+    for mut t in tables {
+        let mut changed = false;
+        for con in &mut t.constraints {
+            if let ConstraintKind::ForeignKey { ref_table, .. } = &mut con.kind
+                && ref_table == old
+            {
+                *ref_table = new.to_owned();
+                changed = true;
+            }
+        }
+        if changed {
+            let name = t.name.clone();
+            cat.replace_table(&name, t);
+        }
+    }
+    let seqs: Vec<pgmem_catalog::SequenceDef> =
+        cat.sequences().filter(|s| s.owned_by.as_ref().is_some_and(|(t, _)| t == old)).map(|s| (**s).clone()).collect();
+    for mut s in seqs {
+        cat.drop_sequence(&s.name);
+        if let Some((t, _)) = &mut s.owned_by {
+            *t = new.to_owned();
+        }
+        let _ = cat.create_sequence(s);
+    }
+}
+
+fn dependents_error(what: &str, name: &str, detail: String) -> SqlError {
+    SqlError::new(code::DEPENDENT_OBJECTS_STILL_EXIST, format!("cannot drop {what} {name} because other objects depend on it"))
+        .with_detail(detail)
+        .with_hint("Use DROP ... CASCADE to drop the dependent objects too.")
+}
+
+fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> {
+    let kind = match d.object_type {
+        ObjectType::Table => "TABLE",
+        ObjectType::View => "VIEW",
+        ObjectType::Index => "INDEX",
+        ObjectType::Sequence => "SEQUENCE",
+        ObjectType::Schema => return Ok(tag("DROP SCHEMA")),
+        ObjectType::Extension => return Ok(tag("DROP EXTENSION")),
+        ObjectType::Type => return Err(SqlError::feature_not_supported("DROP TYPE is not supported by pgmem")),
+        ObjectType::Function => return Err(SqlError::feature_not_supported("DROP FUNCTION is not supported by pgmem")),
+    };
+    let mut notices = Vec::new();
+    for name in &d.names {
+        let base = binder.catalog.normalize(name)?.to_owned();
+        let rel = txn.catalog().relation(&base);
+        let missing = |what: &str| -> SqlResult<()> {
+            if d.if_exists { Ok(()) } else { Err(SqlError::new(code::UNDEFINED_TABLE, format!("{what} \"{base}\" does not exist"))) }
+        };
+        match (d.object_type, rel) {
+            (ObjectType::Table, Some(Relation::Table(t))) => {
+                let referencing: Vec<(String, String)> = txn
+                    .catalog()
+                    .tables()
+                    .filter(|o| o.name != t.name)
+                    .flat_map(|o| {
+                        o.constraints.iter().filter_map(|c| match &c.kind {
+                            ConstraintKind::ForeignKey { ref_table, .. } if ref_table == &t.name => Some((o.name.clone(), c.name.clone())),
+                            _ => None,
+                        })
+                    })
+                    .collect();
+                if !referencing.is_empty() {
+                    if !d.cascade {
+                        let (child, con) = &referencing[0];
+                        return Err(dependents_error("table", &base, format!("constraint {con} on table {child} depends on table {base}")));
+                    }
+                    for (child, con) in &referencing {
+                        if let Some(ct) = txn.catalog().table(child).cloned() {
+                            let mut def = (*ct).clone();
+                            def.constraints.retain(|c| &c.name != con);
+                            txn.catalog_mut().replace_table(child, def);
+                            notices.push(Notice {
+                                severity: "NOTICE",
+                                code: "00000",
+                                message: format!("drop cascades to constraint {con} on table {child}"),
+                            });
+                        }
+                    }
+                }
+                txn.catalog_mut().drop_table(&base);
+            }
+            (ObjectType::Table, Some(other)) => {
+                return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{base}\" is not a table")).with_hint(format!(
+                    "Use DROP {} to remove a {}.",
+                    other.kind_name().to_uppercase(),
+                    other.kind_name()
+                )));
+            }
+            (ObjectType::View, Some(Relation::View(_))) => {
+                txn.catalog_mut().drop_view(&base);
+            }
+            (ObjectType::View, Some(_)) => return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{base}\" is not a view"))),
+            (ObjectType::Sequence, Some(Relation::Sequence(_))) => {
+                txn.catalog_mut().drop_sequence(&base);
+            }
+            (ObjectType::Sequence, Some(_)) => return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{base}\" is not a sequence"))),
+            (ObjectType::Index, Some(Relation::Index { table, index })) => {
+                let t = txn.catalog().table(&table).cloned().ok_or_else(|| SqlError::undefined_table(&table))?;
+                if t.has_constraint(&index.name) {
+                    return Err(dependents_error(
+                        "index",
+                        &base,
+                        format!("constraint {} on table {table} requires index {}", index.name, index.name),
+                    )
+                    .with_hint(format!("You can drop constraint {} on table {table} instead.", index.name)));
+                }
+                let mut def = (*t).clone();
+                def.indexes.retain(|i| i.name != index.name);
+                txn.catalog_mut().replace_table(&table, def);
+            }
+            (ObjectType::Index, Some(_)) => return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{base}\" is not an index"))),
+            (_, None) => {
+                let what = match d.object_type {
+                    ObjectType::Table => "table",
+                    ObjectType::View => "view",
+                    ObjectType::Index => "index",
+                    _ => "sequence",
+                };
+                missing(what)?;
+                notices.push(Notice { severity: "NOTICE", code: "00000", message: format!("{what} \"{base}\" does not exist, skipping") });
+            }
+            _ => {}
+        }
+    }
+    Ok(QueryResult { tag: format!("DROP {kind}"), notices, ..Default::default() })
+}
+
+fn truncate(t: &ir::Truncate, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> {
+    let mut names = Vec::new();
+    for n in &t.tables {
+        let base = binder.catalog.normalize(n)?.to_owned();
+        if txn.catalog().table(&base).is_none() {
+            return Err(SqlError::undefined_table(&base));
+        }
+        names.push(base);
+    }
+    // Tables referencing a truncated table must be truncated too (CASCADE adds them).
+    let mut i = 0;
+    while i < names.len() {
+        let target = names[i].clone();
+        let referencing: Vec<String> = txn
+            .catalog()
+            .tables()
+            .filter(|o| {
+                o.constraints.iter().any(|c| matches!(&c.kind, ConstraintKind::ForeignKey { ref_table, .. } if ref_table == &target))
+            })
+            .map(|o| o.name.clone())
+            .collect();
+        for r in referencing {
+            if names.contains(&r) {
+                continue;
+            }
+            if !t.cascade {
+                return Err(SqlError::feature_not_supported("cannot truncate a table referenced in a foreign key constraint")
+                    .with_detail(format!("Table \"{r}\" references \"{target}\"."))
+                    .with_hint(format!("Truncate table \"{r}\" at the same time, or use TRUNCATE ... CASCADE.")));
+            }
+            names.push(r);
+        }
+        i += 1;
+    }
+    for name in &names {
+        let def = txn.catalog().table(name).cloned().ok_or_else(|| SqlError::undefined_table(name))?;
+        txn.truncate(def.oid);
+        if t.restart_identity {
+            let seqs: Vec<pgmem_catalog::SequenceDef> = txn
+                .catalog()
+                .sequences()
+                .filter(|s| s.owned_by.as_ref().is_some_and(|(tb, _)| tb == name))
+                .map(|s| (**s).clone())
+                .collect();
+            for s in seqs {
+                txn.database().reset_sequence(&s);
+            }
+        }
+    }
+    Ok(tag("TRUNCATE TABLE"))
+}
+
+#[allow(dead_code)]
+fn unused(_: Scope) {}

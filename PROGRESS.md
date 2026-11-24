@@ -16,13 +16,14 @@ test can observe — and what comes next. Updated with every PR.
 |---|---|---|---|
 | 2026-11-24 | Rust foundation: types, IR, parser | 37/564 | `types` and `postgres/parse` Go tests ported |
 | 2026-11-24 | Catalog and storage | 49/564 | `storage` Go tests ported (2 deviations: row-level conflicts) |
+| 2026-11-24 | Executor | 49/564 | binder, operators, DML/DDL, builtins (integration tests arrive with the server) |
 
 ## The port, PR by PR
 
 1. **Foundation**: Cargo workspace and CI, `pgmem-types` (types, values, SQLSTATE
    errors, text/binary codecs, numeric, date/time, jsonb), `pgmem-ir`, `pgmem-parse`.
-2. **Catalog and storage** (this PR; row-level transaction overlays, snapshots, savepoints).
-3. Executor: binder, operators, DML/DDL, builtin functions, sessions.
+2. **Catalog and storage** (row-level transaction overlays, snapshots, savepoints).
+3. **Executor** (this PR): binder, operators, DML/DDL, builtin functions, sessions.
 4. Wire protocol, `pgmem::Server`, test harness (pgmem or real Postgres), first integration tests.
 5. to 8. Remaining pgmem-go integration tests by area.
 9. Remove the Go implementation.
