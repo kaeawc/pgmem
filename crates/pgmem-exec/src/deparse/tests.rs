@@ -1000,3 +1000,22 @@ fn approximations_do_not_fail() {
         assert_eq!(deparse_expr(&cat, t, expr).expect("deparse"), expected);
     }
 }
+
+#[test]
+fn views_join_aliases() {
+    check_views(
+        "CREATE TABLE l (k int, v text); CREATE TABLE r (k int, w text);
+        CREATE VIEW vj AS SELECT j.k, w FROM l JOIN r USING (k) AS j;
+        CREATE VIEW vp AS SELECT lr.w, lr.k FROM (l JOIN r USING (k)) AS lr;
+        CREATE VIEW vf AS SELECT k, v FROM l FULL JOIN r USING (k);
+        CREATE VIEW vq AS SELECT x.a, x.c FROM (l LEFT JOIN r ON l.k = r.k) AS x(a, b, c);
+        CREATE VIEW vs AS SELECT * FROM (l FULL JOIN r USING (k)) AS z",
+        &[
+            ("vj", " SELECT l.k,\n    r.w\n   FROM (l\n     JOIN r USING (k) AS j);"),
+            ("vp", " SELECT lr.w,\n    lr.k\n   FROM (l\n     JOIN r USING (k)) lr;"),
+            ("vf", " SELECT k,\n    l.v\n   FROM (l\n     FULL JOIN r USING (k));"),
+            ("vq", " SELECT x.a,\n    x.c\n   FROM (l\n     LEFT JOIN r ON ((l.k = r.k))) x(a, b, c, w);"),
+            ("vs", " SELECT z.k,\n    z.v,\n    z.w\n   FROM (l\n     FULL JOIN r USING (k)) z;"),
+        ],
+    );
+}

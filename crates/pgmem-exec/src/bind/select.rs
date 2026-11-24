@@ -20,7 +20,10 @@ impl Binder<'_> {
         let mut ctx = Ctx { levels: ctx.levels.clone(), ctes: ctx.ctes.clone(), clause: Clause::Other, windows: Vec::new() };
         let mut cte_plans = Vec::new();
         if let Some(with) = &q.with {
-            for cte in &with.ctes {
+            for (i, cte) in with.ctes.iter().enumerate() {
+                if with.ctes[..i].iter().any(|c| c.name == cte.name) {
+                    return Err(SqlError::new(code::DUPLICATE_ALIAS, format!("WITH query name \"{}\" specified more than once", cte.name)));
+                }
                 let plan = self.bind_cte(cte, with.recursive, &ctx)?;
                 cte_plans.push(plan.0);
                 ctx.ctes.push(plan.1);
@@ -31,7 +34,7 @@ impl Binder<'_> {
             body => {
                 let mut b = self.bind_set_expr(body, &ctx)?;
                 if !q.order_by.is_empty() {
-                    b = self.order_by_outputs(b, &q.order_by, &ctx)?;
+                    b = self.order_by_outputs(b, &q.order_by, matches!(body, ir::SetExpr::SetOp { .. }), &ctx)?;
                 }
                 b
             }
@@ -47,7 +50,11 @@ impl Binder<'_> {
             };
             let limit = q.limit.as_ref().map(|l| as_int8(l, "LIMIT")).transpose()?;
             let offset = q.offset.as_ref().map(|o| as_int8(o, "OFFSET")).transpose()?;
-            bound.rel = Rel::Limit { input: Box::new(bound.rel), limit, offset };
+            bound.rel = if q.with_ties {
+                limit_with_ties(bound.rel, limit, offset)
+            } else {
+                Rel::Limit { input: Box::new(bound.rel), limit, offset, ties: None }
+            };
         }
         if !cte_plans.is_empty() {
             bound.rel = Rel::With { ctes: cte_plans, body: Box::new(bound.rel) };
@@ -66,6 +73,12 @@ impl Binder<'_> {
                     format!("recursive query \"{}\" does not have the form non-recursive-term UNION [ALL] recursive-term", cte.name),
                 ));
             };
+            if in_set(left, &cte.name) {
+                return Err(SqlError::new(
+                    code::INVALID_RECURSION,
+                    format!("recursive reference to query \"{}\" must not appear within its non-recursive term", cte.name),
+                ));
+            }
             let base_level = Level::new(Scope::default());
             let base = self.bind_set_expr(left, &ctx.from_item(&[&base_level]))?;
             let mut columns: Vec<(String, Type)> = base.columns.iter().map(|c| (c.name.clone(), c.ty.clone())).collect();
@@ -75,8 +88,27 @@ impl Binder<'_> {
             let binding = CteBinding { name: cte.name.clone(), id, columns: columns.clone() };
             inner_ctx.ctes.push(binding.clone());
             let step = self.bind_set_expr(right, &inner_ctx)?;
+            if has_aggregate(&step.rel) {
+                return Err(SqlError::new(
+                    code::INVALID_RECURSION,
+                    "aggregate functions are not allowed in a recursive query's recursive term",
+                ));
+            }
             if step.columns.len() != columns.len() {
                 return Err(SqlError::syntax("each UNION query must have the same number of columns"));
+            }
+            for (n, (c, s)) in columns.iter().zip(&step.columns).enumerate() {
+                let common = common_of(&[c.1.clone(), s.ty.clone()], "UNION")?;
+                if common != c.1 {
+                    return Err(SqlError::datatype_mismatch(format!(
+                        "recursive query \"{}\" column {} has type {} in non-recursive term but type {} overall",
+                        cte.name,
+                        n + 1,
+                        c.1.name(),
+                        common.name()
+                    ))
+                    .with_hint("Cast the output of the non-recursive term to the correct type."));
+                }
             }
             let step_rel = coerce_columns(
                 self,
@@ -100,8 +132,9 @@ impl Binder<'_> {
             ir::SetExpr::Query(q) => self.bind_query(q, ctx),
             ir::SetExpr::Values(rows) => self.bind_values(rows, ctx),
             ir::SetExpr::SetOp { op, all, left, right } => {
-                let l = self.bind_set_expr(left, ctx)?;
-                let r = self.bind_set_expr(right, ctx)?;
+                let octx = ctx.with_clause(Clause::SetOperand);
+                let l = self.bind_set_expr(left, &octx)?;
+                let r = self.bind_set_expr(right, &octx)?;
                 let name = match op {
                     ir::SetOperator::Union => "UNION",
                     ir::SetOperator::Intersect => "INTERSECT",
@@ -156,7 +189,7 @@ impl Binder<'_> {
     }
 
     /// ORDER BY over a set operation / VALUES: only output columns (by name or position).
-    fn order_by_outputs(&self, b: BoundQuery, order_by: &[ir::OrderByExpr], ctx: &Ctx) -> SqlResult<BoundQuery> {
+    fn order_by_outputs(&self, b: BoundQuery, order_by: &[ir::OrderByExpr], set_op: bool, ctx: &Ctx) -> SqlResult<BoundQuery> {
         let scope = Scope::from_cols(b.columns.iter().map(|c| ScopeCol::new(None, c.name.clone(), c.ty.clone())).collect());
         let level = Level::sharing(scope, ctx.current());
         let octx = ctx.nested_same_level(&level).with_clause(Clause::OrderBy);
@@ -166,6 +199,11 @@ impl Binder<'_> {
                 Some(n) if n >= 1 && n <= b.columns.len() => Expr::Col(n - 1),
                 Some(n) => {
                     return Err(SqlError::new(code::INVALID_COLUMN_REFERENCE, format!("ORDER BY position {n} is not in select list")));
+                }
+                None if set_op && !matches!(&o.expr, ir::Expr::Column(p) if p.len() == 1) => {
+                    return Err(SqlError::new(code::FEATURE_NOT_SUPPORTED, "invalid UNION/INTERSECT/EXCEPT ORDER BY clause")
+                        .with_detail("Only result column names can be used, not expressions or functions.")
+                        .with_hint("Add the expression/function to every SELECT, or move the UNION into a FROM clause."));
                 }
                 None => self.bind_expr(&o.expr, &octx)?.0,
             };
@@ -233,8 +271,9 @@ impl Binder<'_> {
                 }
                 ir::SelectItem::Expr { expr, alias } => {
                     let (e, t) = self.bind_expr(expr, &list_ctx)?;
-                    // An untyped literal in the select list becomes text, as in Postgres.
-                    let (e, t) = if t == Type::Unknown {
+                    // An untyped literal in the select list becomes text, as in Postgres (a set
+                    // operation operand leaves it to the set operation).
+                    let (e, t) = if t == Type::Unknown && ctx.clause != Clause::SetOperand {
                         (super::coerce(self, e, &t, &Type::Text, CoercionContext::Implicit)?, Type::Text)
                     } else {
                         (e, t)
@@ -511,7 +550,7 @@ impl Binder<'_> {
                 let bound = if lateral {
                     self.bind_query(query, &ctx.from_item(&[&left_level, &level]))?
                 } else {
-                    self.bind_query(query, &ctx.from_item(&[&level]))?
+                    self.bind_query(query, &ctx.from_item(&[&level])).map_err(|e| sibling_reference(e, left))?
                 };
                 let alias_name = alias.as_ref().map(|a| a.name.clone());
                 let mut cols: Vec<ScopeCol> =
@@ -527,68 +566,132 @@ impl Binder<'_> {
             ir::TableRef::Function { call, alias, with_ordinality, .. } => {
                 self.bind_function_scan(call, alias.as_ref(), *with_ordinality, ctx, left)
             }
-            ir::TableRef::Join { left: l, right: r, kind, constraint } => {
-                let (lrel, lscope, _) = self.bind_table_ref(l, ctx, left)?;
-                let (rrel, rscope, lateral) = self.bind_table_ref(r, ctx, &lscope)?;
-                check_duplicate_aliases(&lscope, &rscope)?;
-                let kind = match kind {
-                    ir::JoinKind::Inner | ir::JoinKind::Cross => JoinKind::Inner,
-                    ir::JoinKind::Left => JoinKind::Left,
-                    ir::JoinKind::Right => JoinKind::Right,
-                    ir::JoinKind::Full => JoinKind::Full,
-                };
-                if lateral && matches!(kind, JoinKind::Right | JoinKind::Full) {
-                    return Err(SqlError::syntax("invalid reference to FROM-clause entry for table")
-                        .with_hint("The combining JOIN type must be INNER or LEFT for a LATERAL reference."));
+            ir::TableRef::Join { left: l, right: r, kind, constraint, using_alias, alias } => {
+                let (rel, scope) = self.bind_join(l, r, *kind, constraint, using_alias.as_deref(), ctx, left)?;
+                match alias {
+                    None => Ok((rel, scope, false)),
+                    // An aliased join exposes only its output columns, under the alias.
+                    Some(a) => {
+                        let exprs: Vec<Expr> = scope.star.iter().map(|&i| Expr::Col(i)).collect();
+                        let mut cols: Vec<ScopeCol> = scope
+                            .star
+                            .iter()
+                            .map(|&i| {
+                                let c = &scope.cols[i];
+                                let mut n = ScopeCol::new(Some(a.name.clone()), c.name.clone(), c.ty.clone());
+                                n.typmod = c.typmod;
+                                n.table_oid = c.table_oid;
+                                n.attnum = c.attnum;
+                                n
+                            })
+                            .collect();
+                        apply_column_aliases(&mut cols, &a.columns, &a.name)?;
+                        Ok((Rel::Project { input: Box::new(rel), exprs }, Scope::from_cols(cols), false))
+                    }
                 }
-                let (lw, rw) = (lscope.width(), rscope.width());
-                let using: Vec<String> = match constraint {
-                    ir::JoinConstraint::Using(cols) => cols.clone(),
-                    ir::JoinConstraint::Natural => {
-                        let lnames: Vec<&String> = lscope.star.iter().map(|i| &lscope.cols[*i].name).collect();
-                        rscope.star.iter().map(|i| rscope.cols[*i].name.clone()).filter(|n| lnames.contains(&n)).collect()
-                    }
-                    _ => Vec::new(),
-                };
-                let scope = join_scopes(lscope.clone(), rscope.clone(), &using, kind);
-                let on = match constraint {
-                    ir::JoinConstraint::On(e) => {
-                        let level = Level::sharing(scope.clone(), ctx.current());
-                        let jctx = ctx.nested_same_level(&level).with_clause(Clause::JoinOn);
-                        Some(self.bind_predicate(e, "JOIN/ON", &jctx)?)
-                    }
-                    ir::JoinConstraint::Using(_) | ir::JoinConstraint::Natural => {
-                        let mut conds = Vec::new();
-                        for name in &using {
-                            let li = find_col(&lscope, name).ok_or_else(|| {
-                                SqlError::undefined_column(&format!("\"{name}\""))
-                                    .with_detail(format!("column \"{name}\" specified in USING clause does not exist in left table"))
-                            })?;
-                            let ri = find_col(&rscope, name).ok_or_else(|| {
-                                SqlError::undefined_column(&format!("\"{name}\""))
-                                    .with_detail(format!("column \"{name}\" specified in USING clause does not exist in right table"))
-                            })?;
-                            let (lt, rt) = (lscope.cols[li].ty.clone(), rscope.cols[ri].ty.clone());
-                            conds.push(self.apply_binary("=", Expr::Col(li), lt, Expr::Col(lw + ri), rt)?.0);
-                        }
-                        if conds.is_empty() { None } else { Some(Expr::And(conds)) }
-                    }
-                    ir::JoinConstraint::None => {
-                        if matches!(kind, JoinKind::Left | JoinKind::Right | JoinKind::Full) {
-                            return Err(
-                                SqlError::syntax("syntax error at or near \"WHERE\"").with_detail("OUTER JOIN requires a join condition")
-                            );
-                        }
-                        None
-                    }
-                };
-                Ok((
-                    Rel::Join { kind, left: Box::new(lrel), right: Box::new(rrel), on, lateral, left_width: lw, right_width: rw },
-                    scope,
-                    false,
-                ))
             }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind_join(
+        &self,
+        l: &ir::TableRef,
+        r: &ir::TableRef,
+        kind: ir::JoinKind,
+        constraint: &ir::JoinConstraint,
+        using_alias: Option<&str>,
+        ctx: &Ctx,
+        left: &Scope,
+    ) -> SqlResult<(Rel, Scope)> {
+        let (lrel, lscope, _) = self.bind_table_ref(l, ctx, left)?;
+        let (rrel, rscope, lateral) = self.bind_table_ref(r, ctx, &lscope)?;
+        check_duplicate_aliases(&lscope, &rscope)?;
+        let kind = match kind {
+            ir::JoinKind::Inner | ir::JoinKind::Cross => JoinKind::Inner,
+            ir::JoinKind::Left => JoinKind::Left,
+            ir::JoinKind::Right => JoinKind::Right,
+            ir::JoinKind::Full => JoinKind::Full,
+        };
+        if lateral && matches!(kind, JoinKind::Right | JoinKind::Full) {
+            return Err(SqlError::syntax("invalid reference to FROM-clause entry for table")
+                .with_hint("The combining JOIN type must be INNER or LEFT for a LATERAL reference."));
+        }
+        let (lw, rw) = (lscope.width(), rscope.width());
+        let using: Vec<String> = match constraint {
+            ir::JoinConstraint::Using(cols) => cols.clone(),
+            ir::JoinConstraint::Natural => {
+                let lnames: Vec<&String> = lscope.star.iter().map(|i| &lscope.cols[*i].name).collect();
+                rscope.star.iter().map(|i| rscope.cols[*i].name.clone()).filter(|n| lnames.contains(&n)).collect()
+            }
+            _ => Vec::new(),
+        };
+        // USING columns: (left index, right index, merged type).
+        let mut pairs = Vec::new();
+        for name in &using {
+            let li = find_col(&lscope, name).ok_or_else(|| {
+                SqlError::new(code::UNDEFINED_COLUMN, format!("column \"{name}\" specified in USING clause does not exist in left table"))
+            })?;
+            let ri = find_col(&rscope, name).ok_or_else(|| {
+                SqlError::new(code::UNDEFINED_COLUMN, format!("column \"{name}\" specified in USING clause does not exist in right table"))
+            })?;
+            let (lt, rt) = (lscope.cols[li].ty.clone(), rscope.cols[ri].ty.clone());
+            let common = super::expr::common_of(&[lt.clone(), rt.clone()], "JOIN/USING")?;
+            pairs.push((li, ri, lt, rt, common));
+        }
+        let mut scope = join_scopes(lscope.clone(), rscope.clone(), &using, kind);
+        let on = match constraint {
+            ir::JoinConstraint::On(e) => {
+                let level = Level::sharing(scope.clone(), ctx.current());
+                let jctx = ctx.nested_same_level(&level).with_clause(Clause::JoinOn);
+                Some(self.bind_predicate(e, "JOIN/ON", &jctx)?)
+            }
+            ir::JoinConstraint::Using(_) | ir::JoinConstraint::Natural => {
+                let mut conds = Vec::new();
+                for (li, ri, lt, rt, _) in &pairs {
+                    conds.push(self.apply_binary("=", Expr::Col(*li), lt.clone(), Expr::Col(lw + ri), rt.clone())?.0);
+                }
+                if conds.is_empty() { None } else { Some(Expr::And(conds)) }
+            }
+            ir::JoinConstraint::None => {
+                if matches!(kind, JoinKind::Left | JoinKind::Right | JoinKind::Full) {
+                    return Err(SqlError::syntax("syntax error at or near \"WHERE\"").with_detail("OUTER JOIN requires a join condition"));
+                }
+                None
+            }
+        };
+        let mut rel = Rel::Join { kind, left: Box::new(lrel), right: Box::new(rrel), on, lateral, left_width: lw, right_width: rw };
+        // The merged USING column is its own expression when it is not just one side's column:
+        // COALESCE(l, r) for FULL JOIN, a cast when the types differ, or a USING alias names it.
+        let merge = !pairs.is_empty()
+            && (kind == JoinKind::Full || using_alias.is_some() || pairs.iter().any(|(_, _, lt, rt, c)| lt != c || rt != c));
+        if merge {
+            let mut exprs: Vec<Expr> = (0..lw + rw).map(Expr::Col).collect();
+            let mut star = Vec::new();
+            for (n, (li, ri, lt, rt, common)) in pairs.iter().enumerate() {
+                let lcol = super::coerce(self, Expr::Col(*li), lt, common, CoercionContext::Implicit)?;
+                let rcol = super::coerce(self, Expr::Col(lw + ri), rt, common, CoercionContext::Implicit)?;
+                exprs.push(match kind {
+                    JoinKind::Full => Expr::Coalesce(vec![lcol, rcol]),
+                    JoinKind::Right => rcol,
+                    _ => lcol,
+                });
+                scope.cols[*li].hidden_unqualified = true;
+                scope.cols[lw + ri].hidden_unqualified = true;
+                let mut col = ScopeCol::new(using_alias.map(str::to_owned), using[n].clone(), common.clone());
+                let src = if kind == JoinKind::Right { &scope.cols[lw + ri] } else { &scope.cols[*li] };
+                if lt == rt {
+                    col.typmod = src.typmod;
+                }
+                scope.cols.push(col);
+                star.push(exprs.len() - 1);
+            }
+            let merged: Vec<usize> = pairs.iter().flat_map(|(li, ri, ..)| [*li, lw + ri]).collect();
+            star.extend(scope.star.iter().copied().filter(|i| !merged.contains(i)));
+            scope.star = star;
+            rel = Rel::Project { input: Box::new(rel), exprs };
+        }
+        Ok((rel, scope))
     }
 
     fn bind_function_scan(
@@ -759,6 +862,44 @@ fn contains_column(e: &Expr) -> bool {
         }
     });
     found
+}
+
+/// Places a WITH TIES limit right above the query's sort (below the projection that drops
+/// hidden ORDER BY columns), comparing rows on the sort keys.
+fn limit_with_ties(rel: Rel, limit: Option<Expr>, offset: Option<Expr>) -> Rel {
+    fn keys_of(rel: &Rel) -> Option<Vec<SortKey>> {
+        match rel {
+            Rel::Sort { keys, .. } => Some(keys.clone()),
+            Rel::Distinct { input, .. } => keys_of(input),
+            _ => None,
+        }
+    }
+    match rel {
+        Rel::Project { input, exprs } if keys_of(&input).is_some() && exprs.iter().all(|e| matches!(e, Expr::Col(_))) => {
+            let ties = keys_of(&input);
+            Rel::Project { input: Box::new(Rel::Limit { input, limit, offset, ties }), exprs }
+        }
+        rel => {
+            let ties = keys_of(&rel);
+            Rel::Limit { input: Box::new(rel), limit, offset, ties }
+        }
+    }
+}
+
+/// A non-LATERAL subquery naming a FROM item to its left: Postgres says the entry exists but
+/// can't be referenced from there.
+fn sibling_reference(e: SqlError, left: &Scope) -> SqlError {
+    let named = (e.code == code::UNDEFINED_TABLE).then(|| e.message.clone()).and_then(|m| {
+        m.strip_prefix("missing FROM-clause entry for table \"")
+            .and_then(|r| r.strip_suffix('"'))
+            .filter(|q| left.has_qualifier(q))
+            .map(str::to_owned)
+    });
+    match named {
+        Some(q) => SqlError::new(code::UNDEFINED_TABLE, format!("invalid reference to FROM-clause entry for table \"{q}\""))
+            .with_hint(format!("There is an entry for table \"{q}\", but it cannot be referenced from this part of the query.")),
+        None => e,
+    }
 }
 
 fn find_col(scope: &Scope, name: &str) -> Option<usize> {
@@ -1008,8 +1149,26 @@ fn map_children(e: Expr, f: &mut dyn FnMut(Expr) -> SqlResult<Expr>) -> SqlResul
     })
 }
 
+/// True if the plan aggregates at its own level (not inside a FROM subquery's plan).
+fn has_aggregate(rel: &Rel) -> bool {
+    match rel {
+        Rel::Aggregate { .. } => true,
+        Rel::Project { input, .. }
+        | Rel::Filter { input, .. }
+        | Rel::Sort { input, .. }
+        | Rel::Limit { input, .. }
+        | Rel::Distinct { input, .. }
+        | Rel::Window { input, .. } => has_aggregate(input),
+        _ => false,
+    }
+}
+
 /// True if a query references `name` (a recursive CTE's self-reference) in a FROM clause.
 fn query_references(q: &ir::Query, name: &str) -> bool {
+    in_set(&q.body, name)
+}
+
+fn in_set(s: &ir::SetExpr, name: &str) -> bool {
     fn in_ref(t: &ir::TableRef, name: &str) -> bool {
         match t {
             ir::TableRef::Table { name: n, .. } => n.0.len() == 1 && n.base() == name,
@@ -1018,15 +1177,12 @@ fn query_references(q: &ir::Query, name: &str) -> bool {
             ir::TableRef::Function { .. } => false,
         }
     }
-    fn in_set(s: &ir::SetExpr, name: &str) -> bool {
-        match s {
-            ir::SetExpr::Select(sel) => sel.from.iter().any(|t| in_ref(t, name)),
-            ir::SetExpr::Values(_) => false,
-            ir::SetExpr::SetOp { left, right, .. } => in_set(left, name) || in_set(right, name),
-            ir::SetExpr::Query(q) => query_references(q, name),
-        }
+    match s {
+        ir::SetExpr::Select(sel) => sel.from.iter().any(|t| in_ref(t, name)),
+        ir::SetExpr::Values(_) => false,
+        ir::SetExpr::SetOp { left, right, .. } => in_set(left, name) || in_set(right, name),
+        ir::SetExpr::Query(q) => query_references(q, name),
     }
-    in_set(&q.body, name)
 }
 
 #[allow(dead_code)]

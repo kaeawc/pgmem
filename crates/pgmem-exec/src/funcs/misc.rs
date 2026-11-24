@@ -8,7 +8,15 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
     let err = || no_function(name, args);
     let n = args.len();
     match name {
-        "gen_random_uuid" | "uuid_generate_v4" if n == 0 => resolved(lenient("gen_random_uuid", gen_random_uuid), vec![], Type::Uuid),
+        "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" if n == 0 => {
+            resolved(lenient("gen_random_uuid", gen_random_uuid), vec![], Type::Uuid)
+        }
+        "uuidv7" if n == 0 => resolved(lenient("uuidv7", uuidv7), vec![], Type::Uuid),
+        "uuidv7" if n == 1 => resolved(lenient("uuidv7", uuidv7), vec![Type::Interval], Type::Uuid),
+        "uuid_extract_version" if n == 1 => resolved(strict("uuid_extract_version", uuid_extract_version), vec![Type::Uuid], Type::Int2),
+        "uuid_extract_timestamp" if n == 1 => {
+            resolved(strict("uuid_extract_timestamp", uuid_extract_timestamp), vec![Type::Uuid], Type::Timestamptz)
+        }
         "version" if n == 0 => {
             resolved(lenient("version", |_, _| Ok(Value::Text(crate::session::VERSION_STRING.to_owned()))), vec![], Type::Text)
         }
@@ -121,6 +129,74 @@ fn gen_random_uuid(_: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
     Ok(Value::Uuid(b))
+}
+
+/// Microseconds between the Unix epoch and 2000-01-01 (Postgres' timestamp epoch).
+const UNIX_TO_PG_MICROS: i64 = 946_684_800_000_000;
+
+/// `uuidv7([shift interval])`: a 48-bit Unix millisecond timestamp from the server clock, then
+/// 12 bits of sub-millisecond precision (as Postgres 18 fills `rand_a`), then random bits.
+fn uuidv7(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
+    let mut now = ctx.env.clock.now_micros();
+    if let Some(Value::Interval(iv)) = a.first() {
+        now = super::datetime::tstz_add_interval(now, iv)?;
+    }
+    let unix_us = now + UNIX_TO_PG_MICROS;
+    let ms = unix_us.div_euclid(1000);
+    let sub_us = unix_us.rem_euclid(1000);
+    let mut b = [0u8; 16];
+    getrandom::fill(&mut b).map_err(|e| SqlError::internal(format!("uuidv7: {e}")))?;
+    let ms_bytes = ms.to_be_bytes();
+    b[..6].copy_from_slice(&ms_bytes[2..8]);
+    // Sub-millisecond fraction scaled to 12 bits.
+    let frac = u16::try_from(sub_us * 4096 / 1000).unwrap_or(0);
+    b[6] = 0x70 | u8::try_from(frac >> 8).unwrap_or(0);
+    b[7] = u8::try_from(frac & 0xff).unwrap_or(0);
+    b[8] = (b[8] & 0x3f) | 0x80;
+    Ok(Value::Uuid(b))
+}
+
+fn uuid_bytes(v: &Value) -> [u8; 16] {
+    match v {
+        Value::Uuid(b) => *b,
+        _ => [0; 16],
+    }
+}
+
+/// The version of an RFC 9562 (variant 10) UUID, else NULL.
+fn uuid_extract_version(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let b = uuid_bytes(&a[0]);
+    if b[8] & 0xc0 != 0x80 {
+        return Ok(Value::Null);
+    }
+    Ok(Value::Int2(i16::from(b[6] >> 4)))
+}
+
+/// The timestamp of a version 1 or 7 UUID, else NULL.
+fn uuid_extract_timestamp(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let b = uuid_bytes(&a[0]);
+    if b[8] & 0xc0 != 0x80 {
+        return Ok(Value::Null);
+    }
+    match b[6] >> 4 {
+        7 => {
+            let mut ms = [0u8; 8];
+            ms[2..].copy_from_slice(&b[..6]);
+            let unix_ms = i64::from_be_bytes(ms);
+            Ok(Value::Timestamptz(unix_ms * 1000 - UNIX_TO_PG_MICROS))
+        }
+        1 => {
+            // 60-bit count of 100ns intervals since 1582-10-15 (time_low, time_mid, time_hi).
+            let low = u64::from(u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+            let mid = u64::from(u16::from_be_bytes([b[4], b[5]]));
+            let hi = u64::from(u16::from_be_bytes([b[6] & 0x0f, b[7]]));
+            let ticks = i64::try_from((hi << 48) | (mid << 32) | low).unwrap_or(0);
+            // 1582-10-15 to 1970-01-01 is 12219292800 seconds.
+            let unix_us = ticks / 10 - 12_219_292_800_000_000;
+            Ok(Value::Timestamptz(unix_us - UNIX_TO_PG_MICROS))
+        }
+        _ => Ok(Value::Null),
+    }
 }
 
 fn current_setting(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {

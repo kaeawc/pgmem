@@ -197,6 +197,9 @@ fn convert(v: Value, to: &Type) -> SqlResult<Value> {
             if n.is_nan() {
                 return Err(SqlError::feature_not_supported(format!("cannot convert NaN to {}", t.name())));
             }
+            if n.is_infinite() {
+                return Err(SqlError::feature_not_supported(format!("cannot convert infinity to {}", t.name())));
+            }
             make_int(n.to_i64().ok_or_else(|| int_out_of_range(t))?, t)?
         }
         (V::Numeric(n), Type::Float8) => V::Float8(n.to_f64()),
@@ -247,13 +250,20 @@ fn jsonb_to_scalar(j: &pgmem_types::Jsonb, to: &Type) -> SqlResult<Value> {
     }
 }
 
-/// Postgres typmod encodings: `varchar(n)` is `n + 4`; `numeric(p, s)` is `((p << 16) | s) + 4`.
+/// Postgres typmod encodings: `varchar(n)` is `n + 4`; `numeric(p, s)` is
+/// `((p << 16) | (s & 0x7ff)) + 4` (the scale may be negative, as of Postgres 15).
 pub fn varchar_typmod(n: i64) -> i32 {
     i32::try_from(n + 4).unwrap_or(-1)
 }
 
 pub fn numeric_typmod(p: i64, s: i64) -> i32 {
-    i32::try_from(((p << 16) | s) + 4).unwrap_or(-1)
+    i32::try_from(((p << 16) | (s & 0x7ff)) + 4).unwrap_or(-1)
+}
+
+/// `(precision, scale)` of a `numeric` typmod (`numeric_typmod_precision` / `_scale`).
+pub fn numeric_typmod_parts(typmod: i32) -> (i32, i32) {
+    let t = typmod - 4;
+    ((t >> 16) & 0xffff, ((t & 0x7ff) ^ 1024) - 1024)
 }
 
 fn apply_typmod(v: Value, to: &Type, typmod: i32, explicit: bool) -> SqlResult<Value> {
@@ -287,9 +297,7 @@ fn apply_typmod(v: Value, to: &Type, typmod: i32, explicit: bool) -> SqlResult<V
             }
         }
         (Value::Numeric(n), Type::Numeric) => {
-            let t = typmod - 4;
-            let precision = u32::try_from((t >> 16) & 0xffff).unwrap_or(0);
-            let scale = u32::try_from(t & 0xffff).unwrap_or(0);
+            let (precision, scale) = numeric_typmod_parts(typmod);
             Ok(Value::Numeric(n.apply_typmod(precision, scale)?))
         }
         (v, _) => Ok(v),

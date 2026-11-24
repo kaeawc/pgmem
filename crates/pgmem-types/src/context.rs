@@ -30,11 +30,13 @@ pub struct Context {
     pub now: i64,
     /// User-defined types of the running transaction's catalog.
     pub types: Arc<Registry>,
+    /// `bytea_output = escape` (the default is hex).
+    pub bytea_escape: bool,
 }
 
 impl Default for Context {
     fn default() -> Context {
-        Context { zone: Zone::utc(), date_order: DateOrder::Mdy, now: 0, types: Arc::default() }
+        Context { zone: Zone::utc(), date_order: DateOrder::Mdy, now: 0, types: Arc::default(), bytea_escape: false }
     }
 }
 
@@ -53,6 +55,11 @@ pub fn with_zone<R>(f: impl FnOnce(&Zone) -> R) -> R {
         Some(ctx) => f(&ctx.zone),
         None => f(&Zone::utc()),
     })
+}
+
+/// Whether `bytea_output` is `escape` on this thread.
+pub fn bytea_escape() -> bool {
+    CURRENT.with(|c| c.borrow().as_ref().is_some_and(|ctx| ctx.bytea_escape))
 }
 
 /// Runs `f` with the current user-type registry without cloning the context.

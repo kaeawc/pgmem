@@ -90,6 +90,9 @@ pub enum Clause {
     Returning,
     Check,
     Default,
+    /// Binding an operand of UNION/INTERSECT/EXCEPT: untyped select-list literals stay unknown
+    /// until the set operation resolves the column type.
+    SetOperand,
     Other,
 }
 
@@ -115,7 +118,7 @@ impl Clause {
             Clause::Returning => "RETURNING",
             Clause::Check => "check constraints",
             Clause::Default => "DEFAULT expressions",
-            Clause::Other => "this context",
+            Clause::SetOperand | Clause::Other => "this context",
         }
     }
 }
@@ -361,7 +364,10 @@ pub fn resolve_type_name(catalog: &Catalog, t: &pgmem_ir::TypeName) -> SqlResult
         ("timestamp" | "timestamptz" | "time" | "timetz" | "interval", [p]) => i32::try_from(*p).unwrap_or(-1),
         ("numeric" | "decimal", [p, s]) => {
             if *p < 1 || *p > 1000 {
-                return Err(SqlError::syntax(format!("NUMERIC precision {p} must be between 1 and 1000")));
+                return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, format!("NUMERIC precision {p} must be between 1 and 1000")));
+            }
+            if *s < -1000 || *s > 1000 {
+                return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, format!("NUMERIC scale {s} must be between -1000 and 1000")));
             }
             crate::cast::numeric_typmod(*p, *s)
         }

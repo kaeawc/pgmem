@@ -132,13 +132,15 @@ pub struct Query {
     /// `None` = no LIMIT (or `LIMIT ALL`).
     pub limit: Option<Expr>,
     pub offset: Option<Expr>,
+    /// `FETCH FIRST n ROWS WITH TIES`: rows tied with the last one by ORDER BY are kept.
+    pub with_ties: bool,
     /// `FOR UPDATE` / `FOR SHARE` ... (accepted; pgmem's snapshot model makes them no-ops).
     pub locking: Vec<LockClause>,
 }
 
 impl Query {
     pub fn from_body(body: SetExpr) -> Query {
-        Query { with: None, body, order_by: Vec::new(), limit: None, offset: None, locking: Vec::new() }
+        Query { with: None, body, order_by: Vec::new(), limit: None, offset: None, with_ties: false, locking: Vec::new() }
     }
 }
 
@@ -255,6 +257,10 @@ pub enum TableRef {
         right: Box<TableRef>,
         kind: JoinKind,
         constraint: JoinConstraint,
+        /// `JOIN ... USING (k) AS j`: names the merged USING columns.
+        using_alias: Option<String>,
+        /// `(a JOIN b) AS j(x, y)`: hides the inner table names behind one alias.
+        alias: Option<TableAlias>,
     },
 }
 

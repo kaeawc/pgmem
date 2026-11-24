@@ -83,10 +83,32 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
         },
         "gcd" | "lcm" => match args {
             [a, b] => {
-                let t = super::numeric_common(a, b).filter(|t| t.is_integer()).ok_or_else(err)?;
+                let t = match (a, b) {
+                    (Type::Unknown, t) | (t, Type::Unknown) if t.is_integer() || *t == Type::Numeric => t.clone(),
+                    _ => super::numeric_common(a, b).filter(|t| t.is_integer() || *t == Type::Numeric).ok_or_else(err)?,
+                };
                 let f = if name == "gcd" { strict("gcd", gcd_fn) } else { strict("lcm", lcm_fn) };
                 resolved(f, vec![t.clone(), t.clone()], t)
             }
+            _ => Err(err()),
+        },
+        "scale" | "min_scale" | "trim_scale" => match args {
+            [t] if t.is_numeric() || *t == Type::Unknown => {
+                let (f, ret) = match name {
+                    "scale" => (strict("scale", |a, _| Ok(numeric_scale(&a[0], |n| n.scale()))), Type::Int4),
+                    "min_scale" => (strict("min_scale", |a, _| Ok(numeric_scale(&a[0], Numeric::min_scale))), Type::Int4),
+                    _ => (strict("trim_scale", |a, _| Ok(Value::Numeric(num(&a[0]).trim_scale()))), Type::Numeric),
+                };
+                resolved(f, vec![Type::Numeric], ret)
+            }
+            _ => Err(err()),
+        },
+        "factorial" => match args {
+            [t] if t.is_integer() || *t == Type::Unknown => resolved(
+                strict("factorial", |a, _| Ok(Value::Numeric(Numeric::factorial(a[0].as_i64().unwrap_or(0))?))),
+                vec![Type::Int8],
+                Type::Numeric,
+            ),
             _ => Err(err()),
         },
         "pi" if args.is_empty() => resolved(strict("pi", |_, _| Ok(Value::Float8(std::f64::consts::PI))), vec![], Type::Float8),
@@ -183,7 +205,48 @@ pub fn sqrt_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
 }
 
 pub fn cbrt_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
-    Ok(Value::Float8(f(&a[0]).cbrt()))
+    Ok(Value::Float8(glibc_cbrt(f(&a[0]))))
+}
+
+/// glibc's `cbrt` (sysdeps/ieee754/dbl-64/s_cbrt.c), which Postgres calls: not correctly
+/// rounded (`cbrt(27)` is 3.0000000000000004), so Rust's `f64::cbrt` would differ.
+fn glibc_cbrt(x: f64) -> f64 {
+    const CBRT2: f64 = 1.259_921_049_894_873_2;
+    const SQR_CBRT2: f64 = 1.587_401_051_968_199_6;
+    const FACTOR: [f64; 5] = [1.0 / SQR_CBRT2, 1.0 / CBRT2, 1.0, CBRT2, SQR_CBRT2];
+    if x == 0.0 || !x.is_finite() {
+        return x + x;
+    }
+    let (xm, xe) = frexp(x.abs());
+    let u = 0.354_895_765_043_919_84
+        + (1.508_191_937_815_849
+            + (-2.114_994_941_673_713
+                + (2.446_931_225_635_344_4
+                    + (-1.834_692_774_836_130_8 + (0.784_932_344_976_639_2 - 0.145_263_899_385_486_37 * xm) * xm) * xm)
+                    * xm)
+                * xm)
+            * xm;
+    let t2 = u * u * u;
+    let idx = usize::try_from(2 + xe % 3).unwrap_or(2);
+    let ym = u * (t2 + 2.0 * xm) / (2.0 * t2 + xm) * FACTOR[idx];
+    ldexp(if x > 0.0 { ym } else { -ym }, xe / 3)
+}
+
+/// `frexp`: `x = m * 2^e` with `0.5 <= m < 1` (x finite and nonzero).
+fn frexp(x: f64) -> (f64, i32) {
+    let bits = x.to_bits();
+    let exp = i32::try_from((bits >> 52) & 0x7ff).unwrap_or(0);
+    if exp == 0 {
+        // Subnormal: scale up first.
+        let (m, e) = frexp(x * f64::from_bits(0x4350_0000_0000_0000)); // 2^54
+        return (m, e - 54);
+    }
+    let m = f64::from_bits((bits & !(0x7ff << 52)) | (1022 << 52));
+    (m, exp - 1022)
+}
+
+fn ldexp(x: f64, e: i32) -> f64 {
+    x * 2f64.powi(e)
 }
 
 fn exp_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
@@ -302,12 +365,24 @@ fn gcd_i(mut a: i64, mut b: i64) -> i64 {
     a.abs()
 }
 
+/// `scale` / `min_scale`: NULL for NaN and infinities.
+fn numeric_scale(v: &Value, f: impl Fn(&Numeric) -> u32) -> Value {
+    let n = num(v);
+    if n.is_finite() { Value::Int4(i32::try_from(f(&n)).unwrap_or(i32::MAX)) } else { Value::Null }
+}
+
 fn gcd_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    if let (Value::Numeric(x), Value::Numeric(y)) = (&a[0], &a[1]) {
+        return Ok(Value::Numeric(x.gcd(y)));
+    }
     let g = gcd_i(a[0].as_i64().unwrap_or(0), a[1].as_i64().unwrap_or(0));
     crate::cast::cast_value(Value::Int8(g), &a[0].natural_type(), -1)
 }
 
 fn lcm_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    if let (Value::Numeric(x), Value::Numeric(y)) = (&a[0], &a[1]) {
+        return Ok(Value::Numeric(x.lcm(y)));
+    }
     let (x, y) = (a[0].as_i64().unwrap_or(0), a[1].as_i64().unwrap_or(0));
     let l = if x == 0 || y == 0 { 0 } else { (x / gcd_i(x, y)).checked_mul(y).ok_or_else(|| SqlError::out_of_range("bigint"))?.abs() };
     crate::cast::cast_value(Value::Int8(l), &a[0].natural_type(), -1)

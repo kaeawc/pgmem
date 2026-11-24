@@ -80,7 +80,7 @@ pub fn decode(s: &str, ty: &Type) -> SqlResult<Value> {
         Type::Int2 => parse_int(s, "smallint").and_then(|n| i16::try_from(n).map_err(|_| out_of_range(s, "smallint"))).map(Value::Int2),
         Type::Int4 => parse_int(s, "integer").and_then(|n| i32::try_from(n).map_err(|_| out_of_range(s, "integer"))).map(Value::Int4),
         Type::Int8 => parse_int(s, "bigint").map(Value::Int8),
-        Type::Float4 => parse_float(s, "real").map(|f| Value::Float4(f as f32)),
+        Type::Float4 => parse_float4(s).map(Value::Float4),
         Type::Float8 => parse_float(s, "double precision").map(Value::Float8),
         Type::Numeric => crate::Numeric::parse(s).map(Value::Numeric),
         Type::Bytea => parse_bytea(s).map(Value::Bytea),
@@ -173,10 +173,32 @@ pub fn parse_float(s: &str, ty: &str) -> SqlResult<f64> {
         _ => {}
     }
     let f: f64 = t.parse().map_err(|_| SqlError::invalid_text(ty, s))?;
-    if f.is_infinite() {
+    if f.is_infinite() || (f == 0.0 && nonzero_mantissa(t)) {
         return Err(SqlError::new(code::NUMERIC_VALUE_OUT_OF_RANGE, format!("\"{s}\" is out of range for type {ty}")));
     }
     Ok(f)
+}
+
+/// `float4in`: parsed as single precision, so overflow and underflow are judged for `real`
+/// (strtof's ERANGE), not after rounding a double.
+pub fn parse_float4(s: &str) -> SqlResult<f32> {
+    let f = parse_float(s, "real")?;
+    if f.is_nan() || f.is_infinite() {
+        #[allow(clippy::cast_possible_truncation)]
+        return Ok(f as f32);
+    }
+    let t = s.trim();
+    let g: f32 = t.parse().map_err(|_| SqlError::invalid_text("real", s))?;
+    if g.is_infinite() || (g == 0.0 && nonzero_mantissa(t)) {
+        return Err(SqlError::new(code::NUMERIC_VALUE_OUT_OF_RANGE, format!("\"{s}\" is out of range for type real")));
+    }
+    Ok(g)
+}
+
+/// True if a numeric literal's digits (before any exponent) are not all zero: a zero result
+/// then means the value underflowed.
+fn nonzero_mantissa(t: &str) -> bool {
+    t.split(['e', 'E']).next().unwrap_or("").bytes().any(|b| (b'1'..=b'9').contains(&b))
 }
 
 /// Shortest round-trip output with Postgres' exponent rule: scientific notation when the
@@ -248,7 +270,28 @@ pub fn format_float4(f: f32) -> String {
     format_shortest(&format!("{f:e}"), 6)
 }
 
+/// `byteaout` under the session's `bytea_output`.
 pub fn format_bytea(b: &[u8]) -> String {
+    if crate::context::bytea_escape() { format_bytea_escape(b) } else { format_bytea_hex(b) }
+}
+
+/// The escape output format: printable ASCII as is, `\\` for a backslash, `\ooo` octal
+/// for everything else.
+pub fn format_bytea_escape(b: &[u8]) -> String {
+    let mut out = String::with_capacity(b.len());
+    for &byte in b {
+        match byte {
+            b'\\' => out.push_str("\\\\"),
+            0x20..=0x7e => out.push(char::from(byte)),
+            _ => {
+                let _ = write!(out, "\\{byte:03o}");
+            }
+        }
+    }
+    out
+}
+
+pub fn format_bytea_hex(b: &[u8]) -> String {
     let mut out = String::with_capacity(2 + b.len() * 2);
     out.push_str("\\x");
     for byte in b {
@@ -293,7 +336,7 @@ pub fn parse_bytea(s: &str) -> SqlResult<Vec<u8>> {
             out.push((bytes[i + 1] - b'0') * 64 + (bytes[i + 2] - b'0') * 8 + (bytes[i + 3] - b'0'));
             i += 4;
         } else {
-            return Err(SqlError::invalid_text("bytea", s));
+            return Err(SqlError::new(code::INVALID_TEXT_REPRESENTATION, "invalid input syntax for type bytea"));
         }
     }
     Ok(out)

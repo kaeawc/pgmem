@@ -40,16 +40,41 @@ pub(crate) fn lower_expr(e: sq::Expr) -> SqlResult<Expr> {
             }
         }
         E::Between { expr, negated, low, high } => {
-            Expr::Between { expr: b(lower_expr(*expr)?), low: b(lower_expr(*low)?), high: b(lower_expr(*high)?), negated, symmetric: false }
+            let (low, symmetric) = match lower_expr(*low)? {
+                Expr::Function(f) if f.name.base() == crate::SYMMETRIC_MARKER && f.args.len() == 1 => {
+                    (f.args.into_iter().next().unwrap_or(Expr::Literal(pgmem_ir::Literal::Null)), true)
+                }
+                low => (low, false),
+            };
+            Expr::Between { expr: b(lower_expr(*expr)?), low: b(low), high: b(lower_expr(*high)?), negated, symmetric }
         }
         E::BinaryOp { left, op, right } => lower_binary(*left, &op, *right)?,
         E::Like { negated, any, expr, pattern, escape_char } => {
             if any {
-                return Err(unsupported("LIKE ANY"));
+                let op = if negated { "!~~" } else { "~~" };
+                return Ok(Expr::AnyAll {
+                    left: b(lower_expr(*expr)?),
+                    op: op.into(),
+                    right: AnyAllRight::Array(b(lower_expr(*pattern)?)),
+                    all: false,
+                });
+            }
+            let pattern = lower_expr(*pattern)?;
+            // sqlparser reads `x LIKE ALL (arr)` as a call to a function named all.
+            if let Expr::Function(f) = &pattern
+                && f.name.0.len() == 1
+                && matches!(f.name.base(), "all" | "any" | "some")
+                && f.args.len() == 1
+                && escape_char.is_none()
+            {
+                let op = if negated { "!~~" } else { "~~" };
+                let all = f.name.base() == "all";
+                let arr = f.args[0].clone();
+                return Ok(Expr::AnyAll { left: b(lower_expr(*expr)?), op: op.into(), right: AnyAllRight::Array(b(arr)), all });
             }
             Expr::Like {
                 expr: b(lower_expr(*expr)?),
-                pattern: b(lower_expr(*pattern)?),
+                pattern: b(pattern),
                 escape: escape_char.map(|e| lower_expr(*e)).transpose()?.map(Box::new),
                 negated,
                 case_insensitive: false,
@@ -57,11 +82,30 @@ pub(crate) fn lower_expr(e: sq::Expr) -> SqlResult<Expr> {
         }
         E::ILike { negated, any, expr, pattern, escape_char } => {
             if any {
-                return Err(unsupported("ILIKE ANY"));
+                let op = if negated { "!~~*" } else { "~~*" };
+                return Ok(Expr::AnyAll {
+                    left: b(lower_expr(*expr)?),
+                    op: op.into(),
+                    right: AnyAllRight::Array(b(lower_expr(*pattern)?)),
+                    all: false,
+                });
+            }
+            let pattern = lower_expr(*pattern)?;
+            // sqlparser reads `x LIKE ALL (arr)` as a call to a function named all.
+            if let Expr::Function(f) = &pattern
+                && f.name.0.len() == 1
+                && matches!(f.name.base(), "all" | "any" | "some")
+                && f.args.len() == 1
+                && escape_char.is_none()
+            {
+                let op = if negated { "!~~*" } else { "~~*" };
+                let all = f.name.base() == "all";
+                let arr = f.args[0].clone();
+                return Ok(Expr::AnyAll { left: b(lower_expr(*expr)?), op: op.into(), right: AnyAllRight::Array(b(arr)), all });
             }
             Expr::Like {
                 expr: b(lower_expr(*expr)?),
-                pattern: b(lower_expr(*pattern)?),
+                pattern: b(pattern),
                 escape: escape_char.map(|e| lower_expr(*e)).transpose()?.map(Box::new),
                 negated,
                 case_insensitive: true,

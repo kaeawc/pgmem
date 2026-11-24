@@ -253,8 +253,8 @@ fn type_columns(ty: &Type, typmod: i32, catalog: &Value) -> Vec<(&'static str, V
         Type::Numeric => {
             out.push(("numeric_precision_radix", n(10)));
             if typmod >= 4 {
-                let t = i64::from(typmod - 4);
-                out.extend([("numeric_precision", n((t >> 16) & 0xffff)), ("numeric_scale", n(t & 0xffff))]);
+                let (p, s) = crate::cast::numeric_typmod_parts(typmod);
+                out.extend([("numeric_precision", n(i64::from(p))), ("numeric_scale", n(i64::from(s)))]);
             }
         }
         Type::Date => out.push(("datetime_precision", n(0))),

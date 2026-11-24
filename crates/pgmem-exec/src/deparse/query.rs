@@ -7,6 +7,10 @@ use pgmem_ir as ir;
 use pgmem_types::Type;
 use std::collections::VecDeque;
 
+/// The qualifier of range-table entries that no reference can name (the inputs of an aliased
+/// join, an unnamed join's merged columns).
+const HIDDEN_QUALIFIER: &str = "\u{0}";
+
 #[derive(Clone, Debug)]
 pub(super) struct OutCol {
     pub name: String,
@@ -85,10 +89,35 @@ pub(super) struct Select {
 
 #[derive(Clone, Debug)]
 pub(super) enum FromItem {
-    Rel { relname: String, refname: String, print_alias: bool, colaliases: Vec<String> },
-    Sub { query: Box<Query>, refname: String, colaliases: Vec<String>, lateral: bool },
-    Func { call: Node, refname: String, colnames: Vec<String>, lateral: bool, ordinality: bool },
-    Join { left: Box<FromItem>, right: Box<FromItem>, kind: ir::JoinKind, on: Option<Node>, using: Vec<String> },
+    Rel {
+        relname: String,
+        refname: String,
+        print_alias: bool,
+        colaliases: Vec<String>,
+    },
+    Sub {
+        query: Box<Query>,
+        refname: String,
+        colaliases: Vec<String>,
+        lateral: bool,
+    },
+    Func {
+        call: Node,
+        refname: String,
+        colnames: Vec<String>,
+        lateral: bool,
+        ordinality: bool,
+    },
+    Join {
+        left: Box<FromItem>,
+        right: Box<FromItem>,
+        kind: ir::JoinKind,
+        on: Option<Node>,
+        using: Vec<String>,
+        using_alias: Option<String>,
+        /// `(... JOIN ...) alias(cols)`.
+        alias: Option<(String, Vec<String>)>,
+    },
 }
 
 /// A FROM item's analysis result: the item, its `*` columns (rte index, column index) and the
@@ -366,7 +395,14 @@ impl Analyzer<'_> {
                 let item = FromItem::Func { call: node, refname, colnames, lateral: *lateral, ordinality: *with_ordinality };
                 Built { item, star, rtes: 1 }
             }
-            ir::TableRef::Join { left, right, kind, constraint } => self.join(left, right, *kind, constraint, names),
+            ir::TableRef::Join { left, right, kind, constraint, using_alias, alias } => {
+                let first_rte = self.level().rtes.len();
+                let b = self.join(left, right, *kind, constraint, using_alias.as_deref(), names);
+                match alias {
+                    Some(a) => self.alias_join(b, a, first_rte),
+                    None => b,
+                }
+            }
         }
     }
 
@@ -376,6 +412,7 @@ impl Analyzer<'_> {
         right: &ir::TableRef,
         kind: ir::JoinKind,
         c: &ir::JoinConstraint,
+        using_alias: Option<&str>,
         names: &mut VecDeque<String>,
     ) -> Built {
         let l = self.build_from_item(left, names);
@@ -405,6 +442,26 @@ impl Analyzer<'_> {
                 star.push(s);
             }
         }
+        if kind == ir::JoinKind::Full && !using.is_empty() {
+            // The merged columns are COALESCE(l, r): join columns, printed unqualified (an
+            // unnamed join has no refname), or under the USING alias.
+            let cols: Vec<ScopeCol> = star.iter().map(|&(rte, col)| self.level_ref().rtes[rte].cols[col].clone()).collect();
+            for &(rte, col) in &star {
+                self.level().rtes[rte].cols[col].hidden = true;
+            }
+            let qualifier = using_alias.map_or_else(|| HIDDEN_QUALIFIER.to_owned(), str::to_owned);
+            let (_, merged) = self.push_rte(qualifier, using_alias.unwrap_or_default().to_owned(), cols);
+            star = merged;
+        } else if let Some(ua) = using_alias {
+            // `j.k` names the left input's column (ruleutils looks through the join alias var).
+            for &(rte, col) in &star {
+                let target = &self.level_ref().rtes[rte];
+                let mut c = target.cols[col].clone();
+                c.hidden = true;
+                let refname = target.refname.clone();
+                self.push_rte(ua.to_owned(), refname, vec![c]);
+            }
+        }
         star.extend(l.star.iter().copied().filter(|&s| !using.contains(&col_name(self, s))));
         star.extend(r.star.iter().copied().filter(|&s| !using.contains(&col_name(self, s))));
         let on = match c {
@@ -412,8 +469,33 @@ impl Analyzer<'_> {
             _ => None,
         };
         let kind = if kind == ir::JoinKind::Inner && on.is_none() && using.is_empty() { ir::JoinKind::Cross } else { kind };
-        let item = FromItem::Join { left: Box::new(l.item), right: Box::new(r.item), kind, on, using };
+        let using_alias = using_alias.map(str::to_owned);
+        let item = FromItem::Join { left: Box::new(l.item), right: Box::new(r.item), kind, on, using, using_alias, alias: None };
         Built { item, star, rtes: l.rtes + r.rtes + 1 }
+    }
+
+    /// `(a JOIN b) AS j(x, ...)`: the join's columns are addressable only through `j`, and
+    /// print as `j.x`.
+    fn alias_join(&mut self, b: Built, a: &ir::TableAlias, first: usize) -> Built {
+        let mut cols: Vec<ScopeCol> = b.star.iter().map(|&(rte, col)| self.level_ref().rtes[rte].cols[col].clone()).collect();
+        rename(&mut cols, &a.columns);
+        for c in &mut cols {
+            c.hidden = false;
+        }
+        for rte in &mut self.level().rtes[first..] {
+            rte.qualifier = HIDDEN_QUALIFIER.to_owned();
+            rte.cols.iter_mut().for_each(|c| c.hidden = true);
+        }
+        // A column alias list prints in full (the remaining columns under their own names).
+        let colnames: Vec<String> = if a.columns.is_empty() { Vec::new() } else { cols.iter().map(|c| c.name.clone()).collect() };
+        let (_, star) = self.push_rte(a.name.clone(), a.name.clone(), cols);
+        let item = match b.item {
+            FromItem::Join { left, right, kind, on, using, using_alias, .. } => {
+                FromItem::Join { left, right, kind, on, using, using_alias, alias: Some((a.name.clone(), colnames)) }
+            }
+            other => other,
+        };
+        Built { item, star, rtes: b.rtes }
     }
 
     fn level_ref(&self) -> &Level {

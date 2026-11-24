@@ -54,7 +54,7 @@ pub fn run(rel: &Rel, ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             sort_rows(&mut rows, keys, ctx)?;
             Ok(rows)
         }
-        Rel::Limit { input, limit, offset } => {
+        Rel::Limit { input, limit, offset, ties } => {
             let rows = run(input, ctx)?;
             let off = match offset {
                 None => 0,
@@ -82,11 +82,23 @@ pub fn run(rel: &Rel, ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                     }
                 },
             };
-            let iter = rows.into_iter().skip(off);
-            Ok(match lim {
-                Some(n) => iter.take(n).collect(),
-                None => iter.collect(),
-            })
+            let mut rows: Vec<Row> = rows.into_iter().skip(off).collect();
+            if let Some(n) = lim
+                && n < rows.len()
+            {
+                let mut end = n;
+                if let Some(keys) = ties
+                    && n > 0
+                {
+                    let key = |r: &Row| keys.iter().map(|k| eval(&k.expr, r, ctx)).collect::<SqlResult<Vec<_>>>();
+                    let last = key(&rows[n - 1])?;
+                    while end < rows.len() && key(&rows[end])?.iter().zip(&last).all(|(a, b)| a.group_key() == b.group_key()) {
+                        end += 1;
+                    }
+                }
+                rows.truncate(end);
+            }
+            Ok(rows)
         }
         Rel::Distinct { input, on } => {
             let rows = run(input, ctx)?;

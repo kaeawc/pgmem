@@ -736,7 +736,7 @@ fn truncate(t: &ir::Truncate, txn: &mut Txn, binder: &Binder) -> SqlResult<Query
                 .map(|s| (**s).clone())
                 .collect();
             for s in seqs {
-                txn.database().reset_sequence(&s);
+                txn.reset_sequence(&s);
             }
         }
     }

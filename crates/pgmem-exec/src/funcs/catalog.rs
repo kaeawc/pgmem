@@ -37,8 +37,8 @@ pub fn format_type(type_oid: u32, typmod: i32, catalog: &pgmem_catalog::Catalog)
             Type::Varchar => format!("character varying({})", typmod - 4),
             Type::Bpchar => format!("character({})", typmod - 4),
             Type::Numeric => {
-                let t = typmod - 4;
-                format!("numeric({},{})", (t >> 16) & 0xffff, t & 0xffff)
+                let (p, s) = crate::cast::numeric_typmod_parts(typmod);
+                format!("numeric({p},{s})")
             }
             Type::Timestamp => format!("timestamp({typmod}) without time zone"),
             Type::Timestamptz => format!("timestamp({typmod}) with time zone"),
