@@ -1,0 +1,95 @@
+# LISTEN / NOTIFY / UNLISTEN acceptance and pg_notify.
+
+statement ok
+LISTEN events
+
+statement ok
+LISTEN "Mixed Channel"
+
+query
+SELECT pg_listening_channels() ORDER BY 1
+----
+pg_listening_channels:text
+Mixed Channel
+events
+
+statement ok
+NOTIFY events
+
+statement ok
+NOTIFY events, 'hello'
+
+query
+SELECT pg_notify('events', 'from function')
+----
+pg_notify:void
+(empty)
+
+connection other
+statement ok
+NOTIFY events, 'from another session'
+
+statement ok
+UNLISTEN events
+
+query
+SELECT pg_listening_channels() ORDER BY 1
+----
+pg_listening_channels:text
+Mixed Channel
+
+statement ok
+UNLISTEN *
+
+query
+SELECT count(*) FROM pg_listening_channels()
+----
+count:int8
+0
+
+statement ok
+UNLISTEN never_listened
+
+# notifications inside a transaction
+statement ok
+BEGIN
+
+statement ok
+LISTEN tx_channel
+
+statement ok
+NOTIFY tx_channel, 'queued'
+
+statement ok
+COMMIT
+
+statement ok
+BEGIN
+
+statement ok
+NOTIFY tx_channel, 'discarded'
+
+statement ok
+ROLLBACK
+
+query
+SELECT pg_notification_queue_usage() >= 0
+----
+?column?:bool
+t
+
+# NOTIFY payload must be a literal; pg_notify takes expressions
+statement error 42601 syntax error at or near "||"
+NOTIFY events, 'a' || 'b'
+
+query
+SELECT pg_notify('ch_' || 1, repeat('x', 10))
+----
+pg_notify:void
+(empty)
+
+statement error 22023 channel name cannot be empty
+SELECT pg_notify('', 'empty channel')
+
+statement error 22023 payload string too long
+SELECT pg_notify('events', repeat('x', 8000))

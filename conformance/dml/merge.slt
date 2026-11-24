@@ -1,0 +1,136 @@
+# MERGE (PostgreSQL 15+, RETURNING in 17+, old/new in 18)
+statement ok
+CREATE TABLE stock (sku text PRIMARY KEY, qty int NOT NULL, note text)
+
+statement ok
+CREATE TABLE delivery (sku text, qty int)
+
+statement ok
+INSERT INTO stock VALUES ('a', 10, NULL), ('b', 5, NULL), ('c', 1, NULL), ('d', 0, NULL)
+
+statement ok
+INSERT INTO delivery VALUES ('a', 5), ('c', -1), ('e', 7)
+
+# Matched update, not matched insert
+statement ok
+MERGE INTO stock s USING delivery d ON s.sku = d.sku WHEN MATCHED THEN UPDATE SET qty = s.qty + d.qty WHEN NOT MATCHED THEN INSERT (sku, qty) VALUES (d.sku, d.qty)
+
+query
+SELECT sku, qty, note FROM stock ORDER BY sku
+----
+sku:text | qty:int4 | note:text
+a | 15 | NULL
+b | 5 | NULL
+c | 0 | NULL
+d | 0 | NULL
+e | 7 | NULL
+
+# Conditional WHEN clauses are tried in order; DELETE and DO NOTHING
+statement ok
+MERGE INTO stock s USING (VALUES ('a', 1), ('c', 0), ('d', 3), ('f', 0)) AS v(sku, qty) ON s.sku = v.sku WHEN MATCHED AND s.qty + v.qty <= 0 THEN DELETE WHEN MATCHED AND v.qty = 1 THEN UPDATE SET note = 'one' WHEN MATCHED THEN UPDATE SET qty = s.qty + v.qty WHEN NOT MATCHED AND v.qty = 0 THEN DO NOTHING WHEN NOT MATCHED THEN INSERT VALUES (v.sku, v.qty)
+
+query
+SELECT sku, qty, note FROM stock ORDER BY sku
+----
+sku:text | qty:int4 | note:text
+a | 15 | one
+b | 5 | NULL
+d | 3 | NULL
+e | 7 | NULL
+
+# RETURNING with merge_action()
+query rowsort
+MERGE INTO stock s USING (VALUES ('a', 2), ('g', 4), ('b', -5)) AS v(sku, qty) ON s.sku = v.sku WHEN MATCHED AND s.qty + v.qty = 0 THEN DELETE WHEN MATCHED THEN UPDATE SET qty = s.qty + v.qty WHEN NOT MATCHED THEN INSERT (sku, qty) VALUES (v.sku, v.qty) RETURNING merge_action() AS action, s.sku, s.qty, v.qty AS delta
+----
+action:text | sku:text | qty:int4 | delta:int4
+UPDATE | a | 17 | 2
+INSERT | g | 4 | 4
+DELETE | b | 5 | -5
+
+query rowsort
+MERGE INTO stock s USING (VALUES ('a', 1), ('h', 1)) AS v(sku, qty) ON s.sku = v.sku WHEN MATCHED THEN UPDATE SET qty = s.qty + v.qty WHEN NOT MATCHED THEN INSERT VALUES (v.sku, v.qty) RETURNING merge_action(), old.qty AS old_qty, new.qty AS new_qty
+----
+merge_action:text | old_qty:int4 | new_qty:int4
+UPDATE | 17 | 18
+INSERT | NULL | 1
+
+# WHEN NOT MATCHED BY SOURCE (PostgreSQL 17)
+statement ok
+CREATE TABLE mirror (id int PRIMARY KEY, val text)
+
+statement ok
+INSERT INTO mirror VALUES (1, 'one'), (2, 'two'), (3, 'three')
+
+query rowsort
+MERGE INTO mirror m USING (VALUES (2, 'TWO'), (4, 'four')) AS src(id, val) ON m.id = src.id WHEN MATCHED THEN UPDATE SET val = src.val WHEN NOT MATCHED BY TARGET THEN INSERT VALUES (src.id, src.val) WHEN NOT MATCHED BY SOURCE THEN DELETE RETURNING merge_action(), m.id
+----
+merge_action:text | id:int4
+DELETE | 1
+UPDATE | 2
+DELETE | 3
+INSERT | 4
+
+query
+SELECT id, val FROM mirror ORDER BY id
+----
+id:int4 | val:text
+2 | TWO
+4 | four
+
+query rowsort
+MERGE INTO mirror m USING (SELECT 2 AS id) src ON m.id = src.id WHEN NOT MATCHED BY SOURCE AND m.id > 3 THEN UPDATE SET val = 'orphan' RETURNING m.id, m.val
+----
+id:int4 | val:text
+4 | orphan
+
+# INSERT DEFAULT VALUES and a source table subquery
+statement ok
+CREATE TABLE counter (id serial PRIMARY KEY, n int DEFAULT 0)
+
+query rowsort
+MERGE INTO counter c USING (SELECT 1 AS id) src ON c.id = src.id WHEN MATCHED THEN UPDATE SET n = c.n + 1 WHEN NOT MATCHED THEN INSERT DEFAULT VALUES RETURNING c.id, c.n
+----
+id:int4 | n:int4
+1 | 0
+
+query rowsort
+MERGE INTO counter c USING (SELECT 1 AS id) src ON c.id = src.id WHEN MATCHED THEN UPDATE SET n = c.n + 1 WHEN NOT MATCHED THEN INSERT DEFAULT VALUES RETURNING c.id, c.n
+----
+id:int4 | n:int4
+1 | 1
+
+# A source that matches one target row twice is an error
+statement error 21000 MERGE command cannot affect row a second time
+MERGE INTO mirror m USING (VALUES (2, 'x'), (2, 'y')) AS src(id, val) ON m.id = src.id WHEN MATCHED THEN UPDATE SET val = src.val
+
+query
+SELECT id, val FROM mirror ORDER BY id
+----
+id:int4 | val:text
+2 | TWO
+4 | orphan
+
+# Constraint violations surface from MERGE
+statement error 23502 null value in column "qty" of relation "stock" violates not-null constraint
+MERGE INTO stock s USING (VALUES ('zz', NULL::int)) AS v(sku, qty) ON s.sku = v.sku WHEN NOT MATCHED THEN INSERT VALUES (v.sku, v.qty)
+
+statement error 42703 column "nope" of relation "stock" does not exist
+MERGE INTO stock s USING delivery d ON s.sku = d.sku WHEN MATCHED THEN UPDATE SET nope = 1
+
+statement error 42601 syntax error at or near "UPDATE"
+MERGE INTO stock s USING delivery d ON s.sku = d.sku WHEN NOT MATCHED THEN UPDATE SET qty = 1
+
+# MERGE inside a CTE (PostgreSQL 17)
+query rowsort
+WITH m AS (MERGE INTO mirror t USING (VALUES (1, 'uno')) AS s(id, val) ON t.id = s.id WHEN MATCHED THEN UPDATE SET val = s.val WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.val) RETURNING merge_action() AS a, t.*) SELECT a, id, val FROM m
+----
+a:text | id:int4 | val:text
+INSERT | 1 | uno
+
+query
+SELECT id, val FROM mirror ORDER BY id
+----
+id:int4 | val:text
+1 | uno
+2 | TWO
+4 | orphan

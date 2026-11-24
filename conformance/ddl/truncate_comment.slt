@@ -1,0 +1,61 @@
+# TRUNCATE and COMMENT ON.
+
+statement ok
+CREATE TABLE parent (id int PRIMARY KEY); CREATE TABLE child (id int, pid int REFERENCES parent); INSERT INTO parent VALUES (1), (2); INSERT INTO child VALUES (1, 1)
+
+# TRUNCATE of a referenced table needs the referencing table or CASCADE
+statement error 0A000 cannot truncate a table referenced in a foreign key constraint
+TRUNCATE parent
+
+statement ok
+TRUNCATE parent, child; INSERT INTO parent VALUES (1); INSERT INTO child VALUES (1, 1); TRUNCATE TABLE parent CASCADE
+
+query
+SELECT (SELECT count(*) FROM parent), (SELECT count(*) FROM child)
+----
+count:int8 | count:int8
+0 | 0
+
+# TRUNCATE is transactional
+statement ok
+INSERT INTO parent VALUES (5)
+
+statement ok
+BEGIN; TRUNCATE parent CASCADE; ROLLBACK
+
+query
+SELECT id FROM parent
+----
+id:int4
+5
+
+# COMMENT ON
+statement ok
+COMMENT ON TABLE parent IS 'Parent rows'; COMMENT ON COLUMN parent.id IS 'The id'
+
+query
+SELECT obj_description('parent'::regclass, 'pg_class'), col_description('parent'::regclass, 1)
+----
+obj_description:text | col_description:text
+Parent rows | The id
+
+statement ok
+COMMENT ON TABLE parent IS NULL
+
+query
+SELECT obj_description('parent'::regclass, 'pg_class') IS NULL
+----
+?column?:bool
+t
+
+statement error 42P01 relation "nosuch" does not exist
+COMMENT ON TABLE nosuch IS 'x'
+
+statement ok
+CREATE SCHEMA s; COMMENT ON SCHEMA s IS 'a schema'; CREATE INDEX child_pid ON child (pid); COMMENT ON INDEX child_pid IS 'fk index'; COMMENT ON CONSTRAINT child_pid_fkey ON child IS 'fk'; CREATE VIEW pv AS SELECT * FROM parent; COMMENT ON VIEW pv IS 'view'; CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1'; COMMENT ON FUNCTION f() IS 'fn'
+
+query
+SELECT obj_description('child_pid'::regclass, 'pg_class'), obj_description('pv'::regclass, 'pg_class'), obj_description('f'::regproc, 'pg_proc'), (SELECT obj_description(oid, 'pg_namespace') FROM pg_namespace WHERE nspname = 's')
+----
+obj_description:text | obj_description:text | obj_description:text | obj_description:text
+fk index | view | fn | a schema

@@ -448,6 +448,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pgmem-conformance"
+version = "0.1.0"
+dependencies = [
+ "pgmem",
+ "postgres",
+]
+
+[[package]]
 name = "pgmem-exec"
 version = "0.1.0"
 dependencies = [

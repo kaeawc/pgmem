@@ -92,6 +92,11 @@ ordering, the part of the protocol drivers are most sensitive to.
 Every integration test is written against a real client and runs twice in CI: against pgmem and
 against PostgreSQL 18 (`PGMEM_TEST_DSN`). An assertion that doesn't hold on real Postgres is a
 broken test. The pgmem-go suite was ported this way ([PARITY.md](PARITY.md)), and its sqlc + pgx
-examples run against the `pgmem` binary in CI. Phase 2 adds a
-sqllogictest conformance corpus whose expected results are recorded from PostgreSQL
-([PROGRESS.md](PROGRESS.md)).
+examples run against the `pgmem` binary in CI.
+
+Feature completeness is measured by the conformance corpus (`conformance/`, run by
+`crates/pgmem-conformance`): SQL files in a small sqllogictest dialect whose expected results —
+column names and types, text values, SQLSTATEs and messages — are recorded from PostgreSQL 18
+and re-verified against it in CI. The corpus deliberately covers what pgmem does not support
+yet; the records pgmem fails are listed in `conformance/known_failures.txt`, and CI fails on any
+change to that set, so the pass rate ([CONFORMANCE.md](CONFORMANCE.md)) only ratchets up.

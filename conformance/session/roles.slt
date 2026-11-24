@@ -1,0 +1,171 @@
+# CREATE ROLE / GRANT / REVOKE as they appear in migration files. Roles are cluster-wide on
+# PostgreSQL, so names are unique and dropped at the end.
+
+statement ok
+DROP ROLE IF EXISTS conf_sess_reader
+
+statement ok
+DROP ROLE IF EXISTS conf_sess_writer
+
+statement ok
+DROP ROLE IF EXISTS conf_sess_login
+
+statement ok
+CREATE ROLE conf_sess_reader
+
+statement ok
+CREATE ROLE conf_sess_writer NOLOGIN
+
+statement ok
+CREATE ROLE conf_sess_login WITH LOGIN PASSWORD 'secret' CONNECTION LIMIT 5 VALID UNTIL 'infinity'
+
+statement error 42710 role "conf_sess_reader" already exists
+CREATE ROLE conf_sess_reader
+
+query
+SELECT rolname, rolcanlogin, rolsuper, rolinherit, rolconnlimit
+FROM pg_roles WHERE rolname LIKE 'conf\_sess\_%' ORDER BY rolname
+----
+rolname:name | rolcanlogin:bool | rolsuper:bool | rolinherit:bool | rolconnlimit:int4
+conf_sess_login | t | f | t | 5
+conf_sess_reader | f | f | t | -1
+conf_sess_writer | f | f | t | -1
+
+statement ok
+ALTER ROLE conf_sess_login WITH NOLOGIN
+
+statement ok
+ALTER ROLE conf_sess_login SET search_path = public
+
+statement ok
+GRANT conf_sess_reader TO conf_sess_writer
+
+query
+SELECT pg_has_role('conf_sess_writer', 'conf_sess_reader', 'MEMBER')
+----
+pg_has_role:bool
+t
+
+statement ok
+CREATE TABLE docs (id int, body text)
+
+statement ok
+CREATE SCHEMA reports
+
+statement ok
+GRANT SELECT ON docs TO conf_sess_reader
+
+statement ok
+GRANT INSERT, UPDATE, DELETE ON TABLE docs TO conf_sess_writer
+
+statement ok
+GRANT USAGE ON SCHEMA reports TO conf_sess_reader
+
+statement ok
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO conf_sess_reader
+
+statement ok
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO conf_sess_reader
+
+statement ok
+GRANT ALL PRIVILEGES ON docs TO conf_sess_writer WITH GRANT OPTION
+
+query
+SELECT has_table_privilege('conf_sess_reader', 'docs', 'SELECT'), has_table_privilege('conf_sess_reader', 'docs', 'INSERT')
+----
+has_table_privilege:bool | has_table_privilege:bool
+t | f
+
+query
+SELECT privilege_type FROM information_schema.role_table_grants
+WHERE grantee = 'conf_sess_reader' AND table_name = 'docs'
+ORDER BY privilege_type
+----
+privilege_type:varchar
+SELECT
+
+statement ok
+REVOKE SELECT ON docs FROM conf_sess_reader
+
+query
+SELECT has_table_privilege('conf_sess_reader', 'docs', 'SELECT')
+----
+has_table_privilege:bool
+f
+
+statement ok
+REVOKE ALL ON docs FROM conf_sess_writer CASCADE
+
+statement ok
+REVOKE ALL ON SCHEMA public FROM PUBLIC
+
+statement ok
+GRANT ALL ON SCHEMA public TO PUBLIC
+
+statement error 42704 role "conf_sess_nobody" does not exist
+GRANT SELECT ON docs TO conf_sess_nobody
+
+statement ok
+ALTER TABLE docs OWNER TO conf_sess_writer
+
+statement ok
+ALTER TABLE docs OWNER TO CURRENT_USER
+
+# SET ROLE
+statement error 22023 role "conf_sess_nobody" does not exist
+SET ROLE conf_sess_nobody
+
+statement ok
+SET ROLE conf_sess_reader
+
+query
+SELECT current_user
+----
+current_user:name
+conf_sess_reader
+
+statement error 42501 permission denied for table docs
+SELECT * FROM docs
+
+statement ok
+RESET ROLE
+
+query
+SELECT current_user = session_user
+----
+?column?:bool
+t
+
+statement ok
+SET ROLE NONE
+
+statement ok
+SET SESSION AUTHORIZATION DEFAULT
+
+# cleanup
+statement error 2BP01 role "conf_sess_reader" cannot be dropped because some objects depend on it
+DROP ROLE conf_sess_reader
+
+statement ok
+DROP OWNED BY conf_sess_reader
+
+statement ok
+DROP ROLE conf_sess_reader
+
+statement ok
+DROP ROLE conf_sess_writer
+
+statement error 42704 role "conf_sess_writer" does not exist
+DROP ROLE conf_sess_writer
+
+statement ok
+DROP ROLE conf_sess_login
+
+statement ok
+DROP ROLE IF EXISTS conf_sess_login
+
+query
+SELECT count(*) FROM pg_roles WHERE rolname LIKE 'conf\_sess\_%'
+----
+count:int8
+0

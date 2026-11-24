@@ -1,0 +1,328 @@
+# Conditional expressions, series generators and system information functions.
+
+# coalesce / nullif
+query
+SELECT coalesce(NULL, 2, 3), coalesce(NULL::int, NULL), coalesce('a', 'b'), pg_typeof(coalesce(1, 2.5))
+----
+coalesce:int4 | coalesce:int4 | coalesce:text | pg_typeof:regtype
+2 | NULL | a | numeric
+
+statement error 22P02 invalid input syntax for type integer: "x"
+SELECT coalesce(1, 'x')
+
+query
+SELECT coalesce(1, '2'), pg_typeof(coalesce(NULL, 'x'))
+----
+coalesce:int4 | pg_typeof:regtype
+1 | text
+
+query
+SELECT nullif(1, 1), nullif(1, 2), nullif('a', 'b'), nullif(NULL::int, 1)
+----
+nullif:int4 | nullif:int4 | nullif:text | nullif:int4
+NULL | 1 | a | NULL
+
+query
+SELECT coalesce(1, 1/0)
+----
+coalesce:int4
+1
+
+
+# greatest / least typing
+query
+SELECT greatest(1, 2.5, 3::bigint), pg_typeof(greatest(1, 2.5)), least('b', 'a', NULL), pg_typeof(least(1::smallint, 2))
+----
+greatest:numeric | pg_typeof:regtype | least:text | pg_typeof:regtype
+3 | numeric | a | integer
+
+query
+SELECT greatest(date '2024-01-01', timestamp '2023-06-01 12:00'), pg_typeof(greatest(date '2024-01-01', timestamp '2023-06-01'))
+----
+greatest:timestamp | pg_typeof:regtype
+2024-01-01 00:00:00 | timestamp without time zone
+
+
+# CASE
+query
+SELECT CASE WHEN 1 > 2 THEN 'a' WHEN 2 > 1 THEN 'b' ELSE 'c' END, CASE 2 WHEN 1 THEN 'one' WHEN 2 THEN 'two' END, CASE WHEN false THEN 1 END
+----
+case:text | case:text | case:int4
+b | two | NULL
+
+query
+SELECT CASE WHEN true THEN 1 ELSE 2.5 END, pg_typeof(CASE WHEN true THEN 1 ELSE 2.5 END)
+----
+case:numeric | pg_typeof:regtype
+1 | numeric
+
+statement error 22P02 invalid input syntax for type integer: "x"
+SELECT CASE WHEN true THEN 1 ELSE 'x' END
+
+query
+SELECT CASE WHEN true THEN 1 ELSE '2' END, pg_typeof(CASE WHEN true THEN 'a' ELSE NULL END)
+----
+case:int4 | pg_typeof:regtype
+1 | text
+
+statement error 42804 CASE types boolean and integer cannot be matched
+SELECT CASE WHEN true THEN 1 ELSE true END
+
+query
+SELECT CASE NULL WHEN NULL THEN 'match' ELSE 'no match' END
+----
+case:text
+no match
+
+query
+SELECT CASE WHEN x > 0 THEN 'pos' WHEN x < 0 THEN 'neg' ELSE 'zero' END FROM (VALUES (1), (-1), (0)) v(x)
+----
+case:text
+pos
+neg
+zero
+
+query
+SELECT CASE WHEN true THEN 1 ELSE 1/0 END
+----
+case:int4
+1
+
+
+# generate_series
+query
+SELECT * FROM generate_series(1, 5)
+----
+generate_series:int4
+1
+2
+3
+4
+5
+
+query
+SELECT * FROM generate_series(10, 1, -3)
+----
+generate_series:int4
+10
+7
+4
+1
+
+query
+SELECT * FROM generate_series(5, 1)
+----
+generate_series:int4
+
+query
+SELECT generate_series(1.5, 3.0, 0.5)
+----
+generate_series:numeric
+1.5
+2.0
+2.5
+3.0
+
+query
+SELECT generate_series(1::bigint, 3::bigint), pg_typeof(generate_series(1::bigint, 1))
+----
+generate_series:int8 | pg_typeof:regtype
+1 | bigint
+2 | bigint
+3 | bigint
+
+query
+SELECT * FROM generate_series(timestamp '2024-01-01', timestamp '2024-01-02', interval '6 hours')
+----
+generate_series:timestamp
+2024-01-01 00:00:00
+2024-01-01 06:00:00
+2024-01-01 12:00:00
+2024-01-01 18:00:00
+2024-01-02 00:00:00
+
+query
+SELECT * FROM generate_series(date '2024-01-30', date '2024-04-30', interval '1 month')
+----
+generate_series:timestamptz
+2024-01-30 00:00:00+00
+2024-02-29 00:00:00+00
+2024-03-29 00:00:00+00
+2024-04-29 00:00:00+00
+
+query
+SELECT * FROM generate_series(timestamptz '2024-03-09', timestamptz '2024-03-12', interval '1 day', 'America/New_York')
+----
+generate_series:timestamptz
+2024-03-09 00:00:00+00
+2024-03-10 00:00:00+00
+2024-03-10 23:00:00+00
+2024-03-11 23:00:00+00
+
+statement error 22023 step size cannot equal zero
+SELECT * FROM generate_series(1, 5, 0)
+
+query
+SELECT * FROM generate_series(1, 3) WITH ORDINALITY AS g(v, n)
+----
+v:int4 | n:int8
+1 | 1
+2 | 2
+3 | 3
+
+query
+SELECT x, x * x AS sq FROM generate_series(1, 3) AS x
+----
+x:int4 | sq:int4
+1 | 1
+2 | 4
+3 | 9
+
+query
+SELECT sum(g) FROM generate_series(1, 100) g
+----
+sum:int8
+5050
+
+
+# generate_subscripts
+query
+SELECT generate_subscripts(ARRAY['a', 'b', 'c'], 1)
+----
+generate_subscripts:int4
+1
+2
+3
+
+query
+SELECT generate_subscripts('[3:5]={x,y,z}'::text[], 1), generate_subscripts(ARRAY[1, 2], 1, true)
+----
+generate_subscripts:int4 | generate_subscripts:int4
+3 | 2
+4 | 1
+5 | NULL
+
+query
+SELECT generate_subscripts(ARRAY[[1, 2, 3], [4, 5, 6]], 2)
+----
+generate_subscripts:int4
+1
+2
+3
+
+
+# num_nulls / num_nonnulls / pg_typeof
+query
+SELECT num_nulls(1, NULL, 2, NULL), num_nonnulls(1, NULL, 2, NULL), num_nulls(VARIADIC ARRAY[NULL, 1])
+----
+num_nulls:int4 | num_nonnulls:int4 | num_nulls:int4
+2 | 2 | 1
+
+query
+SELECT pg_typeof(1), pg_typeof(1.5), pg_typeof('a'), pg_typeof('a'::text), pg_typeof(NULL), pg_typeof(1::int8), pg_typeof(true)
+----
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+integer | numeric | unknown | text | unknown | bigint | boolean
+
+query
+SELECT pg_typeof(ARRAY[1]), pg_typeof('{}'::jsonb), pg_typeof(date '2024-01-01' - 1), pg_typeof(interval '1 day'), pg_typeof(ROW(1, 2))
+----
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+integer[] | jsonb | date | interval | record
+
+query
+SELECT pg_typeof(1)::text = 'integer', format_type('int4'::regtype, NULL), format_type('varchar'::regtype, 14)
+----
+?column?:bool | format_type:text | format_type:text
+t | integer | character varying(10)
+
+
+# system information (deterministic)
+query
+SELECT current_schema, current_schema(), current_schemas(false)
+----
+current_schema:name | current_schema:name | current_schemas:_name
+public | public | {public}
+
+query
+SELECT current_database() = current_catalog
+----
+?column?:bool
+t
+
+query
+SELECT current_setting('DateStyle'), current_setting('standard_conforming_strings')
+----
+current_setting:text | current_setting:text
+ISO, MDY | on
+
+query
+SELECT current_setting('no.such_setting', true)
+----
+current_setting:text
+NULL
+
+statement error 42704 unrecognized configuration parameter "no_such_setting"
+SELECT current_setting('no_such_setting')
+
+query
+SELECT set_config('application_name', 'conf', false), current_setting('application_name')
+----
+set_config:text | current_setting:text
+conf | conf
+
+query
+SELECT set_config('my.custom', 'v1', false), current_setting('my.custom')
+----
+set_config:text | current_setting:text
+v1 | v1
+
+query
+SELECT pg_column_size(1::int4), pg_column_size(1::int8), pg_column_size('abc'::text)
+----
+pg_column_size:int4 | pg_column_size:int4 | pg_column_size:int4
+4 | 8 | 7
+
+query
+SELECT has_table_privilege('pg_class', 'SELECT'), 'pg_class'::regclass, 'int4'::regtype, 'public'::regnamespace
+----
+has_table_privilege:bool | regclass:regclass | regtype:regtype | regnamespace:regnamespace
+t | pg_class | integer | public
+
+query
+SELECT to_regclass('no_such_table'), to_regtype('integer'), to_regtype('nope')
+----
+to_regclass:regclass | to_regtype:regtype | to_regtype:regtype
+NULL | integer | NULL
+
+query
+SELECT pg_get_viewdef('pg_roles'::regclass) IS NOT NULL
+----
+?column?:bool
+t
+
+query
+SELECT uuid_extract_version('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11')
+----
+uuid_extract_version:int2
+4
+
+
+# boolean and comparison helpers
+query
+SELECT 1 IS DISTINCT FROM NULL, NULL IS NOT DISTINCT FROM NULL, 2 BETWEEN 1 AND 3, 2 BETWEEN SYMMETRIC 3 AND 1
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t
+
+query
+SELECT bool_and(b), bool_or(b), every(b) FROM (VALUES (true), (false)) v(b)
+----
+bool_and:bool | bool_or:bool | every:bool
+f | t | f
+
+query
+SELECT true IS TRUE, NULL::bool IS UNKNOWN, false IS NOT FALSE
+----
+?column?:bool | ?column?:bool | ?column?:bool
+t | t | f

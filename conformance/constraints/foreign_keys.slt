@@ -1,0 +1,192 @@
+# FOREIGN KEY constraints and referential actions.
+
+statement ok
+CREATE TABLE authors (id int PRIMARY KEY, name text); CREATE TABLE books (id int PRIMARY KEY, author_id int REFERENCES authors (id), title text); INSERT INTO authors VALUES (1, 'a'), (2, 'b'); INSERT INTO books VALUES (10, 1, 'x'), (11, NULL, 'orphan ok')
+
+statement error 23503 insert or update on table "books" violates foreign key constraint "books_author_id_fkey"
+INSERT INTO books VALUES (12, 99, 'bad')
+
+# The default action is NO ACTION
+statement error 23503 update or delete on table "authors" violates foreign key constraint "books_author_id_fkey" on table "books"
+DELETE FROM authors WHERE id = 1
+
+statement ok
+DELETE FROM authors WHERE id = 2; UPDATE authors SET name = 'renamed' WHERE id = 1
+
+# Invalid references
+statement error 42830 there is no unique constraint matching given keys for referenced table "authors"
+CREATE TABLE bad (x text REFERENCES authors (name))
+
+statement error 42P01 relation "nosuch" does not exist
+CREATE TABLE bad (x int REFERENCES nosuch (id))
+
+statement error 42804 foreign key constraint "bad_x_fkey" cannot be implemented
+CREATE TABLE bad (x text REFERENCES authors (id))
+
+# Implicit reference to the primary key
+statement ok
+CREATE TABLE reviews (id int, book_id int REFERENCES books)
+
+statement error 23503 insert or update on table "reviews" violates foreign key constraint "reviews_book_id_fkey"
+INSERT INTO reviews VALUES (1, 404)
+
+# ON DELETE / ON UPDATE CASCADE, SET NULL, SET DEFAULT
+statement ok
+CREATE TABLE p (id int PRIMARY KEY); INSERT INTO p VALUES (1), (2), (3), (4), (5); CREATE TABLE c_cascade (id int, pid int REFERENCES p ON DELETE CASCADE ON UPDATE CASCADE); CREATE TABLE c_setnull (id int, pid int REFERENCES p ON DELETE SET NULL ON UPDATE SET NULL); CREATE TABLE c_setdef (id int, pid int DEFAULT 3 REFERENCES p ON DELETE SET DEFAULT)
+
+statement ok
+INSERT INTO c_cascade VALUES (1, 1), (2, 1), (3, 2); INSERT INTO c_setnull VALUES (1, 4), (2, 5); INSERT INTO c_setdef VALUES (1, 4); DELETE FROM p WHERE id IN (1, 4); UPDATE p SET id = id * 10 WHERE id IN (2, 5)
+
+query
+SELECT 'cascade', id, pid FROM c_cascade UNION ALL SELECT 'setnull', id, pid FROM c_setnull UNION ALL SELECT 'setdef', id, pid FROM c_setdef ORDER BY 1, 2
+----
+?column?:text | id:int4 | pid:int4
+cascade | 3 | 20
+setdef | 1 | 3
+setnull | 1 | NULL
+setnull | 2 | NULL
+
+# SET DEFAULT fails when the default has no parent row
+statement error 23503 update or delete on table "p" violates foreign key constraint "c_setdef_pid_fkey" on table "c_setdef"
+DELETE FROM p WHERE id = 3
+
+# RESTRICT
+statement ok
+CREATE TABLE c_restrict (id int, pid int REFERENCES p ON DELETE RESTRICT ON UPDATE RESTRICT); INSERT INTO c_restrict VALUES (1, 20)
+
+statement error 23001 update or delete on table "p" violates RESTRICT setting of foreign key constraint "c_restrict_pid_fkey" on table "c_restrict"
+DELETE FROM p WHERE id = 20
+
+statement error 23001 update or delete on table "p" violates RESTRICT setting of foreign key constraint "c_restrict_pid_fkey" on table "c_restrict"
+UPDATE p SET id = 21 WHERE id = 20
+
+# SET NULL with a column list
+statement ok
+CREATE TABLE tenants (tid int, id int, PRIMARY KEY (tid, id)); CREATE TABLE tenant_items (tid int NOT NULL, parent_id int, FOREIGN KEY (tid, parent_id) REFERENCES tenants ON DELETE SET NULL (parent_id)); INSERT INTO tenants VALUES (1, 1); INSERT INTO tenant_items VALUES (1, 1); DELETE FROM tenants
+
+query
+SELECT tid, parent_id FROM tenant_items
+----
+tid:int4 | parent_id:int4
+1 | NULL
+
+# Composite keys: MATCH SIMPLE vs MATCH FULL
+statement ok
+CREATE TABLE ck (a int, b int, PRIMARY KEY (a, b)); INSERT INTO ck VALUES (1, 1); CREATE TABLE fk_simple (a int, b int, FOREIGN KEY (a, b) REFERENCES ck (a, b)); CREATE TABLE fk_full (a int, b int, FOREIGN KEY (a, b) REFERENCES ck (a, b) MATCH FULL); INSERT INTO fk_simple VALUES (1, 1), (9, NULL), (NULL, NULL)
+
+statement error 23503 insert or update on table "fk_simple" violates foreign key constraint "fk_simple_a_b_fkey"
+INSERT INTO fk_simple VALUES (9, 9)
+
+statement ok
+INSERT INTO fk_full VALUES (1, 1), (NULL, NULL)
+
+statement error 23503 insert or update on table "fk_full" violates foreign key constraint "fk_full_a_b_fkey"
+INSERT INTO fk_full VALUES (9, NULL)
+
+statement error 42830 there is no unique constraint matching given keys for referenced table "ck"
+CREATE TABLE bad (a int, b int, FOREIGN KEY (a, b) REFERENCES ck (a))
+
+# Self-references
+statement ok
+CREATE TABLE tree (id int PRIMARY KEY, parent_id int REFERENCES tree (id) ON DELETE CASCADE); INSERT INTO tree VALUES (1, NULL), (2, 1), (3, 2), (4, 1), (5, 5)
+
+statement error 23503 insert or update on table "tree" violates foreign key constraint "tree_parent_id_fkey"
+INSERT INTO tree VALUES (6, 7)
+
+statement ok
+INSERT INTO tree VALUES (7, 8), (8, NULL); DELETE FROM tree WHERE id = 1
+
+query
+SELECT id, parent_id FROM tree ORDER BY id
+----
+id:int4 | parent_id:int4
+5 | 5
+7 | 8
+8 | NULL
+
+statement ok
+CREATE TABLE emp (id int PRIMARY KEY, manager int REFERENCES emp); INSERT INTO emp VALUES (1, NULL), (2, 1)
+
+statement error 23503 update or delete on table "emp" violates foreign key constraint "emp_manager_fkey" on table "emp"
+DELETE FROM emp WHERE id = 1
+
+# ADD FOREIGN KEY validates existing rows unless NOT VALID
+statement ok
+CREATE TABLE late_child (pid int); INSERT INTO late_child VALUES (20), (999)
+
+statement error 23503 insert or update on table "late_child" violates foreign key constraint "late_child_pid_fkey"
+ALTER TABLE late_child ADD FOREIGN KEY (pid) REFERENCES p (id)
+
+statement ok
+ALTER TABLE late_child ADD CONSTRAINT late_fk FOREIGN KEY (pid) REFERENCES p (id) NOT VALID
+
+statement error 23503 insert or update on table "late_child" violates foreign key constraint "late_fk"
+INSERT INTO late_child VALUES (998)
+
+statement error 23503 insert or update on table "late_child" violates foreign key constraint "late_fk"
+ALTER TABLE late_child VALIDATE CONSTRAINT late_fk
+
+statement ok
+DELETE FROM late_child WHERE pid = 999; ALTER TABLE late_child VALIDATE CONSTRAINT late_fk
+
+query
+SELECT conname, convalidated FROM pg_constraint WHERE conname = 'late_fk'
+----
+conname:name | convalidated:bool
+late_fk | t
+
+query
+SELECT constraint_name, update_rule, delete_rule, match_option FROM information_schema.referential_constraints WHERE constraint_schema = 'public' ORDER BY constraint_name
+----
+constraint_name:name | update_rule:varchar | delete_rule:varchar | match_option:varchar
+books_author_id_fkey | NO ACTION | NO ACTION | NONE
+c_cascade_pid_fkey | CASCADE | CASCADE | NONE
+c_restrict_pid_fkey | RESTRICT | RESTRICT | NONE
+c_setdef_pid_fkey | NO ACTION | SET DEFAULT | NONE
+c_setnull_pid_fkey | SET NULL | SET NULL | NONE
+emp_manager_fkey | NO ACTION | NO ACTION | NONE
+fk_full_a_b_fkey | NO ACTION | NO ACTION | FULL
+fk_simple_a_b_fkey | NO ACTION | NO ACTION | NONE
+late_fk | NO ACTION | NO ACTION | NONE
+reviews_book_id_fkey | NO ACTION | NO ACTION | NONE
+tenant_items_tid_parent_id_fkey | NO ACTION | SET NULL | NONE
+tree_parent_id_fkey | NO ACTION | CASCADE | NONE
+
+# Referenced tables cannot be truncated or dropped alone
+statement error 0A000 cannot truncate a table referenced in a foreign key constraint
+TRUNCATE ck
+
+statement error 2BP01 cannot drop table ck because other objects depend on it
+DROP TABLE ck
+
+# FK to a UNIQUE column with ON UPDATE CASCADE
+statement ok
+CREATE TABLE codes (code text UNIQUE); CREATE TABLE uses_code (code text REFERENCES codes (code) ON UPDATE CASCADE); INSERT INTO codes VALUES ('A'); INSERT INTO uses_code VALUES ('A'); UPDATE codes SET code = 'B'
+
+query
+SELECT code FROM uses_code
+----
+code:text
+B
+
+# Multi-level cascade, and a cascade blocked by a NO ACTION grandchild
+statement ok
+CREATE TABLE l1 (id int PRIMARY KEY); CREATE TABLE l2 (id int PRIMARY KEY, l1 int REFERENCES l1 ON DELETE CASCADE); CREATE TABLE l3 (id int PRIMARY KEY, l2 int REFERENCES l2 ON DELETE CASCADE); INSERT INTO l1 VALUES (1); INSERT INTO l2 VALUES (1, 1); INSERT INTO l3 VALUES (1, 1); DELETE FROM l1
+
+query
+SELECT (SELECT count(*) FROM l2), (SELECT count(*) FROM l3)
+----
+count:int8 | count:int8
+0 | 0
+
+statement ok
+CREATE TABLE l3r (id int, l2 int REFERENCES l2); INSERT INTO l1 VALUES (2); INSERT INTO l2 VALUES (2, 2); INSERT INTO l3r VALUES (1, 2)
+
+statement error 23503 update or delete on table "l2" violates foreign key constraint "l3r_l2_fkey" on table "l3r"
+DELETE FROM l1
+
+query
+SELECT (SELECT count(*) FROM l1), (SELECT count(*) FROM l2)
+----
+count:int8 | count:int8
+1 | 1

@@ -1,0 +1,223 @@
+# CREATE EXTENSION for the contrib extensions applications use most, and their functions.
+
+# pgcrypto
+statement ok
+CREATE EXTENSION IF NOT EXISTS pgcrypto
+
+statement ok
+CREATE EXTENSION IF NOT EXISTS pgcrypto
+
+statement error 42710 extension "pgcrypto" already exists
+CREATE EXTENSION pgcrypto
+
+query
+SELECT gen_random_uuid() IS NOT NULL, length(gen_random_uuid()::text)
+----
+?column?:bool | length:int4
+t | 36
+
+query
+SELECT encode(digest('abc', 'sha256'), 'hex')
+----
+encode:text
+ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+
+query
+SELECT encode(hmac('data', 'key', 'sha1'), 'hex')
+----
+encode:text
+104152c5bfdca07bc633eebd46199f0255c9f49d
+
+query
+SELECT crypt('password', gen_salt('bf')) <> 'password', length(gen_random_bytes(16))
+----
+?column?:bool | length:int4
+t | 16
+
+query
+SELECT crypt('pw', '$1$abcdefgh$')
+----
+crypt:text
+$1$abcdefgh$IQtUouv7y7Q9dRWkQEPCc.
+
+# uuid-ossp
+statement ok
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp"
+
+query
+SELECT uuid_generate_v4() IS NOT NULL, uuid_generate_v4() <> uuid_generate_v4()
+----
+?column?:bool | ?column?:bool
+t | t
+
+query
+SELECT uuid_generate_v5(uuid_ns_url(), 'https://example.com')
+----
+uuid_generate_v5:uuid
+4fd35a71-71ef-5a55-a9d9-aa75c889a6d0
+
+query
+SELECT uuid_generate_v3(uuid_ns_dns(), 'example.com'), uuid_nil()
+----
+uuid_generate_v3:uuid | uuid_nil:uuid
+9073926b-929f-31c2-abc9-fad77ae3e8eb | 00000000-0000-0000-0000-000000000000
+
+statement ok
+CREATE TABLE things (id uuid PRIMARY KEY DEFAULT uuid_generate_v4(), name text)
+
+statement ok
+INSERT INTO things (name) VALUES ('a'), ('b')
+
+query
+SELECT count(DISTINCT id) FROM things
+----
+count:int8
+2
+
+# citext
+statement ok
+CREATE EXTENSION IF NOT EXISTS citext
+
+statement ok
+CREATE TABLE members (email citext PRIMARY KEY)
+
+statement ok
+INSERT INTO members VALUES ('Alice@Example.com')
+
+query
+SELECT email FROM members WHERE email = 'alice@example.COM'
+----
+email:citext
+Alice@Example.com
+
+statement error 23505 duplicate key value violates unique constraint "members_pkey"
+INSERT INTO members VALUES ('ALICE@example.com')
+
+query
+SELECT 'ABC'::citext = 'abc'::citext, 'a'::citext < 'B'::citext, 'abc'::citext LIKE 'A%'
+----
+?column?:bool | ?column?:bool | ?column?:bool
+t | t | t
+
+query
+SELECT pg_typeof('x'::citext)::text, 'Hello'::citext::text
+----
+pg_typeof:text | text:text
+citext | Hello
+
+# pg_trgm
+statement ok
+CREATE EXTENSION IF NOT EXISTS pg_trgm
+
+query
+SELECT similarity('word', 'words')
+----
+similarity:float4
+0.5714286
+
+query
+SELECT show_trgm('cat')
+----
+show_trgm:_text
+{"  c"," ca","at ",cat}
+
+query
+SELECT 'postgres' % 'postgre', word_similarity('word', 'two words')
+----
+?column?:bool | word_similarity:float4
+t | 0.8
+
+statement ok
+CREATE TABLE docs (body text)
+
+statement ok
+CREATE INDEX docs_body_trgm ON docs USING gin (body gin_trgm_ops)
+
+statement ok
+INSERT INTO docs VALUES ('hello world'), ('goodbye world'), ('something else')
+
+query rowsort
+SELECT body FROM docs WHERE body % 'hello wrld'
+----
+body:text
+hello world
+
+# hstore
+statement ok
+CREATE EXTENSION IF NOT EXISTS hstore
+
+query
+SELECT 'a=>1, b=>2'::hstore -> 'b'
+----
+?column?:text
+2
+
+query
+SELECT 'a=>1, b=>2'::hstore ? 'a', 'a=>1'::hstore || 'c=>3'::hstore
+----
+?column?:bool | ?column?:hstore
+t | "a"=>"1", "c"=>"3"
+
+query
+SELECT akeys('x=>1, y=>2'::hstore), hstore('k', 'v')
+----
+akeys:_text | hstore:hstore
+{x,y} | "k"=>"v"
+
+# catalog view of installed extensions
+query
+SELECT extname FROM pg_extension WHERE extname <> 'plpgsql' ORDER BY extname
+----
+extname:name
+citext
+hstore
+pg_trgm
+pgcrypto
+uuid-ossp
+
+query
+SELECT name FROM pg_available_extensions WHERE name IN ('pgcrypto', 'uuid-ossp', 'citext', 'pg_trgm', 'hstore') ORDER BY name
+----
+name:name
+citext
+hstore
+pg_trgm
+pgcrypto
+uuid-ossp
+
+query
+SELECT installed_version IS NOT NULL FROM pg_available_extensions WHERE name = 'citext'
+----
+?column?:bool
+t
+
+# extension into a schema, and dropping
+statement ok
+CREATE SCHEMA ext
+
+statement ok
+CREATE EXTENSION IF NOT EXISTS btree_gist SCHEMA ext
+
+query
+SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'btree_gist'
+----
+nspname:name
+ext
+
+statement ok
+DROP EXTENSION btree_gist
+
+statement error 2BP01 cannot drop extension citext because other objects depend on it
+DROP EXTENSION citext
+
+statement ok
+DROP EXTENSION hstore
+
+statement ok
+DROP EXTENSION IF EXISTS hstore
+
+statement error 0A000 extension "no_such_extension" is not available
+CREATE EXTENSION no_such_extension
+
+statement ok
+CREATE EXTENSION IF NOT EXISTS plpgsql

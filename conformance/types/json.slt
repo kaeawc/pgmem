@@ -1,0 +1,199 @@
+# json vs jsonb.
+
+# json preserves input text exactly; jsonb normalizes
+query
+SELECT '{"b": 1,  "a": [1, 2], "a": 3}'::json, '{"b": 1,  "a": [1, 2], "a": 3}'::jsonb
+----
+json:json | jsonb:jsonb
+{"b": 1,  "a": [1, 2], "a": 3} | {"a": 3, "b": 1}
+
+query
+SELECT '{"z":1,"aa":2,"b":3}'::jsonb, '[1, 2.50, 1e2, -0]'::jsonb
+----
+jsonb:jsonb | jsonb:jsonb
+{"b": 3, "z": 1, "aa": 2} | [1, 2.50, 100, 0]
+
+query
+SELECT 'null'::jsonb, 'true'::jsonb, '"str"'::jsonb, '12.30'::jsonb, '  [ ]  '::jsonb
+----
+jsonb:jsonb | jsonb:jsonb | jsonb:jsonb | jsonb:jsonb | jsonb:jsonb
+null | true | "str" | 12.30 | []
+
+statement error 22P02 invalid input syntax for type json
+SELECT '{"a": }'::jsonb
+
+statement error 22P02 invalid input syntax for type json
+SELECT '{a: 1}'::json
+
+statement error 22P02 invalid input syntax for type json
+SELECT ''::jsonb
+
+# Unicode escapes
+query
+SELECT '"é"'::jsonb, '"é"'::json, '"tab\tx"'::jsonb
+----
+jsonb:jsonb | json:json | jsonb:jsonb
+"é" | "é" | "tab\tx"
+
+statement error 22P05 unsupported Unicode escape sequence
+SELECT '"\u0000"'::jsonb
+
+# Accessors
+query
+SELECT '{"a": {"b": [10, 20]}}'::jsonb -> 'a', '{"a": {"b": [10, 20]}}'::jsonb -> 'a' -> 'b' -> 1, '{"a": "x"}'::jsonb ->> 'a', '[1,2,3]'::jsonb -> -1
+----
+?column?:jsonb | ?column?:jsonb | ?column?:text | ?column?:jsonb
+{"b": [10, 20]} | 20 | x | 3
+
+query
+SELECT '{"a": {"b": [10, 20]}}'::jsonb #> '{a,b,0}', '{"a": {"b": [10, 20]}}'::jsonb #>> '{a,b}', '{"a": 1}'::jsonb -> 'missing'
+----
+?column?:jsonb | ?column?:text | ?column?:jsonb
+10 | [10, 20] | NULL
+
+query
+SELECT pg_typeof('{"a":1}'::jsonb -> 'a'), pg_typeof('{"a":1}'::jsonb ->> 'a'), pg_typeof('{"a":1}'::json -> 'a')
+----
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+jsonb | text | json
+
+# Containment and existence
+query
+SELECT '{"a":1,"b":2}'::jsonb @> '{"a":1}', '[1,2,3]'::jsonb @> '[3,1]', '{"a":1}'::jsonb ? 'a', '{"a":1,"b":2}'::jsonb ?| ARRAY['x','b'], '{"a":1}'::jsonb ?& ARRAY['a','b']
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t | f
+
+# Modification
+query
+SELECT '{"a":1}'::jsonb || '{"b":2}', '{"a":1,"b":2}'::jsonb - 'a', '[1,2,3]'::jsonb - 0, '{"a":{"b":1}}'::jsonb #- '{a,b}'
+----
+?column?:jsonb | ?column?:jsonb | ?column?:jsonb | ?column?:jsonb
+{"a": 1, "b": 2} | {"b": 2} | [2, 3] | {"a": {}}
+
+query
+SELECT jsonb_set('{"a":{"b":1}}', '{a,b}', '2'), jsonb_set('{"a":1}', '{c}', '"new"'), jsonb_insert('[1,3]', '{1}', '2')
+----
+jsonb_set:jsonb | jsonb_set:jsonb | jsonb_insert:jsonb
+{"a": {"b": 2}} | {"a": 1, "c": "new"} | [1, 2, 3]
+
+# Equality and ordering
+query
+SELECT '{"a":1,"b":2}'::jsonb = '{"b":2,"a":1}'::jsonb, '1.0'::jsonb = '1'::jsonb
+----
+?column?:bool | ?column?:bool
+t | t
+
+statement error 42883 operator does not exist: json = json
+SELECT '{"a":1}'::json = '{"a":1}'::json
+
+# Construction
+query
+SELECT to_jsonb('text'::text), to_json(1.5), to_jsonb(ARRAY[1,2]), to_jsonb(NULL::text), json_build_object('a', 1, 'b', NULL), jsonb_build_array(1, 'x', true)
+----
+to_jsonb:jsonb | to_json:json | to_jsonb:jsonb | to_jsonb:jsonb | json_build_object:json | jsonb_build_array:jsonb
+"text" | 1.5 | [1, 2] | NULL | {"a" : 1, "b" : null} | [1, "x", true]
+
+query
+SELECT row_to_json(r) FROM (SELECT 1 AS id, 'x' AS name, NULL::int AS n) r
+----
+row_to_json:json
+{"id":1,"name":"x","n":null}
+
+query
+SELECT to_jsonb(timestamptz '2024-06-15 12:00:00+00'), to_json(date '2024-06-15'), to_jsonb('NaN'::float8), to_jsonb('Infinity'::numeric)
+----
+to_jsonb:jsonb | to_json:json | to_jsonb:jsonb | to_jsonb:jsonb
+"2024-06-15T12:00:00+00:00" | "2024-06-15" | "NaN" | "Infinity"
+
+query
+SELECT jsonb_agg(x ORDER BY x), json_agg(x), jsonb_object_agg(x::text, x * 2) FROM (VALUES (2), (1)) v(x)
+----
+jsonb_agg:jsonb | json_agg:json | jsonb_object_agg:jsonb
+[1, 2] | [1, 2] | {"1": 2, "2": 4}
+
+# Decomposition
+query
+SELECT key, value FROM jsonb_each('{"b":2,"a":"x"}') ORDER BY key
+----
+key:text | value:jsonb
+a | "x"
+b | 2
+
+query
+SELECT jsonb_typeof('{}'), jsonb_typeof('[]'), jsonb_typeof('1'), jsonb_typeof('"s"'), jsonb_typeof('null'), json_typeof('true')
+----
+jsonb_typeof:text | jsonb_typeof:text | jsonb_typeof:text | jsonb_typeof:text | jsonb_typeof:text | json_typeof:text
+object | array | number | string | null | boolean
+
+query
+SELECT jsonb_array_length('[1,2,3]'), jsonb_pretty('{"a":[1,2]}')
+----
+jsonb_array_length:int4 | jsonb_pretty:text
+3 | {\n    "a": [\n        1,\n        2\n    ]\n}
+
+query
+SELECT x FROM jsonb_array_elements_text('["a", 1, null]') x ORDER BY x
+----
+x:text
+1
+a
+NULL
+
+# Casts out of jsonb
+query
+SELECT ('{"n": 42}'::jsonb -> 'n')::int, ('{"n": 1.5}'::jsonb -> 'n')::numeric, ('true'::jsonb)::bool, '{"a":1}'::jsonb::text, '{"a":1}'::json::jsonb
+----
+int4:int4 | numeric:numeric | bool:bool | text:text | jsonb:jsonb
+42 | 1.5 | t | {"a": 1} | {"a": 1}
+
+statement error 22023 cannot cast jsonb string to type integer
+SELECT '"abc"'::jsonb::int
+
+# Columns
+statement ok
+CREATE TABLE docs (id int, j json, jb jsonb)
+
+statement ok
+INSERT INTO docs VALUES (1, '{"k": "v",  "n": 1}', '{"k": "v",  "n": 1}'), (2, '[]', '[]'), (3, 'null', NULL)
+
+query
+SELECT id, j, jb FROM docs ORDER BY id
+----
+id:int4 | j:json | jb:jsonb
+1 | {"k": "v",  "n": 1} | {"k": "v", "n": 1}
+2 | [] | []
+3 | null | NULL
+
+query
+SELECT id FROM docs WHERE jb @> '{"k":"v"}' ORDER BY id
+----
+id:int4
+1
+
+query
+SELECT id, jb ->> 'k' FROM docs WHERE jb ? 'n' ORDER BY id
+----
+id:int4 | ?column?:text
+1 | v
+
+# SQL/JSON path
+query
+SELECT jsonb_path_query_array('{"a":[1,2,3,4]}', '$.a[*] ? (@ > 2)'), jsonb_path_exists('{"a":1}', '$.a'), '{"a":[1,2]}'::jsonb @? '$.a[*] ? (@ == 2)'
+----
+jsonb_path_query_array:jsonb | jsonb_path_exists:bool | ?column?:bool
+[3, 4] | t | t
+
+# SQL/JSON constructors and predicates (PG 16+)
+query
+SELECT '{"a":1}' IS JSON, '[1' IS JSON, '[1]' IS JSON ARRAY, JSON_OBJECT('a': 1), JSON_ARRAY(1, 'x')
+----
+?column?:bool | ?column?:bool | ?column?:bool | json_object:json | json_array:json
+t | f | t | {"a" : 1} | [1, "x"]
+
+# JSON_VALUE / JSON_QUERY (PG 17+)
+query
+SELECT JSON_VALUE('{"a":"x"}'::jsonb, '$.a'), JSON_QUERY('{"a":[1,2]}'::jsonb, '$.a'), JSON_EXISTS('{"a":1}'::jsonb, '$.b')
+----
+json_value:text | json_query:jsonb | json_exists:bool
+x | [1, 2] | f

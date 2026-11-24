@@ -1,0 +1,332 @@
+# WHERE clauses and comparison operators.
+statement ok
+CREATE TABLE t (id int PRIMARY KEY, a int, s text)
+
+statement ok
+INSERT INTO t VALUES (1, 10, 'Alpha'), (2, 20, 'beta'), (3, NULL, 'gamma%'), (4, 40, NULL), (5, 10, 'a_b'), (6, -5, 'A\B')
+
+# Three-valued logic
+query
+SELECT id FROM t WHERE a > 5 ORDER BY id
+----
+id:int4
+1
+2
+4
+5
+
+query
+SELECT id FROM t WHERE NOT (a > 15) ORDER BY id
+----
+id:int4
+1
+5
+6
+
+query
+SELECT id FROM t WHERE a > 15 OR s IS NULL ORDER BY id
+----
+id:int4
+2
+4
+
+query
+SELECT id FROM t WHERE (a = 10) IS NOT TRUE ORDER BY id
+----
+id:int4
+2
+3
+4
+6
+
+query
+SELECT id FROM t WHERE (a = 10) IS UNKNOWN ORDER BY id
+----
+id:int4
+3
+
+query
+SELECT NULL::bool IS TRUE, NULL::bool IS NOT FALSE, (NULL = 1) IS NULL
+----
+?column?:bool | ?column?:bool | ?column?:bool
+f | t | t
+
+# IN / NOT IN with NULLs
+query
+SELECT id FROM t WHERE a IN (10, 40) ORDER BY id
+----
+id:int4
+1
+4
+5
+
+query
+SELECT id FROM t WHERE a NOT IN (10, 40) ORDER BY id
+----
+id:int4
+2
+6
+
+query
+SELECT id FROM t WHERE a NOT IN (10, NULL) ORDER BY id
+----
+id:int4
+
+query
+SELECT 1 IN (1, NULL), 2 IN (1, NULL), 2 NOT IN (1, NULL), NULL IN (1, 2)
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | NULL | NULL | NULL
+
+query
+SELECT id FROM t WHERE a NOT IN (SELECT a FROM t WHERE id = 3) ORDER BY id
+----
+id:int4
+
+query
+SELECT id FROM t WHERE a IN (SELECT a FROM t WHERE s LIKE '%a%') ORDER BY id
+----
+id:int4
+1
+2
+5
+
+query
+SELECT id FROM t WHERE (id, a) IN ((1, 10), (2, 99), (5, 10)) ORDER BY id
+----
+id:int4
+1
+5
+
+# ANY / ALL
+query
+SELECT id FROM t WHERE a = ANY (ARRAY[10, 20]) ORDER BY id
+----
+id:int4
+1
+2
+5
+
+query
+SELECT id FROM t WHERE a > ALL (ARRAY[5, 15]) ORDER BY id
+----
+id:int4
+2
+4
+
+query
+SELECT id FROM t WHERE a <> ALL (SELECT a FROM t WHERE id IN (1, 2)) ORDER BY id
+----
+id:int4
+4
+6
+
+query
+SELECT id FROM t WHERE a < ANY (SELECT a FROM t WHERE id > 3) ORDER BY id
+----
+id:int4
+1
+2
+5
+6
+
+query
+SELECT 1 = ANY ('{}'::int[]), 1 = ALL ('{}'::int[]), 1 = ANY (ARRAY[2, NULL]), 1 = ALL (ARRAY[1, NULL]), 1 = SOME (ARRAY[1])
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | t | NULL | NULL | t
+
+query
+SELECT 'b' LIKE ANY (ARRAY['a%', 'b%']), 'abc' ILIKE ALL (ARRAY['A%', '%C'])
+----
+?column?:bool | ?column?:bool
+t | t
+
+# BETWEEN
+query
+SELECT id FROM t WHERE a BETWEEN 10 AND 20 ORDER BY id
+----
+id:int4
+1
+2
+5
+
+query
+SELECT id FROM t WHERE a BETWEEN 20 AND 10 ORDER BY id
+----
+id:int4
+
+query
+SELECT id FROM t WHERE a BETWEEN SYMMETRIC 20 AND 10 ORDER BY id
+----
+id:int4
+1
+2
+5
+
+query
+SELECT id FROM t WHERE a NOT BETWEEN 0 AND 20 ORDER BY id
+----
+id:int4
+4
+6
+
+query
+SELECT 5 BETWEEN NULL AND 10, 50 BETWEEN NULL AND 10, 'b' BETWEEN 'a' AND 'c'
+----
+?column?:bool | ?column?:bool | ?column?:bool
+NULL | f | t
+
+# IS DISTINCT FROM
+query
+SELECT id FROM t WHERE a IS DISTINCT FROM 10 ORDER BY id
+----
+id:int4
+2
+3
+4
+6
+
+query
+SELECT id FROM t WHERE a IS NOT DISTINCT FROM NULL ORDER BY id
+----
+id:int4
+3
+
+query
+SELECT NULL IS DISTINCT FROM NULL, 1 IS DISTINCT FROM NULL, 1 IS NOT DISTINCT FROM 1, ROW(1, NULL) IS DISTINCT FROM ROW(1, NULL)
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | t | t | f
+
+# LIKE / ILIKE
+query
+SELECT id FROM t WHERE s LIKE 'a%' ORDER BY id
+----
+id:int4
+5
+
+query
+SELECT id FROM t WHERE s ILIKE 'a%' ORDER BY id
+----
+id:int4
+1
+5
+6
+
+query
+SELECT id FROM t WHERE s NOT LIKE '%a%' ORDER BY id
+----
+id:int4
+6
+
+query
+SELECT id FROM t WHERE s LIKE 'a\_b' ORDER BY id
+----
+id:int4
+5
+
+query
+SELECT id FROM t WHERE s LIKE 'a_b' ORDER BY id
+----
+id:int4
+5
+
+query
+SELECT id FROM t WHERE s LIKE '%!%' ESCAPE '!' ORDER BY id
+----
+id:int4
+3
+
+query
+SELECT id FROM t WHERE s LIKE 'A\\B' ORDER BY id
+----
+id:int4
+6
+
+query
+SELECT id FROM t WHERE s LIKE 'A\B' ESCAPE '' ORDER BY id
+----
+id:int4
+6
+
+query
+SELECT 'abc' LIKE 'abc', 'abc' LIKE 'ab', 'abc' LIKE '_b_', 'ABC' ILIKE 'abc', 'abc' ~~ 'a%', 'ABC' ~~* 'a%', 'abc' !~~ 'a%'
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | f | t | t | t | t | f
+
+query
+SELECT 'foo' LIKE NULL, NULL LIKE 'x', '' LIKE '', '' LIKE '%'
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+NULL | NULL | t | t
+
+statement error 22025 LIKE pattern must not end with escape character
+SELECT 'abc' LIKE 'a\'
+
+# Regular expressions and SIMILAR TO
+query
+SELECT id FROM t WHERE s ~ '^[a-z]+$' ORDER BY id
+----
+id:int4
+2
+
+query
+SELECT id FROM t WHERE s ~* '^a' ORDER BY id
+----
+id:int4
+1
+5
+6
+
+query
+SELECT 'abc' SIMILAR TO 'a(b|c)c', 'abc' SIMILAR TO 'a%', 'abc' NOT SIMILAR TO '_b'
+----
+?column?:bool | ?column?:bool | ?column?:bool
+t | t | t
+
+# Row comparisons
+query
+SELECT ROW(1, 2) < ROW(1, 3), (1, 2) = (1, 2), (1, NULL) = (1, 2), (2, NULL) > (1, 5)
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | NULL | t
+
+query
+SELECT id FROM t WHERE (a, id) > (10, 1) ORDER BY id
+----
+id:int4
+2
+4
+5
+
+# Comparison of mixed types
+query
+SELECT 1 = 1.0, 1::int2 = 1::int8, '2024-01-01'::date < '2024-01-01 00:00:01'::timestamp, 1.5::float8 = 1.5::numeric
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t
+
+statement error 42883 operator does not exist: text = integer
+SELECT id FROM t WHERE s = 1
+
+query
+SELECT id FROM t WHERE a = '10' ORDER BY id
+----
+id:int4
+1
+5
+
+statement error 22P02 invalid input syntax for type integer: "ten"
+SELECT id FROM t WHERE a = 'ten'
+
+statement error 42804 argument of WHERE must be type boolean, not type integer
+SELECT id FROM t WHERE a
+
+query
+SELECT id FROM t WHERE true AND (a IS NULL OR s IS NULL) ORDER BY id
+----
+id:int4
+3
+4

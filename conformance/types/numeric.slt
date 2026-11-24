@@ -1,0 +1,150 @@
+# numeric / decimal.
+
+# Literal typing
+query
+SELECT pg_typeof(1.5), 1.50, 0.1 + 0.2
+----
+pg_typeof:regtype | ?column?:numeric | ?column?:numeric
+numeric | 1.50 | 0.3
+
+# Trailing zeros preserved; scale of results
+query
+SELECT 1.10 * 2, 1.0 / 3, 10.0 / 4, 2::numeric / 3
+----
+?column?:numeric | ?column?:numeric | ?column?:numeric | ?column?:numeric
+2.20 | 0.33333333333333333333 | 2.5000000000000000 | 0.66666666666666666667
+
+# typmod rounds half away from zero
+query
+SELECT 1.005::numeric(5,2), 2.5::numeric(3,0), (-2.5)::numeric(3,0), 123.456::numeric(6,2)
+----
+numeric:numeric | numeric:numeric | numeric:numeric | numeric:numeric
+1.01 | 3 | -3 | 123.46
+
+statement error 22003 numeric field overflow
+SELECT 1000.0::numeric(4,1)
+
+statement error 22003 numeric field overflow
+SELECT 12345::numeric(5,2)
+
+# Negative scale and scale > precision (PG 15+)
+query
+SELECT 12345::numeric(5,-2), 0.0123::numeric(3,4)
+----
+numeric:numeric | numeric:numeric
+12300 | 0.0123
+
+# Column with typmod
+statement ok
+CREATE TABLE prices (id int, amount numeric(10,2), raw numeric)
+
+statement ok
+INSERT INTO prices VALUES (1, 19.999, 19.999), (2, 5, 5), (3, -0.005, -0.005)
+
+statement error 22003 numeric field overflow
+INSERT INTO prices VALUES (4, 123456789.0, 0)
+
+query
+SELECT id, amount, raw FROM prices ORDER BY id
+----
+id:int4 | amount:numeric | raw:numeric
+1 | 20.00 | 19.999
+2 | 5.00 | 5
+3 | -0.01 | -0.005
+
+query
+SELECT sum(amount), avg(amount), max(raw) FROM prices
+----
+sum:numeric | avg:numeric | max:numeric
+24.99 | 8.3300000000000000 | 19.999
+
+# NaN and Infinity (PG 14+)
+query
+SELECT 'NaN'::numeric, 'nan'::numeric, 'Infinity'::numeric, '-inf'::numeric
+----
+numeric:numeric | numeric:numeric | numeric:numeric | numeric:numeric
+NaN | NaN | Infinity | -Infinity
+
+query
+SELECT 'NaN'::numeric = 'NaN'::numeric, 'NaN'::numeric > 1e100, 'Infinity'::numeric > 1e100
+----
+?column?:bool | ?column?:bool | ?column?:bool
+t | t | t
+
+query
+SELECT 'NaN'::numeric(5,2), 'Infinity'::numeric::float8
+----
+numeric:numeric | float8:float8
+NaN | Infinity
+
+statement error 22003 numeric field overflow
+SELECT 'Infinity'::numeric(5,2)
+
+statement error 22012 division by zero
+SELECT 1::numeric / 0
+
+statement error 22P02 invalid input syntax for type numeric: "abc"
+SELECT 'abc'::numeric
+
+# Huge values
+query
+SELECT 2::numeric ^ 100, 1e-20::numeric * 1e-20
+----
+?column?:numeric | ?column?:numeric
+1267650600228229401496703205376 | 0.0000000000000000000000000000000000000001
+
+# Rounding functions
+query
+SELECT round(2.5), round(-2.5), round(1.2345, 2), round(1234.5, -2), trunc(-1.99), trunc(1.999, 2)
+----
+round:numeric | round:numeric | round:numeric | round:numeric | trunc:numeric | trunc:numeric
+3 | -3 | 1.23 | 1200 | -1 | 1.99
+
+query
+SELECT ceil(1.1), floor(-1.1), sign(-3.2), abs(-1.50)
+----
+ceil:numeric | floor:numeric | sign:numeric | abs:numeric
+2 | -2 | -1 | 1.50
+
+query
+SELECT mod(10.5, 3), 10.5 % 3, div(10.5, 3)
+----
+mod:numeric | ?column?:numeric | div:numeric
+1.5 | 1.5 | 3
+
+query
+SELECT scale(1.230), min_scale(1.230), trim_scale(1.230)
+----
+scale:int4 | min_scale:int4 | trim_scale:numeric
+3 | 2 | 1.23
+
+# Text output of numeric with exponent input
+query
+SELECT 1.5e3::numeric, 1E-3::numeric, '  12.50  '::numeric
+----
+numeric:numeric | numeric:numeric | numeric:numeric
+1500 | 0.001 | 12.50
+
+# Casts between numeric and float
+query
+SELECT 0.1::float8::numeric, 1.23456789012345678::float8, (1::numeric / 3)::float8
+----
+numeric:numeric | float8:float8 | float8:float8
+0.1 | 1.2345678901234567 | 0.3333333333333333
+
+# sqrt / exp / ln on numeric
+query
+SELECT sqrt(2::numeric), ln(10::numeric)::numeric(10,8), exp(1::numeric)::numeric(10,8)
+----
+sqrt:numeric | ln:numeric | exp:numeric
+1.414213562373095 | 2.30258509 | 2.71828183
+
+statement error 2201F cannot take square root of a negative number
+SELECT sqrt(-1::numeric)
+
+# Underscores in numeric literals (PG 16+)
+query
+SELECT 1_000.000_1
+----
+?column?:numeric
+1000.0001

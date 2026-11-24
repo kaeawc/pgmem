@@ -1,0 +1,33 @@
+# Smoke test for the runner itself.
+statement ok
+CREATE TABLE t (a int PRIMARY KEY, b text)
+
+statement ok
+INSERT INTO t VALUES (1, 'x'), (2, NULL), (3, '')
+
+statement error 23505 duplicate key value violates unique constraint "t_pkey"
+INSERT INTO t VALUES (1, 'dup')
+
+query rowsort
+SELECT a, b FROM t
+----
+a:int4 | b:text
+1 | x
+2 | NULL
+3 | (empty)
+
+query
+SELECT count(*), 1 + 1, 'a' || 'b'
+----
+count:int8 | ?column?:int4 | ?column?:text
+1 | 2 | ab
+
+statement error 22012 division by zero
+SELECT 1/0
+
+connection other
+query
+SELECT count(*) FROM t
+----
+count:int8
+3

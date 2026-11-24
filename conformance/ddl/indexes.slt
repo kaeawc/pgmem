@@ -1,0 +1,132 @@
+# Indexes.
+
+statement ok
+CREATE TABLE accounts (id int PRIMARY KEY, email text, org int, deleted_at timestamptz, data jsonb); INSERT INTO accounts VALUES (1, 'a@x.com', 1, NULL, '{"k": 1}'), (2, 'b@x.com', 1, NULL, '{"k": 2}')
+
+# Plain, multi-column, generated names, IF NOT EXISTS
+statement ok
+CREATE INDEX accounts_org_idx ON accounts (org); CREATE INDEX ON accounts (org, email)
+
+statement error 42P07 relation "accounts_org_idx" already exists
+CREATE INDEX accounts_org_idx ON accounts (email)
+
+statement ok
+CREATE INDEX IF NOT EXISTS accounts_org_idx ON accounts (email)
+
+statement error 42703 column "nosuch" does not exist
+CREATE INDEX bad_idx ON accounts (nosuch)
+
+query
+SELECT indexname FROM pg_indexes WHERE tablename = 'accounts' ORDER BY indexname
+----
+indexname:name
+accounts_org_email_idx
+accounts_org_idx
+accounts_pkey
+
+# Unique index: NULLs are distinct, existing duplicates block creation
+statement ok
+CREATE UNIQUE INDEX accounts_email_key ON accounts (email)
+
+statement error 23505 duplicate key value violates unique constraint "accounts_email_key"
+INSERT INTO accounts VALUES (3, 'a@x.com', 2, NULL, NULL)
+
+statement ok
+INSERT INTO accounts VALUES (3, NULL, 2, NULL, NULL), (4, NULL, 2, NULL, NULL)
+
+statement error 23505 could not create unique index "accounts_org_key"
+CREATE UNIQUE INDEX accounts_org_key ON accounts (org)
+
+# Unique NULLS NOT DISTINCT
+statement ok
+CREATE TABLE nn (a int); CREATE UNIQUE INDEX nn_a ON nn (a) NULLS NOT DISTINCT; INSERT INTO nn VALUES (NULL)
+
+statement error 23505 duplicate key value violates unique constraint "nn_a"
+INSERT INTO nn VALUES (NULL)
+
+# Expression indexes
+statement ok
+CREATE UNIQUE INDEX accounts_lower_email ON accounts (lower(email))
+
+statement error 23505 duplicate key value violates unique constraint "accounts_lower_email"
+INSERT INTO accounts VALUES (5, 'A@X.COM', 3, NULL, NULL)
+
+# Partial unique index (soft delete pattern) and ON CONFLICT inference
+statement ok
+CREATE TABLE members (id int, username text, deleted_at timestamptz); CREATE UNIQUE INDEX members_username_live ON members (username) WHERE deleted_at IS NULL; INSERT INTO members VALUES (1, 'bob', '2024-01-01 00:00:00+00'), (2, 'bob', NULL), (4, 'bob', '2024-02-01 00:00:00+00')
+
+statement error 23505 duplicate key value violates unique constraint "members_username_live"
+INSERT INTO members VALUES (3, 'bob', NULL)
+
+statement ok
+INSERT INTO members VALUES (5, 'bob', NULL) ON CONFLICT (username) WHERE deleted_at IS NULL DO NOTHING
+
+statement error 42P10 there is no unique or exclusion constraint matching the ON CONFLICT specification
+INSERT INTO members VALUES (5, 'bob', NULL) ON CONFLICT (username) DO NOTHING
+
+query
+SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'members' ORDER BY indexname
+----
+indexname:name | indexdef:text
+members_username_live | CREATE UNIQUE INDEX members_username_live ON public.members USING btree (username) WHERE (deleted_at IS NULL)
+
+# Access methods, operator classes, ordering, INCLUDE
+statement ok
+CREATE INDEX accounts_data_gin ON accounts USING gin (data); CREATE INDEX accounts_email_hash ON accounts USING hash (email); CREATE INDEX accounts_brin ON accounts USING brin (id); CREATE INDEX accounts_email_desc ON accounts (email DESC NULLS LAST); CREATE INDEX accounts_email_pattern ON accounts (email text_pattern_ops); CREATE INDEX accounts_cover ON accounts (org) INCLUDE (email)
+
+statement error 42704 access method "nosuchmethod" does not exist
+CREATE INDEX bad ON accounts USING nosuchmethod (id)
+
+# CONCURRENTLY
+statement ok
+CREATE INDEX CONCURRENTLY accounts_conc ON accounts (deleted_at)
+
+statement ok
+CREATE INDEX CONCURRENTLY IF NOT EXISTS accounts_conc ON accounts (deleted_at)
+
+statement ok
+BEGIN
+
+statement error 25001 CREATE INDEX CONCURRENTLY cannot run inside a transaction block
+CREATE INDEX CONCURRENTLY accounts_conc2 ON accounts (deleted_at)
+
+statement ok
+ROLLBACK
+
+statement ok
+DROP INDEX CONCURRENTLY IF EXISTS accounts_conc
+
+# ALTER INDEX, DROP INDEX
+statement ok
+ALTER INDEX accounts_org_idx RENAME TO accounts_org_ix; ALTER INDEX IF EXISTS nosuch RENAME TO other; DROP INDEX accounts_email_hash, accounts_brin
+
+query
+SELECT indexname FROM pg_indexes WHERE tablename = 'accounts' ORDER BY indexname
+----
+indexname:name
+accounts_cover
+accounts_data_gin
+accounts_email_desc
+accounts_email_key
+accounts_email_pattern
+accounts_lower_email
+accounts_org_email_idx
+accounts_org_ix
+accounts_pkey
+
+# Unique constraint adopting an existing index
+statement ok
+CREATE TABLE ui (a int); CREATE UNIQUE INDEX ui_a_idx ON ui (a); ALTER TABLE ui ADD CONSTRAINT ui_a_unique UNIQUE USING INDEX ui_a_idx
+
+query
+SELECT conname, contype FROM pg_constraint WHERE conrelid = 'ui'::regclass
+----
+conname:name | contype:char
+ui_a_unique | u
+
+# Indexes follow a column rename
+statement ok
+ALTER TABLE accounts RENAME COLUMN email TO mail
+
+statement error 23505 duplicate key value violates unique constraint "accounts_email_key"
+INSERT INTO accounts VALUES (9, 'b@x.com', 1, NULL, NULL)

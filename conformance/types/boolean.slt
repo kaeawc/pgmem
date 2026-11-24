@@ -1,0 +1,88 @@
+# boolean.
+
+query
+SELECT 't'::bool, 'true'::bool, 'yes'::bool, 'on'::bool, '1'::bool, 'y'::bool
+----
+bool:bool | bool:bool | bool:bool | bool:bool | bool:bool | bool:bool
+t | t | t | t | t | t
+
+query
+SELECT 'f'::bool, 'FALSE'::bool, 'no'::bool, 'off'::bool, '0'::bool, ' n '::bool
+----
+bool:bool | bool:bool | bool:bool | bool:bool | bool:bool | bool:bool
+f | f | f | f | f | f
+
+statement error 22P02 invalid input syntax for type boolean: "maybe"
+SELECT 'maybe'::bool
+
+statement error 22P02 invalid input syntax for type boolean: "2"
+SELECT '2'::bool
+
+statement error 22P02 invalid input syntax for type boolean: ""
+SELECT ''::bool
+
+# int <-> bool casts
+query
+SELECT 1::bool, 0::bool, 5::bool, true::int, false::int
+----
+bool:bool | bool:bool | bool:bool | int4:int4 | int4:int4
+t | f | t | 1 | 0
+
+statement error 42846 cannot cast type bigint to boolean
+SELECT 1::int8::bool
+
+# Text output
+query
+SELECT true::text, false::varchar, true::text || '!'
+----
+text:text | varchar:varchar | ?column?:text
+true | false | true!
+
+# Three-valued logic
+query
+SELECT NULL::bool AND false, NULL::bool AND true, NULL::bool OR true, NULL::bool OR false, NOT NULL::bool
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | NULL | t | NULL | NULL
+
+query
+SELECT true IS TRUE, NULL::bool IS UNKNOWN, NULL::bool IS NOT FALSE, false IS DISTINCT FROM NULL
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t
+
+# Ordering: false < true, NULLs last
+query
+SELECT b FROM (VALUES (true), (NULL), (false)) v(b) ORDER BY b
+----
+b:bool
+f
+t
+NULL
+
+# Boolean aggregates
+query
+SELECT bool_and(b), bool_or(b), every(b) FROM (VALUES (true), (false), (NULL)) v(b)
+----
+bool_and:bool | bool_or:bool | every:bool
+f | t | f
+
+# Boolean column with string input
+statement ok
+CREATE TABLE flags (id int, f boolean)
+
+statement ok
+INSERT INTO flags VALUES (1, 'yes'), (2, 'off'), (3, NULL)
+
+statement error 22P02 invalid input syntax for type boolean: "x"
+INSERT INTO flags VALUES (4, 'x')
+
+query
+SELECT id, f FROM flags WHERE f IS NOT TRUE ORDER BY id
+----
+id:int4 | f:bool
+2 | f
+3 | NULL
+
+statement error 42804 argument of WHERE must be type boolean, not type integer
+SELECT 1 WHERE 1

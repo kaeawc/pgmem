@@ -1,0 +1,517 @@
+# JSON and JSONB functions and operators.
+
+# access operators
+query
+SELECT '{"a": {"b": [1, 2, 3]}}'::jsonb -> 'a', '{"a": {"b": [1, 2, 3]}}'::jsonb -> 'a' -> 'b' -> 1
+----
+?column?:jsonb | ?column?:jsonb
+{"b": [1, 2, 3]} | 2
+
+query
+SELECT '{"a": "x", "n": null}'::jsonb ->> 'a', '{"a": "x", "n": null}'::jsonb ->> 'n', '{"a": 1}'::jsonb ->> 'zz'
+----
+?column?:text | ?column?:text | ?column?:text
+x | NULL | NULL
+
+query
+SELECT '[1, 2, 3]'::jsonb -> -1, '[1, 2, 3]'::jsonb ->> 0, '[1, 2, 3]'::jsonb -> 10
+----
+?column?:jsonb | ?column?:text | ?column?:jsonb
+3 | 1 | NULL
+
+query
+SELECT '{"a": {"b": [1, {"c": "d"}]}}'::jsonb #> '{a,b,1}', '{"a": {"b": [1, {"c": "d"}]}}'::jsonb #>> '{a,b,1,c}'
+----
+?column?:jsonb | ?column?:text
+{"c": "d"} | d
+
+query
+SELECT '{"a": [1, 2]}'::json -> 'a', '{"a": [1, 2]}'::json ->> 'a', pg_typeof('{"a": 1}'::json -> 'a')
+----
+?column?:json | ?column?:text | pg_typeof:regtype
+[1, 2] | [1, 2] | json
+
+query
+SELECT ('{"a": {"b": 5}}'::jsonb)['a']['b'], ('[10, 20]'::jsonb)[1]
+----
+jsonb:jsonb | jsonb:jsonb
+5 | 20
+
+
+# containment and existence
+query
+SELECT '{"a": 1, "b": 2}'::jsonb @> '{"b": 2}', '{"b": 2}'::jsonb <@ '{"a": 1, "b": 2}', '[1, 2, 3]'::jsonb @> '[3, 1]', '[1, [2, 3]]'::jsonb @> '[[3]]'
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t
+
+query
+SELECT '{"a": 1, "b": 2}'::jsonb ? 'a', '["a", "b"]'::jsonb ? 'b', '{"a": 1}'::jsonb ? 'z'
+----
+?column?:bool | ?column?:bool | ?column?:bool
+t | t | f
+
+query
+SELECT '{"a": 1, "b": 2}'::jsonb ?| ARRAY['b', 'z'], '{"a": 1, "b": 2}'::jsonb ?& ARRAY['a', 'z']
+----
+?column?:bool | ?column?:bool
+t | f
+
+query
+SELECT '{"a": 1}'::jsonb @? '$.a ? (@ > 0)', '{"a": 1}'::jsonb @@ '$.a == 1'
+----
+?column?:bool | ?column?:bool
+t | t
+
+
+# modification
+query
+SELECT '{"a": 1}'::jsonb || '{"b": 2}', '[1, 2]'::jsonb || '[3]', '[1]'::jsonb || '{"a": 1}', '{"a": 1}'::jsonb || '{"a": 2}'
+----
+?column?:jsonb | ?column?:jsonb | ?column?:jsonb | ?column?:jsonb
+{"a": 1, "b": 2} | [1, 2, 3] | [1, {"a": 1}] | {"a": 2}
+
+query
+SELECT '{"a": 1, "b": 2}'::jsonb - 'a', '["a", "b", "c"]'::jsonb - 1, '{"a": 1, "b": 2, "c": 3}'::jsonb - ARRAY['a', 'c']
+----
+?column?:jsonb | ?column?:jsonb | ?column?:jsonb
+{"b": 2} | ["a", "c"] | {"b": 2}
+
+query
+SELECT '{"a": {"b": 1, "c": 2}}'::jsonb #- '{a,b}'
+----
+?column?:jsonb
+{"a": {"c": 2}}
+
+query
+SELECT jsonb_set('{"a": {"b": 1}}', '{a,b}', '2'), jsonb_set('{"a": 1}', '{z}', '"new"'), jsonb_set('{"a": 1}', '{z}', '"new"', false)
+----
+jsonb_set:jsonb | jsonb_set:jsonb | jsonb_set:jsonb
+{"a": {"b": 2}} | {"a": 1, "z": "new"} | {"a": 1}
+
+query
+SELECT jsonb_set('[1, 2, 3]', '{1}', '"x"'), jsonb_set('[1, 2]', '{5}', '9')
+----
+jsonb_set:jsonb | jsonb_set:jsonb
+[1, "x", 3] | [1, 2, 9]
+
+query
+SELECT jsonb_set_lax('{"a": 1}', '{a}', NULL), jsonb_set_lax('{"a": 1, "b": 2}', '{a}', NULL, true, 'delete_key')
+----
+jsonb_set_lax:jsonb | jsonb_set_lax:jsonb
+{"a": null} | {"b": 2}
+
+query
+SELECT jsonb_insert('{"a": [0, 1, 2]}', '{a,1}', '"new"'), jsonb_insert('{"a": [0, 1, 2]}', '{a,1}', '"new"', true)
+----
+jsonb_insert:jsonb | jsonb_insert:jsonb
+{"a": [0, "new", 1, 2]} | {"a": [0, 1, "new", 2]}
+
+statement error 22023 cannot replace existing key
+SELECT jsonb_insert('{"a": 1}', '{a}', '2')
+
+query
+SELECT jsonb_strip_nulls('{"a": 1, "b": null, "c": {"d": null}, "e": [null]}')
+----
+jsonb_strip_nulls:jsonb
+{"a": 1, "c": {}, "e": [null]}
+
+query
+SELECT jsonb_pretty('{"a": 1, "b": [1, 2], "c": {}}')
+----
+jsonb_pretty:text
+{\n    "a": 1,\n    "b": [\n        1,\n        2\n    ],\n    "c": {\n    }\n}
+
+
+# construction
+query
+SELECT json_build_object('a', 1, 'b', 'two', 'c', NULL, 'd', true), jsonb_build_object('b', 1, 'a', 2)
+----
+json_build_object:json | jsonb_build_object:jsonb
+{"a" : 1, "b" : "two", "c" : null, "d" : true} | {"a": 2, "b": 1}
+
+query
+SELECT json_build_array(1, 'a', NULL, 2.5), jsonb_build_array()
+----
+json_build_array:json | jsonb_build_array:jsonb
+[1, "a", null, 2.5] | []
+
+statement error 22023 argument list must have even number of elements
+SELECT json_build_object('a')
+
+query
+SELECT json_object('{a, 1, b, 2}'), jsonb_object(ARRAY['k1', 'k2'], ARRAY['v1', 'v2'])
+----
+json_object:json | jsonb_object:jsonb
+{"a" : "1", "b" : "2"} | {"k1": "v1", "k2": "v2"}
+
+query
+SELECT to_json('text with "quotes"'::text), to_jsonb(42), to_jsonb(ARRAY[1, 2]), to_jsonb(true), to_json(NULL::text)
+----
+to_json:json | to_jsonb:jsonb | to_jsonb:jsonb | to_jsonb:jsonb | to_json:json
+"text with \"quotes\"" | 42 | [1, 2] | true | NULL
+
+query
+SELECT to_jsonb(timestamp '2024-03-15 14:30:00'), to_jsonb(timestamptz '2024-03-15 14:30:00+00'), to_jsonb(date '2024-03-15'), to_jsonb(1.50::numeric)
+----
+to_jsonb:jsonb | to_jsonb:jsonb | to_jsonb:jsonb | to_jsonb:jsonb
+"2024-03-15T14:30:00" | "2024-03-15T14:30:00+00:00" | "2024-03-15" | 1.50
+
+query
+SELECT row_to_json(r) FROM (SELECT 1 AS id, 'x' AS name, NULL::int AS z) r
+----
+row_to_json:json
+{"id":1,"name":"x","z":null}
+
+query
+SELECT to_jsonb(r) FROM (SELECT 1 AS id, ARRAY['a'] AS tags) r
+----
+to_jsonb:jsonb
+{"id": 1, "tags": ["a"]}
+
+query
+SELECT row_to_json(ROW(1, 'foo'))
+----
+row_to_json:json
+{"f1":1,"f2":"foo"}
+
+query
+SELECT array_to_json(ARRAY[[1, 2], [3, 4]])
+----
+array_to_json:json
+[[1,2],[3,4]]
+
+query
+SELECT JSON_OBJECT('a' VALUE 1, 'b' : 2), JSON_ARRAY(1, 'x', NULL), JSON_ARRAY(1, NULL NULL ON NULL)
+----
+json_object:json | json_array:json | json_array:json
+{"a" : 1, "b" : 2} | [1, "x"] | [1, null]
+
+
+# aggregates
+query
+SELECT json_agg(x ORDER BY x), jsonb_agg(x ORDER BY x DESC) FROM (VALUES (3), (1), (2)) v(x)
+----
+json_agg:json | jsonb_agg:jsonb
+[1, 2, 3] | [3, 2, 1]
+
+query
+SELECT json_agg(r) FROM (VALUES (1, 'a'), (2, 'b')) r(id, name)
+----
+json_agg:json
+[{"id":1,"name":"a"}, \n {"id":2,"name":"b"}]
+
+query
+SELECT json_object_agg(k, v ORDER BY k), jsonb_object_agg(k, v) FROM (VALUES ('b', 2), ('a', 1)) t(k, v)
+----
+json_object_agg:json | jsonb_object_agg:jsonb
+{ "a" : 1, "b" : 2 } | {"a": 1, "b": 2}
+
+query
+SELECT jsonb_agg(x) FROM (VALUES (1)) v(x) WHERE false
+----
+jsonb_agg:jsonb
+NULL
+
+query
+SELECT JSON_ARRAYAGG(x ORDER BY x), JSON_OBJECTAGG(k VALUE x) FROM (VALUES ('a', 1), ('b', 2)) t(k, x)
+----
+json_arrayagg:json | json_objectagg:json
+[1, 2] | { "a" : 1, "b" : 2 }
+
+query
+SELECT jsonb_agg_strict(x) FROM (VALUES (1), (NULL), (2)) v(x)
+----
+jsonb_agg_strict:jsonb
+[1, 2]
+
+
+# set-returning functions
+query
+SELECT * FROM jsonb_array_elements('[1, "two", {"three": 3}, null]')
+----
+value:jsonb
+1
+"two"
+{"three": 3}
+null
+
+query
+SELECT * FROM jsonb_array_elements_text('[1, "two", null]')
+----
+value:text
+1
+two
+NULL
+
+query
+SELECT * FROM json_array_elements('[true, [1]]')
+----
+value:json
+true
+[1]
+
+query rowsort
+SELECT * FROM jsonb_each('{"a": 1, "b": "x", "c": null}')
+----
+key:text | value:jsonb
+a | 1
+b | "x"
+c | null
+
+query rowsort
+SELECT * FROM jsonb_each_text('{"a": 1, "b": "x", "c": null}')
+----
+key:text | value:text
+a | 1
+b | x
+c | NULL
+
+query rowsort
+SELECT * FROM jsonb_object_keys('{"a": 1, "b": {"c": 2}}')
+----
+jsonb_object_keys:text
+a
+b
+
+statement error 22023 cannot extract elements from an object
+SELECT * FROM jsonb_array_elements('{"a": 1}')
+
+
+# introspection
+query
+SELECT jsonb_typeof('{}'), jsonb_typeof('[]'), jsonb_typeof('1.5'), jsonb_typeof('"s"'), jsonb_typeof('true'), jsonb_typeof('null'), json_typeof('1')
+----
+jsonb_typeof:text | jsonb_typeof:text | jsonb_typeof:text | jsonb_typeof:text | jsonb_typeof:text | jsonb_typeof:text | json_typeof:text
+object | array | number | string | boolean | null | number
+
+query
+SELECT jsonb_array_length('[1, 2, [3]]'), json_array_length('[]')
+----
+jsonb_array_length:int4 | json_array_length:int4
+3 | 0
+
+statement error 22023 cannot get array length of a non-array
+SELECT jsonb_array_length('{}')
+
+
+# input normalization
+query
+SELECT '{"b": 1, "a": 2, "a": 3}'::jsonb, '{"b": 1, "a": 2, "a": 3}'::json
+----
+jsonb:jsonb | json:json
+{"a": 3, "b": 1} | {"b": 1, "a": 2, "a": 3}
+
+query
+SELECT '  [1,2,   3]  '::jsonb, '1.000'::jsonb, '1e3'::jsonb, '"\u00e9"'::jsonb
+----
+jsonb:jsonb | jsonb:jsonb | jsonb:jsonb | jsonb:jsonb
+[1, 2, 3] | 1.000 | 1000 | "é"
+
+statement error 22P02 invalid input syntax for type json
+SELECT '{"a": }'::jsonb
+
+query
+SELECT '{"a": 1}'::jsonb = '{ "a" : 1 }'::jsonb, '[1, 2]'::jsonb = '[2, 1]'::jsonb
+----
+?column?:bool | ?column?:bool
+t | f
+
+query
+SELECT '{"a": 1}'::jsonb < '{"a": 2}'::jsonb, 'null'::jsonb < 'true'::jsonb
+----
+?column?:bool | ?column?:bool
+t | t
+
+query
+SELECT ('{"n": 42}'::jsonb -> 'n')::int, ('{"n": "42"}'::jsonb ->> 'n')::int, ('true'::jsonb)::boolean, ('3.5'::jsonb)::numeric
+----
+int4:int4 | int4:int4 | bool:bool | numeric:numeric
+42 | 42 | t | 3.5
+
+statement error 22023 cannot cast jsonb string to type integer
+SELECT ('"x"'::jsonb)::int
+
+
+# SQL/JSON path
+query
+SELECT jsonb_path_query('{"a": [1, 2, 3, 4]}', '$.a[*] ? (@ > 2)')
+----
+jsonb_path_query:jsonb
+3
+4
+
+query
+SELECT jsonb_path_query_array('{"a": [1, 2, 3]}', '$.a[*] ? (@ > 1)'), jsonb_path_query_first('{"a": [1, 2]}', '$.a[last]')
+----
+jsonb_path_query_array:jsonb | jsonb_path_query_first:jsonb
+[2, 3] | 2
+
+query
+SELECT jsonb_path_exists('{"a": [1, 2]}', '$.a[*] ? (@ == 2)'), jsonb_path_match('{"a": 1}', '$.a == 1')
+----
+jsonb_path_exists:bool | jsonb_path_match:bool
+t | t
+
+query
+SELECT jsonb_path_query('{"x": [1, 5, 9]}', '$.x[*] ? (@ >= $min)', '{"min": 5}')
+----
+jsonb_path_query:jsonb
+5
+9
+
+query
+SELECT jsonb_path_query('{"a": "abc"}', '$.a.type()'), jsonb_path_query('[1, 2, 3]', '$.size()'), jsonb_path_query('{"a": -2.5}', '$.a.abs().floor()')
+----
+jsonb_path_query:jsonb | jsonb_path_query:jsonb | jsonb_path_query:jsonb
+"string" | 3 | 2
+
+query
+SELECT jsonb_path_query('{"a": {"b": {"c": 1}}}', 'strict $.**.c'), jsonb_path_query('{"s": "Hello"}', '$.s ? (@ like_regex "^h" flag "i")')
+----
+jsonb_path_query:jsonb | jsonb_path_query:jsonb
+1 | "Hello"
+
+statement error 2203A JSON object does not contain key "b"
+SELECT jsonb_path_query('{"a": 1}', 'strict $.b')
+
+query
+SELECT jsonb_path_query('{"a": 1}', 'lax $.b')
+----
+jsonb_path_query:jsonb
+
+
+# PG16/17 SQL/JSON
+query
+SELECT '{"a": 1}' IS JSON, '[1]' IS JSON ARRAY, '{"a": 1}' IS JSON SCALAR, 'abc' IS JSON, '{"a": 1, "a": 2}' IS JSON WITH UNIQUE KEYS
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | f | f | f
+
+query
+SELECT JSON_EXISTS(jsonb '{"a": [1, 2]}', '$.a[1]'), JSON_EXISTS(jsonb '{"a": [1, 2]}', '$.b')
+----
+json_exists:bool | json_exists:bool
+t | f
+
+query
+SELECT JSON_VALUE(jsonb '{"a": "x"}', '$.a'), JSON_VALUE(jsonb '{"a": 42}', '$.a' RETURNING int), JSON_VALUE(jsonb '{"a": [1]}', '$.a')
+----
+json_value:text | json_value:int4 | json_value:text
+x | 42 | NULL
+
+query
+SELECT JSON_VALUE(jsonb '{"a": "x"}', '$.b' DEFAULT 'none' ON EMPTY)
+----
+json_value:text
+none
+
+statement error 2203F JSON path expression in JSON_VALUE must return single scalar item
+SELECT JSON_VALUE(jsonb '{"a": [1]}', '$.a' ERROR ON ERROR)
+
+query
+SELECT JSON_QUERY(jsonb '{"a": [1, 2]}', '$.a'), JSON_QUERY(jsonb '{"a": [1, 2]}', '$.a[*]' WITH WRAPPER)
+----
+json_query:jsonb | json_query:jsonb
+[1, 2] | [1, 2]
+
+query
+SELECT * FROM JSON_TABLE(jsonb '[{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]', '$[*]' COLUMNS (id int PATH '$.id', name text PATH '$.name'))
+----
+id:int4 | name:text
+1 | a
+2 | b
+
+query
+SELECT * FROM JSON_TABLE(jsonb '{"items": [{"x": 1}, {"x": 2}]}', '$.items[*]' COLUMNS (ord FOR ORDINALITY, x int PATH '$.x', missing text PATH '$.nope'))
+----
+ord:int4 | x:int4 | missing:text
+1 | 1 | NULL
+2 | 2 | NULL
+
+query
+SELECT JSON('{"a": 1}'), JSON_SCALAR(42), JSON_SERIALIZE(json '{"a": 1}')
+----
+json:json | json_scalar:json | json_serialize:text
+{"a": 1} | 42 | {"a": 1}
+
+
+# record population
+statement ok
+CREATE TYPE person AS (name text, age int, tags text[])
+
+query
+SELECT * FROM json_populate_record(NULL::person, '{"name": "Ann", "age": 30, "tags": ["x", "y"], "extra": 1}')
+----
+name:text | age:int4 | tags:_text
+Ann | 30 | {x,y}
+
+query
+SELECT * FROM jsonb_populate_recordset(NULL::person, '[{"name": "A", "age": 1}, {"name": "B"}]')
+----
+name:text | age:int4 | tags:_text
+A | 1 | NULL
+B | NULL | NULL
+
+query
+SELECT * FROM jsonb_to_record('{"a": 1, "b": "x", "c": [1, 2]}') AS t(a int, b text, c int[])
+----
+a:int4 | b:text | c:_int4
+1 | x | {1,2}
+
+query
+SELECT * FROM json_to_recordset('[{"a": 1}, {"a": 2, "b": true}]') AS t(a int, b bool)
+----
+a:int4 | b:bool
+1 | NULL
+2 | t
+
+statement error 22P02 invalid input syntax for type integer: "old"
+SELECT * FROM jsonb_populate_record(NULL::person, '{"age": "old"}')
+
+
+# jsonb in tables
+statement ok
+CREATE TABLE docs (id int PRIMARY KEY, body jsonb)
+
+statement ok
+INSERT INTO docs VALUES (1, '{"tags": ["a", "b"], "n": 1}'), (2, '{"tags": ["b"], "n": 2}'), (3, '{"n": null}')
+
+query
+SELECT id FROM docs WHERE body @> '{"tags": ["b"]}' ORDER BY id
+----
+id:int4
+1
+2
+
+query
+SELECT id, body ->> 'n' FROM docs WHERE body ? 'tags' ORDER BY id
+----
+id:int4 | ?column?:text
+1 | 1
+2 | 2
+
+query
+SELECT id, jsonb_array_length(body -> 'tags') FROM docs ORDER BY id
+----
+id:int4 | jsonb_array_length:int4
+1 | 2
+2 | 1
+3 | NULL
+
+query
+SELECT d.id, t.tag FROM docs d, jsonb_array_elements_text(d.body -> 'tags') t(tag) ORDER BY 1, 2
+----
+id:int4 | tag:text
+1 | a
+1 | b
+2 | b
+
+statement ok
+UPDATE docs SET body = jsonb_set(body, '{n}', to_jsonb((body ->> 'n')::int + 10)) WHERE id = 1
+
+query
+SELECT body FROM docs WHERE id = 1
+----
+body:jsonb
+{"n": 11, "tags": ["a", "b"]}

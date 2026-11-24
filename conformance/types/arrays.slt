@@ -1,0 +1,212 @@
+# Arrays.
+
+# Literal forms and output
+query
+SELECT ARRAY[1, 2, 3], '{1,2,3}'::int[], ARRAY['a', 'b c', 'd"e', ''], ARRAY[]::int[]
+----
+array:_int4 | int4:_int4 | array:_text | array:_int4
+{1,2,3} | {1,2,3} | {a,"b c","d\"e",""} | {}
+
+query
+SELECT pg_typeof(ARRAY[1, 2]), pg_typeof(ARRAY[1.5, 2]), pg_typeof(ARRAY['a']), pg_typeof('{}'::text[])
+----
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+integer[] | numeric[] | text[] | text[]
+
+query
+SELECT ARRAY[1, NULL, 3], '{NULL, "NULL", null}'::text[], ARRAY['a,b', 'x\y', ' sp ']
+----
+array:_int4 | text:_text | array:_text
+{1,NULL,3} | {NULL,"NULL",NULL} | {"a,b","x\\y"," sp "}
+
+statement error 42P18 cannot determine type of empty array
+SELECT ARRAY[]
+
+statement error 22P02 malformed array literal: "{1,2"
+SELECT '{1,2'::int[]
+
+statement error 22P02 invalid input syntax for type integer: "a"
+SELECT '{1,a}'::int[]
+
+statement error 22P02 invalid input syntax for type integer: "x"
+SELECT ARRAY[1, 'x']
+
+# Multi-dimensional arrays
+query
+SELECT ARRAY[[1, 2], [3, 4]], '{{a,b},{c,d}}'::text[], array_dims(ARRAY[[1, 2, 3], [4, 5, 6]]), array_ndims(ARRAY[[1]])
+----
+array:_int4 | text:_text | array_dims:text | array_ndims:int4
+{{1,2},{3,4}} | {{a,b},{c,d}} | [1:2][1:3] | 2
+
+statement error 2202E multidimensional arrays must have array expressions with matching dimensions
+SELECT ARRAY[[1, 2], [3]]
+
+# Non-default lower bounds
+query
+SELECT '[0:2]={a,b,c}'::text[], ('[0:2]={a,b,c}'::text[])[0], array_lower('[0:2]={a,b,c}'::text[], 1)
+----
+text:_text | text:text | array_lower:int4
+[0:2]={a,b,c} | a | 0
+
+# Subscripts are 1-based; out-of-range yields NULL
+query
+SELECT (ARRAY[10, 20, 30])[1], (ARRAY[10, 20, 30])[3], (ARRAY[10, 20, 30])[4], (ARRAY[10, 20, 30])[0]
+----
+array:int4 | array:int4 | array:int4 | array:int4
+10 | 30 | NULL | NULL
+
+query
+SELECT (ARRAY[[1, 2], [3, 4]])[2][1], (ARRAY[[1, 2], [3, 4]])[2]
+----
+array:int4 | array:int4
+3 | NULL
+
+# Slices
+query
+SELECT (ARRAY[1, 2, 3, 4, 5])[2:4], (ARRAY[1, 2, 3, 4, 5])[:2], (ARRAY[1, 2, 3, 4, 5])[4:], (ARRAY[1, 2, 3])[5:6]
+----
+array:_int4 | array:_int4 | array:_int4 | array:_int4
+{2,3,4} | {1,2} | {4,5} | {}
+
+query
+SELECT (ARRAY[[1, 2, 3], [4, 5, 6]])[1:2][2:3]
+----
+array:_int4
+{{2,3},{5,6}}
+
+# Concatenation and functions
+query
+SELECT ARRAY[1, 2] || ARRAY[3], ARRAY[1] || 2, 0 || ARRAY[1], ARRAY[[1, 2]] || ARRAY[3, 4]
+----
+?column?:_int4 | ?column?:_int4 | ?column?:_int4 | ?column?:_int4
+{1,2,3} | {1,2} | {0,1} | {{1,2},{3,4}}
+
+query
+SELECT array_append(ARRAY[1], 2), array_prepend(0, ARRAY[1]), array_cat(ARRAY[1], ARRAY[2, 3]), array_remove(ARRAY[1, 2, 1], 1), array_replace(ARRAY[1, 2, 1], 1, 9)
+----
+array_append:_int4 | array_prepend:_int4 | array_cat:_int4 | array_remove:_int4 | array_replace:_int4
+{1,2} | {0,1} | {1,2,3} | {2} | {9,2,9}
+
+query
+SELECT array_length(ARRAY[1, 2, 3], 1), array_length(ARRAY[]::int[], 1), cardinality(ARRAY[[1, 2], [3, 4]]), array_upper(ARRAY[1, 2], 1)
+----
+array_length:int4 | array_length:int4 | cardinality:int4 | array_upper:int4
+3 | NULL | 4 | 2
+
+query
+SELECT array_position(ARRAY['a', 'b', 'c'], 'b'), array_positions(ARRAY[1, 2, 1], 1), array_to_string(ARRAY[1, NULL, 3], ',', '*')
+----
+array_position:int4 | array_positions:_int4 | array_to_string:text
+2 | {1,3} | 1,*,3
+
+query
+SELECT trim_array(ARRAY[1, 2, 3], 1), array_fill(0, ARRAY[2]), array_reverse(ARRAY[1, 2, 3]), array_sort(ARRAY[3, 1, 2])
+----
+trim_array:_int4 | array_fill:_int4 | array_reverse:_int4 | array_sort:_int4
+{1,2} | {0,0} | {3,2,1} | {1,2,3}
+
+# ANY / ALL / containment / overlap
+query
+SELECT 2 = ANY(ARRAY[1, 2, 3]), 5 > ALL(ARRAY[1, 2, 3]), 2 = ANY('{}'::int[]), NULL::int = ANY(ARRAY[1])
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | f | NULL
+
+query
+SELECT ARRAY[1, 2, 3] @> ARRAY[2, 1], ARRAY[1] <@ ARRAY[1, 2], ARRAY[1, 2] && ARRAY[2, 3], ARRAY[1, 2] = ARRAY[1, 2]
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t
+
+# Comparison is element-wise lexicographic
+query
+SELECT ARRAY[1, 2] < ARRAY[1, 3], ARRAY[1, 2] < ARRAY[1, 2, 0], ARRAY[2] > ARRAY[1, 9]
+----
+?column?:bool | ?column?:bool | ?column?:bool
+t | t | t
+
+# unnest and array_agg
+query
+SELECT x FROM unnest(ARRAY[3, 1, NULL]) x ORDER BY x
+----
+x:int4
+1
+3
+NULL
+
+query
+SELECT * FROM unnest(ARRAY[1, 2], ARRAY['a', 'b', 'c']) AS t(n, s) ORDER BY n NULLS LAST
+----
+n:int4 | s:text
+1 | a
+2 | b
+NULL | c
+
+query
+SELECT n, ord FROM unnest(ARRAY[10, 20]) WITH ORDINALITY AS t(n, ord) ORDER BY ord
+----
+n:int4 | ord:int8
+10 | 1
+20 | 2
+
+query
+SELECT array_agg(x ORDER BY x DESC), array_agg(DISTINCT x ORDER BY x) FROM (VALUES (1), (2), (1)) v(x)
+----
+array_agg:_int4 | array_agg:_int4
+{2,1,1} | {1,2}
+
+query
+SELECT ARRAY(SELECT generate_series(1, 3)), ARRAY(SELECT 1 WHERE false)
+----
+array:_int4 | array:_int4
+{1,2,3} | {}
+
+# Array columns
+statement ok
+CREATE TABLE arr (id int, tags text[], m int[][], ts timestamptz[])
+
+statement ok
+INSERT INTO arr VALUES (1, '{a,b}', '{{1,2},{3,4}}', ARRAY['2024-01-01 00:00:00+00'::timestamptz]), (2, ARRAY['c'], NULL, '{}')
+
+statement ok
+UPDATE arr SET tags[3] = 'z' WHERE id = 1
+
+statement ok
+UPDATE arr SET tags[5] = 'gap' WHERE id = 2
+
+query
+SELECT id, tags, m, ts FROM arr ORDER BY id
+----
+id:int4 | tags:_text | m:_int4 | ts:_timestamptz
+1 | {a,b,z} | {{1,2},{3,4}} | {"2024-01-01 00:00:00+00"}
+2 | {c,NULL,NULL,NULL,gap} | NULL | {}
+
+query
+SELECT id FROM arr WHERE 'a' = ANY(tags) OR tags @> '{gap}' ORDER BY id
+----
+id:int4
+1
+2
+
+statement ok
+UPDATE arr SET m[1:1][1:2] = '{{9,9}}' WHERE id = 1
+
+query
+SELECT m FROM arr WHERE id = 1
+----
+m:_int4
+{{9,9},{3,4}}
+
+# Array of other types
+query
+SELECT ARRAY[true, false], ARRAY[1.5::float8, 'NaN'], ARRAY['2024-01-01'::date], ARRAY['{"a":1}'::jsonb], ARRAY['\x01'::bytea]
+----
+array:_bool | array:_float8 | array:_date | array:_jsonb | array:_bytea
+{t,f} | {1.5,NaN} | {2024-01-01} | {"{\"a\": 1}"} | {"\\x01"}
+
+# Casting arrays element-wise
+query
+SELECT '{1,2}'::int[]::text[], ARRAY['1', '2']::int[], ARRAY[1.6, 2.4]::int[]
+----
+text:_text | array:_int4 | array:_int4
+{1,2} | {1,2} | {2,2}

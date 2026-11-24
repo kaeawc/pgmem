@@ -11,7 +11,7 @@ and what comes next. Updated with every PR.
 | Integration suite on pgmem | **517 / 517** pass | `cargo nextest run -p pgmem --test it` |
 | Integration suite on real PostgreSQL 18 | **517 / 517** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
 | Go pgx example suites (sqlc) against the Rust binary | **27 / 27** pass | `make examples` (CI `pgx-examples`) |
-| SQL conformance corpus | not yet measured | Phase 2: sqllogictest corpus recorded from real PostgreSQL |
+| **SQL conformance corpus** (3309 records, 9 areas) | **2031 / 3309 (61.4%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
 
 ### Conformance history
 
@@ -26,6 +26,7 @@ and what comes next. Updated with every PR.
 | 2026-11-24 | #109 types and expression tests | 466/564 | — |
 | 2026-11-24 | #110 builtin function tests | 564/564 | — |
 | 2026-11-24 | #111 remove the Go implementation; pgx examples run against Rust | 564/564 | — |
+| 2026-11-24 | conformance corpus and runner (baseline) | 564/564 | 2031/3309 (61.4%) |
 
 ## Supported
 
@@ -77,9 +78,31 @@ and what comes next. Updated with every PR.
 
 ## Next
 
-1. Conformance harness: sqllogictest corpus by area (wire, types, DDL, constraints, transactions,
-   joins, aggregates, windows, CTEs, catalog, error codes), expected results recorded from and
-   re-verified against PostgreSQL 18 in CI; track the pass rate here.
-2. Client matrix in CI: psql, tokio-postgres, sqlx and JDBC (Go pgx is covered by `examples/`).
-3. Hill-climb, highest value first: `pg_catalog`/`information_schema` for driver and ORM
-   introspection, named time zones, COPY, LISTEN/NOTIFY.
+Hill-climb, ordered by conformance records recovered per unit of work and by what blocks real
+clients. Each item names the corpus area it moves (see CONFORMANCE.md for per-file rates).
+
+1. **System catalogs**: `pg_catalog` (pg_class, pg_namespace, pg_attribute, pg_type, pg_index,
+   pg_constraint, pg_attrdef, pg_proc, pg_description, pg_settings, pg_sequences, pg_views,
+   pg_tables, pg_indexes, pg_roles, pg_extension) and `information_schema` (tables, columns,
+   constraints, key/constraint column usage, views, sequences); `reg*` types and `to_reg*`,
+   `pg_get_*def`, `format_type`, `pg_get_serial_sequence`. Blocks ORM/driver introspection and
+   array decoding in drivers that look up `pg_type` (catalog 23%, ddl, types).
+2. **Result types and column names**: `pg_typeof` → regtype, `varchar(n)`/`char(n)` as distinct
+   types with padding, `json` as its own type (not jsonb), `name` results, cast column naming.
+3. **Named time zones**: `SET TIME ZONE`, `AT TIME ZONE 'Region/City'`, zone names in input.
+4. **Set-returning functions in the select list**, multidimensional arrays, array element
+   assignment, `ROW(...)` constructors and row comparisons.
+5. **Settings fidelity**: validation (22023/42704), value normalisation, custom `x.y` settings,
+   `SET LOCAL`/savepoint scoping, DateStyle/IntervalStyle output styles.
+6. **Statements**: SQL-level PREPARE/EXECUTE, cursors, LISTEN/NOTIFY, MERGE, writable CTEs,
+   `RETURNING old/new`, GROUPING SETS/ROLLUP/CUBE, ordered-set aggregates, window `RANGE` offsets
+   and `EXCLUDE`, CTE `SEARCH`/`CYCLE`.
+7. **Types**: enums, domains, composite types, range types (and EXCLUDE constraints).
+8. **Transactions and constraints**: deferred constraints, per-row unique checks, row locks with
+   NOWAIT/SKIP LOCKED between sessions, advisory locks shared across sessions, READ ONLY
+   transactions, SERIALIZABLE write-skew detection, dependency errors (2BP01).
+9. **Functions/procedures/triggers** (SQL and PL/pgSQL), `DO` blocks — large; most of ddl/migrations.
+10. Client matrix in CI: psql, tokio-postgres, sqlx and JDBC (Go pgx is covered by `examples/`).
+
+Known wrong result (not just unsupported): `FULL JOIN ... USING (k)` yields NULL for the merged
+column on right-only rows (queries/joins.slt).

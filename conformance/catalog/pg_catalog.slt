@@ -1,0 +1,407 @@
+# pg_catalog tables and the pg_get_* deparsing functions. Output avoids OIDs.
+
+statement ok
+CREATE TABLE accounts (
+  id serial PRIMARY KEY,
+  email varchar(255) NOT NULL UNIQUE,
+  balance numeric(12,2) NOT NULL DEFAULT 0 CHECK (balance >= 0),
+  status text DEFAULT 'new',
+  created timestamp(3) DEFAULT CURRENT_TIMESTAMP,
+  flags int[]
+)
+
+statement ok
+CREATE TABLE transfers (
+  id bigserial PRIMARY KEY,
+  from_id int NOT NULL REFERENCES accounts (id),
+  to_id int REFERENCES accounts (id) ON DELETE SET NULL,
+  amount numeric NOT NULL,
+  note text
+)
+
+statement ok
+CREATE INDEX transfers_from_idx ON transfers (from_id)
+
+statement ok
+CREATE UNIQUE INDEX transfers_pair_idx ON transfers (from_id, to_id) WHERE note IS NULL
+
+statement ok
+CREATE INDEX accounts_lower_email_idx ON accounts (lower(email))
+
+statement ok
+CREATE VIEW rich AS SELECT id, email FROM accounts WHERE balance > 1000
+
+statement ok
+CREATE MATERIALIZED VIEW totals AS SELECT from_id, sum(amount) AS total FROM transfers GROUP BY from_id
+
+statement ok
+CREATE SEQUENCE ticket_seq AS int START 10 INCREMENT 2
+
+statement ok
+CREATE TYPE color AS ENUM ('red', 'green', 'blue')
+
+statement ok
+CREATE TYPE pair AS (a int, b text)
+
+statement ok
+CREATE DOMAIN posint AS int CHECK (VALUE > 0)
+
+# pg_class / pg_namespace
+query
+SELECT c.relname, c.relkind
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+ORDER BY c.relname
+----
+relname:name | relkind:char
+accounts | r
+accounts_email_key | i
+accounts_id_seq | S
+accounts_lower_email_idx | i
+accounts_pkey | i
+pair | c
+rich | v
+ticket_seq | S
+totals | m
+transfers | r
+transfers_from_idx | i
+transfers_id_seq | S
+transfers_pair_idx | i
+transfers_pkey | i
+
+query
+SELECT relname, relkind, relpersistence, relhasindex
+FROM pg_class
+WHERE relname IN ('accounts', 'transfers', 'rich')
+ORDER BY relname
+----
+relname:name | relkind:char | relpersistence:char | relhasindex:bool
+accounts | r | p | t
+rich | v | p | f
+transfers | r | p | t
+
+query
+SELECT nspname FROM pg_namespace
+WHERE nspname IN ('public', 'pg_catalog', 'information_schema')
+ORDER BY nspname
+----
+nspname:name
+information_schema
+pg_catalog
+public
+
+query
+SELECT relnatts, relchecks FROM pg_class WHERE relname = 'accounts'
+----
+relnatts:int2 | relchecks:int2
+6 | 1
+
+# pg_attribute
+query
+SELECT attname, attnum, attnotnull, format_type(atttypid, atttypmod), atthasdef
+FROM pg_attribute
+WHERE attrelid = 'accounts'::regclass AND attnum > 0 AND NOT attisdropped
+ORDER BY attnum
+----
+attname:name | attnum:int2 | attnotnull:bool | format_type:text | atthasdef:bool
+id | 1 | t | integer | t
+email | 2 | t | character varying(255) | f
+balance | 3 | t | numeric(12,2) | t
+status | 4 | f | text | t
+created | 5 | f | timestamp(3) without time zone | t
+flags | 6 | f | integer[] | f
+
+query
+SELECT attname, attnum
+FROM pg_attribute
+WHERE attrelid = 'accounts'::regclass AND attnum < 0
+ORDER BY attnum
+----
+attname:name | attnum:int2
+tableoid | -6
+cmax | -5
+xmax | -4
+cmin | -3
+xmin | -2
+ctid | -1
+
+query
+SELECT attname, attidentity, attgenerated, attndims
+FROM pg_attribute
+WHERE attrelid = 'accounts'::regclass AND attnum > 0
+ORDER BY attnum
+----
+attname:name | attidentity:char | attgenerated:char | attndims:int2
+id | (empty) | (empty) | 0
+email | (empty) | (empty) | 0
+balance | (empty) | (empty) | 0
+status | (empty) | (empty) | 0
+created | (empty) | (empty) | 0
+flags | (empty) | (empty) | 1
+
+statement ok
+ALTER TABLE accounts DROP COLUMN status
+
+query
+SELECT count(*) FROM pg_attribute WHERE attrelid = 'accounts'::regclass AND attisdropped
+----
+count:int8
+1
+
+# pg_type by name
+query
+SELECT typname, typlen, typbyval, typtype, typcategory, typdelim
+FROM pg_type
+WHERE typname IN ('int4', 'text', 'bool', 'numeric', 'timestamptz', 'uuid', 'jsonb')
+ORDER BY typname
+----
+typname:name | typlen:int2 | typbyval:bool | typtype:char | typcategory:char | typdelim:char
+bool | 1 | t | b | B | ,
+int4 | 4 | t | b | N | ,
+jsonb | -1 | f | b | U | ,
+numeric | -1 | f | b | N | ,
+text | -1 | f | b | S | ,
+timestamptz | 8 | t | b | D | ,
+uuid | 16 | f | b | U | ,
+
+query
+SELECT t.typname, e.typname AS elem
+FROM pg_type t JOIN pg_type e ON e.oid = t.typelem
+WHERE t.typname IN ('_int4', '_text')
+ORDER BY t.typname
+----
+typname:name | elem:name
+_int4 | int4
+_text | text
+
+query
+SELECT typname, typtype
+FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+WHERE n.nspname = 'public' AND typname IN ('color', 'pair', 'posint', 'accounts')
+ORDER BY typname
+----
+typname:name | typtype:char
+accounts | c
+color | e
+pair | c
+posint | d
+
+query
+SELECT format_type(typbasetype, typtypmod), typnotnull FROM pg_type WHERE typname = 'posint'
+----
+format_type:text | typnotnull:bool
+integer | f
+
+# pg_enum
+query
+SELECT enumlabel, enumsortorder FROM pg_enum WHERE enumtypid = 'color'::regtype ORDER BY enumsortorder
+----
+enumlabel:name | enumsortorder:float4
+red | 1
+green | 2
+blue | 3
+
+statement ok
+ALTER TYPE color ADD VALUE 'yellow' AFTER 'red'
+
+query
+SELECT enumlabel FROM pg_enum WHERE enumtypid = 'color'::regtype ORDER BY enumsortorder
+----
+enumlabel:name
+red
+yellow
+green
+blue
+
+# pg_index + pg_get_indexdef
+query
+SELECT c.relname, i.indisunique, i.indisprimary, i.indnatts, pg_get_indexdef(i.indexrelid)
+FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+WHERE i.indrelid = 'transfers'::regclass
+ORDER BY c.relname
+----
+relname:name | indisunique:bool | indisprimary:bool | indnatts:int2 | pg_get_indexdef:text
+transfers_from_idx | f | f | 1 | CREATE INDEX transfers_from_idx ON public.transfers USING btree (from_id)
+transfers_pair_idx | t | f | 2 | CREATE UNIQUE INDEX transfers_pair_idx ON public.transfers USING btree (from_id, to_id) WHERE (note IS NULL)
+transfers_pkey | t | t | 1 | CREATE UNIQUE INDEX transfers_pkey ON public.transfers USING btree (id)
+
+query
+SELECT pg_get_indexdef('accounts_lower_email_idx'::regclass)
+----
+pg_get_indexdef:text
+CREATE INDEX accounts_lower_email_idx ON public.accounts USING btree (lower((email)::text))
+
+query
+SELECT pg_get_indexdef('transfers_pair_idx'::regclass, 2, true)
+----
+pg_get_indexdef:text
+to_id
+
+# pg_constraint + pg_get_constraintdef
+query
+SELECT conname, contype, pg_get_constraintdef(oid)
+FROM pg_constraint
+WHERE conrelid = 'accounts'::regclass
+ORDER BY conname
+----
+conname:name | contype:char | pg_get_constraintdef:text
+accounts_balance_check | c | CHECK ((balance >= (0)::numeric))
+accounts_balance_not_null | n | NOT NULL balance
+accounts_email_key | u | UNIQUE (email)
+accounts_email_not_null | n | NOT NULL email
+accounts_id_not_null | n | NOT NULL id
+accounts_pkey | p | PRIMARY KEY (id)
+
+query
+SELECT conname, confrelid::regclass::text, confupdtype, confdeltype, confmatchtype, pg_get_constraintdef(oid, true)
+FROM pg_constraint
+WHERE conrelid = 'transfers'::regclass AND contype = 'f'
+ORDER BY conname
+----
+conname:name | confrelid:text | confupdtype:char | confdeltype:char | confmatchtype:char | pg_get_constraintdef:text
+transfers_from_id_fkey | accounts | a | a | s | FOREIGN KEY (from_id) REFERENCES accounts(id)
+transfers_to_id_fkey | accounts | a | n | s | FOREIGN KEY (to_id) REFERENCES accounts(id) ON DELETE SET NULL
+
+query
+SELECT conname, conkey, confkey FROM pg_constraint
+WHERE conrelid = 'transfers'::regclass AND contype = 'f'
+ORDER BY conname
+----
+conname:name | conkey:_int2 | confkey:_int2
+transfers_from_id_fkey | {2} | {1}
+transfers_to_id_fkey | {3} | {1}
+
+# pg_attrdef + pg_get_expr
+query
+SELECT a.attname, pg_get_expr(d.adbin, d.adrelid)
+FROM pg_attrdef d JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+WHERE d.adrelid = 'accounts'::regclass
+ORDER BY a.attnum
+----
+attname:name | pg_get_expr:text
+id | nextval('accounts_id_seq'::regclass)
+balance | 0
+created | CURRENT_TIMESTAMP
+
+# pg_sequences
+query
+SELECT sequencename, data_type::text, start_value, min_value, max_value, increment_by, cycle, cache_size, last_value
+FROM pg_sequences
+WHERE schemaname = 'public'
+ORDER BY sequencename
+----
+sequencename:name | data_type:text | start_value:int8 | min_value:int8 | max_value:int8 | increment_by:int8 | cycle:bool | cache_size:int8 | last_value:int8
+accounts_id_seq | integer | 1 | 1 | 2147483647 | 1 | f | 1 | NULL
+ticket_seq | integer | 10 | 1 | 2147483647 | 2 | f | 1 | NULL
+transfers_id_seq | bigint | 1 | 1 | 9223372036854775807 | 1 | f | 1 | NULL
+
+query
+SELECT nextval('ticket_seq'), nextval('ticket_seq')
+----
+nextval:int8 | nextval:int8
+10 | 12
+
+query
+SELECT last_value FROM pg_sequences WHERE sequencename = 'ticket_seq'
+----
+last_value:int8
+12
+
+query
+SELECT pg_get_serial_sequence('accounts', 'id'), pg_get_serial_sequence('transfers', 'id')
+----
+pg_get_serial_sequence:text | pg_get_serial_sequence:text
+public.accounts_id_seq | public.transfers_id_seq
+
+# pg_views / pg_get_viewdef
+query
+SELECT viewname, definition FROM pg_views WHERE schemaname = 'public'
+----
+viewname:name | definition:text
+rich |  SELECT id,\n    email\n   FROM accounts\n  WHERE (balance > (1000)::numeric);
+
+query
+SELECT pg_get_viewdef('rich'::regclass)
+----
+pg_get_viewdef:text
+ SELECT id,\n    email\n   FROM accounts\n  WHERE (balance > (1000)::numeric);
+
+query
+SELECT pg_get_viewdef('rich'::regclass, true)
+----
+pg_get_viewdef:text
+ SELECT id,\n    email\n   FROM accounts\n  WHERE balance > 1000::numeric;
+
+query
+SELECT matviewname, ispopulated FROM pg_matviews WHERE schemaname = 'public'
+----
+matviewname:name | ispopulated:bool
+totals | t
+
+# pg_tables / pg_indexes
+query
+SELECT tablename, hasindexes, hasrules, hastriggers, rowsecurity
+FROM pg_tables
+WHERE schemaname = 'public'
+ORDER BY tablename
+----
+tablename:name | hasindexes:bool | hasrules:bool | hastriggers:bool | rowsecurity:bool
+accounts | t | f | t | f
+transfers | t | f | t | f
+
+query
+SELECT tablename, indexname, indexdef
+FROM pg_indexes
+WHERE schemaname = 'public'
+ORDER BY tablename, indexname
+----
+tablename:name | indexname:name | indexdef:text
+accounts | accounts_email_key | CREATE UNIQUE INDEX accounts_email_key ON public.accounts USING btree (email)
+accounts | accounts_lower_email_idx | CREATE INDEX accounts_lower_email_idx ON public.accounts USING btree (lower((email)::text))
+accounts | accounts_pkey | CREATE UNIQUE INDEX accounts_pkey ON public.accounts USING btree (id)
+transfers | transfers_from_idx | CREATE INDEX transfers_from_idx ON public.transfers USING btree (from_id)
+transfers | transfers_pair_idx | CREATE UNIQUE INDEX transfers_pair_idx ON public.transfers USING btree (from_id, to_id) WHERE (note IS NULL)
+transfers | transfers_pkey | CREATE UNIQUE INDEX transfers_pkey ON public.transfers USING btree (id)
+
+# pg_proc for a user function
+statement ok
+CREATE FUNCTION double_it(n int) RETURNS int LANGUAGE sql IMMUTABLE AS $$ SELECT n * 2 $$
+
+query
+SELECT proname, pronargs, provolatile, prorettype::regtype::text, pg_get_function_arguments(oid), pg_get_function_result(oid)
+FROM pg_proc WHERE proname = 'double_it'
+----
+proname:name | pronargs:int2 | provolatile:char | prorettype:text | pg_get_function_arguments:text | pg_get_function_result:text
+double_it | 1 | i | integer | n integer | integer
+
+# pg_depend links a serial sequence to its column
+query
+SELECT s.relname, a.attname, d.deptype
+FROM pg_depend d
+JOIN pg_class s ON s.oid = d.objid
+JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
+WHERE s.relkind = 'S' AND d.refobjid = 'accounts'::regclass
+----
+relname:name | attname:name | deptype:char
+accounts_id_seq | id | a
+
+# pg_inherits for partitions
+statement ok
+CREATE TABLE events (id int, at date) PARTITION BY RANGE (at)
+
+statement ok
+CREATE TABLE events_2024 PARTITION OF events FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
+
+query
+SELECT c.relname, c.relkind, c.relispartition, pg_get_expr(c.relpartbound, c.oid)
+FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+WHERE i.inhparent = 'events'::regclass
+----
+relname:name | relkind:char | relispartition:bool | pg_get_expr:text
+events_2024 | r | t | FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
+
+query
+SELECT pg_get_partkeydef('events'::regclass)
+----
+pg_get_partkeydef:text
+RANGE (at)

@@ -1,0 +1,231 @@
+# Advisory locks across two sessions (try-variants only, never blocking)
+query
+SELECT pg_try_advisory_lock(1001)
+----
+pg_try_advisory_lock:bool
+t
+
+connection b
+query
+SELECT pg_try_advisory_lock(1001)
+----
+pg_try_advisory_lock:bool
+f
+
+# Session locks are re-entrant: two locks need two unlocks
+query
+SELECT pg_try_advisory_lock(1001)
+----
+pg_try_advisory_lock:bool
+t
+
+query
+SELECT pg_advisory_unlock(1001)
+----
+pg_advisory_unlock:bool
+t
+
+connection b
+query
+SELECT pg_try_advisory_lock(1001)
+----
+pg_try_advisory_lock:bool
+f
+
+query
+SELECT pg_advisory_unlock(1001)
+----
+pg_advisory_unlock:bool
+t
+
+connection b
+query
+SELECT pg_try_advisory_lock(1001)
+----
+pg_try_advisory_lock:bool
+t
+
+# Unlocking a lock not held returns false (with a warning)
+query
+SELECT pg_advisory_unlock(1001)
+----
+pg_advisory_unlock:bool
+f
+
+connection b
+query
+SELECT pg_advisory_unlock(1001)
+----
+pg_advisory_unlock:bool
+t
+
+# Session locks survive ROLLBACK
+statement ok
+BEGIN
+
+query
+SELECT pg_try_advisory_lock(2002)
+----
+pg_try_advisory_lock:bool
+t
+
+statement ok
+ROLLBACK
+
+connection b
+query
+SELECT pg_try_advisory_lock(2002)
+----
+pg_try_advisory_lock:bool
+f
+
+query
+SELECT pg_advisory_unlock(2002)
+----
+pg_advisory_unlock:bool
+t
+
+# Transaction-level locks are released at the end of the transaction
+statement ok
+BEGIN
+
+query
+SELECT pg_try_advisory_xact_lock(3003)
+----
+pg_try_advisory_xact_lock:bool
+t
+
+connection b
+query
+SELECT pg_try_advisory_xact_lock(3003)
+----
+pg_try_advisory_xact_lock:bool
+f
+
+statement ok
+COMMIT
+
+connection b
+query
+SELECT pg_try_advisory_xact_lock(3003)
+----
+pg_try_advisory_xact_lock:bool
+t
+
+# Shared versus exclusive
+query
+SELECT pg_try_advisory_lock_shared(4004)
+----
+pg_try_advisory_lock_shared:bool
+t
+
+connection b
+query
+SELECT pg_try_advisory_lock_shared(4004)
+----
+pg_try_advisory_lock_shared:bool
+t
+
+connection b
+query
+SELECT pg_try_advisory_lock(4004)
+----
+pg_try_advisory_lock:bool
+f
+
+query
+SELECT pg_advisory_unlock_shared(4004)
+----
+pg_advisory_unlock_shared:bool
+t
+
+connection b
+query
+SELECT pg_advisory_unlock_shared(4004)
+----
+pg_advisory_unlock_shared:bool
+t
+
+# Two-key form is a different lock space from the bigint form
+query
+SELECT pg_try_advisory_lock(1, 2)
+----
+pg_try_advisory_lock:bool
+t
+
+connection b
+query
+SELECT pg_try_advisory_lock(1, 2), pg_try_advisory_lock(2, 1)
+----
+pg_try_advisory_lock:bool | pg_try_advisory_lock:bool
+f | t
+
+connection b
+query
+SELECT pg_try_advisory_lock(4294967298)
+----
+pg_try_advisory_lock:bool
+t
+
+# The blocking form on an uncontested key
+query
+SELECT pg_advisory_lock(5005)
+----
+pg_advisory_lock:void
+(empty)
+
+query
+SELECT locktype, classid, objid, objsubid, mode, granted FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid() ORDER BY objsubid, classid, objid
+----
+locktype:text | classid:oid | objid:oid | objsubid:int2 | mode:text | granted:bool
+advisory | 0 | 5005 | 1 | ExclusiveLock | t
+advisory | 1 | 2 | 2 | ExclusiveLock | t
+
+# pg_advisory_unlock_all releases every session lock
+statement ok
+SELECT pg_advisory_unlock_all()
+
+connection b
+query
+SELECT pg_try_advisory_lock(5005), pg_try_advisory_lock(1, 2)
+----
+pg_try_advisory_lock:bool | pg_try_advisory_lock:bool
+t | t
+
+connection b
+statement ok
+SELECT pg_advisory_unlock_all()
+
+# Transaction locks inside a transaction block and the hashtext idiom used by migration tools
+statement ok
+BEGIN
+
+query
+SELECT pg_try_advisory_xact_lock(hashtext('migrations'))
+----
+pg_try_advisory_xact_lock:bool
+t
+
+connection b
+query
+SELECT pg_try_advisory_xact_lock(hashtext('migrations'))
+----
+pg_try_advisory_xact_lock:bool
+f
+
+statement ok
+ROLLBACK
+
+connection b
+query
+SELECT pg_try_advisory_lock(hashtext('migrations'))
+----
+pg_try_advisory_lock:bool
+t
+
+connection b
+query
+SELECT pg_advisory_unlock(hashtext('migrations'))
+----
+pg_advisory_unlock:bool
+t

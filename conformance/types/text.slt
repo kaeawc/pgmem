@@ -1,0 +1,168 @@
+# Character types: text, varchar(n), char(n).
+
+# varchar(n): error on overlong input, but explicit casts truncate
+statement ok
+CREATE TABLE s (id int, v varchar(5), c char(5), t text)
+
+statement ok
+INSERT INTO s VALUES (1, 'abc', 'abc', 'abc')
+
+statement error 22001 value too long for type character varying(5)
+INSERT INTO s (id, v) VALUES (2, 'abcdef')
+
+statement error 22001 value too long for type character(5)
+INSERT INTO s (id, c) VALUES (2, 'abcdef')
+
+# Trailing spaces beyond the limit are silently trimmed
+statement ok
+INSERT INTO s VALUES (3, 'abcde   ', 'ab   ', 'x  ')
+
+query
+SELECT 'abcdef'::varchar(3), 'abcdef'::char(3), CAST('hello world' AS varchar(5))
+----
+varchar:varchar | bpchar:bpchar | varchar:varchar
+abc | abc | hello
+
+query
+SELECT id, v, c, t, length(v), length(c), octet_length(c) FROM s ORDER BY id
+----
+id:int4 | v:varchar | c:bpchar | t:text | length:int4 | length:int4 | octet_length:int4
+1 | abc | abc   | abc | 3 | 3 | 5
+3 | abcde | ab    | x   | 5 | 2 | 5
+
+# char(n) pads with spaces; padding is insignificant in comparisons
+query
+SELECT 'ab'::char(4) = 'ab  '::char(4), 'ab'::char(4) || '|', ('ab'::char(4))::text || '|'
+----
+?column?:bool | ?column?:text | ?column?:text
+t | ab| | ab|
+
+query
+SELECT c = 'abc', v = 'abc' FROM s WHERE id = 1
+----
+?column?:bool | ?column?:bool
+t | t
+
+query
+SELECT 'a'::char, pg_typeof('a'::char), 'abc'::"char"
+----
+bpchar:bpchar | pg_typeof:regtype | char:char
+a | character | a
+
+# Multibyte characters count as characters, not bytes
+statement ok
+INSERT INTO s (id, v) VALUES (4, 'héllo')
+
+statement error 22001 value too long for type character varying(5)
+INSERT INTO s (id, v) VALUES (5, 'héllo!')
+
+query
+SELECT length(v), octet_length(v) FROM s WHERE id = 4
+----
+length:int4 | octet_length:int4
+5 | 6
+
+# Concatenation
+query
+SELECT 'a' || 'b', 'a' || NULL, 'n=' || 42, 1 || '-' || 2
+----
+?column?:text | ?column?:text | ?column?:text | ?column?:text
+ab | NULL | n=42 | 1-2
+
+query
+SELECT concat('a', NULL, 'b', 1), concat_ws(',', 'a', NULL, 'c')
+----
+concat:text | concat_ws:text
+ab1 | a,c
+
+statement error 42883 operator does not exist: integer || integer
+SELECT 1 || 2
+
+# Literal escapes
+query
+SELECT 'it''s', E'tab\there', E'\x41', U&'\0041'
+----
+?column?:text | ?column?:text | ?column?:text | ?column?:text
+it's | tab	here | A | A
+
+query
+SELECT $$dollar 'quoted'$$, $tag$a$$b$tag$
+----
+?column?:text | ?column?:text
+dollar 'quoted' | a$$b
+
+# Empty string vs NULL
+query
+SELECT '' IS NULL, length(''), coalesce(NULL, '')
+----
+?column?:bool | length:int4 | coalesce:text
+f | 0 | (empty)
+
+# Common string functions
+query
+SELECT upper('abc'), lower('ABC'), initcap('hello world'), reverse('abc')
+----
+upper:text | lower:text | initcap:text | reverse:text
+ABC | abc | Hello World | cba
+
+query
+SELECT substring('hello' from 2 for 3), substr('hello', 2), left('hello', 2), right('hello', 2)
+----
+substring:text | substr:text | left:text | right:text
+ell | ello | he | lo
+
+query
+SELECT position('l' in 'hello'), strpos('hello', 'lo'), replace('aaa', 'a', 'b'), repeat('ab', 3)
+----
+position:int4 | strpos:int4 | replace:text | repeat:text
+3 | 4 | bbb | ababab
+
+query
+SELECT trim('  x  '), ltrim('xxa', 'x'), rtrim('axx', 'x'), btrim('--a--', '-'), lpad('5', 3, '0'), rpad('ab', 4, '*')
+----
+btrim:text | ltrim:text | rtrim:text | btrim:text | lpad:text | rpad:text
+x | a | a | a | 005 | ab**
+
+query
+SELECT split_part('a,b,c', ',', 2), string_to_array('a,b,c', ','), array_to_string(ARRAY['x', 'y'], '-')
+----
+split_part:text | string_to_array:_text | array_to_string:text
+b | {a,b,c} | x-y
+
+# Collation-independent comparisons (C collation byte order)
+query
+SELECT 'a' < 'b', 'B' < 'a', 'abc' < 'abd'
+----
+?column?:bool | ?column?:bool | ?column?:bool
+t | t | t
+
+query
+SELECT x FROM (VALUES ('b'), ('A'), ('a'), ('B'), ('')) v(x) ORDER BY x
+----
+x:text
+(empty)
+A
+B
+a
+b
+
+# Pattern matching
+query
+SELECT 'abc' LIKE 'a%', 'abc' LIKE 'A%', 'abc' ILIKE 'A%', 'a_c' LIKE 'a\_c', 'abc' ~ '^a.c$'
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | f | t | t | t
+
+# Result type of text functions
+query
+SELECT pg_typeof('a'::varchar || 'b'::varchar), pg_typeof(upper('a'::varchar(3)))
+----
+pg_typeof:regtype | pg_typeof:regtype
+text | text
+
+# name type truncates to 63 bytes
+query
+SELECT length(repeat('x', 100)::name)
+----
+length:int4
+63

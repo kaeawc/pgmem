@@ -1,0 +1,244 @@
+# Common table expressions.
+statement ok
+CREATE TABLE nodes (id int PRIMARY KEY, parent_id int, name text)
+
+statement ok
+INSERT INTO nodes VALUES (1, NULL, 'root'), (2, 1, 'a'), (3, 1, 'b'), (4, 2, 'a1'), (5, 2, 'a2'), (6, 4, 'a1x')
+
+statement ok
+CREATE TABLE edges (src int, dst int)
+
+statement ok
+INSERT INTO edges VALUES (1, 2), (2, 3), (3, 1), (3, 4), (4, 5)
+
+# Simple WITH
+query
+WITH x AS (SELECT 1 AS a) SELECT a FROM x
+----
+a:int4
+1
+
+query
+WITH big AS (SELECT * FROM nodes WHERE id > 3), names AS (SELECT name FROM big) SELECT name FROM names ORDER BY name
+----
+name:text
+a1
+a1x
+a2
+
+query
+WITH c(n, label) AS (SELECT id, name FROM nodes WHERE parent_id = 1) SELECT n, label FROM c ORDER BY n
+----
+n:int4 | label:text
+2 | a
+3 | b
+
+query
+WITH x AS (SELECT 1 AS v) SELECT * FROM x a JOIN x b ON a.v = b.v
+----
+v:int4 | v:int4
+1 | 1
+
+query
+WITH x AS (SELECT id FROM nodes) SELECT count(*) FROM x WHERE id IN (SELECT id FROM x WHERE id < 3)
+----
+count:int8
+2
+
+# CTE shadows a table
+query
+WITH nodes AS (SELECT 42 AS id) SELECT id FROM nodes
+----
+id:int4
+42
+
+# Nested WITH
+query
+WITH outer_cte AS (WITH inner_cte AS (SELECT 5 AS v) SELECT v * 2 AS v FROM inner_cte) SELECT v FROM outer_cte
+----
+v:int4
+10
+
+statement error 42712 WITH query name "x" specified more than once
+WITH x AS (SELECT 1), x AS (SELECT 2) SELECT * FROM x
+
+statement error 42P01 relation "y" does not exist
+WITH x AS (SELECT * FROM y), y AS (SELECT 1) SELECT * FROM x
+
+statement error 42P10 WITH query "x" has 1 columns available but 2 columns specified
+WITH x(a, b) AS (SELECT 1) SELECT * FROM x
+
+# Recursive: counting
+query
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 5) SELECT i FROM n
+----
+i:int4
+1
+2
+3
+4
+5
+
+query
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100) SELECT count(*), sum(i) FROM n
+----
+count:int8 | sum:int8
+100 | 5050
+
+query
+WITH RECURSIVE fib(a, b) AS (SELECT 0::bigint, 1::bigint UNION ALL SELECT b, a + b FROM fib WHERE b < 100) SELECT a FROM fib
+----
+a:int8
+0
+1
+1
+2
+3
+5
+8
+13
+21
+34
+55
+89
+
+# Recursive: trees
+query
+WITH RECURSIVE t AS (SELECT id, name, 0 AS depth, name::text AS path FROM nodes WHERE parent_id IS NULL UNION ALL SELECT n.id, n.name, t.depth + 1, t.path || '/' || n.name FROM nodes n JOIN t ON n.parent_id = t.id) SELECT id, depth, path FROM t ORDER BY path
+----
+id:int4 | depth:int4 | path:text
+1 | 0 | root
+2 | 1 | root/a
+4 | 2 | root/a/a1
+6 | 3 | root/a/a1/a1x
+5 | 2 | root/a/a2
+3 | 1 | root/b
+
+query
+WITH RECURSIVE anc AS (SELECT id, parent_id FROM nodes WHERE id = 6 UNION ALL SELECT n.id, n.parent_id FROM nodes n JOIN anc ON n.id = anc.parent_id) SELECT id FROM anc ORDER BY id
+----
+id:int4
+1
+2
+4
+6
+
+# Recursive: UNION removes duplicates and terminates cycles
+query
+WITH RECURSIVE reach(n) AS (SELECT 1 UNION SELECT e.dst FROM edges e JOIN reach r ON e.src = r.n) SELECT n FROM reach ORDER BY n
+----
+n:int4
+1
+2
+3
+4
+5
+
+# Recursive: SEARCH and CYCLE clauses
+query
+WITH RECURSIVE t(id, name) AS (SELECT id, name FROM nodes WHERE parent_id IS NULL UNION ALL SELECT n.id, n.name FROM nodes n JOIN t ON n.parent_id = t.id) SEARCH DEPTH FIRST BY id SET ord SELECT id, name FROM t ORDER BY ord
+----
+id:int4 | name:text
+1 | root
+2 | a
+4 | a1
+6 | a1x
+5 | a2
+3 | b
+
+query
+WITH RECURSIVE t(id, name) AS (SELECT id, name FROM nodes WHERE parent_id IS NULL UNION ALL SELECT n.id, n.name FROM nodes n JOIN t ON n.parent_id = t.id) SEARCH BREADTH FIRST BY id SET ord SELECT id, name FROM t ORDER BY ord
+----
+id:int4 | name:text
+1 | root
+2 | a
+3 | b
+4 | a1
+5 | a2
+6 | a1x
+
+query
+WITH RECURSIVE g(src, dst) AS (SELECT src, dst FROM edges WHERE src = 1 UNION ALL SELECT e.src, e.dst FROM edges e JOIN g ON e.src = g.dst) CYCLE src SET is_cycle USING path SELECT src, dst, is_cycle, path::text FROM g ORDER BY path::text
+----
+src:int4 | dst:int4 | is_cycle:bool | path:text
+1 | 2 | t | {(1),(2),(3),(1)}
+4 | 5 | f | {(1),(2),(3),(4)}
+3 | 1 | f | {(1),(2),(3)}
+3 | 4 | f | {(1),(2),(3)}
+2 | 3 | f | {(1),(2)}
+1 | 2 | f | {(1)}
+
+query
+WITH RECURSIVE g(src, dst) AS (SELECT src, dst FROM edges WHERE src = 1 UNION ALL SELECT e.src, e.dst FROM edges e JOIN g ON e.src = g.dst) CYCLE src SET looped TO 'Y' DEFAULT 'N' USING p SELECT src, dst, looped FROM g ORDER BY p::text
+----
+src:int4 | dst:int4 | looped:text
+1 | 2 | Y
+4 | 5 | N
+3 | 1 | N
+3 | 4 | N
+2 | 3 | N
+1 | 2 | N
+
+# Recursive errors
+statement error 42P19 recursive reference to query "n" must not appear within its non-recursive term
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n UNION ALL SELECT i FROM n) SELECT * FROM n
+
+statement error 42P19 recursive query "n" does not have the form non-recursive-term UNION [ALL] recursive-term
+WITH RECURSIVE n(i) AS (SELECT i FROM n) SELECT * FROM n
+
+statement error 42P19 aggregate functions are not allowed in a recursive query's recursive term
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT count(*) FROM n) SELECT * FROM n
+
+statement error 42804 UNION types integer and text cannot be matched
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT 'x'::text FROM n) SELECT * FROM n
+
+# MATERIALIZED / NOT MATERIALIZED
+query
+WITH x AS MATERIALIZED (SELECT id FROM nodes WHERE id < 3) SELECT id FROM x ORDER BY id
+----
+id:int4
+1
+2
+
+query
+WITH x AS NOT MATERIALIZED (SELECT id FROM nodes WHERE id < 3) SELECT id FROM x WHERE id > 1
+----
+id:int4
+2
+
+# Data-modifying CTEs
+statement ok
+CREATE TABLE log (msg text)
+
+query
+WITH ins AS (INSERT INTO log VALUES ('hello'), ('world') RETURNING msg) SELECT upper(msg) FROM ins ORDER BY 1
+----
+upper:text
+HELLO
+WORLD
+
+query
+WITH d AS (DELETE FROM log WHERE msg = 'hello' RETURNING *) SELECT count(*) FROM d
+----
+count:int8
+1
+
+query
+SELECT msg FROM log
+----
+msg:text
+world
+
+query
+WITH u AS (UPDATE log SET msg = 'WORLD' RETURNING msg) SELECT msg FROM u
+----
+msg:text
+WORLD
+
+# CTE referenced in a subquery
+query
+WITH totals AS (SELECT parent_id, count(*) AS c FROM nodes GROUP BY parent_id) SELECT name FROM nodes WHERE id IN (SELECT parent_id FROM totals WHERE c > 1) ORDER BY name
+----
+name:text
+a
+root

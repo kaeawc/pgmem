@@ -1,0 +1,427 @@
+# String functions.
+
+# length variants
+query
+SELECT length('hello'), char_length('héllo'), character_length('abc'), octet_length('héllo')
+----
+length:int4 | char_length:int4 | character_length:int4 | octet_length:int4
+5 | 5 | 3 | 6
+
+query
+SELECT bit_length('abc')
+----
+bit_length:int4
+24
+
+query
+SELECT length(NULL::text)
+----
+length:int4
+NULL
+
+query
+SELECT length('ab  '::char(4)), octet_length('ab'::char(4))
+----
+length:int4 | octet_length:int4
+2 | 4
+
+query
+SELECT length('\x0102'::bytea)
+----
+length:int4
+2
+
+
+# case
+query
+SELECT upper('Hello World'), lower('Hello World')
+----
+upper:text | lower:text
+HELLO WORLD | hello world
+
+query
+SELECT initcap('hello wORLD foo-bar o''neil')
+----
+initcap:text
+Hello World Foo-Bar O'Neil
+
+
+# substr / substring
+query
+SELECT substr('alphabet', 3), substr('alphabet', 3, 2), substr('alphabet', 0, 3), substr('alphabet', -2, 5)
+----
+substr:text | substr:text | substr:text | substr:text
+phabet | ph | al | al
+
+query
+SELECT substring('Thomas' from 2 for 3), substring('Thomas' from 3), substring('Thomas' for 2)
+----
+substring:text | substring:text | substring:text
+hom | omas | Th
+
+statement error 22011 negative substring length not allowed
+SELECT substr('abc', 1, -1)
+
+query
+SELECT substring('Thomas' from '...$')
+----
+substring:text
+mas
+
+query
+SELECT substring('foobar123' from '[0-9]+'), substring('foobar' from 'o(b.)')
+----
+substring:text | substring:text
+123 | ba
+
+query
+SELECT substring('Thomas' similar '%#"o_a#"_' escape '#')
+----
+substring:text
+oma
+
+query
+SELECT substring('Thomas' from '%#"o_a#"_' for '#')
+----
+substring:text
+oma
+
+
+# position / strpos
+query
+SELECT position('om' in 'Thomas'), position('x' in 'Thomas'), position('' in 'abc')
+----
+position:int4 | position:int4 | position:int4
+3 | 0 | 1
+
+query
+SELECT strpos('high', 'ig'), strpos('high', 'z')
+----
+strpos:int4 | strpos:int4
+2 | 0
+
+
+# replace / translate / overlay
+query
+SELECT replace('abcdefabcdef', 'cd', 'XX'), replace('aaa', 'a', ''), replace('abc', '', 'x')
+----
+replace:text | replace:text | replace:text
+abXXefabXXef | (empty) | abc
+
+query
+SELECT translate('12345', '143', 'ax'), translate('hello', 'el', 'ip')
+----
+translate:text | translate:text
+a2x5 | hippo
+
+query
+SELECT overlay('Txxxxas' placing 'hom' from 2 for 4), overlay('abcdef' placing 'ZZ' from 3)
+----
+overlay:text | overlay:text
+Thomas | abZZef
+
+
+# padding and trimming
+query
+SELECT lpad('hi', 5, 'xy'), rpad('hi', 5, 'xy'), lpad('hello', 3), rpad('hi', 4), lpad('hi', 5, '')
+----
+lpad:text | rpad:text | lpad:text | rpad:text | lpad:text
+xyxhi | hixyx | hel | hi   | hi
+
+query
+SELECT trim('  abc  ') || '|', ltrim('  abc  ') || '|', rtrim('  abc  ') || '|'
+----
+?column?:text | ?column?:text | ?column?:text
+abc| | abc  | |   abc|
+
+query
+SELECT trim(both 'xy' from 'xyxabcxyy'), trim(leading 'x' from 'xxabcxx'), trim(trailing 'x' from 'xxabcxx')
+----
+btrim:text | ltrim:text | rtrim:text
+abc | abcxx | xxabc
+
+query
+SELECT ltrim('zzzytest', 'xyz'), rtrim('testxxzx', 'xyz'), btrim('xyxtrimyyx', 'xyz')
+----
+ltrim:text | rtrim:text | btrim:text
+test | test | trim
+
+query
+SELECT trim(from '  abc  ') || '|', trim('x' from 'xabcx')
+----
+?column?:text | btrim:text
+abc| | abc
+
+
+# split_part
+query
+SELECT split_part('abc~@~def~@~ghi', '~@~', 2), split_part('a,b,c', ',', 5) || '|'
+----
+split_part:text | ?column?:text
+def | |
+
+query
+SELECT split_part('a,b,c', ',', -1), split_part('a,b,c', ',', -3), split_part('a,b,c', ',', -4) || '|'
+----
+split_part:text | split_part:text | ?column?:text
+c | a | |
+
+statement error 22023 field position must not be zero
+SELECT split_part('a,b,c', ',', 0)
+
+query
+SELECT split_part('abc', '', 1), split_part('abc', '', 2) || '|'
+----
+split_part:text | ?column?:text
+abc | |
+
+
+# concat / concat_ws / ||
+query
+SELECT concat('abcde', 2, NULL, 22), concat(NULL, NULL) || '|'
+----
+concat:text | ?column?:text
+abcde222 | |
+
+query
+SELECT concat_ws(',', 'abcde', 2, NULL, 22), concat_ws(NULL, 'a', 'b')
+----
+concat_ws:text | concat_ws:text
+abcde,2,22 | NULL
+
+query
+SELECT 'abc' || NULL, 'Value: ' || 42, 42 || '!'
+----
+?column?:text | ?column?:text | ?column?:text
+NULL | Value: 42 | 42!
+
+query
+SELECT concat(VARIADIC ARRAY['a', 'b', 'c'])
+----
+concat:text
+abc
+
+
+# format
+query
+SELECT format('Hello %s, %s', 'World', 42)
+----
+format:text
+Hello World, 42
+
+query
+SELECT format('INSERT INTO %I VALUES(%L)', 'Foo bar', 'O''Reilly')
+----
+format:text
+INSERT INTO "Foo bar" VALUES('O''Reilly')
+
+query
+SELECT format('%I.%I', 'public', 'users'), format('%I', 'select'), format('%L', NULL), format('%s|', NULL)
+----
+format:text | format:text | format:text | format:text
+public.users | "select" | NULL | |
+
+query
+SELECT format('|%10s|%-10s|', 'foo', 'bar')
+----
+format:text
+|       foo|bar       |
+
+query
+SELECT format('%2$s %1$s %2$s', 'a', 'b'), format('100%%')
+----
+format:text | format:text
+b a b | 100%
+
+query
+SELECT format('%*s|', 6, 'ab')
+----
+format:text
+    ab|
+
+statement error 22023 too few arguments for format()
+SELECT format('%s %s', 'only one')
+
+statement error 22023 unrecognized format() type specifier "x"
+SELECT format('%x', 1)
+
+query
+SELECT format('%s', ARRAY[1,2,3]), format('%L', 3.5)
+----
+format:text | format:text
+{1,2,3} | '3.5'
+
+
+# repeat / reverse / left / right / starts_with
+query
+SELECT repeat('Pg', 4), repeat('x', 0) || '|', repeat('x', -1) || '|'
+----
+repeat:text | ?column?:text | ?column?:text
+PgPgPgPg | | | |
+
+query
+SELECT reverse('abcde')
+----
+reverse:text
+edcba
+
+query
+SELECT left('abcde', 2), left('abcde', -2), right('abcde', 2), right('abcde', -2)
+----
+left:text | left:text | right:text | right:text
+ab | abc | de | cde
+
+query
+SELECT starts_with('alphabet', 'alph'), starts_with('alphabet', 'beta')
+----
+starts_with:bool | starts_with:bool
+t | f
+
+query
+SELECT 'alphabet' ^@ 'alph'
+----
+?column?:bool
+t
+
+
+# hashing and encoding
+query
+SELECT md5('abc'), md5('')
+----
+md5:text | md5:text
+900150983cd24fb0d6963f7d28e17f72 | d41d8cd98f00b204e9800998ecf8427e
+
+query
+SELECT sha256('abc'::bytea)
+----
+sha256:bytea
+\xba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+
+query
+SELECT encode('hello'::bytea, 'base64'), encode('hello'::bytea, 'hex'), decode('aGVsbG8=', 'base64')
+----
+encode:text | encode:text | decode:bytea
+aGVsbG8= | 68656c6c6f | \x68656c6c6f
+
+query
+SELECT convert_to('abc', 'UTF8'), convert_from('\x616263', 'UTF8')
+----
+convert_to:bytea | convert_from:text
+\x616263 | abc
+
+
+# quoting
+query
+SELECT quote_ident('Foo bar'), quote_ident('foo'), quote_ident('select'), quote_ident('a"b')
+----
+quote_ident:text | quote_ident:text | quote_ident:text | quote_ident:text
+"Foo bar" | foo | "select" | "a""b"
+
+query
+SELECT quote_literal('O''Reilly'), quote_literal(42.5), quote_literal(E'back\\slash')
+----
+quote_literal:text | quote_literal:text | quote_literal:text
+'O''Reilly' | '42.5' | E'back\\slash'
+
+query
+SELECT quote_nullable(NULL), quote_nullable('x')
+----
+quote_nullable:text | quote_nullable:text
+NULL | 'x'
+
+
+# ascii / chr / to_hex
+query
+SELECT ascii('x'), ascii('€'), ascii('')
+----
+ascii:int4 | ascii:int4 | ascii:int4
+120 | 8364 | 0
+
+query
+SELECT chr(65), chr(8364)
+----
+chr:text | chr:text
+A | €
+
+statement error 54000 null character not permitted
+SELECT chr(0)
+
+query
+SELECT to_hex(255), to_hex(-1), to_hex(9223372036854775807::bigint)
+----
+to_hex:text | to_hex:text | to_hex:text
+ff | ffffffff | 7fffffffffffffff
+
+query
+SELECT to_bin(10), to_oct(64)
+----
+to_bin:text | to_oct:text
+1010 | 100
+
+
+# string_to_array / arrays of strings
+query
+SELECT string_to_array('xx~^~yy~^~zz', '~^~'), string_to_array('a,b,,c', ',', ''), string_to_array('abc', NULL)
+----
+string_to_array:_text | string_to_array:_text | string_to_array:_text
+{xx,yy,zz} | {a,b,NULL,c} | {a,b,c}
+
+query
+SELECT string_to_array('', ','), string_to_array('a', '')
+----
+string_to_array:_text | string_to_array:_text
+{} | {a}
+
+query
+SELECT * FROM string_to_table('a|b|c', '|')
+----
+string_to_table:text
+a
+b
+c
+
+query
+SELECT regexp_split_to_table('the quick  brown', '\s+')
+----
+regexp_split_to_table:text
+the
+quick
+brown
+
+query
+SELECT regexp_split_to_array('a1b22c', '[0-9]+')
+----
+regexp_split_to_array:_text
+{a,b,c}
+
+query
+SELECT array_to_string(ARRAY['a', NULL, 'c'], ',', '*'), array_to_string(ARRAY['a', NULL, 'c'], ',')
+----
+array_to_string:text | array_to_string:text
+a,*,c | a,c
+
+
+# misc
+query
+SELECT unistr('d\0061t\+000061')
+----
+unistr:text
+data
+
+query
+SELECT normalize('abc'), 'abc' IS NFC NORMALIZED
+----
+normalize:text | is_normalized:bool
+abc | t
+
+query
+SELECT 'abc' LIKE 'a%', 'ABC' ILIKE 'a_c', 'a_c' LIKE 'a\_c', 'abc' NOT LIKE '%d'
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t
+
+query
+SELECT 'abc' ~~ 'a%', 'ABC' ~~* 'a%'
+----
+?column?:bool | ?column?:bool
+t | t

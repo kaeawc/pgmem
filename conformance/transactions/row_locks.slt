@@ -1,0 +1,279 @@
+# Row and table locks across sessions, using only NOWAIT and SKIP LOCKED (never blocking).
+statement ok
+CREATE TABLE job (id int PRIMARY KEY, state text NOT NULL DEFAULT 'queued')
+
+statement ok
+INSERT INTO job (id) VALUES (1), (2), (3), (4), (5)
+
+# FOR UPDATE: other sessions skip the row or fail fast
+statement ok
+BEGIN
+
+query
+SELECT id FROM job WHERE id IN (1, 2) ORDER BY id FOR UPDATE
+----
+id:int4
+1
+2
+
+connection b
+query
+SELECT id FROM job ORDER BY id FOR UPDATE SKIP LOCKED
+----
+id:int4
+3
+4
+5
+
+connection b
+statement error 55P03 could not obtain lock on row in relation "job"
+SELECT id FROM job WHERE id = 1 FOR UPDATE NOWAIT
+
+connection b
+statement error 55P03 could not obtain lock on row in relation "job"
+SELECT id FROM job WHERE id = 2 FOR SHARE NOWAIT
+
+connection b
+statement error 55P03 could not obtain lock on row in relation "job"
+SELECT id FROM job WHERE id = 1 FOR KEY SHARE NOWAIT
+
+connection b
+query
+SELECT id FROM job WHERE id = 3 FOR UPDATE NOWAIT
+----
+id:int4
+3
+
+connection b
+query
+SELECT id, state FROM job ORDER BY id
+----
+id:int4 | state:text
+1 | queued
+2 | queued
+3 | queued
+4 | queued
+5 | queued
+
+connection b
+query
+SELECT id FROM job ORDER BY id LIMIT 2 FOR UPDATE SKIP LOCKED
+----
+id:int4
+3
+4
+
+statement ok
+COMMIT
+
+connection b
+query
+SELECT id FROM job WHERE id = 1 FOR UPDATE NOWAIT
+----
+id:int4
+1
+
+# Queue workers claiming jobs with SKIP LOCKED
+statement ok
+BEGIN
+
+query
+UPDATE job SET state = 'running' WHERE id = (SELECT id FROM job WHERE state = 'queued' ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING id
+----
+id:int4
+1
+
+connection b
+statement ok
+BEGIN
+
+connection b
+query
+UPDATE job SET state = 'running' WHERE id = (SELECT id FROM job WHERE state = 'queued' ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING id
+----
+id:int4
+2
+
+statement ok
+COMMIT
+
+connection b
+statement ok
+COMMIT
+
+query
+SELECT id, state FROM job ORDER BY id
+----
+id:int4 | state:text
+1 | running
+2 | running
+3 | queued
+4 | queued
+5 | queued
+
+# UPDATE takes FOR NO KEY UPDATE: FOR KEY SHARE is compatible, FOR SHARE is not
+statement ok
+BEGIN
+
+statement ok
+UPDATE job SET state = 'done' WHERE id = 3
+
+connection b
+query
+SELECT id FROM job WHERE id = 3 FOR KEY SHARE NOWAIT
+----
+id:int4
+3
+
+connection b
+statement error 55P03 could not obtain lock on row in relation "job"
+SELECT id FROM job WHERE id = 3 FOR SHARE NOWAIT
+
+connection b
+statement error 55P03 could not obtain lock on row in relation "job"
+SELECT id FROM job WHERE id = 3 FOR NO KEY UPDATE NOWAIT
+
+connection b
+query
+SELECT state FROM job WHERE id = 3
+----
+state:text
+queued
+
+statement ok
+COMMIT
+
+# FOR SHARE locks are shared
+statement ok
+BEGIN
+
+query
+SELECT id FROM job WHERE id = 4 FOR SHARE
+----
+id:int4
+4
+
+connection b
+query
+SELECT id FROM job WHERE id = 4 FOR SHARE NOWAIT
+----
+id:int4
+4
+
+connection b
+statement error 55P03 could not obtain lock on row in relation "job"
+SELECT id FROM job WHERE id = 4 FOR UPDATE NOWAIT
+
+statement ok
+ROLLBACK
+
+# A rolled back savepoint releases the row lock it took
+statement ok
+BEGIN
+
+statement ok
+SAVEPOINT s
+
+query
+SELECT id FROM job WHERE id = 5 FOR UPDATE
+----
+id:int4
+5
+
+statement ok
+ROLLBACK TO s
+
+connection b
+query
+SELECT id FROM job WHERE id = 5 FOR UPDATE NOWAIT
+----
+id:int4
+5
+
+statement ok
+COMMIT
+
+# NOWAIT inside session b's transaction aborts it
+statement ok
+BEGIN
+
+statement ok
+SELECT 1 FROM job WHERE id = 1 FOR UPDATE
+
+connection b
+statement ok
+BEGIN
+
+connection b
+statement error 55P03 could not obtain lock on row in relation "job"
+SELECT 1 FROM job WHERE id = 1 FOR UPDATE NOWAIT
+
+connection b
+statement error 25P02 current transaction is aborted, commands ignored until end of transaction block
+SELECT 1
+
+connection b
+statement ok
+ROLLBACK
+
+statement ok
+COMMIT
+
+# Locking clauses that are not allowed
+statement error 0A000 FOR UPDATE is not allowed with aggregate functions
+SELECT count(*) FROM job FOR UPDATE
+
+statement error 0A000 FOR UPDATE is not allowed with DISTINCT clause
+SELECT DISTINCT state FROM job FOR UPDATE
+
+statement error 0A000 FOR UPDATE is not allowed with UNION/INTERSECT/EXCEPT
+SELECT id FROM job UNION SELECT id FROM job FOR UPDATE
+
+# Table locks
+statement error 25P01 LOCK TABLE can only be used in transaction blocks
+LOCK TABLE job IN ACCESS EXCLUSIVE MODE
+
+statement ok
+BEGIN
+
+statement ok
+LOCK TABLE job IN SHARE ROW EXCLUSIVE MODE
+
+connection b
+statement ok
+BEGIN
+
+connection b
+statement error 55P03 could not obtain lock on relation "job"
+LOCK TABLE job IN ROW EXCLUSIVE MODE NOWAIT
+
+connection b
+statement ok
+ROLLBACK
+
+connection b
+statement ok
+BEGIN
+
+connection b
+statement ok
+LOCK TABLE job IN ACCESS SHARE MODE NOWAIT
+
+connection b
+statement ok
+COMMIT
+
+statement ok
+COMMIT
+
+connection b
+statement ok
+BEGIN
+
+connection b
+statement ok
+LOCK TABLE job IN ACCESS EXCLUSIVE MODE NOWAIT
+
+connection b
+statement ok
+COMMIT

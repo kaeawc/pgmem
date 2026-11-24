@@ -1,0 +1,134 @@
+# CHECK and NOT NULL.
+
+statement ok
+CREATE TABLE products (id int, price numeric CHECK (price > 0), discount numeric, name text NOT NULL, CONSTRAINT valid_discount CHECK (discount < price)); INSERT INTO products VALUES (1, 10, 5, 'a')
+
+statement error 23514 new row for relation "products" violates check constraint "products_price_check"
+INSERT INTO products VALUES (2, -1, NULL, 'b')
+
+statement error 23514 new row for relation "products" violates check constraint "valid_discount"
+INSERT INTO products VALUES (3, 10, 20, 'c')
+
+statement error 23502 null value in column "name" of relation "products" violates not-null constraint
+INSERT INTO products VALUES (4, 10, 1, NULL)
+
+# NULL satisfies a CHECK
+statement ok
+INSERT INTO products VALUES (5, NULL, NULL, 'e')
+
+query
+SELECT id, price, discount, name FROM products ORDER BY id
+----
+id:int4 | price:numeric | discount:numeric | name:text
+1 | 10 | 5 | a
+5 | NULL | NULL | e
+
+# Table-level checks get <table>_check names; regex, IN and function checks
+statement ok
+CREATE TABLE ranges (lo int, hi int, CHECK (lo <= hi)); CREATE TABLE users (email text CHECK (email ~ '^[^@]+@[^@]+$'), status text CHECK (status IN ('active', 'banned')), code text CHECK (length(code) = 3))
+
+statement error 23514 new row for relation "ranges" violates check constraint "ranges_check"
+INSERT INTO ranges VALUES (5, 1)
+
+statement error 23514 new row for relation "users" violates check constraint "users_email_check"
+INSERT INTO users VALUES ('nope', 'active', 'abc')
+
+statement error 23514 new row for relation "users" violates check constraint "users_code_check"
+INSERT INTO users VALUES ('a@b', 'active', 'abcd')
+
+# Invalid check expressions
+statement error 0A000 cannot use subquery in check constraint
+CREATE TABLE bad (a int CHECK (a IN (SELECT 1)))
+
+# Adding a CHECK validates existing rows
+statement ok
+CREATE TABLE stock (qty int); INSERT INTO stock VALUES (5), (-1)
+
+statement error 23514 check constraint "stock_qty_check" of relation "stock" is violated by some row
+ALTER TABLE stock ADD CHECK (qty >= 0)
+
+statement ok
+DELETE FROM stock WHERE qty < 0; ALTER TABLE stock ADD CONSTRAINT qty_nonneg CHECK (qty >= 0)
+
+statement error 23514 new row for relation "stock" violates check constraint "qty_nonneg"
+INSERT INTO stock VALUES (-5)
+
+query
+SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'stock'::regclass ORDER BY conname
+----
+conname:name | pg_get_constraintdef:text
+qty_nonneg | CHECK ((qty >= 0))
+
+query
+SELECT constraint_name, check_clause FROM information_schema.check_constraints WHERE constraint_name IN ('qty_nonneg', 'valid_discount', 'ranges_check') ORDER BY constraint_name
+----
+constraint_name:name | check_clause:varchar
+qty_nonneg | (qty >= 0)
+ranges_check | (lo <= hi)
+valid_discount | (discount < price)
+
+# Domain constraints
+statement ok
+CREATE DOMAIN posint AS int CHECK (VALUE > 0); CREATE DOMAIN email_nn AS text NOT NULL; CREATE TABLE dom (n posint, e email_nn)
+
+statement error 23514 value for domain posint violates check constraint "posint_check"
+INSERT INTO dom VALUES (0, 'x')
+
+statement error 23502 domain email_nn does not allow null values
+INSERT INTO dom VALUES (1, NULL)
+
+# NOT NULL on existing data
+statement ok
+CREATE TABLE nn (a int, b int); INSERT INTO nn VALUES (1, NULL)
+
+statement error 23502 column "b" of relation "nn" contains null values
+ALTER TABLE nn ALTER COLUMN b SET NOT NULL
+
+statement ok
+ALTER TABLE nn ALTER COLUMN a SET NOT NULL
+
+statement error 23502 null value in column "a" of relation "nn" violates not-null constraint
+INSERT INTO nn VALUES (NULL, 1)
+
+# Named NOT NULL constraints are catalogued in PostgreSQL 18
+statement ok
+CREATE TABLE nnc (a int CONSTRAINT a_required NOT NULL, b int NOT NULL)
+
+query
+SELECT conname, contype FROM pg_constraint WHERE conrelid = 'nnc'::regclass ORDER BY conname
+----
+conname:name | contype:char
+a_required | n
+nnc_b_not_null | n
+
+statement ok
+ALTER TABLE nnc DROP CONSTRAINT a_required; INSERT INTO nnc VALUES (NULL, 1)
+
+# NOT NULL with DEFAULT NULL; first violating column is reported
+statement ok
+CREATE TABLE multi (a int NOT NULL DEFAULT NULL, b int NOT NULL)
+
+statement error 23502 null value in column "a" of relation "multi" violates not-null constraint
+INSERT INTO multi DEFAULT VALUES
+
+statement error 23502 null value in column "b" of relation "multi" violates not-null constraint
+INSERT INTO multi VALUES (1, NULL)
+
+# NOT VALID checks skip old rows but apply to new and updated ones
+statement ok
+CREATE TABLE legacy (v int); INSERT INTO legacy VALUES (-1); ALTER TABLE legacy ADD CONSTRAINT v_pos CHECK (v > 0) NOT VALID
+
+statement error 23514 new row for relation "legacy" violates check constraint "v_pos"
+INSERT INTO legacy VALUES (-2)
+
+statement error 23514 check constraint "v_pos" of relation "legacy" is violated by some row
+ALTER TABLE legacy VALIDATE CONSTRAINT v_pos
+
+statement ok
+UPDATE legacy SET v = 1; ALTER TABLE legacy VALIDATE CONSTRAINT v_pos
+
+query
+SELECT conname, convalidated FROM pg_constraint WHERE conrelid = 'legacy'::regclass
+----
+conname:name | convalidated:bool
+v_pos | t

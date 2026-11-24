@@ -1,0 +1,97 @@
+# bytea.
+
+# Hex output (bytea_output = hex)
+query
+SELECT 'abc'::bytea, '\x616263'::bytea, ''::bytea, '\000\001'::bytea
+----
+bytea:bytea | bytea:bytea | bytea:bytea | bytea:bytea
+\x616263 | \x616263 | \x | \x0001
+
+query
+SELECT E'\\xDEADBEEF'::bytea, decode('DEADBEEF', 'hex'), '\xde ad be ef'::bytea
+----
+bytea:bytea | decode:bytea | bytea:bytea
+\xdeadbeef | \xdeadbeef | \xdeadbeef
+
+statement error 22023 invalid hexadecimal data: odd number of digits
+SELECT '\x6'::bytea
+
+statement error 22023 invalid hexadecimal digit: "z"
+SELECT '\xzz'::bytea
+
+statement error 22P02 invalid input syntax for type bytea
+SELECT '\9'::bytea
+
+# Escape output format
+statement ok
+SET bytea_output = 'escape'
+
+query
+SELECT 'abc'::bytea, '\x00ff0a'::bytea, 'a\\b'::bytea
+----
+bytea:bytea | bytea:bytea | bytea:bytea
+abc | \000\377\012 | a\\b
+
+statement ok
+SET bytea_output = 'hex'
+
+# Functions
+query
+SELECT length('\x010203'::bytea), octet_length('abc'::bytea), '\x01'::bytea || '\x02'::bytea
+----
+length:int4 | octet_length:int4 | ?column?:bytea
+3 | 3 | \x0102
+
+query
+SELECT encode('hello'::bytea, 'base64'), decode('aGVsbG8=', 'base64'), encode('\x00ff'::bytea, 'hex'), encode('a\\b'::bytea, 'escape')
+----
+encode:text | decode:bytea | encode:text | encode:text
+aGVsbG8= | \x68656c6c6f | 00ff | a\\b
+
+query
+SELECT get_byte('\x0102'::bytea, 1), set_byte('\x0102'::bytea, 0, 255), substring('\x01020304'::bytea from 2 for 2)
+----
+get_byte:int4 | set_byte:bytea | substring:bytea
+2 | \xff02 | \x0203
+
+query
+SELECT md5('abc'), md5('abc'::bytea), sha256('abc'::bytea)
+----
+md5:text | md5:text | sha256:bytea
+900150983cd24fb0d6963f7d28e17f72 | 900150983cd24fb0d6963f7d28e17f72 | \xba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+
+query
+SELECT convert_to('héllo', 'UTF8'), convert_from('\x68c3a96c6c6f'::bytea, 'UTF8')
+----
+convert_to:bytea | convert_from:text
+\x68c3a96c6c6f | héllo
+
+# Comparisons and ordering are bytewise
+query
+SELECT '\x00'::bytea < '\x01'::bytea, '\xff'::bytea > '\x0000'::bytea, 'abc'::bytea = '\x616263'::bytea
+----
+?column?:bool | ?column?:bool | ?column?:bool
+t | t | t
+
+# Column storage
+statement ok
+CREATE TABLE blobs (id int, b bytea)
+
+statement ok
+INSERT INTO blobs VALUES (1, '\xcafe'), (2, ''), (3, NULL), (4, 'text\000nul')
+
+query
+SELECT id, b, length(b) FROM blobs ORDER BY id
+----
+id:int4 | b:bytea | length:int4
+1 | \xcafe | 2
+2 | \x | 0
+3 | NULL | NULL
+4 | \x74657874006e756c | 8
+
+# text cast of bytea gives its text representation
+query
+SELECT '\xcafe'::bytea::text
+----
+text:text
+\xcafe

@@ -1,0 +1,208 @@
+# Deferred constraints are checked at COMMIT (or at SET CONSTRAINTS ... IMMEDIATE)
+statement ok
+CREATE TABLE parent (id int PRIMARY KEY)
+
+statement ok
+CREATE TABLE child (id int PRIMARY KEY, parent_id int REFERENCES parent DEFERRABLE INITIALLY DEFERRED)
+
+statement ok
+CREATE TABLE strict_child (id int PRIMARY KEY, parent_id int CONSTRAINT strict_fk REFERENCES parent DEFERRABLE INITIALLY IMMEDIATE)
+
+# Child before parent works when deferred
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO child VALUES (1, 10)
+
+statement ok
+INSERT INTO parent VALUES (10)
+
+statement ok
+COMMIT
+
+query
+SELECT id, parent_id FROM child
+----
+id:int4 | parent_id:int4
+1 | 10
+
+# A violation surfaces at COMMIT, which rolls everything back
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO parent VALUES (20)
+
+statement ok
+INSERT INTO child VALUES (2, 99)
+
+statement error 23503 insert or update on table "child" violates foreign key constraint "child_parent_id_fkey"
+COMMIT
+
+query
+SELECT count(*) FROM parent WHERE id = 20
+----
+count:int8
+0
+
+# Outside a transaction block a deferred constraint is checked at statement end
+statement error 23503 insert or update on table "child" violates foreign key constraint "child_parent_id_fkey"
+INSERT INTO child VALUES (3, 98)
+
+# SET CONSTRAINTS ALL IMMEDIATE checks pending rows immediately
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO child VALUES (4, 97)
+
+statement error 23503 insert or update on table "child" violates foreign key constraint "child_parent_id_fkey"
+SET CONSTRAINTS ALL IMMEDIATE
+
+statement ok
+ROLLBACK
+
+# Deferring an INITIALLY IMMEDIATE constraint by name
+statement ok
+BEGIN
+
+statement error 23503 insert or update on table "strict_child" violates foreign key constraint "strict_fk"
+INSERT INTO strict_child VALUES (1, 30)
+
+statement ok
+ROLLBACK
+
+statement ok
+BEGIN
+
+statement ok
+SET CONSTRAINTS strict_fk DEFERRED
+
+statement ok
+INSERT INTO strict_child VALUES (1, 30)
+
+statement ok
+INSERT INTO parent VALUES (30)
+
+statement ok
+COMMIT
+
+query
+SELECT id, parent_id FROM strict_child
+----
+id:int4 | parent_id:int4
+1 | 30
+
+# Fixing the violation before commit
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO child VALUES (5, 40)
+
+statement ok
+UPDATE child SET parent_id = 10 WHERE id = 5
+
+statement ok
+COMMIT
+
+# Deleting a referenced parent is checked at commit too
+statement ok
+BEGIN
+
+statement ok
+DELETE FROM parent WHERE id = 10
+
+statement ok
+INSERT INTO parent VALUES (10)
+
+statement ok
+COMMIT
+
+statement error 42704 constraint "no_such_constraint" does not exist
+SET CONSTRAINTS no_such_constraint DEFERRED
+
+# Non-deferrable constraints cannot be deferred
+statement ok
+CREATE TABLE plain (id int PRIMARY KEY, parent_id int CONSTRAINT plain_fk REFERENCES parent)
+
+statement ok
+BEGIN
+
+statement error 42809 constraint "plain_fk" is not deferrable
+SET CONSTRAINTS plain_fk DEFERRED
+
+statement ok
+ROLLBACK
+
+# Unique constraints: non-deferrable checks per row, deferrable at statement end or commit
+statement ok
+CREATE TABLE seq_strict (pos int UNIQUE)
+
+statement ok
+CREATE TABLE seq_stmt (pos int UNIQUE DEFERRABLE)
+
+statement ok
+CREATE TABLE seq_commit (pos int CONSTRAINT seq_commit_pos UNIQUE DEFERRABLE INITIALLY DEFERRED)
+
+statement ok
+INSERT INTO seq_strict VALUES (1), (2), (3)
+
+statement ok
+INSERT INTO seq_stmt VALUES (1), (2), (3)
+
+statement ok
+INSERT INTO seq_commit VALUES (1), (2), (3)
+
+statement error 23505 duplicate key value violates unique constraint "seq_strict_pos_key"
+UPDATE seq_strict SET pos = pos + 1
+
+statement ok
+UPDATE seq_stmt SET pos = pos + 1
+
+query
+SELECT pos FROM seq_stmt ORDER BY pos
+----
+pos:int4
+2
+3
+4
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO seq_commit VALUES (1)
+
+statement ok
+UPDATE seq_commit SET pos = 0 WHERE pos = 1 AND ctid = (SELECT max(ctid) FROM seq_commit WHERE pos = 1)
+
+statement ok
+COMMIT
+
+query
+SELECT pos FROM seq_commit ORDER BY pos
+----
+pos:int4
+0
+1
+2
+3
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO seq_commit VALUES (2)
+
+statement error 23505 duplicate key value violates unique constraint "seq_commit_pos"
+COMMIT
+
+# Deferred unique constraints cannot be ON CONFLICT arbiters
+statement error 55000 ON CONFLICT does not support deferrable unique constraints/exclusion constraints as arbiters
+INSERT INTO seq_commit VALUES (3) ON CONFLICT (pos) DO NOTHING
+
+# Deferred CHECK constraints do not exist: CHECK is never deferrable
+statement error 42601 misplaced DEFERRABLE clause
+CREATE TABLE bad (a int CHECK (a > 0) DEFERRABLE)

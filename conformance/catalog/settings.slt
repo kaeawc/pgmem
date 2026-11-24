@@ -1,0 +1,94 @@
+# pg_settings, current_setting and set_config as seen through the catalog.
+
+query
+SELECT name, setting, vartype FROM pg_settings
+WHERE name IN ('max_identifier_length', 'server_encoding', 'integer_datetimes', 'standard_conforming_strings', 'block_size')
+ORDER BY name
+----
+name:text | setting:text | vartype:text
+block_size | 8192 | integer
+integer_datetimes | on | bool
+max_identifier_length | 63 | integer
+server_encoding | UTF8 | string
+standard_conforming_strings | on | bool
+
+query
+SELECT name, unit FROM pg_settings WHERE name IN ('statement_timeout', 'lock_timeout') ORDER BY name
+----
+name:text | unit:text
+lock_timeout | ms
+statement_timeout | ms
+
+query
+SELECT name, context FROM pg_settings WHERE name IN ('search_path', 'server_version_num', 'max_connections') ORDER BY name
+----
+name:text | context:text
+max_connections | postmaster
+search_path | user
+server_version_num | internal
+
+query
+SELECT enumvals FROM pg_settings WHERE name = 'client_min_messages'
+----
+enumvals:_text
+{debug5,debug4,debug3,debug2,debug1,log,notice,warning,error}
+
+statement ok
+SET application_name = 'conformance_app'
+
+query
+SELECT setting, source FROM pg_settings WHERE name = 'application_name'
+----
+setting:text | source:text
+conformance_app | session
+
+query
+SELECT current_setting('application_name')
+----
+current_setting:text
+conformance_app
+
+query
+SELECT set_config('application_name', 'via_set_config', false)
+----
+set_config:text
+via_set_config
+
+query
+SELECT setting FROM pg_settings WHERE name = 'application_name'
+----
+setting:text
+via_set_config
+
+statement ok
+UPDATE pg_settings SET setting = 'via_update' WHERE name = 'application_name'
+
+query
+SHOW application_name
+----
+application_name:text
+via_update
+
+query
+SELECT current_setting('server_encoding'), current_setting('client_encoding')
+----
+current_setting:text | current_setting:text
+UTF8 | UTF8
+
+query
+SELECT current_setting('server_version_num')::int >= 180000
+----
+?column?:bool
+t
+
+query
+SELECT current_setting('max_identifier_length')::int
+----
+current_setting:int4
+63
+
+query
+SELECT current_catalog = current_database()
+----
+?column?:bool
+t

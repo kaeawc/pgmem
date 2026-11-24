@@ -46,7 +46,7 @@ DDL (tables, views, indexes, sequences, ALTER TABLE) — transactional, like Pos
 identity columns); transactions with savepoints and isolation levels; types `bool`, `int2/4/8`,
 `float4/8`, `numeric`, `text`/`varchar(n)`, `bytea`, `uuid`, `date`, `time`, `timetz`,
 `timestamp`, `timestamptz`, `interval`, `jsonb` and arrays, with binary and text wire formats; a
-large builtin function library. Details and the conformance status: [PROGRESS.md](PROGRESS.md).
+large builtin function library. Details: [PROGRESS.md](PROGRESS.md). Conformance against PostgreSQL 18: [CONFORMANCE.md](CONFORMANCE.md).
 Architecture: [DESIGN.md](DESIGN.md).
 
 ## Development

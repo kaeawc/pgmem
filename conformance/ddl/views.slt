@@ -1,0 +1,152 @@
+# Views and materialized views.
+
+statement ok
+CREATE TABLE orders (id int PRIMARY KEY, customer text, amount numeric, status text DEFAULT 'open'); INSERT INTO orders VALUES (1, 'ann', 10, 'open'), (2, 'bob', 20, 'paid'), (3, 'ann', 30, 'paid'); CREATE VIEW paid AS SELECT id, customer, amount FROM orders WHERE status = 'paid'
+
+query
+SELECT id, customer, amount FROM paid ORDER BY id
+----
+id:int4 | customer:text | amount:numeric
+2 | bob | 20
+3 | ann | 30
+
+statement ok
+CREATE VIEW totals (who, total) AS SELECT customer, sum(amount) FROM orders GROUP BY customer
+
+query
+SELECT who, total FROM totals ORDER BY who
+----
+who:text | total:numeric
+ann | 40
+bob | 20
+
+# CREATE OR REPLACE VIEW may only append columns
+statement ok
+CREATE OR REPLACE VIEW paid AS SELECT id, customer, amount, status FROM orders WHERE status = 'paid'
+
+statement error 42P16 cannot drop columns from view
+CREATE OR REPLACE VIEW paid AS SELECT id, amount FROM orders
+
+statement error 42P16 cannot change data type of view column "customer" from text to character varying
+CREATE OR REPLACE VIEW paid AS SELECT id, customer::varchar AS customer, amount, status FROM orders
+
+# Simple views are auto-updatable
+statement ok
+INSERT INTO paid (id, customer, amount, status) VALUES (5, 'dan', 50, 'paid'); UPDATE paid SET amount = amount + 1 WHERE id = 2; DELETE FROM paid WHERE id = 3
+
+query
+SELECT id, customer, amount, status FROM orders ORDER BY id
+----
+id:int4 | customer:text | amount:numeric | status:text
+1 | ann | 10 | open
+2 | bob | 21 | paid
+5 | dan | 50 | paid
+
+# WITH CHECK OPTION
+statement ok
+CREATE VIEW paid_checked AS SELECT id, customer, amount, status FROM orders WHERE status = 'paid' WITH CHECK OPTION
+
+statement error 44000 new row violates check option for view "paid_checked"
+INSERT INTO paid_checked VALUES (7, 'fay', 70, 'open')
+
+statement error 44000 new row violates check option for view "paid_checked"
+UPDATE paid_checked SET status = 'open' WHERE id = 2
+
+statement ok
+INSERT INTO paid_checked VALUES (7, 'fay', 70, 'paid')
+
+# Aggregate views are not updatable, unless an INSTEAD OF trigger handles it
+statement error 55000 cannot insert into view "totals"
+INSERT INTO totals VALUES ('x', 1)
+
+statement ok
+CREATE FUNCTION totals_ins() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO orders (id, customer, amount) VALUES (100, NEW.who, NEW.total); RETURN NEW; END $$; CREATE TRIGGER totals_ins INSTEAD OF INSERT ON totals FOR EACH ROW EXECUTE FUNCTION totals_ins(); INSERT INTO totals VALUES ('zed', 5)
+
+query
+SELECT id, customer, amount, status FROM orders WHERE id = 100
+----
+id:int4 | customer:text | amount:numeric | status:text
+100 | zed | 5 | open
+
+# Views over views, rename, catalog
+statement ok
+CREATE VIEW big_paid AS SELECT * FROM paid WHERE amount > 25; ALTER VIEW big_paid RENAME TO large_paid
+
+query
+SELECT id FROM large_paid ORDER BY id
+----
+id:int4
+5
+7
+
+query
+SELECT table_name, is_updatable, is_insertable_into FROM information_schema.views WHERE table_schema = 'public' ORDER BY table_name
+----
+table_name:name | is_updatable:varchar | is_insertable_into:varchar
+large_paid | YES | YES
+paid | YES | YES
+paid_checked | YES | YES
+totals | NO | NO
+
+# Materialized views
+statement ok
+CREATE MATERIALIZED VIEW mv_totals AS SELECT customer, sum(amount) AS total FROM orders GROUP BY customer; INSERT INTO orders VALUES (200, 'ann', 1000, 'open')
+
+query
+SELECT customer, total FROM mv_totals ORDER BY customer
+----
+customer:text | total:numeric
+ann | 10
+bob | 21
+dan | 50
+fay | 70
+zed | 5
+
+statement ok
+REFRESH MATERIALIZED VIEW mv_totals
+
+query
+SELECT customer, total FROM mv_totals ORDER BY customer
+----
+customer:text | total:numeric
+ann | 1010
+bob | 21
+dan | 50
+fay | 70
+zed | 5
+
+statement error 42809 cannot change materialized view "mv_totals"
+INSERT INTO mv_totals VALUES ('x', 1)
+
+statement error 55000 cannot refresh materialized view "public.mv_totals" concurrently
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv_totals
+
+statement ok
+CREATE UNIQUE INDEX mv_totals_customer ON mv_totals (customer)
+
+statement ok
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv_totals
+
+statement ok
+CREATE MATERIALIZED VIEW mv_empty AS SELECT id FROM orders WITH NO DATA
+
+statement error 55000 materialized view "mv_empty" has not been populated
+SELECT * FROM mv_empty
+
+statement ok
+REFRESH MATERIALIZED VIEW mv_empty
+
+query
+SELECT count(*) FROM mv_empty
+----
+count:int8
+6
+
+statement ok
+DROP MATERIALIZED VIEW mv_totals
+
+query
+SELECT matviewname, ispopulated FROM pg_matviews WHERE schemaname = 'public' ORDER BY 1
+----
+matviewname:name | ispopulated:bool
+mv_empty | t

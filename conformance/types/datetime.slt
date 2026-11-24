@@ -1,0 +1,333 @@
+# Date / time types. Session time zone is UTC.
+
+# date input formats (DateStyle ISO, MDY)
+query
+SELECT '2024-02-29'::date, 'February 29, 2024'::date, '20240229'::date, '2024-2-9'::date
+----
+date:date | date:date | date:date | date:date
+2024-02-29 | 2024-02-29 | 2024-02-29 | 2024-02-09
+
+query
+SELECT '1/2/2024'::date
+----
+date:date
+2024-01-02
+
+statement error 22008 date/time field value out of range: "2023-02-29"
+SELECT '2023-02-29'::date
+
+statement error 22007 invalid input syntax for type date: "not a date"
+SELECT 'not a date'::date
+
+statement error 22008 date/time field value out of range: "2024-13-01"
+SELECT '2024-13-01'::date
+
+# Special values
+query
+SELECT 'infinity'::date, '-infinity'::date, 'epoch'::date, 'infinity'::timestamp, '-infinity'::timestamptz
+----
+date:date | date:date | date:date | timestamp:timestamp | timestamptz:timestamptz
+infinity | -infinity | 1970-01-01 | infinity | -infinity
+
+query
+SELECT 'infinity'::date > '9999-12-31'::date, isfinite('infinity'::date), isfinite('2024-01-01'::date)
+----
+?column?:bool | isfinite:bool | isfinite:bool
+t | f | t
+
+# BC dates
+query
+SELECT '0044-03-15 BC'::date, '0001-01-01'::date - 1, '4713-11-24 BC'::date
+----
+date:date | ?column?:date | date:date
+0044-03-15 BC | 0001-12-31 BC | 4713-11-24 BC
+
+statement error 22008 date out of range: "4714-11-23 BC"
+SELECT '4714-11-23 BC'::date
+
+# date arithmetic
+query
+SELECT '2024-03-01'::date - '2024-02-01'::date, '2024-01-31'::date + 1, '2024-01-31'::date - 1
+----
+?column?:int4 | ?column?:date | ?column?:date
+29 | 2024-02-01 | 2024-01-30
+
+query
+SELECT '2024-01-31'::date + interval '1 month', pg_typeof('2024-01-31'::date + interval '1 month')
+----
+?column?:timestamp | pg_typeof:regtype
+2024-02-29 00:00:00 | timestamp without time zone
+
+query
+SELECT '2024-01-01'::date + time '12:30', pg_typeof('2024-01-01'::date + time '12:30')
+----
+?column?:timestamp | pg_typeof:regtype
+2024-01-01 12:30:00 | timestamp without time zone
+
+# time
+query
+SELECT '13:45:30'::time, '1:45 PM'::time, '23:59:59.999999'::time, '24:00:00'::time
+----
+time:time | time:time | time:time | time:time
+13:45:30 | 13:45:00 | 23:59:59.999999 | 24:00:00
+
+query
+SELECT '12:34:56.789'::time(1), '12:34:56.789'::time(0)
+----
+time:time | time:time
+12:34:56.8 | 12:34:57
+
+statement error 22008 date/time field value out of range: "25:00:00"
+SELECT '25:00:00'::time
+
+query
+SELECT time '23:00' + interval '2 hours', time '10:00' - time '08:30'
+----
+?column?:time | ?column?:interval
+01:00:00 | 01:30:00
+
+# timetz
+query
+SELECT '13:45:30+02'::timetz, '13:45:30 -05:30'::timetz
+----
+timetz:timetz | timetz:timetz
+13:45:30+02 | 13:45:30-05:30
+
+# timestamp without time zone
+query
+SELECT '2024-06-15 13:45:30'::timestamp, '2024-06-15T13:45:30.123456'::timestamp, '2024-06-15'::timestamp
+----
+timestamp:timestamp | timestamp:timestamp | timestamp:timestamp
+2024-06-15 13:45:30 | 2024-06-15 13:45:30.123456 | 2024-06-15 00:00:00
+
+query
+SELECT '2024-06-15 13:45:30.1234567'::timestamp, '2024-06-15 13:45:30.555'::timestamp(2)
+----
+timestamp:timestamp | timestamp:timestamp
+2024-06-15 13:45:30.123457 | 2024-06-15 13:45:30.56
+
+# Timezone in input is ignored for timestamp
+query
+SELECT '2024-06-15 13:45:30+05'::timestamp
+----
+timestamp:timestamp
+2024-06-15 13:45:30
+
+# timestamptz is shown in session time zone (UTC)
+query
+SELECT '2024-06-15 13:45:30+05'::timestamptz, '2024-06-15 13:45:30 America/New_York'::timestamptz
+----
+timestamptz:timestamptz | timestamptz:timestamptz
+2024-06-15 08:45:30+00 | 2024-06-15 17:45:30+00
+
+query
+SELECT '2024-06-15 13:45:30Z'::timestamptz, '2024-06-15 13:45:30.5-03:30'::timestamptz
+----
+timestamptz:timestamptz | timestamptz:timestamptz
+2024-06-15 13:45:30+00 | 2024-06-15 17:15:30.5+00
+
+# Changing TimeZone changes timestamptz output
+statement ok
+SET TIME ZONE 'America/New_York'
+
+query
+SELECT '2024-01-15 12:00:00+00'::timestamptz, '2024-07-15 12:00:00+00'::timestamptz
+----
+timestamptz:timestamptz | timestamptz:timestamptz
+2024-01-15 07:00:00-05 | 2024-07-15 08:00:00-04
+
+query
+SELECT '2024-01-15 12:00:00'::timestamptz
+----
+timestamptz:timestamptz
+2024-01-15 12:00:00-05
+
+query
+SELECT '2024-03-10 01:30'::timestamptz + interval '1 hour', '2024-03-10 01:30'::timestamptz + interval '1 day'
+----
+?column?:timestamptz | ?column?:timestamptz
+2024-03-10 03:30:00-04 | 2024-03-11 01:30:00-04
+
+statement ok
+SET TIME ZONE 'UTC'
+
+query
+SELECT timestamptz '2024-06-15 12:00:00+00' AT TIME ZONE 'Asia/Tokyo', timestamp '2024-06-15 12:00:00' AT TIME ZONE 'Asia/Tokyo'
+----
+timezone:timestamp | timezone:timestamptz
+2024-06-15 21:00:00 | 2024-06-15 03:00:00+00
+
+query
+SELECT timestamp '2024-06-15 12:00:00' AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Paris'
+----
+timezone:timestamp
+2024-06-15 14:00:00
+
+# BC timestamps
+query
+SELECT '0001-01-01 00:00:00 BC'::timestamp, '0010-06-01 12:00:00 BC'::timestamptz
+----
+timestamp:timestamp | timestamptz:timestamptz
+0001-01-01 00:00:00 BC | 0010-06-01 12:00:00+00 BC
+
+statement error 22008 date/time field value out of range: "2024-06-15 25:00:00"
+SELECT '2024-06-15 25:00:00'::timestamp
+
+# timestamp arithmetic
+query
+SELECT '2024-03-01 00:00'::timestamp - '2024-02-28 12:00'::timestamp
+----
+?column?:interval
+1 day 12:00:00
+
+query
+SELECT '2024-01-31 10:00'::timestamp + interval '1 month', '2024-02-29'::timestamp + interval '1 year'
+----
+?column?:timestamp | ?column?:timestamp
+2024-02-29 10:00:00 | 2025-02-28 00:00:00
+
+query
+SELECT '2024-06-15 12:00'::timestamptz - interval '36 hours'
+----
+?column?:timestamptz
+2024-06-14 00:00:00+00
+
+# interval input/output (IntervalStyle postgres)
+query
+SELECT interval '1 day', interval '1 year 2 months 3 days 04:05:06', interval '90 minutes', interval '-1 day 2 hours'
+----
+interval:interval | interval:interval | interval:interval | interval:interval
+1 day | 1 year 2 mons 3 days 04:05:06 | 01:30:00 | -1 days +02:00:00
+
+query
+SELECT interval 'P1Y2M3DT4H5M6S', interval '1.5 days', interval '1 week', interval '3 mons'
+----
+interval:interval | interval:interval | interval:interval | interval:interval
+1 year 2 mons 3 days 04:05:06 | 1 day 12:00:00 | 7 days | 3 mons
+
+query
+SELECT interval '25 hours', justify_hours(interval '25 hours'), justify_days(interval '35 days'), justify_interval(interval '1 mon -1 hour')
+----
+interval:interval | justify_hours:interval | justify_days:interval | justify_interval:interval
+25:00:00 | 1 day 01:00:00 | 1 mon 5 days | 29 days 23:00:00
+
+query
+SELECT interval '1 hour' * 2.5, interval '1 day' / 3, interval '1 day' + interval '1 hour', - interval '1 day'
+----
+?column?:interval | ?column?:interval | ?column?:interval | ?column?:interval
+02:30:00 | 08:00:00 | 1 day 01:00:00 | -1 days
+
+query
+SELECT interval '1 day' = interval '24 hours', interval '1 mon' = interval '30 days', interval '1 year' > interval '360 days'
+----
+?column?:bool | ?column?:bool | ?column?:bool
+t | t | f
+
+query
+SELECT interval '0.000001 seconds', interval '1 millisecond', interval '00:00:00'
+----
+interval:interval | interval:interval | interval:interval
+00:00:00.000001 | 00:00:00.001 | 00:00:00
+
+statement error 22007 invalid input syntax for type interval: "one day"
+SELECT interval 'one day'
+
+query
+SELECT 'infinity'::interval, '-infinity'::interval, 'infinity'::timestamp - '2024-01-01'::timestamp
+----
+interval:interval | interval:interval | ?column?:interval
+infinity | -infinity | infinity
+
+# extract / date_part / date_trunc
+query
+SELECT extract(year FROM date '2024-06-15'), extract(dow FROM date '2024-06-15'), extract(doy FROM date '2024-06-15'), extract(epoch FROM timestamptz '2024-01-01 00:00:00+00')
+----
+extract:numeric | extract:numeric | extract:numeric | extract:numeric
+2024 | 6 | 167 | 1704067200.000000
+
+query
+SELECT pg_typeof(extract(year FROM date '2024-06-15')), pg_typeof(date_part('year', date '2024-06-15'))
+----
+pg_typeof:regtype | pg_typeof:regtype
+numeric | double precision
+
+query
+SELECT extract(epoch FROM interval '1 day 2 hours'), extract(hour FROM time '13:45'), extract(isodow FROM date '2024-06-16')
+----
+extract:numeric | extract:numeric | extract:numeric
+93600.000000 | 13 | 7
+
+query
+SELECT date_trunc('month', timestamp '2024-06-15 13:45:30'), date_trunc('hour', timestamptz '2024-06-15 13:45:30+00'), date_trunc('week', date '2024-06-15')
+----
+date_trunc:timestamp | date_trunc:timestamptz | date_trunc:timestamptz
+2024-06-01 00:00:00 | 2024-06-15 13:00:00+00 | 2024-06-10 00:00:00+00
+
+query
+SELECT date_trunc('day', timestamptz '2024-06-15 13:45:30+00', 'Asia/Tokyo')
+----
+date_trunc:timestamptz
+2024-06-14 15:00:00+00
+
+# Constructors and formatting
+query
+SELECT make_date(2024, 2, 29), make_time(13, 45, 30.5), make_timestamp(2024, 6, 15, 13, 45, 30), make_interval(days => 10, hours => 2)
+----
+make_date:date | make_time:time | make_timestamp:timestamp | make_interval:interval
+2024-02-29 | 13:45:30.5 | 2024-06-15 13:45:30 | 10 days 02:00:00
+
+query
+SELECT to_timestamp(0), to_timestamp(1718459130.5), to_date('15/06/2024', 'DD/MM/YYYY')
+----
+to_timestamp:timestamptz | to_timestamp:timestamptz | to_date:date
+1970-01-01 00:00:00+00 | 2024-06-15 13:45:30.5+00 | 2024-06-15
+
+query
+SELECT to_char(timestamp '2024-06-15 13:45:30', 'YYYY-MM-DD HH24:MI:SS'), to_char(date '2024-06-05', 'Day DD Mon YYYY'), to_char(interval '1 day 03:00', 'HH24:MI')
+----
+to_char:text | to_char:text | to_char:text
+2024-06-15 13:45:30 | Wednesday 05 Jun 2024 | 03:00
+
+query
+SELECT age(timestamp '2024-06-15', timestamp '2000-02-29'), date '2024-06-15' - interval '1 day'
+----
+age:interval | ?column?:timestamp
+24 years 3 mons 15 days | 2024-06-14 00:00:00
+
+# OVERLAPS and comparisons across types
+query
+SELECT (date '2024-01-01', date '2024-02-01') OVERLAPS (date '2024-01-15', date '2024-03-01'), date '2024-01-01' = timestamp '2024-01-01 00:00', timestamp '2024-01-01' < timestamptz '2024-01-01 00:00:01+00'
+----
+overlaps:bool | ?column?:bool | ?column?:bool
+t | t | t
+
+# Columns with time types
+statement ok
+CREATE TABLE events (id int, d date, ts timestamp(3), tstz timestamptz, dur interval)
+
+statement ok
+INSERT INTO events VALUES (1, '2024-06-15', '2024-06-15 13:45:30.12345', '2024-06-15 13:45:30+02', '1 hour 30 minutes')
+
+statement ok
+INSERT INTO events VALUES (2, 'infinity', '1999-12-31 23:59:59.9999', '1970-01-01 00:00:00+00', '-3 days')
+
+query
+SELECT id, d, ts, tstz, dur FROM events ORDER BY id
+----
+id:int4 | d:date | ts:timestamp | tstz:timestamptz | dur:interval
+1 | 2024-06-15 | 2024-06-15 13:45:30.123 | 2024-06-15 11:45:30+00 | 01:30:00
+2 | infinity | 2000-01-01 00:00:00 | 1970-01-01 00:00:00+00 | -3 days
+
+query
+SELECT id, ts + dur, tstz::date, d::timestamp FROM events ORDER BY id
+----
+id:int4 | ?column?:timestamp | tstz:date | d:timestamp
+1 | 2024-06-15 15:15:30.123 | 2024-06-15 | 2024-06-15 00:00:00
+2 | 1999-12-29 00:00:00 | 1970-01-01 | infinity
+
+# Casts between date/time types
+query
+SELECT timestamp '2024-06-15 13:45:30'::date, timestamp '2024-06-15 13:45:30'::time, timestamptz '2024-06-15 23:30:00-05'::date, '2024-06-15'::date::timestamptz
+----
+date:date | time:time | date:date | timestamptz:timestamptz
+2024-06-15 | 13:45:30 | 2024-06-16 | 2024-06-15 00:00:00+00

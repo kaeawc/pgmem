@@ -1,0 +1,309 @@
+# SAVEPOINT / ROLLBACK TO / RELEASE
+statement ok
+CREATE TABLE t (id int PRIMARY KEY)
+
+statement error 25P01 SAVEPOINT can only be used in transaction blocks
+SAVEPOINT outside
+
+statement error 25P01 ROLLBACK TO SAVEPOINT can only be used in transaction blocks
+ROLLBACK TO SAVEPOINT outside
+
+statement error 25P01 RELEASE SAVEPOINT can only be used in transaction blocks
+RELEASE SAVEPOINT outside
+
+# Basic rollback to a savepoint
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO t VALUES (1)
+
+statement ok
+SAVEPOINT a
+
+statement ok
+INSERT INTO t VALUES (2)
+
+statement ok
+ROLLBACK TO SAVEPOINT a
+
+statement ok
+INSERT INTO t VALUES (3)
+
+statement ok
+COMMIT
+
+query
+SELECT id FROM t ORDER BY id
+----
+id:int4
+1
+3
+
+# Recovering an aborted transaction
+statement ok
+BEGIN
+
+statement ok
+SAVEPOINT before_dup
+
+statement error 23505 duplicate key value violates unique constraint "t_pkey"
+INSERT INTO t VALUES (1)
+
+statement error 25P02 current transaction is aborted, commands ignored until end of transaction block
+SELECT 1
+
+statement ok
+ROLLBACK TO before_dup
+
+statement ok
+INSERT INTO t VALUES (4)
+
+statement ok
+COMMIT
+
+query
+SELECT id FROM t ORDER BY id
+----
+id:int4
+1
+3
+4
+
+# Nested savepoints
+statement ok
+BEGIN
+
+statement ok
+SAVEPOINT s1
+
+statement ok
+INSERT INTO t VALUES (10)
+
+statement ok
+SAVEPOINT s2
+
+statement ok
+INSERT INTO t VALUES (11)
+
+statement ok
+SAVEPOINT s3
+
+statement ok
+INSERT INTO t VALUES (12)
+
+statement ok
+ROLLBACK TO s2
+
+query
+SELECT id FROM t WHERE id >= 10 ORDER BY id
+----
+id:int4
+10
+
+# s3 was destroyed by rolling back to s2; s2 itself survives
+statement error 3B001 savepoint "s3" does not exist
+ROLLBACK TO s3
+
+statement ok
+ROLLBACK TO s2
+
+statement ok
+INSERT INTO t VALUES (13)
+
+statement ok
+RELEASE s1
+
+statement error 3B001 savepoint "s2" does not exist
+ROLLBACK TO s2
+
+statement ok
+ROLLBACK
+
+query
+SELECT count(*) FROM t WHERE id >= 10
+----
+count:int8
+0
+
+# RELEASE keeps the work; a later rollback of the outer savepoint discards it
+statement ok
+BEGIN
+
+statement ok
+SAVEPOINT outer_sp
+
+statement ok
+SAVEPOINT inner_sp
+
+statement ok
+INSERT INTO t VALUES (20)
+
+statement ok
+RELEASE SAVEPOINT inner_sp
+
+query
+SELECT count(*) FROM t WHERE id = 20
+----
+count:int8
+1
+
+statement ok
+ROLLBACK TO SAVEPOINT outer_sp
+
+query
+SELECT count(*) FROM t WHERE id = 20
+----
+count:int8
+0
+
+statement ok
+INSERT INTO t VALUES (21)
+
+statement ok
+COMMIT
+
+# Reusing a savepoint name: ROLLBACK TO and RELEASE use the newest one
+statement ok
+BEGIN
+
+statement ok
+SAVEPOINT dup
+
+statement ok
+INSERT INTO t VALUES (30)
+
+statement ok
+SAVEPOINT dup
+
+statement ok
+INSERT INTO t VALUES (31)
+
+statement ok
+ROLLBACK TO dup
+
+query
+SELECT id FROM t WHERE id >= 30 ORDER BY id
+----
+id:int4
+30
+
+statement ok
+RELEASE dup
+
+statement ok
+ROLLBACK TO dup
+
+query
+SELECT id FROM t WHERE id >= 30 ORDER BY id
+----
+id:int4
+
+statement ok
+COMMIT
+
+# Savepoint names are identifiers: case folds unless quoted
+statement ok
+BEGIN
+
+statement ok
+SAVEPOINT MixedCase
+
+statement ok
+ROLLBACK TO mixedcase
+
+statement error 3B001 savepoint "MixedCase" does not exist
+ROLLBACK TO "MixedCase"
+
+statement ok
+ROLLBACK
+
+# An error inside a released savepoint still aborts the transaction
+statement ok
+BEGIN
+
+statement ok
+SAVEPOINT x
+
+statement ok
+RELEASE x
+
+statement error 23505 duplicate key value violates unique constraint "t_pkey"
+INSERT INTO t VALUES (1)
+
+statement error 25P02 current transaction is aborted, commands ignored until end of transaction block
+SAVEPOINT y
+
+statement ok
+ROLLBACK
+
+# Sequences are not rolled back
+statement ok
+CREATE SEQUENCE seq
+
+statement ok
+BEGIN
+
+statement ok
+SAVEPOINT s
+
+query
+SELECT nextval('seq')
+----
+nextval:int8
+1
+
+statement ok
+ROLLBACK TO s
+
+query
+SELECT nextval('seq')
+----
+nextval:int8
+2
+
+statement ok
+ROLLBACK
+
+query
+SELECT nextval('seq')
+----
+nextval:int8
+3
+
+# DDL inside a savepoint is rolled back
+statement ok
+BEGIN
+
+statement ok
+SAVEPOINT ddl
+
+statement ok
+CREATE TABLE temp_table (a int)
+
+statement ok
+ALTER TABLE t ADD COLUMN extra int
+
+statement ok
+ROLLBACK TO ddl
+
+statement error 42P01 relation "temp_table" does not exist
+SELECT * FROM temp_table
+
+statement ok
+ROLLBACK TO ddl
+
+statement error 42703 column "extra" does not exist
+SELECT extra FROM t
+
+statement ok
+ROLLBACK
+
+query
+SELECT id FROM t ORDER BY id
+----
+id:int4
+1
+3
+4
+21

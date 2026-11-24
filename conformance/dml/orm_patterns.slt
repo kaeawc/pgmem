@@ -1,0 +1,175 @@
+# DML shapes that ORMs and query builders emit
+statement ok
+CREATE TABLE "product" ("id" bigserial PRIMARY KEY, "sku" varchar(20) NOT NULL UNIQUE, "name" text NOT NULL, "price" numeric(10,2) NOT NULL DEFAULT 0, "version" int NOT NULL DEFAULT 1, "deleted_at" timestamptz, "created_at" timestamptz NOT NULL DEFAULT '2024-01-01 00:00:00+00')
+
+# Prisma / Rails style INSERT ... RETURNING with quoted identifiers
+query rowsort
+INSERT INTO "product" ("sku", "name", "price") VALUES ('A1', 'Alpha', 9.5) RETURNING "product"."id", "product"."sku", "product"."created_at"
+----
+id:int8 | sku:varchar | created_at:timestamptz
+1 | A1 | 2024-01-01 00:00:00+00
+
+# Batch upsert through unnest (pgx/Go, node-postgres)
+query rowsort
+INSERT INTO product (sku, name, price) SELECT * FROM unnest(ARRAY['A1', 'B2', 'C3']::varchar[], ARRAY['Alpha2', 'Beta', 'Gamma'], ARRAY[10, 20, 30]::numeric[]) ON CONFLICT (sku) DO UPDATE SET name = EXCLUDED.name, price = EXCLUDED.price, version = product.version + 1 RETURNING sku, name, price, version
+----
+sku:varchar | name:text | price:numeric | version:int4
+A1 | Alpha2 | 10.00 | 2
+B2 | Beta | 20.00 | 1
+C3 | Gamma | 30.00 | 1
+
+# Django bulk_create(ignore_conflicts=True)
+statement ok
+INSERT INTO "product" ("sku", "name", "price", "version", "deleted_at", "created_at") VALUES ('B2', 'dup', 0, 1, NULL, '2024-02-01T00:00:00+00:00'::timestamptz), ('D4', 'Delta', 4, 1, NULL, '2024-02-01T00:00:00+00:00'::timestamptz) ON CONFLICT DO NOTHING
+
+# SQLAlchemy insertmanyvalues: sort by a sentinel so RETURNING follows input order
+query
+INSERT INTO product (sku, name) SELECT p0, p1 FROM (VALUES ('E5', 'Eps', 0), ('F6', 'Phi', 1), ('G7', 'Gam', 2)) AS imp_sen(p0, p1, sen_counter) ORDER BY sen_counter RETURNING sku, name
+----
+sku:varchar | name:text
+E5 | Eps
+F6 | Phi
+G7 | Gam
+
+# Parameter-typed upsert with ($1::type) casts as drivers send them
+query rowsort
+INSERT INTO product (sku, name, price) VALUES ('H8'::varchar, 'Eta'::text, '12.345'::numeric) ON CONFLICT (sku) DO UPDATE SET price = EXCLUDED.price RETURNING id > 0 AS has_id, price, (xmax = 0) AS inserted
+----
+has_id:bool | price:numeric | inserted:bool
+t | 12.35 | t
+
+query rowsort
+INSERT INTO product (sku, name, price) VALUES ('H8'::varchar, 'Eta'::text, '13'::numeric) ON CONFLICT (sku) DO UPDATE SET price = EXCLUDED.price RETURNING price, (xmax = 0) AS inserted
+----
+price:numeric | inserted:bool
+13.00 | f
+
+# Bulk update through a VALUES join (Ecto, Knex)
+query rowsort
+UPDATE product AS p SET price = v.price, name = v.name FROM (VALUES ('A1', 11.00, 'Alpha3'), ('C3', 31.00, 'Gamma2')) AS v(sku, price, name) WHERE p.sku = v.sku RETURNING p.sku, p.price, p.name
+----
+sku:varchar | price:numeric | name:text
+A1 | 11.00 | Alpha3
+C3 | 31.00 | Gamma2
+
+# Optimistic locking
+query rowsort
+UPDATE product SET price = 99, version = version + 1 WHERE sku = 'D4' AND version = 1 RETURNING version
+----
+version:int4
+2
+
+query rowsort
+UPDATE product SET price = 98, version = version + 1 WHERE sku = 'D4' AND version = 1 RETURNING version
+----
+version:int4
+
+# Soft delete and filtered reads
+statement ok
+UPDATE product SET deleted_at = '2024-03-01 12:00:00+00' WHERE sku = ANY(ARRAY['E5', 'F6'])
+
+query
+SELECT sku FROM product WHERE deleted_at IS NULL ORDER BY sku
+----
+sku:varchar
+A1
+B2
+C3
+D4
+G7
+H8
+
+# Batch delete by ANY / IN lists
+query rowsort
+DELETE FROM product WHERE id = ANY(SELECT id FROM product WHERE deleted_at IS NOT NULL) RETURNING sku
+----
+sku:varchar
+E5
+F6
+
+query rowsort
+DELETE FROM product WHERE sku IN ('G7', 'nope') RETURNING sku
+----
+sku:varchar
+G7
+
+# LIMIT-like UPDATE/DELETE through a subselect on the key or on ctid
+statement ok
+CREATE TABLE events (id int PRIMARY KEY, kind text, processed boolean DEFAULT false)
+
+statement ok
+INSERT INTO events SELECT g, CASE WHEN g % 2 = 0 THEN 'even' ELSE 'odd' END, false FROM generate_series(1, 10) g
+
+query rowsort
+UPDATE events SET processed = true WHERE id IN (SELECT id FROM events WHERE NOT processed ORDER BY id LIMIT 3) RETURNING id
+----
+id:int4
+1
+2
+3
+
+query rowsort
+DELETE FROM events WHERE ctid IN (SELECT ctid FROM events WHERE kind = 'odd' ORDER BY id LIMIT 2) RETURNING id
+----
+id:int4
+1
+3
+
+query rowsort
+DELETE FROM events WHERE ctid = ANY(ARRAY(SELECT ctid FROM events ORDER BY id DESC LIMIT 2)) RETURNING id
+----
+id:int4
+9
+10
+
+statement error 42601 syntax error at or near "LIMIT"
+UPDATE events SET processed = true LIMIT 1
+
+statement error 42601 syntax error at or near "ORDER"
+DELETE FROM events ORDER BY id LIMIT 1
+
+# Job queue: claim the next row with FOR UPDATE SKIP LOCKED
+statement ok
+CREATE TABLE jobs (id int PRIMARY KEY, status text NOT NULL DEFAULT 'queued', attempts int NOT NULL DEFAULT 0)
+
+statement ok
+INSERT INTO jobs (id) VALUES (1), (2), (3)
+
+query rowsort
+UPDATE jobs SET status = 'running', attempts = attempts + 1 WHERE id = (SELECT id FROM jobs WHERE status = 'queued' ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING id, status, attempts
+----
+id:int4 | status:text | attempts:int4
+1 | running | 1
+
+query rowsort
+WITH next AS (SELECT id FROM jobs WHERE status = 'queued' ORDER BY id LIMIT 2 FOR UPDATE SKIP LOCKED) UPDATE jobs j SET status = 'running' FROM next WHERE j.id = next.id RETURNING j.id
+----
+id:int4
+2
+3
+
+# Counter increment
+statement ok
+CREATE TABLE counters (k text PRIMARY KEY, n bigint NOT NULL DEFAULT 0)
+
+query rowsort
+INSERT INTO counters (k, n) VALUES ('hits', 1) ON CONFLICT (k) DO UPDATE SET n = counters.n + 1 RETURNING n
+----
+n:int8
+1
+
+query rowsort
+INSERT INTO counters (k, n) VALUES ('hits', 1) ON CONFLICT (k) DO UPDATE SET n = counters.n + 1 RETURNING n
+----
+n:int8
+2
+
+query
+SELECT sku, name, price, version, deleted_at FROM product ORDER BY sku
+----
+sku:varchar | name:text | price:numeric | version:int4 | deleted_at:timestamptz
+A1 | Alpha3 | 11.00 | 2 | NULL
+B2 | Beta | 20.00 | 1 | NULL
+C3 | Gamma2 | 31.00 | 1 | NULL
+D4 | Delta | 99.00 | 2 | NULL
+H8 | Eta | 13.00 | 1 | NULL

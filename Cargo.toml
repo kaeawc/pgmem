@@ -19,6 +19,7 @@ pgmem-catalog = { path = "crates/pgmem-catalog" }
 pgmem-storage = { path = "crates/pgmem-storage" }
 pgmem-exec = { path = "crates/pgmem-exec" }
 pgmem-wire = { path = "crates/pgmem-wire" }
+pgmem = { path = "crates/pgmem" }
 
 getrandom = { version = "0.4", default-features = false, features = ["std"] }
 md-5 = { version = "0.11", default-features = false }

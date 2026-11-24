@@ -1,0 +1,261 @@
+# Enums, domains, composite types and ranges.
+
+# Enums
+statement ok
+CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')
+
+statement ok
+CREATE TABLE person (name text, current_mood mood)
+
+statement ok
+INSERT INTO person VALUES ('a', 'happy'), ('b', 'sad'), ('c', 'ok'), ('d', NULL)
+
+statement error 22P02 invalid input value for enum mood: "angry"
+INSERT INTO person VALUES ('e', 'angry')
+
+# Enums sort by declaration order, not alphabetically
+query
+SELECT name, current_mood FROM person ORDER BY current_mood
+----
+name:text | current_mood:mood
+b | sad
+c | ok
+a | happy
+d | NULL
+
+query
+SELECT name FROM person WHERE current_mood > 'sad' ORDER BY name
+----
+name:text
+a
+c
+
+query
+SELECT 'ok'::mood, pg_typeof('ok'::mood), enum_range(NULL::mood), enum_first(NULL::mood), enum_last(NULL::mood)
+----
+mood:mood | pg_typeof:regtype | enum_range:_mood | enum_first:mood | enum_last:mood
+ok | mood | {sad,ok,happy} | sad | happy
+
+query
+SELECT min(current_mood), max(current_mood) FROM person
+----
+min:mood | max:mood
+sad | happy
+
+statement error 22P02 invalid input value for enum mood: "Happy"
+SELECT 'Happy'::mood
+
+statement error 42883 operator does not exist: mood = text
+SELECT current_mood = 'happy'::text FROM person
+
+query
+SELECT current_mood::text = 'happy' FROM person WHERE name = 'a'
+----
+?column?:bool
+t
+
+statement ok
+ALTER TYPE mood ADD VALUE 'ecstatic' AFTER 'happy'
+
+statement ok
+ALTER TYPE mood ADD VALUE IF NOT EXISTS 'meh' BEFORE 'ok'
+
+statement ok
+ALTER TYPE mood RENAME VALUE 'ok' TO 'fine'
+
+query
+SELECT enum_range(NULL::mood)
+----
+enum_range:_mood
+{sad,meh,fine,happy,ecstatic}
+
+statement error 42710 enum label "sad" already exists
+ALTER TYPE mood ADD VALUE 'sad'
+
+statement error 42710 type "mood" already exists
+CREATE TYPE mood AS ENUM ('x')
+
+query
+SELECT ARRAY['sad', 'happy']::mood[]
+----
+array:_mood
+{sad,happy}
+
+# Domains
+statement ok
+CREATE DOMAIN posint AS integer CHECK (VALUE > 0)
+
+statement ok
+CREATE DOMAIN email AS text NOT NULL CHECK (VALUE ~ '@')
+
+statement ok
+CREATE DOMAIN short_code AS varchar(3) DEFAULT 'abc'
+
+statement ok
+CREATE TABLE acct (id posint, mail email, code short_code)
+
+statement ok
+INSERT INTO acct (id, mail) VALUES (1, 'a@b')
+
+statement error 23514 value for domain posint violates check constraint "posint_check"
+INSERT INTO acct (id, mail) VALUES (0, 'a@b')
+
+statement error 23514 value for domain email violates check constraint "email_check"
+INSERT INTO acct (id, mail) VALUES (2, 'nope')
+
+statement error 23502 domain email does not allow null values
+INSERT INTO acct (id, mail) VALUES (3, NULL)
+
+statement error 22001 value too long for type character varying(3)
+INSERT INTO acct (id, mail, code) VALUES (4, 'x@y', 'toolong')
+
+query
+SELECT id, mail, code, pg_typeof(id) FROM acct
+----
+id:int4 | mail:text | code:varchar | pg_typeof:regtype
+1 | a@b | abc | posint
+
+query
+SELECT 5::posint + 1, pg_typeof(5::posint + 1)
+----
+?column?:int4 | pg_typeof:regtype
+6 | integer
+
+statement error 23514 value for domain posint violates check constraint "posint_check"
+SELECT (-1)::posint
+
+statement error 23514 value for domain posint violates check constraint "posint_check"
+UPDATE acct SET id = -5
+
+statement ok
+CREATE DOMAIN pct AS numeric(5,2) CONSTRAINT pct_range CHECK (VALUE BETWEEN 0 AND 100)
+
+statement error 23514 value for domain pct violates check constraint "pct_range"
+SELECT 100.5::pct
+
+query
+SELECT 99.999::pct
+----
+pct:numeric
+100.00
+
+# Composite types
+statement ok
+CREATE TYPE address AS (street text, zip int)
+
+statement ok
+CREATE TABLE customer (id int, addr address)
+
+statement ok
+INSERT INTO customer VALUES (1, ROW('Main St', 12345)), (2, '("Elm, Rd",)'), (3, NULL)
+
+query
+SELECT id, addr, (addr).street, (addr).zip FROM customer ORDER BY id
+----
+id:int4 | addr:address | street:text | zip:int4
+1 | ("Main St",12345) | Main St | 12345
+2 | ("Elm, Rd",) | Elm, Rd | NULL
+3 | NULL | NULL | NULL
+
+query
+SELECT ROW(1, 'a', NULL), ROW(1, 2) = ROW(1, 2), ROW(1, 2) < ROW(1, 3), (ROW('x', 1)::address).street
+----
+row:record | ?column?:bool | ?column?:bool | street:text
+(1,a,) | t | t | x
+
+statement ok
+UPDATE customer SET addr.zip = 99999 WHERE id = 1
+
+query
+SELECT (addr).* FROM customer WHERE id = 1
+----
+street:text | zip:int4
+Main St | 99999
+
+statement error 22P02 invalid input syntax for type integer: "b"
+SELECT '(a,b)'::address
+
+query
+SELECT c FROM customer c WHERE id = 1
+----
+c:customer
+(1,"(""Main St"",99999)")
+
+# Ranges
+query
+SELECT int4range(1, 10), int4range(1, 10, '[]'), '[1,5)'::int4range, '(1,5]'::int4range, 'empty'::int4range
+----
+int4range:int4range | int4range:int4range | int4range:int4range | int4range:int4range | int4range:int4range
+[1,10) | [1,11) | [1,5) | [2,6) | empty
+
+query
+SELECT numrange(1.5, 2.5), int8range(NULL, 5), '[2024-01-01,2024-02-01)'::daterange, daterange('2024-01-01', '2024-01-31', '[]')
+----
+numrange:numrange | int8range:int8range | daterange:daterange | daterange:daterange
+[1.5,2.5) | (,5) | [2024-01-01,2024-02-01) | [2024-01-01,2024-02-01)
+
+query
+SELECT tsrange('2024-01-01 00:00', '2024-01-02 00:00'), tstzrange('2024-01-01 00:00+00', NULL)
+----
+tsrange:tsrange | tstzrange:tstzrange
+["2024-01-01 00:00:00","2024-01-02 00:00:00") | ["2024-01-01 00:00:00+00",)
+
+query
+SELECT int4range(1, 10) @> 5, int4range(1, 10) @> int4range(2, 3), int4range(1, 5) && int4range(4, 8), 3 <@ int4range(1, 3)
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | f
+
+query
+SELECT lower(int4range(1, 10)), upper(int4range(1, 10)), isempty(int4range(5, 5)), lower_inc('(1,5]'::int4range), upper_inf(int4range(1, NULL))
+----
+lower:int4 | upper:int4 | isempty:bool | lower_inc:bool | upper_inf:bool
+1 | 10 | t | t | t
+
+query
+SELECT int4range(1, 5) + int4range(3, 8), int4range(1, 10) * int4range(5, 15), int4range(1, 10) - int4range(5, 15), int4range(1, 3) -|- int4range(3, 5)
+----
+?column?:int4range | ?column?:int4range | ?column?:int4range | ?column?:bool
+[1,8) | [5,10) | [1,5) | t
+
+statement error 22000 range lower bound must be less than or equal to range upper bound
+SELECT int4range(5, 1)
+
+statement error 22000 result of range union would not be contiguous
+SELECT int4range(1, 3) + int4range(5, 8)
+
+query
+SELECT r FROM (VALUES ('[5,6)'::int4range), ('empty'), ('[1,9)'), ('(,3)')) v(r) ORDER BY r
+----
+r:int4range
+empty
+(,3)
+[1,9)
+[5,6)
+
+# Multiranges (PG 14+)
+query
+SELECT '{[1,3), [5,7)}'::int4multirange, int4multirange(int4range(1, 3), int4range(2, 5)), range_agg(r) FROM (VALUES (int4range(1, 2)), (int4range(4, 5))) v(r)
+----
+int4multirange:int4multirange | int4multirange:int4multirange | range_agg:int4multirange
+{[1,3),[5,7)} | {[1,5)} | {[1,2),[4,5)}
+
+# Range column with exclusion constraint
+statement ok
+CREATE TABLE booking (room int, during tsrange, EXCLUDE USING gist (during WITH &&))
+
+statement ok
+INSERT INTO booking VALUES (1, '[2024-01-01 10:00, 2024-01-01 12:00)')
+
+statement error 23P01 conflicting key value violates exclusion constraint "booking_during_excl"
+INSERT INTO booking VALUES (1, '[2024-01-01 11:00, 2024-01-01 13:00)')
+
+statement ok
+INSERT INTO booking VALUES (1, '[2024-01-01 12:00, 2024-01-01 13:00)')
+
+query
+SELECT during FROM booking ORDER BY during
+----
+during:tsrange
+["2024-01-01 10:00:00","2024-01-01 12:00:00")
+["2024-01-01 12:00:00","2024-01-01 13:00:00")

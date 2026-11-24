@@ -1,0 +1,231 @@
+# Set operations.
+statement ok
+CREATE TABLE a (x int, y text)
+
+statement ok
+CREATE TABLE b (x int, y text)
+
+statement ok
+INSERT INTO a VALUES (1, 'one'), (2, 'two'), (2, 'two'), (3, 'three'), (NULL, 'null')
+
+statement ok
+INSERT INTO b VALUES (2, 'two'), (3, 'three'), (3, 'three'), (4, 'four'), (NULL, 'null')
+
+# UNION / UNION ALL
+query
+SELECT x, y FROM a UNION SELECT x, y FROM b ORDER BY x NULLS FIRST
+----
+x:int4 | y:text
+NULL | null
+1 | one
+2 | two
+3 | three
+4 | four
+
+query
+SELECT x FROM a UNION ALL SELECT x FROM b ORDER BY x NULLS LAST
+----
+x:int4
+1
+2
+2
+2
+3
+3
+3
+4
+NULL
+NULL
+
+query
+SELECT 1 UNION SELECT 1 UNION ALL SELECT 1
+----
+?column?:int4
+1
+1
+
+# INTERSECT / EXCEPT
+query
+SELECT x, y FROM a INTERSECT SELECT x, y FROM b ORDER BY x
+----
+x:int4 | y:text
+2 | two
+3 | three
+NULL | null
+
+query
+SELECT x FROM a INTERSECT ALL SELECT x FROM b ORDER BY x
+----
+x:int4
+2
+3
+NULL
+
+query
+SELECT x, y FROM a EXCEPT SELECT x, y FROM b ORDER BY x
+----
+x:int4 | y:text
+1 | one
+
+query
+SELECT x FROM a EXCEPT ALL SELECT x FROM b ORDER BY x
+----
+x:int4
+1
+2
+
+query
+SELECT x FROM b EXCEPT ALL SELECT x FROM a ORDER BY x
+----
+x:int4
+3
+4
+
+# Precedence: INTERSECT binds tighter than UNION
+query
+SELECT 1 UNION SELECT 2 INTERSECT SELECT 3 ORDER BY 1
+----
+?column?:int4
+1
+
+query
+(SELECT 1 UNION SELECT 2) INTERSECT SELECT 2
+----
+?column?:int4
+2
+
+query
+SELECT x FROM a EXCEPT SELECT x FROM b EXCEPT SELECT 1 ORDER BY 1
+----
+x:int4
+
+# ORDER BY / LIMIT on set operations
+query
+SELECT x AS n FROM a UNION SELECT x FROM b ORDER BY n DESC NULLS LAST LIMIT 3
+----
+n:int4
+4
+3
+2
+
+query
+(SELECT x FROM a ORDER BY x LIMIT 1) UNION ALL (SELECT x FROM b ORDER BY x DESC LIMIT 1) ORDER BY 1
+----
+x:int4
+1
+NULL
+
+query
+SELECT x FROM a UNION SELECT x FROM b ORDER BY 1 OFFSET 2
+----
+x:int4
+3
+4
+NULL
+
+statement error 42703 column "y" does not exist
+SELECT x FROM a UNION SELECT x FROM b ORDER BY y
+
+statement error 0A000 invalid UNION/INTERSECT/EXCEPT ORDER BY clause
+SELECT x FROM a UNION SELECT x FROM b ORDER BY x + 1
+
+statement error 42601 syntax error at or near "UNION"
+SELECT x FROM a ORDER BY x UNION SELECT x FROM b
+
+# Column names come from the first branch
+query
+SELECT 1 AS first, 'a' AS letter UNION ALL SELECT 2 AS second, 'b' ORDER BY 1
+----
+first:int4 | letter:text
+1 | a
+2 | b
+
+# Type unification
+query
+SELECT 1 UNION SELECT 2.5 ORDER BY 1
+----
+?column?:numeric
+1
+2.5
+
+query
+SELECT 1::int2 UNION ALL SELECT 2::int8
+----
+int2:int8
+1
+2
+
+query
+SELECT NULL UNION SELECT 1
+----
+?column?:int4
+1
+NULL
+
+query
+SELECT 'a' UNION SELECT 'b' ORDER BY 1
+----
+?column?:text
+a
+b
+
+query
+SELECT 1 UNION SELECT '2' ORDER BY 1
+----
+?column?:int4
+1
+2
+
+statement error 42804 UNION types integer and text cannot be matched
+SELECT 1 UNION SELECT 'a'::text
+
+statement error 42804 UNION types integer and boolean cannot be matched
+SELECT 1 UNION SELECT true
+
+statement error 42601 each UNION query must have the same number of columns
+SELECT 1, 2 UNION SELECT 1
+
+statement error 42804 UNION types date and integer cannot be matched
+SELECT DATE '2024-01-01' UNION SELECT 1
+
+# Set operations in subqueries and with DISTINCT semantics
+query
+SELECT count(*) FROM (SELECT x FROM a UNION SELECT x FROM b) s
+----
+count:int8
+5
+
+query
+SELECT y FROM a WHERE x IN (SELECT x FROM b INTERSECT SELECT 3) ORDER BY y
+----
+y:text
+three
+
+query
+VALUES (1), (2) UNION VALUES (2), (3) ORDER BY 1
+----
+column1:int4
+1
+2
+3
+
+query
+SELECT ARRAY[1,2] UNION SELECT ARRAY[1,2]
+----
+array:_int4
+{1,2}
+
+query
+SELECT x, y FROM a UNION ALL SELECT x, y FROM b ORDER BY 2, 1
+----
+x:int4 | y:text
+4 | four
+NULL | null
+NULL | null
+1 | one
+3 | three
+3 | three
+3 | three
+2 | two
+2 | two
+2 | two
