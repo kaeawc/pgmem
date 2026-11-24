@@ -94,6 +94,8 @@ fn figure_colname(e: &ir::Expr) -> Option<(String, u8)> {
         },
         ir::Expr::TypedString { ty, .. } => Some((type_display_name(ty), 1)),
         ir::Expr::Case { .. } => Some(("case".into(), 1)),
+        // `x AT TIME ZONE z` is the function call timezone(z, x).
+        ir::Expr::AtTimeZone { .. } => Some(("timezone".into(), 2)),
         ir::Expr::Exists { .. } => Some(("exists".into(), 2)),
         ir::Expr::ArraySubquery(_) | ir::Expr::Array(_) => Some(("array".into(), 2)),
         ir::Expr::Row(_) => Some(("row".into(), 2)),
@@ -471,7 +473,7 @@ impl Binder<'_> {
                 let (e, t) = self.bind_expr(expr, ctx)?;
                 let (z, zt) = self.bind_expr(zone, ctx)?;
                 let r = crate::funcs::datetime::resolve_at_time_zone(&t, &zt)?;
-                let z = coerce(self, z, &zt, &Type::Text, CoercionContext::Explicit)?;
+                let z = coerce(self, z, &zt, &r.args[0], CoercionContext::Explicit)?;
                 let e = coerce(self, e, &t, &r.args[1], CoercionContext::Implicit)?;
                 Ok((Expr::Call { func: r.func, args: vec![z, e] }, r.ret))
             }

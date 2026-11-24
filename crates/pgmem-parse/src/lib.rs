@@ -55,7 +55,8 @@ pub fn parse_one(sql: &str) -> SqlResult<Statement> {
 
 /// Rewrites Postgres syntax that sqlparser does not accept into equivalent syntax it does,
 /// for constructs pgmem treats identically: `FOR NO KEY UPDATE` / `FOR KEY SHARE` row locks
-/// (row locks are no-ops) and `DROP INDEX CONCURRENTLY` / `REINDEX`-style modifiers. Works on
+/// (row locks are no-ops), `DROP INDEX CONCURRENTLY` / `REINDEX`-style modifiers, and
+/// `AT LOCAL` (`AT TIME ZONE current_setting('TimeZone')`, as Postgres defines it). Works on
 /// tokens, so string literals and identifiers are never touched. Returns None if nothing
 /// changed.
 fn rewrite_unsupported(sql: &str) -> Option<String> {
@@ -65,6 +66,7 @@ fn rewrite_unsupported(sql: &str) -> Option<String> {
     // Indexes of significant (non-whitespace) tokens.
     let sig: Vec<usize> = tokens.iter().enumerate().filter(|(_, t)| !matches!(t, Token::Whitespace(_))).map(|(i, _)| i).collect();
     let mut drop = vec![false; tokens.len()];
+    let mut replace: Vec<Option<&str>> = vec![None; tokens.len()];
     for (k, &i) in sig.iter().enumerate() {
         let at = |o: usize, w: &str| sig.get(k + o).is_some_and(|&j| word(&tokens[j], w));
         if word(&tokens[i], "FOR") && at(1, "NO") && at(2, "KEY") && at(3, "UPDATE") {
@@ -74,12 +76,22 @@ fn rewrite_unsupported(sql: &str) -> Option<String> {
             drop[sig[k + 1]] = true;
         } else if word(&tokens[i], "DROP") && at(1, "INDEX") && at(2, "CONCURRENTLY") {
             drop[sig[k + 2]] = true;
+        } else if word(&tokens[i], "AT") && at(1, "LOCAL") {
+            replace[sig[k + 1]] = Some("TIME ZONE current_setting('TimeZone')");
         }
     }
-    if !drop.contains(&true) {
+    if !drop.contains(&true) && replace.iter().all(Option::is_none) {
         return None;
     }
-    Some(tokens.iter().zip(drop).filter(|(_, d)| !d).map(|(t, _)| t.to_string()).collect())
+    Some(
+        tokens
+            .iter()
+            .zip(drop)
+            .zip(replace)
+            .filter(|((_, d), _)| !d)
+            .map(|((t, _), r)| r.map_or_else(|| t.to_string(), str::to_owned))
+            .collect(),
+    )
 }
 
 /// Splits on top-level semicolons, respecting quotes and dollar quotes. Only used by the

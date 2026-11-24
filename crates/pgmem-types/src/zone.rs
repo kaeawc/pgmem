@@ -140,7 +140,16 @@ impl Zone {
     /// The zone abbreviation in effect at a UTC instant (`EST`, `CEST`, or `+0530`-style).
     pub fn abbrev_at(&self, utc_micros: i64) -> String {
         match &self.kind {
-            Kind::Fixed(s) => format_offset(*s),
+            // A POSIX-style zone's abbreviation is its standard-time name (`UTC` of `UTC+5`,
+            // `+05` of `<+05>-05`); an abbreviation zone reports itself.
+            Kind::Fixed(s) => {
+                if let Some(inner) = self.name.strip_prefix('<') {
+                    inner.split('>').next().unwrap_or_default().to_owned()
+                } else {
+                    let letters: String = self.name.chars().take_while(char::is_ascii_alphabetic).collect();
+                    if letters.is_empty() { format_offset(*s) } else { letters.to_ascii_uppercase() }
+                }
+            }
             Kind::Tz(tz) => tz.to_offset_info(to_jiff(utc_micros)).abbreviation().to_owned(),
         }
     }
@@ -172,6 +181,25 @@ impl Zone {
     pub fn is_utc(&self) -> bool {
         matches!(self.kind, Kind::Fixed(0))
     }
+}
+
+fn infinite(t: i64) -> bool {
+    t == i64::MAX || t == i64::MIN
+}
+
+/// The session zone's local wall-clock time of a timestamptz (infinities pass through).
+pub fn to_local(utc_micros: i64) -> i64 {
+    if infinite(utc_micros) { utc_micros } else { crate::context::with_zone(|z| z.local_of_utc(utc_micros)) }
+}
+
+/// The timestamptz of a local wall-clock time in the session zone.
+pub fn from_local(local_micros: i64) -> i64 {
+    if infinite(local_micros) { local_micros } else { crate::context::with_zone(|z| z.utc_of_local(local_micros)) }
+}
+
+/// The session zone's offset (seconds east) at a UTC instant.
+pub fn session_offset(utc_micros: i64) -> i32 {
+    crate::context::with_zone(|z| z.offset_at(utc_micros))
 }
 
 /// A timezone abbreviation from Postgres' `Default` set: (seconds east, is_dst).
