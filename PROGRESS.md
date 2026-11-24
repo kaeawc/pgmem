@@ -18,14 +18,14 @@ and what comes next. Updated with every PR.
 | Date | PR | Parity | Conformance corpus |
 |---|---|---|---|
 | 2026-11-24 | #103 foundation: types, IR, parser | 37/564 | — |
-| 2026-11-24 | catalog and storage | 49/564 | — |
-| 2026-11-24 | executor | 49/564 | — |
-| 2026-11-24 | wire protocol, server, core + example tests | 189/564 | — |
-| 2026-11-24 | transactions, constraints, DDL tests | 268/564 | — |
-| 2026-11-24 | query shape tests (joins, subqueries, CTEs, aggregates, windows) | 364/564 | — |
-| 2026-11-24 | types and expression tests | 466/564 | — |
-| 2026-11-24 | builtin function tests | 564/564 | — |
-| 2026-11-24 | remove the Go implementation; pgx examples run against Rust | 564/564 | — |
+| 2026-11-24 | #104 catalog and storage | 49/564 | — |
+| 2026-11-24 | #105 executor | 49/564 | — |
+| 2026-11-24 | #106 wire protocol, server, core + example tests | 189/564 | — |
+| 2026-11-24 | #107 transactions, constraints, DDL tests | 268/564 | — |
+| 2026-11-24 | #108 query shape tests (joins, subqueries, CTEs, aggregates, windows) | 364/564 | — |
+| 2026-11-24 | #109 types and expression tests | 466/564 | — |
+| 2026-11-24 | #110 builtin function tests | 564/564 | — |
+| 2026-11-24 | #111 remove the Go implementation; pgx examples run against Rust | 564/564 | — |
 
 ## Supported
 
