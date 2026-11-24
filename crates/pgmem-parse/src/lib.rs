@@ -35,13 +35,7 @@ pub fn parse(sql: &str) -> SqlResult<Vec<Statement>> {
     match parsed {
         Ok((stmts, text)) => {
             PARSED_TEXT.with(|t| *t.borrow_mut() = text);
-            stmts
-                .into_iter()
-                .map(|s| match s {
-                    Parsed::Sql(s) => lower_statement(*s),
-                    Parsed::TypeDdl(t) => typeddl::lower(*t),
-                })
-                .collect()
+            stmts.into_iter().map(lower_parsed).collect()
         }
         Err(err) => {
             // Fall back to per-statement prefix recognition for the utility statements
@@ -78,6 +72,29 @@ pub(crate) fn syntax_error_at(at: sqlparser::tokenizer::Location) -> SqlError {
     }
 }
 
+fn lower_parsed(p: Parsed) -> SqlResult<Statement> {
+    match p {
+        Parsed::Sql(s) => lower_statement(*s),
+        Parsed::TypeDdl(t) => typeddl::lower(*t),
+        Parsed::Schema(s, elements) => {
+            let sq::Statement::CreateSchema { schema_name, if_not_exists, .. } = *s else {
+                return Err(SqlError::internal("schema elements without CREATE SCHEMA"));
+            };
+            let elements = elements.into_iter().map(lower_parsed).collect::<SqlResult<Vec<_>>>()?;
+            lower_create_schema(schema_name, if_not_exists, elements)
+        }
+    }
+}
+
+fn lower_create_schema(schema_name: sq::SchemaName, if_not_exists: bool, elements: Vec<Statement>) -> SqlResult<Statement> {
+    let (name, authorization) = match schema_name {
+        sq::SchemaName::Simple(n) => (Some(object_name(&n)?.base().to_owned()), None),
+        sq::SchemaName::UnnamedAuthorization(a) => (None, Some(ident(&a))),
+        sq::SchemaName::NamedAuthorization(n, a) => (Some(object_name(&n)?.base().to_owned()), Some(ident(&a))),
+    };
+    Ok(Statement::CreateSchema(Box::new(pgmem_ir::CreateSchema { name, if_not_exists, authorization, elements })))
+}
+
 /// The function name `(x).*` is rewritten to before parsing; the select-list lowering turns
 /// it back into a field expansion.
 pub(crate) const FIELD_STAR_MARKER: &str = "__pgmem_field_star";
@@ -88,6 +105,8 @@ pub(crate) const SYMMETRIC_MARKER: &str = "__pgmem_symmetric";
 enum Parsed {
     Sql(Box<sq::Statement>),
     TypeDdl(Box<typeddl::TypeDdl>),
+    /// `CREATE SCHEMA ...` followed by its schema elements.
+    Schema(Box<sq::Statement>, Vec<Parsed>),
 }
 
 /// `Parser::parse_statements`, with the statements sqlparser models incompletely (domains,
@@ -110,7 +129,24 @@ fn parse_statements(sql: &str) -> Result<Vec<Parsed>, ParserError> {
         }
         match typeddl::try_parse(&mut p)? {
             Some(t) => out.push(Parsed::TypeDdl(Box::new(t))),
-            None => out.push(Parsed::Sql(Box::new(p.parse_statement()?))),
+            None => {
+                let stmt = p.parse_statement()?;
+                if matches!(stmt, sq::Statement::CreateSchema { .. }) {
+                    // Schema elements follow without a delimiter (CREATE TABLE/VIEW/INDEX/
+                    // SEQUENCE/TRIGGER, GRANT).
+                    let mut elements = Vec::new();
+                    while matches!(&p.peek_token().token, Token::Word(w) if w.value.eq_ignore_ascii_case("CREATE") || w.value.eq_ignore_ascii_case("GRANT"))
+                    {
+                        match typeddl::try_parse(&mut p)? {
+                            Some(t) => elements.push(Parsed::TypeDdl(Box::new(t))),
+                            None => elements.push(Parsed::Sql(Box::new(p.parse_statement()?))),
+                        }
+                    }
+                    out.push(Parsed::Schema(Box::new(stmt), elements));
+                } else {
+                    out.push(Parsed::Sql(Box::new(stmt)));
+                }
+            }
         }
         expecting_delimiter = true;
     }
@@ -255,8 +291,6 @@ fn fallback_statement(sql: &str) -> Option<Statement> {
         ("COMMENT", "ON") => "COMMENT",
         ("CREATE", "EXTENSION") => "CREATE EXTENSION",
         ("DROP", "EXTENSION") => "DROP EXTENSION",
-        ("CREATE", "SCHEMA") => "CREATE SCHEMA",
-        ("DROP", "SCHEMA") => "DROP SCHEMA",
         ("ANALYZE" | "ANALYSE", _) => "ANALYZE",
         ("VACUUM", _) => "VACUUM",
         ("GRANT", _) => "GRANT",
@@ -464,9 +498,21 @@ fn lower_statement(stmt: sq::Statement) -> SqlResult<Statement> {
             };
             Statement::Comment { target, name: object_name(&target_name)?, text: comment }
         }
+        S::AlterSchema(a) => {
+            let name = object_name(&a.name)?.base().to_owned();
+            let mut rename_to = None;
+            for op in a.operations {
+                match op {
+                    sq::AlterSchemaOperation::Rename { name: new } => rename_to = Some(object_name(&new)?.base().to_owned()),
+                    sq::AlterSchemaOperation::OwnerTo { .. } => {}
+                    _ => return Err(unsupported("this ALTER SCHEMA action")),
+                }
+            }
+            Statement::AlterSchema { name, rename_to }
+        }
         S::CreateExtension(_) => Statement::NoOp { tag: "CREATE EXTENSION".into() },
         S::DropExtension(_) => Statement::NoOp { tag: "DROP EXTENSION".into() },
-        S::CreateSchema { .. } => Statement::NoOp { tag: "CREATE SCHEMA".into() },
+        S::CreateSchema { schema_name, if_not_exists, .. } => lower_create_schema(schema_name, if_not_exists, Vec::new())?,
         S::Analyze(_) => Statement::NoOp { tag: "ANALYZE".into() },
         S::Vacuum(_) => Statement::NoOp { tag: "VACUUM".into() },
         S::Grant(_) | S::GrantRole(_) => Statement::NoOp { tag: "GRANT".into() },

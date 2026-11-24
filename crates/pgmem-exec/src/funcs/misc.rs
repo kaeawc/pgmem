@@ -36,18 +36,53 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
         "current_database" | "current_catalog" if n == 0 => {
             resolved(lenient("current_database", |_, c| Ok(Value::Text(c.env.database.clone()))), vec![], Type::Name)
         }
-        "current_schema" if n == 0 => resolved(lenient("current_schema", |_, _| Ok(Value::Text("public".into()))), vec![], Type::Name),
+        "current_schema" if n == 0 => resolved(
+            lenient("current_schema", |_, c| {
+                Ok(c.txn.catalog().explicit_search_path().into_iter().next().map_or(Value::Null, Value::Text))
+            }),
+            vec![],
+            Type::Name,
+        ),
         "current_schemas" if n == 1 => resolved(
-            strict("current_schemas", |a, _| {
-                let mut v = Vec::new();
-                if a[0].as_bool() == Some(true) {
-                    v.push(Value::Text("pg_catalog".into()));
-                }
-                v.push(Value::Text("public".into()));
-                Ok(Value::Array(v))
+            strict("current_schemas", |a, c| {
+                let catalog = c.txn.catalog();
+                let names: Vec<String> = if a[0].as_bool() == Some(true) {
+                    catalog
+                        .search_path()
+                        .into_iter()
+                        .map(|e| match e {
+                            pgmem_catalog::PathEntry::System => "pg_catalog".to_owned(),
+                            pgmem_catalog::PathEntry::Schema(s) => s,
+                        })
+                        .collect()
+                } else {
+                    catalog.explicit_search_path()
+                };
+                Ok(Value::Array(names.into_iter().map(Value::Text).collect()))
             }),
             vec![Type::Bool],
             Type::array_of(Type::Name),
+        ),
+        "pg_my_temp_schema" if n == 0 => resolved(
+            lenient("pg_my_temp_schema", |_, c| {
+                let temp = format!("pg_temp_{}", c.env.backend_pid);
+                Ok(Value::Oid(c.txn.catalog().namespace_oid(&temp).unwrap_or(0)))
+            }),
+            vec![],
+            Type::Oid,
+        ),
+        "pg_is_other_temp_schema" if n == 1 => resolved(
+            strict("pg_is_other_temp_schema", |a, c| {
+                let mine = format!("pg_temp_{}", c.env.backend_pid);
+                let oid = match &a[0] {
+                    Value::Oid(o) | Value::Reg(_, o, _) => *o,
+                    other => u32::try_from(other.as_i64().unwrap_or(0)).unwrap_or(0),
+                };
+                let other = c.txn.catalog().schema_by_oid(oid).is_some_and(|s| s.name.starts_with("pg_temp_") && s.name != mine);
+                Ok(Value::Bool(other))
+            }),
+            vec![Type::Oid],
+            Type::Bool,
         ),
         "pg_backend_pid" if n == 0 => resolved(lenient("pg_backend_pid", |_, c| Ok(Value::Int4(c.env.backend_pid))), vec![], Type::Int4),
         "nextval" if n == 1 => resolved(strict("nextval", nextval), vec![Type::Text], Type::Int8),
@@ -210,9 +245,16 @@ fn current_setting(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
 
 /// Resolves a sequence name argument (`'public.users_id_seq'`, `'"MySeq"'`, `'users_id_seq'::regclass`).
 fn sequence(ctx: &EvalCtx, v: &Value) -> SqlResult<std::sync::Arc<pgmem_catalog::SequenceDef>> {
-    let raw = v.as_str().unwrap_or("");
-    let name = parse_qualified(raw);
-    ctx.txn.catalog().sequence(&name).cloned().ok_or_else(|| SqlError::undefined_table(&name))
+    let catalog = ctx.txn.catalog();
+    let rel = match v {
+        Value::Reg(_, oid, _) | Value::Oid(oid) => catalog.relation_by_oid(*oid),
+        _ => crate::reg::relation_from_text(v.as_str().unwrap_or(""), catalog)?,
+    };
+    match rel {
+        Some(pgmem_catalog::Relation::Sequence(s)) => Ok(s),
+        Some(other) => Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{}\" is not a sequence", other.name()))),
+        None => Err(SqlError::undefined_table(&parse_qualified(v.as_str().unwrap_or("")))),
+    }
 }
 
 /// Applies identifier folding to a possibly-qualified, possibly-quoted name in a string.

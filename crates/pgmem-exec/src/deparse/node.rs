@@ -351,6 +351,9 @@ pub(super) struct Level {
 pub(super) struct Analyzer<'a> {
     pub catalog: &'a Catalog,
     pub levels: Vec<Level>,
+    /// The search path names print against (the session's), when the analysis itself runs
+    /// under a stored one (a view's creation path): relations not visible print qualified.
+    pub display_path: Option<Vec<String>>,
 }
 
 impl Analyzer<'_> {

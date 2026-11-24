@@ -5,7 +5,7 @@ use crate::bind::{self, Binder, Ctx, Level, Scope};
 use crate::cast::cast_value_ctx;
 use crate::eval::{EvalCtx, StatementState, eval, eval_pred};
 use crate::session::{Notice, QueryResult, SessionEnv};
-use pgmem_catalog::{Catalog, ConstraintKind, Relation, TableDef};
+use pgmem_catalog::{Catalog, ConstraintKind, QualName, Relation, TableDef};
 use pgmem_ir::{self as ir, ObjectType, Statement};
 use pgmem_storage::Txn;
 use pgmem_types::{GroupKey, SqlError, SqlResult, Value, code, text};
@@ -32,8 +32,7 @@ fn comment_target(
     use crate::catalog_views::{CLASS_CLASS_OID, NAMESPACE_CLASS_OID};
     use ir::CommentTarget as T;
     let relation = |n: &ir::ObjectName| -> SqlResult<Relation> {
-        let base = catalog.normalize(n)?;
-        catalog.relation(base).ok_or_else(|| SqlError::undefined_table(base))
+        catalog.lookup_relation(n)?.ok_or_else(|| SqlError::undefined_table(&n.to_string()))
     };
     let not_a = |r: &Relation, what: &str| SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{}\" is not {what}", r.name()));
     Ok(Some(match target {
@@ -75,18 +74,13 @@ fn comment_target(
             (CLASS_CLASS_OID, r.oid(), i32::try_from(attnum).unwrap_or(i32::MAX))
         }
         T::Schema => {
-            // pgmem models only the builtin schemas; comments on others (which CREATE SCHEMA
-            // accepted) are accepted without effect.
-            let schema = crate::funcs::string::quote_ident(name.base());
-            match crate::reg::to_reg(Value::Text(schema), pgmem_types::RegKind::Namespace, catalog) {
-                Ok(Value::Reg(_, o, _)) => (NAMESPACE_CLASS_OID, o, 0),
-                _ => return Ok(None),
-            }
+            let oid = catalog.namespace_oid(name.base()).ok_or_else(|| pgmem_catalog::undefined_schema(name.base()))?;
+            (NAMESPACE_CLASS_OID, oid, 0)
         }
         T::Type | T::Domain => {
-            let base = catalog.normalize(name)?;
+            let base = name.base();
             let ty = catalog
-                .type_by_name(base)
+                .lookup_type(name)?
                 .ok_or_else(|| SqlError::new(code::UNDEFINED_OBJECT, format!("type \"{base}\" does not exist")))?;
             if *target == T::Domain && !matches!(ty.kind, pgmem_catalog::TypeDefKind::Domain { .. }) {
                 return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{base}\" is not a domain")));
@@ -109,7 +103,7 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
         }
         Statement::CreateTable(ct) => {
             let Some(CreateTablePlan { mut table, sequences }) = bind::bind_create_table(binder, ct)? else {
-                let name = binder.catalog.normalize(&ct.name)?;
+                let name = ct.name.base();
                 return Ok(notice("CREATE TABLE", format!("relation \"{name}\" already exists, skipping")));
             };
             let cat = txn.catalog_mut();
@@ -132,7 +126,7 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
         }
         Statement::CreateSequence(cs) => {
             let Some(mut seq) = bind::bind_create_sequence(binder, cs)? else {
-                let name = binder.catalog.normalize(&cs.name)?;
+                let name = cs.name.base();
                 return Ok(notice("CREATE SEQUENCE", format!("relation \"{name}\" already exists, skipping")));
             };
             let cat = txn.catalog_mut();
@@ -147,7 +141,7 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
                     format!("relation \"{}\" already exists, skipping", ci.name.clone().unwrap_or_default()),
                 ));
             };
-            let table = txn.catalog().table(&tname).cloned().ok_or_else(|| SqlError::undefined_table(&tname))?;
+            let table = txn.catalog().table_q(&tname).cloned().ok_or_else(|| SqlError::undefined_table(&tname.name))?;
             let mut def = (*table).clone();
             idx.oid = txn.catalog_mut().alloc_oid();
             let unique = idx.unique;
@@ -160,17 +154,16 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
             Ok(tag("CREATE INDEX"))
         }
         Statement::AlterTable(at) => {
-            let name = binder.catalog.normalize(&at.name)?.to_owned();
-            if txn.catalog().table(&name).is_none() {
-                if at.if_exists {
-                    return Ok(notice("ALTER TABLE", format!("relation \"{name}\" does not exist, skipping")));
+            let name = at.name.base().to_owned();
+            let current = match txn.catalog().lookup_relation(&at.name)? {
+                Some(Relation::Table(t)) => t.qualified(),
+                Some(r) => {
+                    return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{name}\" is not a table (it is a {})", r.kind_name())));
                 }
-                return Err(match txn.catalog().relation(&name) {
-                    Some(r) => SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{name}\" is not a table (it is a {})", r.kind_name())),
-                    None => SqlError::undefined_table(&name),
-                });
-            }
-            let mut current = name;
+                None if at.if_exists => return Ok(notice("ALTER TABLE", format!("relation \"{name}\" does not exist, skipping"))),
+                None => return Err(SqlError::undefined_table(&at.name.to_string())),
+            };
+            let mut current = current;
             for action in &at.actions {
                 current = alter_table_action(txn, &current, action, env, state)?;
             }
@@ -185,6 +178,7 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
         }
         Statement::Drop(d) => drop(d, txn, binder),
         Statement::Truncate(t) => truncate(t, txn, binder),
+        Statement::SetSchema { object_type, name, if_exists, schema } => set_schema(*object_type, name, *if_exists, schema, txn),
         other => Err(SqlError::feature_not_supported(format!("statement {other:?} is not supported by pgmem"))),
     }
 }
@@ -192,17 +186,17 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
 /// Applies one ALTER TABLE action to table `current`; returns the table's name afterwards.
 pub(crate) fn alter_table_action(
     txn: &mut Txn,
-    current: &str,
+    current: &QualName,
     action: &ir::AlterTableAction,
     env: &SessionEnv,
     state: &StatementState,
-) -> SqlResult<String> {
-    let table = txn.catalog().table(current).cloned().ok_or_else(|| SqlError::undefined_table(current))?;
+) -> SqlResult<QualName> {
+    let table = txn.catalog().table_q(current).cloned().ok_or_else(|| SqlError::undefined_table(&current.name))?;
     let has_rows = !txn.scan(table.oid).is_empty();
     let snapshot = txn.catalog().clone();
     let b = Binder::new(&snapshot, &[]);
     match bind::bind_alter_table(&b, &table, action, has_rows)? {
-        AlterOutcome::Nothing => Ok(current.to_owned()),
+        AlterOutcome::Nothing => Ok(current.clone()),
         AlterOutcome::Replace { def, rename_from, sequences, validate } => {
             let mut def = *def;
             assign_oids(txn.catalog_mut(), &mut def);
@@ -216,14 +210,13 @@ pub(crate) fn alter_table_action(
             }
             if let ir::AlterTableAction::RenameColumn { old, new } = action {
                 rename_column_refs(&mut def, old, new);
-                rename_fk_column_refs(txn.catalog_mut(), &def.name, old, new);
             }
             apply_validation(txn, &table, &def, validate, &snapshot, env, state)?;
             if let Some(old) = &rename_from {
                 rename_table_refs(txn.catalog_mut(), old, &def.name);
             }
-            let new_name = def.name.clone();
-            txn.catalog_mut().replace_table(rename_from.as_deref().unwrap_or(current), def);
+            let new_name = def.qualified();
+            txn.catalog_mut().replace_table(rename_from.as_ref().unwrap_or(current), def);
             Ok(new_name)
         }
     }
@@ -264,7 +257,7 @@ pub(crate) fn padded_rows(txn: &Txn, def: &TableDef) -> Vec<(u64, Vec<Value>)> {
 /// `CREATE UNIQUE INDEX` / `ADD PRIMARY KEY` over existing rows.
 fn validate_unique(txn: &Txn, def: &TableDef, index: &str, env: &SessionEnv, state: &StatementState) -> SqlResult<()> {
     let mut catalog = txn.catalog().clone();
-    catalog.replace_table(&def.name, def.clone());
+    catalog.replace_table(&def.qualified(), def.clone());
     let b = Binder::new(&catalog, &[]);
     let rules = b.bind_row_rules(&Arc::new(def.clone()))?;
     let Some(u) = rules.uniques.iter().find(|u| u.name == index) else { return Ok(()) };
@@ -323,7 +316,7 @@ fn apply_validation(
             match &con.kind {
                 ConstraintKind::Check { expr } => {
                     let mut catalog = snapshot.clone();
-                    catalog.replace_table(&def.name, def.clone());
+                    catalog.replace_table(&def.qualified(), def.clone());
                     let b = Binder::new(&catalog, &[]);
                     let level = Level::new(bind::dml::physical_scope(def, &def.name));
                     let pred = b.bind_predicate(expr, "CHECK", &Ctx::new(&level))?;
@@ -352,11 +345,12 @@ fn apply_validation(
                     validate_unique(txn, def, &name, env, state)
                 }
                 ConstraintKind::ForeignKey { columns, ref_table, ref_columns, .. } => {
-                    let parent = if ref_table == &def.name {
+                    let parent = if *ref_table == def.qualified() {
                         Arc::new(def.clone())
                     } else {
-                        txn.catalog().table(ref_table).cloned().ok_or_else(|| SqlError::undefined_table(ref_table))?
+                        txn.catalog().table_q(ref_table).cloned().ok_or_else(|| SqlError::undefined_table(&ref_table.name))?
                     };
+                    let ref_table = &ref_table.name;
                     let parents = padded_rows(txn, &parent);
                     for (_, row) in padded_rows(txn, def) {
                         let key: Vec<Value> = columns.iter().map(|c| row[*c].clone()).collect();
@@ -387,7 +381,7 @@ fn apply_validation(
             let column = def.columns[slot].clone();
             // Compute new values with an immutable view, then rewrite.
             let mut catalog = snapshot.clone();
-            catalog.replace_table(&old.name, old.clone());
+            catalog.replace_table(&old.qualified(), old.clone());
             let b = Binder::new(&catalog, &[]);
             let new_slot = slot >= old.columns.len();
             let (using_expr, default_expr, generated_expr) = {
@@ -396,7 +390,7 @@ fn apply_validation(
                 let u = using.as_ref().map(|u| b.bind_expr(u, &ctx)).transpose()?;
                 let rules_def = Arc::new(def.clone());
                 let mut cat2 = snapshot.clone();
-                cat2.replace_table(&def.name, def.clone());
+                cat2.replace_table(&def.qualified(), def.clone());
                 let b2 = Binder::new(&cat2, &[]);
                 let rules = b2.bind_row_rules(&rules_def)?;
                 (u, rules.defaults[slot].clone(), rules.generated[slot].clone())
@@ -555,12 +549,9 @@ fn rename_column_refs(def: &mut TableDef, old: &str, new: &str) {
     }
 }
 
-fn rename_fk_column_refs(_cat: &mut Catalog, _table: &str, _old: &str, _new: &str) {
-    // Foreign keys reference columns by position, so nothing to do.
-}
-
 /// Updates references to a renamed table in other tables' foreign keys and sequence owners.
-fn rename_table_refs(cat: &mut Catalog, old: &str, new: &str) {
+fn rename_table_refs(cat: &mut Catalog, old: &QualName, new: &str) {
+    let renamed = QualName::new(&old.schema, new);
     let tables: Vec<TableDef> = cat.tables().map(|t| (**t).clone()).collect();
     for mut t in tables {
         let mut changed = false;
@@ -568,23 +559,26 @@ fn rename_table_refs(cat: &mut Catalog, old: &str, new: &str) {
             if let ConstraintKind::ForeignKey { ref_table, .. } = &mut con.kind
                 && ref_table == old
             {
-                *ref_table = new.to_owned();
+                *ref_table = renamed.clone();
                 changed = true;
             }
         }
         if changed {
-            let name = t.name.clone();
-            cat.replace_table(&name, t);
+            let key = t.qualified();
+            cat.replace_table(&key, t);
         }
     }
-    let seqs: Vec<pgmem_catalog::SequenceDef> =
-        cat.sequences().filter(|s| s.owned_by.as_ref().is_some_and(|(t, _)| t == old)).map(|s| (**s).clone()).collect();
+    let seqs: Vec<pgmem_catalog::SequenceDef> = cat
+        .sequences()
+        .filter(|s| s.schema == old.schema && s.owned_by.as_ref().is_some_and(|(t, _)| *t == old.name))
+        .map(|s| (**s).clone())
+        .collect();
     for mut s in seqs {
-        cat.drop_sequence(&s.name);
+        let key = QualName::new(&s.schema, &s.name);
         if let Some((t, _)) = &mut s.owned_by {
             *t = new.to_owned();
         }
-        let _ = cat.create_sequence(s);
+        cat.replace_sequence(&key, s);
     }
 }
 
@@ -600,50 +594,45 @@ fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> 
         ObjectType::View => "VIEW",
         ObjectType::Index => "INDEX",
         ObjectType::Sequence => "SEQUENCE",
-        ObjectType::Schema => return Ok(tag("DROP SCHEMA")),
+        ObjectType::Schema => return drop_schemas(d, txn),
         ObjectType::Extension => return Ok(tag("DROP EXTENSION")),
         ObjectType::Type | ObjectType::Domain => return Err(SqlError::internal("DROP TYPE is handled by typeddl")),
         ObjectType::Function => return Err(SqlError::feature_not_supported("DROP FUNCTION is not supported by pgmem")),
     };
+    let _ = binder;
     let mut notices = Vec::new();
     for name in &d.names {
-        let base = binder.catalog.normalize(name)?.to_owned();
-        let rel = txn.catalog().relation(&base);
+        let base = name.base().to_owned();
+        let rel = match txn.catalog().lookup_relation(name) {
+            Err(e) if d.if_exists && e.code == code::INVALID_SCHEMA_NAME => {
+                notices.push(Notice { severity: "NOTICE", code: "00000", message: format!("{}, skipping", e.message) });
+                continue;
+            }
+            other => other?,
+        };
         let missing = |what: &str| -> SqlResult<()> {
             if d.if_exists { Ok(()) } else { Err(SqlError::new(code::UNDEFINED_TABLE, format!("{what} \"{base}\" does not exist"))) }
         };
         match (d.object_type, rel) {
             (ObjectType::Table, Some(Relation::Table(t))) => {
-                let referencing: Vec<(String, String)> = txn
-                    .catalog()
-                    .tables()
-                    .filter(|o| o.name != t.name)
-                    .flat_map(|o| {
-                        o.constraints.iter().filter_map(|c| match &c.kind {
-                            ConstraintKind::ForeignKey { ref_table, .. } if ref_table == &t.name => Some((o.name.clone(), c.name.clone())),
-                            _ => None,
-                        })
-                    })
-                    .collect();
+                let referencing = referencing_fks(txn.catalog(), &t);
                 if !referencing.is_empty() {
                     if !d.cascade {
                         let (child, con) = &referencing[0];
+                        let child = display_name(txn.catalog(), child);
                         return Err(dependents_error("table", &base, format!("constraint {con} on table {child} depends on table {base}")));
                     }
                     for (child, con) in &referencing {
-                        if let Some(ct) = txn.catalog().table(child).cloned() {
-                            let mut def = (*ct).clone();
-                            def.constraints.retain(|c| &c.name != con);
-                            txn.catalog_mut().replace_table(child, def);
-                            notices.push(Notice {
-                                severity: "NOTICE",
-                                code: "00000",
-                                message: format!("drop cascades to constraint {con} on table {child}"),
-                            });
-                        }
+                        drop_fk(txn, child, con);
+                        let child = display_name(txn.catalog(), child);
+                        notices.push(Notice {
+                            severity: "NOTICE",
+                            code: "00000",
+                            message: format!("drop cascades to constraint {con} on table {child}"),
+                        });
                     }
                 }
-                txn.catalog_mut().drop_table(&base);
+                txn.catalog_mut().drop_table(&t.qualified());
             }
             (ObjectType::Table, Some(other)) => {
                 return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{base}\" is not a table")).with_hint(format!(
@@ -652,23 +641,24 @@ fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> 
                     other.kind_name()
                 )));
             }
-            (ObjectType::View, Some(Relation::View(_))) => {
-                txn.catalog_mut().drop_view(&base);
+            (ObjectType::View, Some(Relation::View(v))) => {
+                txn.catalog_mut().drop_view(&QualName::new(&v.schema, &v.name));
             }
             (ObjectType::View, Some(_)) => return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{base}\" is not a view"))),
-            (ObjectType::Sequence, Some(Relation::Sequence(_))) => {
-                txn.catalog_mut().drop_sequence(&base);
+            (ObjectType::Sequence, Some(Relation::Sequence(s))) => {
+                txn.catalog_mut().drop_sequence(&QualName::new(&s.schema, &s.name));
             }
             (ObjectType::Sequence, Some(_)) => return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{base}\" is not a sequence"))),
             (ObjectType::Index, Some(Relation::Index { table, index })) => {
-                let t = txn.catalog().table(&table).cloned().ok_or_else(|| SqlError::undefined_table(&table))?;
+                let t = txn.catalog().table_q(&table).cloned().ok_or_else(|| SqlError::undefined_table(&table.name))?;
                 if t.has_constraint(&index.name) {
+                    let tname = display_name(txn.catalog(), &table);
                     return Err(dependents_error(
                         "index",
                         &base,
-                        format!("constraint {} on table {table} requires index {}", index.name, index.name),
+                        format!("constraint {} on table {tname} requires index {}", index.name, index.name),
                     )
-                    .with_hint(format!("You can drop constraint {} on table {table} instead.", index.name)));
+                    .with_hint(format!("You can drop constraint {} on table {tname} instead.", index.name)));
                 }
                 let mut def = (*t).clone();
                 def.indexes.retain(|i| i.name != index.name);
@@ -692,25 +682,22 @@ fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> 
 }
 
 fn truncate(t: &ir::Truncate, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> {
-    let mut names = Vec::new();
+    let _ = binder;
+    let mut names: Vec<QualName> = Vec::new();
     for n in &t.tables {
-        let base = binder.catalog.normalize(n)?.to_owned();
-        if txn.catalog().table(&base).is_none() {
-            return Err(SqlError::undefined_table(&base));
-        }
-        names.push(base);
+        names.push(txn.catalog().lookup_table(n)?.qualified());
     }
     // Tables referencing a truncated table must be truncated too (CASCADE adds them).
     let mut i = 0;
     while i < names.len() {
         let target = names[i].clone();
-        let referencing: Vec<String> = txn
+        let referencing: Vec<QualName> = txn
             .catalog()
             .tables()
             .filter(|o| {
-                o.constraints.iter().any(|c| matches!(&c.kind, ConstraintKind::ForeignKey { ref_table, .. } if ref_table == &target))
+                o.constraints.iter().any(|c| matches!(&c.kind, ConstraintKind::ForeignKey { ref_table, .. } if *ref_table == target))
             })
-            .map(|o| o.name.clone())
+            .map(|o| o.qualified())
             .collect();
         for r in referencing {
             if names.contains(&r) {
@@ -718,29 +705,304 @@ fn truncate(t: &ir::Truncate, txn: &mut Txn, binder: &Binder) -> SqlResult<Query
             }
             if !t.cascade {
                 return Err(SqlError::feature_not_supported("cannot truncate a table referenced in a foreign key constraint")
-                    .with_detail(format!("Table \"{r}\" references \"{target}\"."))
-                    .with_hint(format!("Truncate table \"{r}\" at the same time, or use TRUNCATE ... CASCADE.")));
+                    .with_detail(format!("Table \"{}\" references \"{}\".", r.name, target.name))
+                    .with_hint(format!("Truncate table \"{}\" at the same time, or use TRUNCATE ... CASCADE.", r.name)));
             }
             names.push(r);
         }
         i += 1;
     }
     for name in &names {
-        let def = txn.catalog().table(name).cloned().ok_or_else(|| SqlError::undefined_table(name))?;
+        let def = txn.catalog().table_q(name).cloned().ok_or_else(|| SqlError::undefined_table(&name.name))?;
         txn.truncate(def.oid);
         if t.restart_identity {
-            let seqs: Vec<pgmem_catalog::SequenceDef> = txn
-                .catalog()
-                .sequences()
-                .filter(|s| s.owned_by.as_ref().is_some_and(|(tb, _)| tb == name))
-                .map(|s| (**s).clone())
-                .collect();
+            let seqs: Vec<pgmem_catalog::SequenceDef> = txn.catalog().owned_sequences(&def).map(|s| (**s).clone()).collect();
             for s in seqs {
                 txn.reset_sequence(&s);
             }
         }
     }
     Ok(tag("TRUNCATE TABLE"))
+}
+
+/// How an object name prints in messages: unqualified when visible on the search path.
+pub(crate) fn display_name(cat: &Catalog, q: &QualName) -> String {
+    if cat.relation_visible(&q.schema, &q.name) { q.name.clone() } else { q.to_string() }
+}
+
+/// Foreign keys in other tables that reference `t`: (table, constraint name).
+fn referencing_fks(cat: &Catalog, t: &TableDef) -> Vec<(QualName, String)> {
+    let target = t.qualified();
+    cat.tables()
+        .filter(|o| o.qualified() != target)
+        .flat_map(|o| {
+            o.constraints.iter().filter_map(|c| match &c.kind {
+                ConstraintKind::ForeignKey { ref_table, .. } if *ref_table == target => Some((o.qualified(), c.name.clone())),
+                _ => None,
+            })
+        })
+        .collect()
+}
+
+fn drop_fk(txn: &mut Txn, child: &QualName, con: &str) {
+    if let Some(ct) = txn.catalog().table_q(child).cloned() {
+        let mut def = (*ct).clone();
+        def.constraints.retain(|c| c.name != con);
+        txn.catalog_mut().replace_table(child, def);
+    }
+}
+
+pub(crate) fn create_schema(cs: &ir::CreateSchema, txn: &mut Txn, user: &str) -> SqlResult<QueryResult> {
+    let name = match (&cs.name, &cs.authorization) {
+        (Some(n), _) => n.clone(),
+        (None, Some(a)) => a.clone(),
+        (None, None) => return Err(SqlError::syntax("syntax error at or near \"SCHEMA\"")),
+    };
+    if name.starts_with("pg_") {
+        return Err(SqlError::new(code::RESERVED_NAME, format!("unacceptable schema name \"{name}\""))
+            .with_detail("The prefix \"pg_\" is reserved for system schemas."));
+    }
+    if txn.catalog().schema_exists(&name) {
+        if cs.if_not_exists {
+            return Ok(notice("CREATE SCHEMA", format!("schema \"{name}\" already exists, skipping")));
+        }
+        return Err(SqlError::new(code::DUPLICATE_SCHEMA, format!("schema \"{name}\" already exists")));
+    }
+    let cat = txn.catalog_mut();
+    let oid = cat.alloc_oid();
+    let owner = cs.authorization.clone().unwrap_or_else(|| user.to_owned());
+    cat.create_schema(pgmem_catalog::SchemaDef { oid, name, owner })?;
+    Ok(tag("CREATE SCHEMA"))
+}
+
+/// The objects in a schema, as `DROP SCHEMA ... CASCADE` reports them ("table app.items").
+fn schema_members(cat: &Catalog, schema: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for t in cat.tables().filter(|t| t.schema == schema) {
+        out.push(format!("table {schema}.{}", t.name));
+    }
+    for v in cat.views().filter(|v| v.schema == schema) {
+        out.push(format!("view {schema}.{}", v.name));
+    }
+    for s in cat.sequences().filter(|s| s.schema == schema && s.owned_by.is_none()) {
+        out.push(format!("sequence {schema}.{}", s.name));
+    }
+    for t in cat.types().filter(|t| t.schema == schema) {
+        out.push(format!("{} {schema}.{}", t.kind_name(), t.name));
+    }
+    out
+}
+
+fn drop_schemas(d: &ir::Drop, txn: &mut Txn) -> SqlResult<QueryResult> {
+    let mut notices = Vec::new();
+    for name in &d.names {
+        let schema = name.base().to_owned();
+        if pgmem_catalog::is_system_schema(&schema) || schema == "pg_toast" {
+            return Err(SqlError::new(
+                code::DEPENDENT_OBJECTS_STILL_EXIST,
+                format!("cannot drop schema {schema} because it is required by the database system"),
+            ));
+        }
+        if txn.catalog().schema(&schema).is_none() {
+            if d.if_exists {
+                notices.push(Notice {
+                    severity: "NOTICE",
+                    code: "00000",
+                    message: format!("schema \"{schema}\" does not exist, skipping"),
+                });
+                continue;
+            }
+            return Err(pgmem_catalog::undefined_schema(&schema));
+        }
+        let members = schema_members(txn.catalog(), &schema);
+        if !members.is_empty() {
+            if !d.cascade {
+                let detail: Vec<String> = members.iter().map(|m| format!("{m} depends on schema {schema}")).collect();
+                return Err(dependents_error("schema", &schema, detail.join("\n")));
+            }
+            drop_schema_contents(txn, &schema);
+            notices.push(cascade_notice(&members));
+        }
+        txn.catalog_mut().drop_schema(&schema);
+    }
+    Ok(QueryResult { tag: "DROP SCHEMA".into(), notices, ..Default::default() })
+}
+
+/// Postgres' "drop cascades to ..." notice: one line, or a count with the list as detail.
+fn cascade_notice(members: &[String]) -> Notice {
+    let message = if members.len() == 1 {
+        format!("drop cascades to {}", members[0])
+    } else {
+        let lines: Vec<String> = members.iter().map(|m| format!("drop cascades to {m}")).collect();
+        format!("drop cascades to {} other objects\n{}", members.len(), lines.join("\n"))
+    };
+    Notice { severity: "NOTICE", code: "00000", message }
+}
+
+/// Drops every object in a schema (foreign keys elsewhere that reference its tables go too).
+pub(crate) fn drop_schema_contents(txn: &mut Txn, schema: &str) {
+    let tables: Vec<Arc<TableDef>> = txn.catalog().tables().filter(|t| t.schema == schema).cloned().collect();
+    for t in &tables {
+        for (child, con) in referencing_fks(txn.catalog(), t) {
+            if child.schema != schema {
+                drop_fk(txn, &child, &con);
+            }
+        }
+    }
+    let cat = txn.catalog_mut();
+    for t in &tables {
+        cat.drop_comments(t.oid);
+        cat.drop_table(&t.qualified());
+    }
+    let views: Vec<QualName> = cat.views().filter(|v| v.schema == schema).map(|v| QualName::new(&v.schema, &v.name)).collect();
+    for v in views {
+        cat.drop_view(&v);
+    }
+    let seqs: Vec<QualName> = cat.sequences().filter(|s| s.schema == schema).map(|s| QualName::new(&s.schema, &s.name)).collect();
+    for s in seqs {
+        cat.drop_sequence(&s);
+    }
+    let types: Vec<QualName> = cat.types().filter(|t| t.schema == schema).map(|t| QualName::new(&t.schema, &t.name)).collect();
+    for t in types {
+        cat.drop_type(&t);
+    }
+}
+
+pub(crate) fn alter_schema(name: &str, rename_to: &str, txn: &mut Txn) -> SqlResult<QueryResult> {
+    if txn.catalog().schema(name).is_none() {
+        return Err(pgmem_catalog::undefined_schema(name));
+    }
+    if rename_to.starts_with("pg_") {
+        return Err(SqlError::new(code::RESERVED_NAME, format!("unacceptable schema name \"{rename_to}\""))
+            .with_detail("The prefix \"pg_\" is reserved for system schemas."));
+    }
+    txn.catalog_mut().rename_schema(name, rename_to)?;
+    // Stored references (serial defaults) name the schema.
+    let tables: Vec<TableDef> = txn.catalog().tables().filter(|t| t.schema == rename_to).map(|t| (**t).clone()).collect();
+    for mut t in tables {
+        for c in &mut t.columns {
+            if let Some(ir::Expr::Function(f)) = &mut c.default
+                && f.name.base() == "nextval"
+                && let Some(ir::Expr::Literal(ir::Literal::String(s))) = f.args.first_mut()
+                && let Ok(parts) = crate::reg::parse_qualified(s)
+                && parts.len() == 2
+                && parts[0] == name
+            {
+                *s = format!("{}.{}", crate::funcs::string::quote_ident(rename_to), crate::funcs::string::quote_ident(&parts[1]));
+            }
+        }
+        let key = t.qualified();
+        txn.catalog_mut().replace_table(&key, t);
+    }
+    Ok(tag("ALTER SCHEMA"))
+}
+
+/// `ALTER ... SET SCHEMA`: moves a relation or type (a table takes its indexes, row type and
+/// owned sequences along, as `AlterTableNamespace` does).
+fn set_schema(kind: ObjectType, name: &ir::ObjectName, if_exists: bool, schema: &str, txn: &mut Txn) -> SqlResult<QueryResult> {
+    let tag_name = match kind {
+        ObjectType::Table => "ALTER TABLE",
+        ObjectType::View => "ALTER VIEW",
+        ObjectType::Sequence => "ALTER SEQUENCE",
+        ObjectType::Domain => "ALTER DOMAIN",
+        _ => "ALTER TYPE",
+    };
+    let target = txn.catalog().target_schema(schema, name.base())?;
+    if matches!(kind, ObjectType::Type | ObjectType::Domain) {
+        let def = txn
+            .catalog()
+            .lookup_type(name)?
+            .ok_or_else(|| SqlError::new(code::UNDEFINED_OBJECT, format!("type \"{}\" does not exist", name.base())))?;
+        if def.schema == target {
+            return Ok(tag(tag_name));
+        }
+        if txn.catalog().type_by_name(&target, &def.name).is_some() {
+            return Err(SqlError::new(code::DUPLICATE_OBJECT, format!("type \"{}\" already exists in schema \"{target}\"", def.name)));
+        }
+        let mut moved = (*def).clone();
+        moved.schema = target;
+        txn.catalog_mut().replace_type(&QualName::new(&def.schema, &def.name), moved);
+        return Ok(tag(tag_name));
+    }
+    let Some(rel) = txn.catalog().lookup_relation(name)? else {
+        if if_exists {
+            return Ok(notice(tag_name, format!("relation \"{}\" does not exist, skipping", name.base())));
+        }
+        return Err(SqlError::undefined_table(&name.to_string()));
+    };
+    let old = QualName::new(rel.schema(), rel.name());
+    if old.schema == target {
+        return Ok(tag(tag_name));
+    }
+    if txn.catalog().relation(&target, &old.name).is_some() {
+        return Err(SqlError::new(code::DUPLICATE_TABLE, format!("relation \"{}\" already exists in schema \"{target}\"", old.name)));
+    }
+    match rel {
+        Relation::Table(t) => {
+            let owned: Vec<pgmem_catalog::SequenceDef> = txn.catalog().owned_sequences(&t).map(|s| (**s).clone()).collect();
+            let mut def = (*t).clone();
+            def.schema = target.clone();
+            for seq in owned {
+                let key = QualName::new(&seq.schema, &seq.name);
+                let mut moved = seq.clone();
+                moved.schema = target.clone();
+                txn.catalog_mut().replace_sequence(&key, moved);
+                retarget_nextval(&mut def, &key, &target);
+            }
+            txn.catalog_mut().replace_table(&old, def);
+            // Foreign keys elsewhere follow the table.
+            let renamed = QualName::new(&target, &old.name);
+            let others: Vec<TableDef> = txn.catalog().tables().map(|t| (**t).clone()).collect();
+            for mut o in others {
+                let mut changed = false;
+                for con in &mut o.constraints {
+                    if let ConstraintKind::ForeignKey { ref_table, .. } = &mut con.kind
+                        && *ref_table == old
+                    {
+                        *ref_table = renamed.clone();
+                        changed = true;
+                    }
+                }
+                if changed {
+                    let key = o.qualified();
+                    txn.catalog_mut().replace_table(&key, o);
+                }
+            }
+        }
+        Relation::View(v) => {
+            let mut def = (*v).clone();
+            def.schema = target;
+            txn.catalog_mut().drop_view(&old);
+            txn.catalog_mut().create_view(def, false)?;
+        }
+        Relation::Sequence(s) => {
+            if s.owned_by.is_some() {
+                return Err(SqlError::feature_not_supported("cannot move an owned sequence into another schema"));
+            }
+            let mut def = (*s).clone();
+            def.schema = target;
+            txn.catalog_mut().replace_sequence(&old, def);
+        }
+        Relation::Index { .. } => {
+            return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{}\" is not a table", old.name)));
+        }
+    }
+    Ok(tag(tag_name))
+}
+
+/// Points `nextval('schema.seq')` defaults at a sequence's new schema.
+fn retarget_nextval(def: &mut TableDef, seq: &QualName, schema: &str) {
+    for c in &mut def.columns {
+        if let Some(ir::Expr::Function(f)) = &mut c.default
+            && f.name.base() == "nextval"
+            && let Some(ir::Expr::Literal(ir::Literal::String(s))) = f.args.first_mut()
+            && let Ok(parts) = crate::reg::parse_qualified(s)
+            && parts.last() == Some(&seq.name)
+            && (parts.len() == 1 || parts[0] == seq.schema)
+        {
+            *s = format!("{}.{}", crate::funcs::string::quote_ident(schema), crate::funcs::string::quote_ident(&seq.name));
+        }
+    }
 }
 
 #[allow(dead_code)]

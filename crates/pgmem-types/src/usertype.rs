@@ -50,6 +50,8 @@ pub struct UserType {
     /// The OID of `_name`, the type's array type.
     pub array_oid: u32,
     pub name: String,
+    /// The schema the type lives in.
+    pub schema: String,
     pub kind: UserKind,
 }
 
@@ -119,8 +121,43 @@ pub fn lookup(oid: u32) -> Option<Arc<UserType>> {
 
 /// A user type's name as `format_type` prints it: quoted when it is not a plain lower-case
 /// identifier, `???` when the type is not visible.
+/// `format_type`'s name for a user type: schema-qualified when the search path doesn't find
+/// it by name (`TypeIsVisible`).
 pub fn type_name(oid: u32) -> String {
-    lookup(oid).map_or_else(|| "???".to_owned(), |t| quote_ident(&t.name))
+    let Some(t) = lookup(oid) else { return "???".to_owned() };
+    if type_visible(&t) { quote_ident(&t.name) } else { format!("{}.{}", quote_ident(&t.schema), quote_ident(&t.name)) }
+}
+
+fn type_visible(t: &UserType) -> bool {
+    let path = crate::context::search_path();
+    let mut schemas: Vec<String> = Vec::new();
+    if let Some(temp) = &path.temp_schema {
+        schemas.push(temp.clone());
+    }
+    if !path.entries.iter().any(|e| e == "pg_catalog") {
+        schemas.push("pg_catalog".into());
+    }
+    for e in &path.entries {
+        schemas.push(match e.as_str() {
+            "$user" => path.user.clone(),
+            "pg_temp" => continue,
+            other => other.to_owned(),
+        });
+    }
+    crate::context::with_types(|reg| {
+        for s in &schemas {
+            if s == "pg_catalog" {
+                if crate::Type::from_sql_name(&t.name).is_some() {
+                    return false;
+                }
+                continue;
+            }
+            if let Some(found) = reg.types.values().find(|x| x.schema == *s && x.name == t.name) {
+                return found.oid == t.oid;
+            }
+        }
+        false
+    })
 }
 
 /// A user type's `pg_type.typname`.
@@ -152,6 +189,11 @@ pub fn type_for_oid(oid: u32) -> Option<Type> {
 }
 
 /// A domain's base type and typmod, following domains over domains.
+/// The schema a user type (or table row type) lives in.
+pub fn schema_of(oid: u32) -> Option<String> {
+    lookup(oid).map(|t| t.schema.clone())
+}
+
 pub fn domain_base(oid: u32) -> Option<(Type, i32)> {
     let t = lookup(oid)?;
     match &t.kind {
@@ -311,6 +353,7 @@ mod tests {
             oid: 20000,
             array_oid: 20001,
             name: "mood".into(),
+            schema: "public".into(),
             kind: UserKind::Enum {
                 labels: vec![
                     EnumLabel { oid: 20002, sort: 1.0, label: "sad".into() },
@@ -323,6 +366,7 @@ mod tests {
             oid: 20010,
             array_oid: 20011,
             name: "address".into(),
+            schema: "public".into(),
             kind: UserKind::Composite {
                 fields: vec![
                     Field { name: "street".into(), ty: Type::Text, typmod: -1 },

@@ -16,7 +16,7 @@ fn catalog(ddl: &str) -> Arc<Catalog> {
 }
 
 fn table<'a>(cat: &'a Catalog, name: &str) -> &'a TableDef {
-    cat.table(name).unwrap_or_else(|| panic!("no table {name}"))
+    cat.table("public", name).unwrap_or_else(|| panic!("no table {name}"))
 }
 
 /// Compares every case and reports all mismatches at once.
@@ -51,7 +51,7 @@ fn check_constraints(ddl: &str, tname: &str, cases: &[(&str, &str)]) {
 
 fn check_views(ddl: &str, cases: &[(&str, &str)]) {
     let cat = catalog(ddl);
-    check_all("view", cases, |name| Some(deparse_view(&cat, cat.view(name)?).expect("deparse")));
+    check_all("view", cases, |name| Some(deparse_view(&cat, cat.view("public", name)?).expect("deparse")));
 }
 
 fn check_indexes(ddl: &str, tname: &str, cases: &[(&str, &str)]) {

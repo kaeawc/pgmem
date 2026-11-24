@@ -5,7 +5,7 @@ use crate::bind::{Binder, Clause, Ctx, Level, Scope, resolve_type_name};
 use crate::ddl::{alter_table_action, padded_rows};
 use crate::eval::{EvalCtx, StatementState, eval};
 use crate::session::{Notice, QueryResult, SessionEnv};
-use pgmem_catalog::{Catalog, DomainCheck, Oid, TypeDef, TypeDefKind, type_mentions};
+use pgmem_catalog::{Catalog, DomainCheck, Oid, QualName, Relation, TypeDef, TypeDefKind, type_mentions};
 use pgmem_ir as ir;
 use pgmem_storage::Txn;
 use pgmem_types::usertype::{EnumLabel, Field};
@@ -27,7 +27,8 @@ fn not_found(name: &str) -> SqlError {
 const MAX_LABEL: usize = 63;
 
 pub fn create_type(ct: &ir::CreateType, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> {
-    let name = binder.catalog.normalize(&ct.name)?.to_owned();
+    let schema = binder.catalog.creation_schema(&ct.name)?;
+    let name = ct.name.base().to_owned();
     let cat = txn.catalog_mut();
     let kind = match &ct.kind {
         ir::CreateTypeKind::Enum(labels) => {
@@ -74,12 +75,13 @@ pub fn create_type(ct: &ir::CreateType, txn: &mut Txn, binder: &Binder) -> SqlRe
         (TypeDefKind::Composite { fields, .. }, _) => TypeDefKind::Composite { fields, relid: cat.alloc_oid() },
         (other, _) => other,
     };
-    cat.create_type(TypeDef { oid, array_oid, name, kind })?;
+    cat.create_type(TypeDef { oid, array_oid, schema, name, kind })?;
     Ok(tag("CREATE TYPE"))
 }
 
 pub fn create_domain(cd: &ir::CreateDomain, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> {
-    let name = binder.catalog.normalize(&cd.name)?.to_owned();
+    let schema = binder.catalog.creation_schema(&cd.name)?;
+    let name = cd.name.base().to_owned();
     let (base, typmod) = resolve_type_name(binder.catalog, &cd.ty)?;
     if matches!(base, Type::Record | Type::Unknown | Type::Void) {
         return Err(SqlError::datatype_mismatch(format!("\"{}\" is not a valid base type for a domain", base.name())));
@@ -108,7 +110,7 @@ pub fn create_domain(cd: &ir::CreateDomain, txn: &mut Txn, binder: &Binder) -> S
         c.oid = cat.alloc_oid();
     }
     let kind = TypeDefKind::Domain { base, typmod, not_null: cd.not_null, default: cd.default.clone(), checks };
-    cat.create_type(TypeDef { oid, array_oid, name, kind })?;
+    cat.create_type(TypeDef { oid, array_oid, schema, name, kind })?;
     Ok(tag("CREATE DOMAIN"))
 }
 
@@ -133,23 +135,23 @@ fn validate_default(binder: &Binder, d: &ir::Expr, base: &Type, typmod: i32) -> 
 }
 
 fn user_type(cat: &Catalog, name: &ir::ObjectName) -> SqlResult<TypeDef> {
-    let base = cat.normalize(name)?;
-    if let Some(t) = cat.type_by_name(base) {
-        return Ok((**t).clone());
+    let base = name.base();
+    if let Some(t) = cat.lookup_type(name)? {
+        return Ok((*t).clone());
     }
-    if cat.table(base).is_some() {
+    if matches!(cat.lookup_relation(name)?, Some(Relation::Table(_))) {
         return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("{base} is a table's row type")).with_hint("Use ALTER TABLE instead."));
     }
     Err(not_found(base))
 }
 
 /// Columns of tables declared with `oid` itself (not arrays or other types over it).
-fn direct_columns(cat: &Catalog, oid: Oid) -> Vec<(String, usize)> {
+fn direct_columns(cat: &Catalog, oid: Oid) -> Vec<(QualName, usize)> {
     let mut out = Vec::new();
     for t in cat.tables() {
         for (i, c) in t.live_columns() {
             if c.ty == Type::Domain(oid) || c.ty == Type::Enum(oid) || c.ty == Type::Composite(oid) {
-                out.push((t.name.clone(), i));
+                out.push((t.qualified(), i));
             }
         }
     }
@@ -157,11 +159,12 @@ fn direct_columns(cat: &Catalog, oid: Oid) -> Vec<(String, usize)> {
 }
 
 fn rename_type(cat: &mut Catalog, mut def: TypeDef, new: &str) -> SqlResult<()> {
-    if cat.type_by_name(new).is_some() || cat.table(new).is_some() || cat.view(new).is_some() {
+    let schema = def.schema.clone();
+    if cat.type_by_name(&schema, new).is_some() || cat.table(&schema, new).is_some() || cat.view(&schema, new).is_some() {
         return Err(SqlError::new(code::DUPLICATE_OBJECT, format!("type \"{new}\" already exists")));
     }
     let old = std::mem::replace(&mut def.name, new.to_owned());
-    cat.replace_type(&old, def);
+    cat.replace_type(&QualName::new(&schema, &old), def);
     Ok(())
 }
 
@@ -251,7 +254,8 @@ pub fn alter_type(at: &ir::AlterType, txn: &mut Txn, binder: &Binder) -> SqlResu
         }
         ir::AlterTypeAction::NoOp => return Ok(tag("ALTER TYPE")),
     }
-    cat.replace_type(&name, def);
+    let key = QualName::new(&def.schema, &name);
+    cat.replace_type(&key, def);
     Ok(QueryResult { tag: "ALTER TYPE".into(), notices, ..Default::default() })
 }
 
@@ -289,8 +293,8 @@ pub fn alter_domain(
     env: &SessionEnv,
     state: &StatementState,
 ) -> SqlResult<QueryResult> {
-    let base_name = binder.catalog.normalize(&ad.name)?.to_owned();
-    let mut def = binder.catalog.type_by_name(&base_name).map(|t| (**t).clone()).ok_or_else(|| not_found(&base_name))?;
+    let base_name = ad.name.base().to_owned();
+    let mut def = binder.catalog.lookup_type(&ad.name)?.map(|t| (*t).clone()).ok_or_else(|| not_found(&base_name))?;
     let name = def.name.clone();
     let oid = def.oid;
     if !matches!(def.kind, TypeDefKind::Domain { .. }) {
@@ -317,7 +321,12 @@ pub fn alter_domain(
         ir::AlterDomainAction::SetNotNull => {
             for (table, slot, v) in domain_values(txn, oid) {
                 if v.is_null() {
-                    return Err(column_error(code::NOT_NULL_VIOLATION, &table, &txn_column(txn, &table, slot), "contains null values"));
+                    return Err(column_error(
+                        code::NOT_NULL_VIOLATION,
+                        &table.name,
+                        &txn_column(txn, &table, slot),
+                        "contains null values",
+                    ));
                 }
             }
             *not_null = true;
@@ -364,12 +373,13 @@ pub fn alter_domain(
         }
         ir::AlterDomainAction::Rename(_) | ir::AlterDomainAction::NoOp => {}
     }
-    txn.catalog_mut().replace_type(&name, def);
+    let key = QualName::new(&def.schema, &name);
+    txn.catalog_mut().replace_type(&key, def);
     Ok(QueryResult { tag: "ALTER DOMAIN".into(), notices, ..Default::default() })
 }
 
-fn txn_column(txn: &Txn, table: &str, slot: usize) -> String {
-    txn.catalog().table(table).and_then(|t| t.columns.get(slot)).map(|c| c.name.clone()).unwrap_or_default()
+fn txn_column(txn: &Txn, table: &QualName, slot: usize) -> String {
+    txn.catalog().table_q(table).and_then(|t| t.columns.get(slot)).map(|c| c.name.clone()).unwrap_or_default()
 }
 
 fn column_error(code: &'static str, table: &str, column: &str, what: &str) -> SqlError {
@@ -377,10 +387,10 @@ fn column_error(code: &'static str, table: &str, column: &str, what: &str) -> Sq
 }
 
 /// Every stored value of a column declared with domain `oid`: (table, slot, value).
-fn domain_values(txn: &Txn, oid: Oid) -> Vec<(String, usize, Value)> {
+fn domain_values(txn: &Txn, oid: Oid) -> Vec<(QualName, usize, Value)> {
     let mut out = Vec::new();
     for (table, slot) in direct_columns(txn.catalog(), oid) {
-        let Some(def) = txn.catalog().table(&table).cloned() else { continue };
+        let Some(def) = txn.catalog().table_q(&table).cloned() else { continue };
         for (_, row) in padded_rows(txn, &def) {
             out.push((table.clone(), slot, row[slot].clone()));
         }
@@ -394,7 +404,7 @@ fn validate_check(txn: &Txn, oid: Oid, check: &crate::plan::Expr, env: &SessionE
         if matches!(eval(check, std::slice::from_ref(&v), &ctx)?, Value::Bool(false)) {
             return Err(column_error(
                 code::CHECK_VIOLATION,
-                &table,
+                &table.name,
                 &txn_column(txn, &table, slot),
                 "contains values that violate the new constraint",
             ));
@@ -407,19 +417,19 @@ fn validate_check(txn: &Txn, oid: Oid, check: &crate::plan::Expr, env: &SessionE
 #[derive(Clone, Debug)]
 enum Dependent {
     /// A table column; `via_array` when it is declared with the type's array type.
-    Column { table: String, table_oid: Oid, slot: usize, column: String, via_array: bool },
+    Column { table: QualName, table_oid: Oid, slot: usize, column: String, via_array: bool },
     /// A domain over the type.
-    Domain { name: String, oid: Oid },
+    Domain { name: QualName, oid: Oid },
     /// An attribute of a composite type.
-    Attribute { ty: String, oid: Oid, field: String },
+    Attribute { ty: QualName, oid: Oid, field: String },
 }
 
 impl Dependent {
     fn describe(&self) -> String {
         match self {
-            Dependent::Column { table, column, .. } => format!("column {column} of table {table}"),
-            Dependent::Domain { name, .. } => format!("type {name}"),
-            Dependent::Attribute { ty, field, .. } => format!("column {field} of composite type {ty}"),
+            Dependent::Column { table, column, .. } => format!("column {column} of table {}", table.name),
+            Dependent::Domain { name, .. } => format!("type {}", name.name),
+            Dependent::Attribute { ty, field, .. } => format!("column {field} of composite type {}", ty.name),
         }
     }
 
@@ -447,7 +457,7 @@ fn dependents(cat: &Catalog, oid: Oid) -> Vec<Dependent> {
     for t in cat.tables() {
         for (slot, c) in t.live_columns() {
             if let Some(arr) = mentions(&c.ty) {
-                let d = Dependent::Column { table: t.name.clone(), table_oid: t.oid, slot, column: c.name.clone(), via_array: arr };
+                let d = Dependent::Column { table: t.qualified(), table_oid: t.oid, slot, column: c.name.clone(), via_array: arr };
                 if arr { via_array.push(d) } else { direct.push(d) }
             }
         }
@@ -455,11 +465,11 @@ fn dependents(cat: &Catalog, oid: Oid) -> Vec<Dependent> {
     for t in cat.types() {
         match &t.kind {
             TypeDefKind::Domain { base, .. } if mentions(base).is_some() => {
-                direct.push(Dependent::Domain { name: t.name.clone(), oid: t.oid })
+                direct.push(Dependent::Domain { name: QualName::new(&t.schema, &t.name), oid: t.oid })
             }
             TypeDefKind::Composite { fields, .. } => {
                 for f in fields.iter().filter(|f| mentions(&f.ty).is_some()) {
-                    direct.push(Dependent::Attribute { ty: t.name.clone(), oid: t.oid, field: f.name.clone() });
+                    direct.push(Dependent::Attribute { ty: QualName::new(&t.schema, &t.name), oid: t.oid, field: f.name.clone() });
                 }
             }
             _ => {}
@@ -476,9 +486,9 @@ pub fn drop_types(d: &ir::Drop, txn: &mut Txn, env: &SessionEnv, state: &Stateme
     let tag_name = if domain_only { "DROP DOMAIN" } else { "DROP TYPE" };
     let mut notices = Vec::new();
     for name in &d.names {
-        let base = txn.catalog().normalize(name)?.to_owned();
-        let Some(def) = txn.catalog().type_by_name(&base).cloned() else {
-            if !domain_only && txn.catalog().table(&base).is_some() {
+        let base = name.base().to_owned();
+        let Some(def) = txn.catalog().lookup_type(name)? else {
+            if !domain_only && matches!(txn.catalog().lookup_relation(name)?, Some(Relation::Table(_))) {
                 return Err(SqlError::new(
                     code::DEPENDENT_OBJECTS_STILL_EXIST,
                     format!("cannot drop type {base} because table {base} requires it"),
@@ -541,12 +551,12 @@ fn drop_one(
                 alter_table_action(txn, &table, &action, env, state)?;
             }
             Dependent::Domain { name, .. } => {
-                if let Some(inner) = txn.catalog().type_by_name(&name).cloned() {
+                if let Some(inner) = txn.catalog().type_by_name(&name.schema, &name.name).cloned() {
                     drop_one(txn, &inner, true, dropped, env, state)?;
                 }
             }
             Dependent::Attribute { ty, field, .. } => {
-                if let Some(t) = txn.catalog().type_by_name(&ty).cloned() {
+                if let Some(t) = txn.catalog().type_by_name(&ty.schema, &ty.name).cloned() {
                     let mut t = (*t).clone();
                     if let TypeDefKind::Composite { fields, .. } = &mut t.kind {
                         fields.retain(|f| f.name != field);
@@ -556,7 +566,7 @@ fn drop_one(
             }
         }
     }
-    txn.catalog_mut().drop_type(&def.name);
+    txn.catalog_mut().drop_type(&QualName::new(&def.schema, &def.name));
     txn.catalog_mut().drop_comments(def.oid);
     Ok(())
 }

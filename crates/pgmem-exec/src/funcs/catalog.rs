@@ -89,16 +89,24 @@ fn indexdef_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
     let def = index_def(&m, t, idx);
     // Pretty mode leaves out the schema of relations on the search path.
     let pretty = a.get(2).and_then(Value::as_bool) == Some(true);
-    Ok(Value::Text(if pretty { def.replacen(" ON public.", " ON ", 1) } else { def }))
+    // Pretty mode prints the table name alone when it is visible.
+    let pretty_def = || -> Option<String> {
+        let start = def.find(" ON ")? + 4;
+        let end = start + def[start..].find(" USING ")?;
+        let parts = crate::reg::parse_qualified(&def[start..end]).ok()?;
+        let [schema, name] = parts.as_slice() else { return None };
+        m.catalog.relation_visible(schema, name).then(|| format!("{}{}{}", &def[..start], quote_ident(name), &def[end..]))
+    };
+    Ok(Value::Text(if pretty { pretty_def().unwrap_or(def) } else { def }))
 }
 
 fn viewdef_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
     let catalog = ctx.txn.catalog();
     let view = match &a[0] {
-        Value::Text(s) => {
-            let parts = crate::reg::parse_qualified(s)?;
-            parts.last().and_then(|n| catalog.view(n)).cloned()
-        }
+        Value::Text(s) => match crate::reg::relation_from_text(s, catalog)? {
+            Some(pgmem_catalog::Relation::View(v)) => Some(v),
+            _ => return Err(SqlError::undefined_table(s)),
+        },
         other => oid_arg(other).and_then(|o| catalog.views().find(|v| v.oid == o).cloned()),
     };
     Ok(view.map_or(Value::Null, |v| Value::Text(crate::deparse::deparse_view(catalog, &v).unwrap_or_default())))
@@ -108,15 +116,16 @@ fn viewdef_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
 /// draws from, schema-qualified.
 fn serial_sequence_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
     let catalog = ctx.txn.catalog();
-    let parts = crate::reg::parse_qualified(text_arg(&a[0]))?;
-    let tname = parts.last().cloned().unwrap_or_default();
-    let table = catalog.table(&tname).ok_or_else(|| SqlError::undefined_table(text_arg(&a[0])))?;
+    let table = match crate::reg::relation_from_text(text_arg(&a[0]), catalog)? {
+        Some(pgmem_catalog::Relation::Table(t)) => t,
+        _ => return Err(SqlError::undefined_table(text_arg(&a[0]))),
+    };
     let column = text_arg(&a[1]);
     if table.column(column).is_none() {
         return Err(SqlError::undefined_column(&format!("\"{column}\" of relation \"{}\"", table.name)));
     }
-    let seq = catalog.sequences().find(|s| s.owned_by.as_ref().is_some_and(|(t, c)| *t == table.name && c == column));
-    Ok(seq.map_or(Value::Null, |s| Value::Text(format!("public.{}", quote_ident(&s.name)))))
+    let seq = catalog.owned_sequences(&table).find(|s| s.owned_by.as_ref().is_some_and(|(_, c)| c == column));
+    Ok(seq.map_or(Value::Null, |s| Value::Text(format!("{}.{}", quote_ident(&s.schema), quote_ident(&s.name)))))
 }
 
 /// The `classoid` a catalog name in `obj_description(oid, 'pg_class')` stands for.

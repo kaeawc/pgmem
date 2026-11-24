@@ -1,17 +1,8 @@
 # Corpus records pgmem fails today, by key (file:hash of the SQL); the first line of the SQL
 # follows for reading. Regenerate with `cargo run -p pgmem-conformance -- --update`.
-catalog/comments.slt:c0292f8e8802feb1  # SELECT obj_description('docs'::regnamespace, 'pg_namespace')
 catalog/comments.slt:fd85b83918947b92  # SELECT obj_description(oid, 'pg_constraint') FROM pg_constraint WHERE conname = 'notes_pkey'
 catalog/comments.slt:65b6351ec417f350  # CREATE FUNCTION f1() RETURNS int LANGUAGE sql AS 'SELECT 1'
 catalog/comments.slt:e39bb176e5b46bd3  # SELECT obj_description('f1'::regproc, 'pg_proc')
-catalog/information_schema.slt:d343ab8810b44fbc  # CREATE TABLE app.reviews (
-catalog/information_schema.slt:a945dd8bde301b09  # SELECT schema_name FROM information_schema.schemata
-catalog/information_schema.slt:84330eb3e790c685  # SELECT table_schema, table_name, table_type
-catalog/information_schema.slt:66e636e79f593e82  # SELECT table_name, column_name, data_type
-catalog/information_schema.slt:00c05c1684d10fee  # SELECT constraint_name, constraint_type, is_deferrable, initially_deferred
-catalog/information_schema.slt:df5e5bc3ea479afe  # SELECT constraint_name, column_name, ordinal_position
-catalog/information_schema.slt:7935bc054dfeb0da  # SELECT constraint_name, unique_constraint_name, match_option, update_rule, delete_rule
-catalog/information_schema.slt:b852cfc0efeccc1d  # SELECT tc.table_schema, tc.table_name, kcu.column_name,
 catalog/information_schema.slt:5eeda95b92993c1a  # SELECT sequence_name, data_type, numeric_precision, start_value, minimum_value, maximum_value, increment, cycle_option
 catalog/information_schema.slt:bcd84fafea9ffe59  # SELECT c.column_name, e.data_type
 catalog/information_schema.slt:dcbc700fd5754b49  # CREATE FUNCTION add_one(x int) RETURNS int LANGUAGE sql AS 'SELECT x + 1'
@@ -39,10 +30,6 @@ catalog/psql_describe.slt:17a1b25d4d29cb62  # SELECT true as sametable, conname,
 catalog/psql_describe.slt:55a36843bc50c0ea  # SELECT conname, conrelid::pg_catalog.regclass AS ontable,
 catalog/psql_describe.slt:44733f14a996f863  # SELECT pol.polname FROM pg_catalog.pg_policy pol WHERE pol.polrelid = 'orders'::regclass ORDER BY 1
 catalog/psql_describe.slt:b4a232974cda9996  # SELECT pg_catalog.pg_get_viewdef('big_orders'::regclass, true)
-catalog/regtypes.slt:209fce473162f6bf  # CREATE TABLE other.thing (x int)
-catalog/regtypes.slt:14048f7f9e264ca2  # SELECT 'other.thing'::regclass::text
-catalog/regtypes.slt:04104fd63a6eb57a  # SELECT to_regclass('other.thing') IS NOT NULL, to_regclass('thing') IS NULL
-catalog/regtypes.slt:1238c168bb65155b  # SELECT 'other.thing'::regclass::text, 't'::regclass::text
 catalog/regtypes.slt:a9ad1acbbcdab0ae  # SELECT 'text[]'::regtype::text, '_int4'::regtype::text, 'double precision'::regtype::text
 catalog/regtypes.slt:4ceb755fe5cff65e  # SELECT format_type('timestamptz'::regtype, 3), format_type('_text'::regtype, -1)
 catalog/regtypes.slt:e1b41969bcc4d789  # SELECT 'now'::regproc::text, 'lower(text)'::regprocedure::text
@@ -123,8 +110,6 @@ constraints/keys_unique.slt:0308954344c2b403  # UPDATE seqs SET n = n + 1
 constraints/keys_unique.slt:88876c83c90d08ae  # ALTER TABLE named ADD CONSTRAINT bc_unique UNIQUE (a)
 constraints/keys_unique.slt:f45a27899f67be03  # SELECT conname, contype, condeferrable, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'later'::regclass ORDER BY conname
 ddl/alter_table.slt:2a30c0766251ab31  # ALTER TABLE ty ALTER COLUMN b TYPE int
-ddl/alter_table.slt:61b6a2d21fbb710f  # CREATE SCHEMA other; ALTER TABLE ty2 SET SCHEMA other
-ddl/alter_table.slt:5cb4ed4d412a21a8  # SELECT count(*) FROM other.ty2
 ddl/alter_table.slt:9b74524baf76d354  # ALTER TABLE t ADD CONSTRAINT score_nonneg CHECK (score >= 0); ALTER TABLE t RENAME CONSTRAINT score_nonneg TO score_positive
 ddl/alter_table.slt:a4b9f6bf5b64c464  # INSERT INTO t (id, name, score) VALUES (6, 'f', -1)
 ddl/alter_table.slt:e64072280b8f5593  # ALTER TABLE t DROP CONSTRAINT score_positive
@@ -145,7 +130,6 @@ ddl/create_table.slt:148890edabdc9695  # CREATE TABLE ctas AS SELECT 1
 ddl/create_table.slt:af47f381e22fee81  # SELECT id, name INTO selinto FROM src WHERE id = 3
 ddl/create_table.slt:efd3ec5485c89293  # SELECT id, name FROM selinto
 ddl/create_table.slt:5bbd1a0375e44100  # SELECT (SELECT count(*) FROM tmp1), (SELECT count(*) FROM unl), (SELECT count(*) FROM tmp2)
-ddl/create_table.slt:c3219dc7b95d6dc1  # SELECT * FROM tmp1
 ddl/create_table.slt:f00debd5b36659ce  # SELECT relname, relpersistence FROM pg_class WHERE relname IN ('tmp1', 'unl', 'src') ORDER BY relname
 ddl/create_table.slt:d5c9cceca396a9e8  # SELECT (SELECT count(*) FROM src), (SELECT count(*) FROM public.src)
 ddl/create_table.slt:094e9270eb3d0521  # SELECT count(*) FROM src
@@ -202,10 +186,6 @@ ddl/indexes.slt:4c6e700a408aabc9  # ALTER INDEX accounts_org_idx RENAME TO accou
 ddl/indexes.slt:9e875ec61d297af5#2  # SELECT indexname FROM pg_indexes WHERE tablename = 'accounts' ORDER BY indexname
 ddl/indexes.slt:f05601fa90c15cdd  # CREATE TABLE ui (a int); CREATE UNIQUE INDEX ui_a_idx ON ui (a); ALTER TABLE ui ADD CONSTRAINT ui_a_unique UNIQUE USING INDEX ui_a_idx
 ddl/indexes.slt:cc9b2bc18077ba1f  # SELECT conname, contype FROM pg_constraint WHERE conrelid = 'ui'::regclass
-ddl/migrations.slt:ca2612da7cd63470  # INSERT INTO "Post" ("authorId", "title") VALUES (42, 't')
-ddl/migrations.slt:cc42d88ccc52170c  # CREATE TYPE "Role" AS ENUM ('USER', 'ADMIN'); ALTER TABLE "User" ADD COLUMN "role" "Role" NOT NULL DEFAULT 'USER'
-ddl/migrations.slt:b9dc0e67412cf851  # ALTER TYPE "Role" ADD VALUE 'OWNER'; INSERT INTO "User" ("email") VALUES ('a@x.com')
-ddl/migrations.slt:75cb2a4fd1604905  # SELECT "email", "role", enum_range(NULL::"Role") FROM "User"
 ddl/migrations.slt:6bcf744ad9557798  # SELECT pg_try_advisory_lock(1)
 ddl/migrations.slt:70c4511f72841147  # SELECT pg_advisory_unlock(1), pg_advisory_unlock(1), pg_advisory_unlock(1)
 ddl/migrations.slt:6bd6804ad95baaaa  # SELECT pg_try_advisory_lock(7)
@@ -241,22 +221,6 @@ ddl/migrations.slt:b3aba26933079ef1  # SELECT id, body, version FROM docs ORDER 
 ddl/migrations.slt:a0eb907c4dff4669  # DROP TRIGGER docs_audit ON docs
 ddl/migrations.slt:a0eb907c4dff4669#2  # DROP TRIGGER docs_audit ON docs
 ddl/migrations.slt:38985e8ae60ca77c  # SELECT trigger_name, event_manipulation, action_timing FROM information_schema.triggers WHERE event_object_table = 'docs' ORDER BY trigger_name, event_manipulation
-ddl/schema.slt:3a44e498f82cb981#2  # CREATE SCHEMA app
-ddl/schema.slt:26a033cadd26bdf1  # CREATE SCHEMA IF NOT EXISTS app; CREATE TABLE app.items (id int, name text); INSERT INTO app.items VALUES (1, 'in app')
-ddl/schema.slt:96047c285dfcdcdb  # SELECT current_schema(), (SELECT name FROM items)
-ddl/schema.slt:4ad88b4c300d2346  # SELECT table_schema FROM information_schema.tables WHERE table_name = 'created_in_app'
-ddl/schema.slt:a99381411f7cbc66  # SELECT name FROM items
-ddl/schema.slt:a99381411f7cbc66#3  # SELECT name FROM items
-ddl/schema.slt:c3c2a749b0f1afed  # CREATE SCHEMA "My Schema"; CREATE TABLE "My Schema".t (a int); INSERT INTO "My Schema".t VALUES (1)
-ddl/schema.slt:bb102635a950a305  # SELECT a FROM "My Schema".t
-ddl/schema.slt:3ef49bde183b252a  # CREATE SCHEMA billing CREATE TABLE invoices (id int PRIMARY KEY, total numeric) CREATE VIEW big AS SELECT id FROM invoices WHERE total > 100; INSERT INTO billing.invoices VALUES (1, 50), (2, 500)
-ddl/schema.slt:4700c3ab2b97c807  # SELECT id FROM billing.big
-ddl/schema.slt:64c9a1b775bfa2c2  # DROP SCHEMA app
-ddl/schema.slt:1a8566699bde103b  # DROP SCHEMA nosuch
-ddl/schema.slt:929aa208eef585d0  # ALTER SCHEMA billing RENAME TO accounts
-ddl/schema.slt:1331d8a8e8122f35  # SELECT count(*) FROM accounts.invoices
-ddl/schema.slt:f6605a269536ddaa  # CREATE TEMP TABLE items (id int, name text)
-ddl/schema.slt:ec4f6c90c8c16f87  # SELECT (SELECT count(*) FROM items), (SELECT count(*) FROM pg_temp.items)
 ddl/sequences.slt:3895120caa03a425  # SELECT last_value, is_called FROM s1
 ddl/sequences.slt:3633973c20b7d846  # SELECT nextval('small'), nextval('small'), nextval('small'), nextval('cyc'), nextval('cyc'), nextval('cyc'), nextval('down'), nextval('down'), nextval('si')
 ddl/sequences.slt:f595a1608086579d  # SELECT nextval('small')
@@ -270,8 +234,6 @@ ddl/sequences.slt:a8473e5edc6f7973  # SELECT nextval('s2b')
 ddl/sequences.slt:f69eb5bfef56efb9  # ALTER SEQUENCE nosuch RESTART
 ddl/sequences.slt:14b63fe6bd155b0c  # SELECT sequence_name, data_type, start_value, minimum_value, maximum_value, increment, cycle_option FROM information_schema.sequences WHERE sequence_name IN ('s1', 'small', 'cyc', 'si') ORDER BY sequence_name
 ddl/sequences.slt:7d3d03566d8d9933  # SELECT nextval('owned_seq')
-ddl/sequences.slt:580f8aae54f9e9af  # CREATE SCHEMA sx; CREATE SEQUENCE sx.q
-ddl/sequences.slt:f52aee057bfb3891  # SELECT nextval('sx.q'), nextval('sx.q'::regclass)
 ddl/truncate_comment.slt:524dc53c8360ddd6  # CREATE SCHEMA s; COMMENT ON SCHEMA s IS 'a schema'; CREATE INDEX child_pid ON child (pid); COMMENT ON INDEX child_pid IS 'fk index'; COMMENT ON CONSTRAINT child_pid_fkey ON child IS 'fk'; CREATE VIEW pv AS SELECT * FROM parent; COMMENT ON VIEW pv IS 'view'; CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1'; COMMENT ON FUNCTION f() IS 'fn'
 ddl/truncate_comment.slt:dfb1c8121b9e9f5f  # SELECT obj_description('child_pid'::regclass, 'pg_class'), obj_description('pv'::regclass, 'pg_class'), obj_description('f'::regproc, 'pg_proc'), (SELECT obj_description(oid, 'pg_namespace') FROM pg_namespace WHERE nspname = 's')
 ddl/views.slt:f563b8c239029a8f  # CREATE OR REPLACE VIEW paid AS SELECT id, amount FROM orders

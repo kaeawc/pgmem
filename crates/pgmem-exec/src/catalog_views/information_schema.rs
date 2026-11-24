@@ -109,12 +109,13 @@ fn domains(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         // A domain over a domain is USER-DEFINED (its immediate base is a user type).
         let mut vals = match base {
             Type::Domain(_) => {
-                vec![("data_type", txt("USER-DEFINED")), ("udt_schema", name("public")), ("udt_name", name(&base.typname()))]
+                vec![("data_type", txt("USER-DEFINED")), ("udt_schema", name(&type_schema(base))), ("udt_name", name(&base.typname()))]
             }
             _ => type_columns(base, *typmod, &cat),
         };
         let default_text = default.as_ref().and_then(|d| {
-            let empty = TableDef { oid: 0, name: String::new(), columns: vec![], constraints: vec![], indexes: vec![] };
+            let empty =
+                TableDef { oid: 0, schema: String::new(), name: String::new(), columns: vec![], constraints: vec![], indexes: vec![] };
             let mut col = pgmem_catalog::ColumnDef::new("value", base.clone());
             col.typmod = *typmod;
             col.default = Some(d.clone());
@@ -122,7 +123,7 @@ fn domains(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         });
         vals.extend([
             ("domain_catalog", cat.clone()),
-            ("domain_schema", name("public")),
+            ("domain_schema", name(&t.schema)),
             ("domain_name", name(&t.name)),
             ("domain_default", default_text.map_or(Value::Null, txt)),
             ("udt_catalog", cat.clone()),
@@ -142,10 +143,10 @@ fn domain_constraints(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         for c in crate::catalog_views::domain_constraints(m.catalog, t) {
             rows.push(s.row(vec![
                 ("constraint_catalog", cat.clone()),
-                ("constraint_schema", name("public")),
+                ("constraint_schema", name(&t.schema)),
                 ("constraint_name", name(&c.name)),
                 ("domain_catalog", cat.clone()),
-                ("domain_schema", name("public")),
+                ("domain_schema", name(&t.schema)),
                 ("domain_name", name(&t.name)),
                 ("is_deferrable", txt("NO")),
                 ("initially_deferred", txt("NO")),
@@ -153,6 +154,15 @@ fn domain_constraints(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         }
     }
     Ok(rows)
+}
+
+/// The schema of a user type (or of an array's element type).
+fn type_schema(t: &Type) -> String {
+    match t {
+        Type::Array(e) => type_schema(e),
+        Type::Enum(o) | Type::Domain(o) | Type::Composite(o) => pgmem_types::usertype::schema_of(*o).unwrap_or_else(|| "public".to_owned()),
+        _ => "pg_catalog".to_owned(),
+    }
 }
 
 fn empty(_: &EvalCtx) -> SqlResult<Vec<Row>> {
@@ -166,11 +176,17 @@ fn catalog_name(ctx: &EvalCtx) -> Value {
 fn schemata(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let s = Spec::parse(SCHEMATA);
     let _ = (ID, CARD, CHARS);
-    Ok(["information_schema", "pg_catalog", "pg_toast", "public"]
+    let m = snapshot(ctx);
+    let mut schemas: Vec<(String, String)> =
+        ["information_schema", "pg_catalog", "pg_toast"].into_iter().map(|n| (n.to_owned(), ctx.env.user.clone())).collect();
+    for sc in m.catalog.schemas() {
+        let owner = if sc.name == "public" { "pg_database_owner".to_owned() } else { sc.owner.clone() };
+        schemas.push((sc.name.clone(), owner));
+    }
+    Ok(schemas
         .into_iter()
-        .map(|schema| {
-            let owner = if schema == "public" { "pg_database_owner".to_owned() } else { ctx.env.user.clone() };
-            s.row(vec![("catalog_name", catalog_name(ctx)), ("schema_name", name(schema)), ("schema_owner", name(&owner))])
+        .map(|(schema, owner)| {
+            s.row(vec![("catalog_name", catalog_name(ctx)), ("schema_name", name(&schema)), ("schema_owner", name(&owner))])
         })
         .collect())
 }
@@ -197,17 +213,21 @@ fn view_updatable(v: &ViewDef) -> bool {
 fn tables(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let m = snapshot(ctx);
     let s = Spec::parse(TABLES);
-    let row = |n: &str, kind: &str, insertable: bool| {
+    let row = |schema: &str, n: &str, kind: &str, insertable: bool| {
         s.row(vec![
             ("table_catalog", catalog_name(ctx)),
-            ("table_schema", name("public")),
+            ("table_schema", name(schema)),
             ("table_name", name(n)),
             ("table_type", txt(kind)),
             ("is_insertable_into", yes_no(insertable)),
         ])
     };
-    let mut rows: Vec<Row> = m.tables().into_iter().map(|t| row(&t.name, "BASE TABLE", true)).collect();
-    rows.extend(m.views().into_iter().map(|v| row(&v.name, "VIEW", view_updatable(v))));
+    let mut rows: Vec<Row> = m
+        .tables()
+        .into_iter()
+        .map(|t| row(&t.schema, &t.name, if t.schema.starts_with("pg_temp_") { "LOCAL TEMPORARY" } else { "BASE TABLE" }, true))
+        .collect();
+    rows.extend(m.views().into_iter().map(|v| row(&v.schema, &v.name, "VIEW", view_updatable(v))));
     Ok(rows)
 }
 
@@ -219,7 +239,7 @@ fn type_columns(ty: &Type, typmod: i32, catalog: &Value) -> Vec<(&'static str, V
     if let Type::Domain(oid) = ty {
         let (base, dmod) = pgmem_types::usertype::domain_base(*oid).unwrap_or((Type::Unknown, -1));
         let mut out = type_columns(&base, if typmod >= 0 { typmod } else { dmod }, catalog);
-        out.extend([("domain_catalog", catalog.clone()), ("domain_schema", name("public")), ("domain_name", name(&ty.typname()))]);
+        out.extend([("domain_catalog", catalog.clone()), ("domain_schema", name(&type_schema(ty))), ("domain_name", name(&ty.typname()))]);
         return out;
     }
     let user = |t: &Type| matches!(t, Type::Enum(_) | Type::Composite(_));
@@ -229,8 +249,12 @@ fn type_columns(ty: &Type, typmod: i32, catalog: &Value) -> Vec<(&'static str, V
         other => other.name(),
     };
     let elem_user = matches!(ty, Type::Array(e) if user(e) || e.is_domain());
-    let schema = if user(ty) || elem_user { "public" } else { "pg_catalog" };
-    let mut out = vec![("data_type", txt(data_type)), ("udt_schema", name(schema)), ("udt_name", name(&ty.typname()))];
+    let schema = match ty {
+        t if user(t) => type_schema(t),
+        Type::Array(e) if elem_user => type_schema(e),
+        _ => "pg_catalog".to_owned(),
+    };
+    let mut out = vec![("data_type", txt(data_type)), ("udt_schema", name(&schema)), ("udt_name", name(&ty.typname()))];
     let null = || Value::Null;
     let n = |v: i64| int4(v);
     match ty {
@@ -268,13 +292,14 @@ fn type_columns(ty: &Type, typmod: i32, catalog: &Value) -> Vec<(&'static str, V
 
 /// The sequence behind an identity column.
 fn identity_sequence<'a>(m: &Model<'a>, t: &TableDef, column: &str) -> Option<&'a pgmem_catalog::SequenceDef> {
-    m.sequences().into_iter().find(|s| s.owned_by.as_ref().is_some_and(|(tn, cn)| *tn == t.name && cn == column))
+    m.sequences().into_iter().find(|s| s.schema == t.schema && s.owned_by.as_ref().is_some_and(|(tn, cn)| *tn == t.name && cn == column))
 }
 
-fn column_row(ctx: &EvalCtx, m: &Model, s: &Spec, rel: &str, table: Option<&TableDef>, a: &Att, updatable: bool) -> Row {
+#[allow(clippy::too_many_arguments)]
+fn column_row(ctx: &EvalCtx, m: &Model, s: &Spec, schema: &str, rel: &str, table: Option<&TableDef>, a: &Att, updatable: bool) -> Row {
     let mut vals = vec![
         ("table_catalog", catalog_name(ctx)),
-        ("table_schema", name("public")),
+        ("table_schema", name(schema)),
         ("table_name", name(rel)),
         ("column_name", name(&a.name)),
         ("ordinal_position", int4(i64::try_from(a.attnum).unwrap_or(0))),
@@ -318,13 +343,13 @@ fn columns(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let mut rows = Vec::new();
     for t in m.tables() {
         for a in Model::table_atts(t).iter().filter(|a| !a.dropped) {
-            rows.push(column_row(ctx, &m, &s, &t.name, Some(t), a, true));
+            rows.push(column_row(ctx, &m, &s, &t.schema, &t.name, Some(t), a, true));
         }
     }
     for v in m.views() {
         let updatable = view_updatable(v);
         for a in &m.view_atts(v) {
-            rows.push(column_row(ctx, &m, &s, &v.name, None, a, updatable));
+            rows.push(column_row(ctx, &m, &s, &v.schema, &v.name, None, a, updatable));
         }
     }
     Ok(rows)
@@ -351,10 +376,10 @@ fn table_constraints(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             };
             s.row(vec![
                 ("constraint_catalog", catalog_name(ctx)),
-                ("constraint_schema", name("public")),
+                ("constraint_schema", name(&c.table.schema)),
                 ("constraint_name", name(&c.name)),
                 ("table_catalog", catalog_name(ctx)),
-                ("table_schema", name("public")),
+                ("table_schema", name(&c.table.schema)),
                 ("table_name", name(&c.table.name)),
                 ("constraint_type", txt(constraint_type(c))),
                 ("nulls_distinct", nulls_distinct),
@@ -386,10 +411,10 @@ fn key_column_usage(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             });
             rows.push(s.row(vec![
                 ("constraint_catalog", catalog_name(ctx)),
-                ("constraint_schema", name("public")),
+                ("constraint_schema", name(&c.table.schema)),
                 ("constraint_name", name(&c.name)),
                 ("table_catalog", catalog_name(ctx)),
-                ("table_schema", name("public")),
+                ("table_schema", name(&c.table.schema)),
                 ("table_name", name(&c.table.name)),
                 ("column_name", name(&column_name(c.table, *attnum))),
                 ("ordinal_position", int4(i64::try_from(i + 1).unwrap_or(0))),
@@ -414,10 +439,10 @@ fn referential_constraints(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             let unique = referenced_constraint(&all, c);
             s.row(vec![
                 ("constraint_catalog", catalog_name(ctx)),
-                ("constraint_schema", name("public")),
+                ("constraint_schema", name(&c.table.schema)),
                 ("constraint_name", name(&c.name)),
                 ("unique_constraint_catalog", unique.map_or(Value::Null, |_| catalog_name(ctx))),
-                ("unique_constraint_schema", unique.map_or(Value::Null, |_| name("public"))),
+                ("unique_constraint_schema", unique.map_or(Value::Null, |u| name(&u.table.schema))),
                 ("unique_constraint_name", unique.map_or(Value::Null, |u| name(&u.name))),
                 ("match_option", txt("NONE")),
                 ("update_rule", txt(fk_action_rule(on_update))),
@@ -444,11 +469,11 @@ fn constraint_column_usage(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         for attnum in attnums {
             rows.push(s.row(vec![
                 ("table_catalog", catalog_name(ctx)),
-                ("table_schema", name("public")),
+                ("table_schema", name(&table.schema)),
                 ("table_name", name(&table.name)),
                 ("column_name", name(&column_name(table, *attnum))),
                 ("constraint_catalog", catalog_name(ctx)),
-                ("constraint_schema", name("public")),
+                ("constraint_schema", name(&c.table.schema)),
                 ("constraint_name", name(&c.name)),
             ]));
         }
@@ -472,19 +497,21 @@ fn check_constraints(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             };
             s.row(vec![
                 ("constraint_catalog", catalog_name(ctx)),
-                ("constraint_schema", name("public")),
+                ("constraint_schema", name(&c.table.schema)),
                 ("constraint_name", name(&c.name)),
                 ("check_clause", txt(clause)),
             ])
         })
-        .chain(m.catalog.types().flat_map(|t| crate::catalog_views::domain_constraints(m.catalog, t)).map(|c| {
-            s.row(vec![
-                ("constraint_catalog", catalog_name(ctx)),
-                ("constraint_schema", name("public")),
-                ("constraint_name", name(&c.name)),
-                ("check_clause", txt(c.check.unwrap_or_else(|| "VALUE IS NOT NULL".to_owned()))),
-            ])
-        }))
+        .chain(m.catalog.types().flat_map(|t| crate::catalog_views::domain_constraints(m.catalog, t).into_iter().map(move |c| (t, c))).map(
+            |(t, c)| {
+                s.row(vec![
+                    ("constraint_catalog", catalog_name(ctx)),
+                    ("constraint_schema", name(&t.schema)),
+                    ("constraint_name", name(&c.name)),
+                    ("check_clause", txt(c.check.unwrap_or_else(|| "VALUE IS NOT NULL".to_owned()))),
+                ])
+            },
+        ))
         .collect())
 }
 
@@ -497,7 +524,7 @@ fn views(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             let updatable = view_updatable(v);
             s.row(vec![
                 ("table_catalog", catalog_name(ctx)),
-                ("table_schema", name("public")),
+                ("table_schema", name(&v.schema)),
                 ("table_name", name(&v.name)),
                 ("view_definition", txt(crate::deparse::deparse_view(m.catalog, v).unwrap_or_default())),
                 ("is_updatable", yes_no(updatable)),
@@ -512,7 +539,9 @@ fn sequences(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let s = Spec::parse(SEQUENCES);
     // Identity columns' sequences are internal and not listed.
     let identity = |seq: &pgmem_catalog::SequenceDef| {
-        seq.owned_by.as_ref().is_some_and(|(t, c)| m.catalog.table(t).and_then(|t| t.column(c)).is_some_and(|c| c.identity.is_some()))
+        seq.owned_by
+            .as_ref()
+            .is_some_and(|(t, c)| m.catalog.table(&seq.schema, t).and_then(|t| t.column(c)).is_some_and(|c| c.identity.is_some()))
     };
     Ok(m.sequences()
         .into_iter()
@@ -526,7 +555,7 @@ fn sequences(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             };
             s.row(vec![
                 ("sequence_catalog", catalog_name(ctx)),
-                ("sequence_schema", name("public")),
+                ("sequence_schema", name(&seq.schema)),
                 ("sequence_name", name(&seq.name)),
                 ("data_type", txt(ty.name())),
                 ("numeric_precision", int4(bits)),
@@ -543,15 +572,20 @@ fn table_privileges(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let m = snapshot(ctx);
     let s = Spec::parse(TABLE_PRIVILEGES);
     let user = &ctx.env.user;
-    let rels: Vec<String> = m.tables().into_iter().map(|t| t.name.clone()).chain(m.views().into_iter().map(|v| v.name.clone())).collect();
+    let rels: Vec<(String, String)> = m
+        .tables()
+        .into_iter()
+        .map(|t| (t.schema.clone(), t.name.clone()))
+        .chain(m.views().into_iter().map(|v| (v.schema.clone(), v.name.clone())))
+        .collect();
     let mut rows = Vec::new();
-    for rel in rels {
+    for (schema, rel) in rels {
         for p in ["INSERT", "SELECT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"] {
             rows.push(s.row(vec![
                 ("grantor", name(user)),
                 ("grantee", name(user)),
                 ("table_catalog", catalog_name(ctx)),
-                ("table_schema", name("public")),
+                ("table_schema", name(&schema)),
                 ("table_name", name(&rel)),
                 ("privilege_type", txt(p)),
                 ("is_grantable", yes_no(true)),
@@ -574,7 +608,7 @@ fn column_privileges(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                     ("grantor", name(user)),
                     ("grantee", name(user)),
                     ("table_catalog", catalog_name(ctx)),
-                    ("table_schema", name("public")),
+                    ("table_schema", name(&t.schema)),
                     ("table_name", name(&t.name)),
                     ("column_name", name(&c.name)),
                     ("privilege_type", txt(p)),

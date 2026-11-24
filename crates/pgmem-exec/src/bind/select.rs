@@ -769,8 +769,28 @@ impl Binder<'_> {
         {
             return self.bind_virtual(schema, name.base(), &qualifier, alias);
         }
-        let base = self.catalog.normalize(name)?;
-        match self.catalog.relation(base) {
+        let base = name.base();
+        // The search path puts pg_catalog's (virtual) relations first unless it is listed later.
+        enum Found {
+            System,
+            User(Relation),
+        }
+        let found = self
+            .catalog
+            .resolve(name, |schema, n| {
+                if schema == pgmem_catalog::PG_CATALOG {
+                    crate::catalog_views::lookup("pg_catalog", n).map(|_| Found::System)
+                } else {
+                    self.catalog.relation(schema, n).map(Found::User)
+                }
+            })
+            .or_else(|e| if e.code == code::INVALID_SCHEMA_NAME { Ok(None) } else { Err(e) })?;
+        let rel = match found {
+            Some(Found::System) => return self.bind_virtual("pg_catalog", base, &qualifier, alias),
+            Some(Found::User(r)) => Some(r),
+            None => None,
+        };
+        match rel {
             Some(Relation::Table(def)) => {
                 let mut cols = Vec::new();
                 let mut slots = Vec::new();
@@ -795,7 +815,7 @@ impl Binder<'_> {
             Some(Relation::View(view)) => {
                 let top = Level::new(Scope::default());
                 let vctx = Ctx::new(&top);
-                let bound = self.bind_query(&view.query, &vctx)?;
+                let bound = pgmem_types::context::with_search_path(&view.search_path, || self.bind_query(&view.query, &vctx))?;
                 let mut cols: Vec<ScopeCol> = bound
                     .columns
                     .iter()
@@ -818,10 +838,7 @@ impl Binder<'_> {
                 Err(feature("selecting from a sequence")).or(Ok((Rel::Values { rows: vec![] }, Scope::from_cols(cols))))
             }
             Some(Relation::Index { .. }) => Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{base}\" is an index"))),
-            None => match crate::catalog_views::lookup("pg_catalog", base) {
-                Some(_) => self.bind_virtual("pg_catalog", base, &qualifier, alias),
-                None => Err(SqlError::undefined_table(&name.to_string())),
-            },
+            None => Err(SqlError::undefined_table(&name.to_string())),
         }
     }
 

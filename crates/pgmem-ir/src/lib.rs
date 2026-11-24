@@ -52,6 +52,19 @@ pub enum Statement {
     AlterDomain(Box<AlterDomain>),
     Drop(Box<Drop>),
     Truncate(Box<Truncate>),
+    CreateSchema(Box<CreateSchema>),
+    /// `ALTER {TABLE|VIEW|SEQUENCE|TYPE|DOMAIN} name SET SCHEMA schema`.
+    SetSchema {
+        object_type: ObjectType,
+        name: ObjectName,
+        if_exists: bool,
+        schema: String,
+    },
+    /// `ALTER SCHEMA name RENAME TO new` (`OWNER TO` is accepted as a no-op).
+    AlterSchema {
+        name: String,
+        rename_to: Option<String>,
+    },
     Transaction(TransactionStmt),
     /// `SET [SESSION|LOCAL] name = value` / `SET name TO value` / `SET TIME ZONE ...`.
     Set {
@@ -82,6 +95,17 @@ pub enum Statement {
     },
     /// Statements with no SQL content (`;` alone): Postgres answers EmptyQueryResponse.
     Empty,
+}
+
+/// `CREATE SCHEMA [IF NOT EXISTS] [name] [AUTHORIZATION role] [element ...]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateSchema {
+    /// None for `CREATE SCHEMA AUTHORIZATION role` (the schema is named after the role).
+    pub name: Option<String>,
+    pub if_not_exists: bool,
+    pub authorization: Option<String>,
+    /// Embedded `CREATE TABLE` / `CREATE VIEW` / ... statements, created in the new schema.
+    pub elements: Vec<Statement>,
 }
 
 /// What a `COMMENT ON` names.
@@ -361,11 +385,13 @@ pub struct TypeName {
     pub modifiers: Vec<i64>,
     /// Number of `[]` array dimensions.
     pub array_dims: usize,
+    /// The schema of a qualified type name (`app.mood`, `pg_catalog.int4`).
+    pub schema: Option<String>,
 }
 
 impl TypeName {
     pub fn simple(name: impl Into<String>) -> TypeName {
-        TypeName { name: name.into(), modifiers: Vec::new(), array_dims: 0 }
+        TypeName { name: name.into(), modifiers: Vec::new(), array_dims: 0, schema: None }
     }
 }
 

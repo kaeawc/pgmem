@@ -38,6 +38,13 @@ pub(crate) enum TypeDdl {
         name: sq::ObjectName,
         action: TypeAction,
     },
+    /// `ALTER {TABLE|VIEW|SEQUENCE|TYPE|DOMAIN} [IF EXISTS] name SET SCHEMA new_schema`.
+    SetSchema {
+        object_type: pgmem_ir::ObjectType,
+        name: sq::ObjectName,
+        if_exists: bool,
+        schema: sq::Ident,
+    },
 }
 
 pub(crate) enum DomainAction {
@@ -80,7 +87,56 @@ fn parse_attribute_action(p: &mut Parser, kw: Keyword) -> bool {
 }
 
 /// Parses one of this module's statements if the parser is positioned at one.
+/// Whether the statement ahead is `ALTER <kind> [IF EXISTS] [ONLY] name SET SCHEMA ...`;
+/// returns the object type and the number of tokens before the name.
+fn set_schema_ahead(p: &Parser) -> Option<(pgmem_ir::ObjectType, usize)> {
+    use pgmem_ir::ObjectType as O;
+    if !is_word(p, 0, Keyword::ALTER) {
+        return None;
+    }
+    let (kind, mut i) = match &p.peek_nth_token(1).token {
+        Token::Word(w) if w.keyword == Keyword::TABLE => (O::Table, 2),
+        Token::Word(w) if w.keyword == Keyword::VIEW => (O::View, 2),
+        Token::Word(w) if w.keyword == Keyword::SEQUENCE => (O::Sequence, 2),
+        Token::Word(w) if w.keyword == Keyword::TYPE => (O::Type, 2),
+        Token::Word(w) if w.keyword == Keyword::DOMAIN => (O::Domain, 2),
+        Token::Word(w) if w.keyword == Keyword::MATERIALIZED && is_word(p, 2, Keyword::VIEW) => (O::View, 3),
+        _ => return None,
+    };
+    let start = i;
+    if is_word(p, i, Keyword::IF) && is_word(p, i + 1, Keyword::EXISTS) {
+        i += 2;
+    }
+    if is_word(p, i, Keyword::ONLY) {
+        i += 1;
+    }
+    // name [. name [. name]]
+    loop {
+        if !matches!(&p.peek_nth_token(i).token, Token::Word(_)) {
+            return None;
+        }
+        i += 1;
+        if p.peek_nth_token(i).token == Token::Period {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    (is_word(p, i, Keyword::SET) && is_word(p, i + 1, Keyword::SCHEMA)).then_some((kind, start))
+}
+
 pub(crate) fn try_parse(p: &mut Parser) -> Result<Option<TypeDdl>, ParserError> {
+    if let Some((object_type, skip)) = set_schema_ahead(p) {
+        for _ in 0..skip {
+            p.next_token();
+        }
+        let if_exists = p.parse_keywords(&[Keyword::IF, Keyword::EXISTS]);
+        let _ = p.parse_keyword(Keyword::ONLY);
+        let name = p.parse_object_name(false)?;
+        p.expect_keywords(&[Keyword::SET, Keyword::SCHEMA])?;
+        let schema = p.parse_identifier()?;
+        return Ok(Some(TypeDdl::SetSchema { object_type, name, if_exists, schema }));
+    }
     let domain = is_word(p, 1, Keyword::DOMAIN);
     let stmt = if is_word(p, 0, Keyword::CREATE) && domain {
         p.next_token();
@@ -248,6 +304,9 @@ fn alter_type(p: &mut Parser) -> Result<TypeDdl, ParserError> {
 
 pub(crate) fn lower(stmt: TypeDdl) -> SqlResult<Statement> {
     Ok(match stmt {
+        TypeDdl::SetSchema { object_type, name, if_exists, schema } => {
+            Statement::SetSchema { object_type, name: object_name(&name)?, if_exists, schema: ident(&schema) }
+        }
         TypeDdl::CreateDomain { conflict: Some(message), .. } => return Err(pgmem_types::SqlError::syntax(message)),
         TypeDdl::CreateDomain { name, ty, default, not_null, checks, conflict: None } => Statement::CreateDomain(Box::new(CreateDomain {
             name: object_name(&name)?,
