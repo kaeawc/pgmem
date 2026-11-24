@@ -132,6 +132,10 @@ fn datetime_rank(t: &Type) -> Option<u8> {
 
 /// The common type two operands are compared (or unioned) as, or None if incompatible.
 pub fn common_type(l: &Type, r: &Type) -> Option<Type> {
+    // Values of different types meet at their domains' base types.
+    if l != r && (l.is_domain() || r.is_domain()) {
+        return common_type(&l.base(), &r.base());
+    }
     match (l, r) {
         (Type::Unknown, Type::Unknown) => Some(Type::Text),
         (Type::Unknown, t) | (t, Type::Unknown) => Some(t.clone()),
@@ -150,6 +154,9 @@ pub fn common_type(l: &Type, r: &Type) -> Option<Type> {
                 (Type::Oid | Type::Reg(_), t) | (t, Type::Oid | Type::Reg(_)) if t.is_integer() => Some(Type::Oid),
                 (Type::Time, Type::TimeTz) | (Type::TimeTz, Type::Time) => Some(Type::TimeTz),
                 (Type::Array(a), Type::Array(b)) => common_type(a, b).map(Type::array_of),
+                // A row constructor meets a named composite at the composite.
+                (Type::Composite(_), Type::Record) => Some(l.clone()),
+                (Type::Record, Type::Composite(_)) => Some(r.clone()),
                 _ => None,
             }
         }
@@ -400,7 +407,7 @@ fn op_concat(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
 
 /// Resolves a unary (prefix) operator.
 pub fn resolve_unary(op: &str, t: &Type) -> SqlResult<Resolved> {
-    let t = if *t == Type::Unknown { Type::Numeric } else { t.clone() };
+    let t = if *t == Type::Unknown { Type::Numeric } else { t.base() };
     let ok = |func: Func| Ok(Resolved { func, args: vec![t.clone()], ret: t.clone() });
     match op {
         "-" if t.is_numeric() || t == Type::Interval => ok(strict("-", op_neg)),

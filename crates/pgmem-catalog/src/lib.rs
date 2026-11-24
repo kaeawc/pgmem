@@ -6,6 +6,7 @@
 //! executor when used, so they always see the current schema.
 
 use pgmem_ir::Expr;
+use pgmem_types::usertype::{EnumLabel, Field, UserKind, UserType};
 use pgmem_types::{SqlError, SqlResult, Type, Value, code};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -184,6 +185,93 @@ pub struct SequenceDef {
     pub owned_by: Option<(String, String)>,
 }
 
+/// A named CHECK constraint of a domain; `expr` refers to the value as `VALUE`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DomainCheck {
+    pub oid: Oid,
+    pub name: String,
+    pub expr: Expr,
+    /// False after `ADD ... NOT VALID` until `VALIDATE CONSTRAINT` (`convalidated`).
+    pub validated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TypeDefKind {
+    /// Labels in sort order.
+    Enum {
+        labels: Vec<EnumLabel>,
+    },
+    /// `relid` is the composite type's own `pg_class` entry (relkind `c`), which clients read
+    /// the fields from through `typrelid`.
+    Composite {
+        fields: Vec<Field>,
+        relid: Oid,
+    },
+    Domain {
+        base: Type,
+        typmod: i32,
+        not_null: bool,
+        default: Option<Expr>,
+        checks: Vec<DomainCheck>,
+    },
+}
+
+/// A user-defined type (`CREATE TYPE`, `CREATE DOMAIN`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TypeDef {
+    pub oid: Oid,
+    pub array_oid: Oid,
+    pub name: String,
+    pub kind: TypeDefKind,
+}
+
+impl TypeDef {
+    /// The I/O-level description installed in the session context.
+    pub fn user_type(&self) -> UserType {
+        let kind = match &self.kind {
+            TypeDefKind::Enum { labels } => UserKind::Enum { labels: labels.clone() },
+            TypeDefKind::Composite { fields, relid } => UserKind::Composite { fields: fields.clone(), relid: *relid },
+            TypeDefKind::Domain { base, typmod, not_null, .. } => {
+                UserKind::Domain { base: base.clone(), typmod: *typmod, not_null: *not_null }
+            }
+        };
+        UserType { oid: self.oid, array_oid: self.array_oid, name: self.name.clone(), kind }
+    }
+
+    pub fn as_type(&self) -> Type {
+        match self.kind {
+            TypeDefKind::Enum { .. } => Type::Enum(self.oid),
+            TypeDefKind::Composite { .. } => Type::Composite(self.oid),
+            TypeDefKind::Domain { .. } => Type::Domain(self.oid),
+        }
+    }
+
+    /// `typtype`: e(num), c(omposite), d(omain).
+    pub fn typtype(&self) -> char {
+        match self.kind {
+            TypeDefKind::Enum { .. } => 'e',
+            TypeDefKind::Composite { .. } => 'c',
+            TypeDefKind::Domain { .. } => 'd',
+        }
+    }
+
+    pub fn kind_name(&self) -> &'static str {
+        match self.kind {
+            TypeDefKind::Domain { .. } => "domain",
+            _ => "type",
+        }
+    }
+}
+
+/// True if `ty` is, or is an array of, the user type `oid`.
+pub fn type_mentions(ty: &Type, oid: Oid) -> bool {
+    match ty {
+        Type::Enum(o) | Type::Domain(o) | Type::Composite(o) => *o == oid,
+        Type::Array(e) => type_mentions(e, oid),
+        _ => false,
+    }
+}
+
 /// What a relation name refers to.
 #[derive(Clone, Debug)]
 pub enum Relation {
@@ -228,6 +316,7 @@ pub struct Catalog {
     tables: BTreeMap<String, Arc<TableDef>>,
     views: BTreeMap<String, Arc<ViewDef>>,
     sequences: BTreeMap<String, Arc<SequenceDef>>,
+    types: BTreeMap<String, Arc<TypeDef>>,
     /// `COMMENT ON` text by (classoid, objoid, objsubid), as in `pg_description`.
     comments: BTreeMap<(Oid, Oid, i32), String>,
     next_oid: Oid,
@@ -341,14 +430,67 @@ impl Catalog {
     }
 
     fn ensure_free(&self, name: &str) -> SqlResult<()> {
-        if self.relation(name).is_some() {
+        // A composite type has a pg_class entry, so it takes a relation name too.
+        let composite = self.types.get(name).is_some_and(|t| matches!(t.kind, TypeDefKind::Composite { .. }));
+        if self.relation(name).is_some() || composite {
             return Err(SqlError::new(code::DUPLICATE_TABLE, format!("relation \"{name}\" already exists")));
+        }
+        Ok(())
+    }
+
+    pub fn type_by_name(&self, name: &str) -> Option<&Arc<TypeDef>> {
+        self.types.get(name)
+    }
+
+    pub fn type_by_oid(&self, oid: Oid) -> Option<&Arc<TypeDef>> {
+        self.types.values().find(|t| t.oid == oid || t.array_oid == oid)
+    }
+
+    pub fn types(&self) -> impl Iterator<Item = &Arc<TypeDef>> {
+        self.types.values()
+    }
+
+    /// Types share `pg_type`'s namespace with the row types of tables and views.
+    fn ensure_type_name_free(&self, name: &str) -> SqlResult<()> {
+        let taken = self.types.contains_key(name)
+            || self.tables.contains_key(name)
+            || self.views.contains_key(name)
+            || self.types.values().any(|t| format!("_{}", t.name) == name);
+        if taken {
+            return Err(SqlError::new(code::DUPLICATE_OBJECT, format!("type \"{name}\" already exists")));
+        }
+        Ok(())
+    }
+
+    pub fn create_type(&mut self, def: TypeDef) -> SqlResult<()> {
+        self.ensure_type_name_free(&def.name)?;
+        self.types.insert(def.name.clone(), Arc::new(def));
+        Ok(())
+    }
+
+    /// Replaces a type definition (ALTER TYPE / ALTER DOMAIN); the name may change.
+    pub fn replace_type(&mut self, old_name: &str, def: TypeDef) {
+        self.types.remove(old_name);
+        self.types.insert(def.name.clone(), Arc::new(def));
+    }
+
+    pub fn drop_type(&mut self, name: &str) -> Option<Arc<TypeDef>> {
+        self.types.remove(name)
+    }
+
+    /// Fails like Postgres when a new relation's row type would collide with a type.
+    fn ensure_rowtype_free(&self, name: &str) -> SqlResult<()> {
+        if self.types.contains_key(name) {
+            return Err(SqlError::new(code::DUPLICATE_OBJECT, format!("type \"{name}\" already exists")).with_hint(
+                "A relation has an associated type of the same name, so you must use a name that doesn't conflict with any existing type.",
+            ));
         }
         Ok(())
     }
 
     pub fn create_table(&mut self, def: TableDef) -> SqlResult<()> {
         self.ensure_free(&def.name)?;
+        self.ensure_rowtype_free(&def.name)?;
         for idx in &def.indexes {
             self.ensure_free(&idx.name)?;
         }
@@ -375,6 +517,7 @@ impl Catalog {
             return Ok(());
         }
         self.ensure_free(&def.name)?;
+        self.ensure_rowtype_free(&def.name)?;
         self.views.insert(def.name.clone(), Arc::new(def));
         Ok(())
     }

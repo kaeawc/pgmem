@@ -166,7 +166,13 @@ fn lower_select(s: sq::Select) -> SqlResult<Select> {
 
 fn lower_select_item(item: sq::SelectItem) -> SqlResult<SelectItem> {
     Ok(match item {
-        sq::SelectItem::UnnamedExpr(e) => SelectItem::Expr { expr: lower_expr(e)?, alias: None },
+        sq::SelectItem::UnnamedExpr(e) => match lower_expr(e)? {
+            // `(x).*`, rewritten before parsing (see `rewrite_unsupported`).
+            Expr::Function(f) if f.name.base() == crate::FIELD_STAR_MARKER && f.args.len() == 1 => {
+                SelectItem::FieldStar(f.args.into_iter().next().unwrap_or(Expr::Literal(pgmem_ir::Literal::Null)))
+            }
+            expr => SelectItem::Expr { expr, alias: None },
+        },
         sq::SelectItem::ExprWithAlias { expr, alias } => SelectItem::Expr { expr: lower_expr(expr)?, alias: Some(ident(&alias)) },
         sq::SelectItem::Wildcard(_) => SelectItem::Wildcard,
         sq::SelectItem::QualifiedWildcard(sq::SelectItemQualifiedWildcardKind::ObjectName(n), _) => {

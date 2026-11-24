@@ -63,7 +63,12 @@ fn model<'a>(ctx: &'a EvalCtx) -> Model<'a> {
 
 fn constraintdef_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
     let m = model(ctx);
-    Ok(oid_arg(&a[0]).and_then(|o| m.constraint_by_oid(o)).map_or(Value::Null, |c| Value::Text(constraint_def(&m, &c))))
+    let Some(o) = oid_arg(&a[0]) else { return Ok(Value::Null) };
+    if let Some(c) = m.constraint_by_oid(o) {
+        return Ok(Value::Text(constraint_def(&m, &c)));
+    }
+    let domain = m.catalog.types().flat_map(|t| crate::catalog_views::domain_constraints(m.catalog, t)).find(|c| c.oid == o);
+    Ok(domain.map_or(Value::Null, |c| Value::Text(c.def())))
 }
 
 fn indexdef_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {

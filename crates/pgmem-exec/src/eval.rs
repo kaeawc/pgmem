@@ -255,6 +255,30 @@ pub fn eval(expr: &Expr, row: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
                 _ => Value::Null,
             }
         }
+        Expr::Row { fields, type_oid, .. } => {
+            Value::Record(*type_oid, fields.iter().map(|e| eval(e, row, ctx)).collect::<SqlResult<Vec<_>>>()?)
+        }
+        Expr::Field { expr, idx } => match eval(expr, row, ctx)? {
+            Value::Record(_, mut fields) if *idx < fields.len() => fields.swap_remove(*idx),
+            Value::Null => Value::Null,
+            other => return Err(SqlError::internal(format!("field selection from {}", other.kind()))),
+        },
+        Expr::FieldStore { expr, idx, value, type_oid, width } => {
+            let mut fields = match eval(expr, row, ctx)? {
+                Value::Record(_, fields) => fields,
+                _ => vec![Value::Null; *width],
+            };
+            let v = eval(value, row, ctx)?;
+            if let Some(slot) = fields.get_mut(*idx) {
+                *slot = v;
+            }
+            Value::Record(*type_oid, fields)
+        }
+        Expr::CoerceToDomain(d) => {
+            let v = eval(&d.expr, row, ctx)?;
+            check_domain(d, &v, ctx)?;
+            v
+        }
         Expr::AggCall(_) | Expr::WindowCall(_) => return Err(SqlError::internal("unresolved aggregate or window call")),
     })
 }
@@ -284,6 +308,24 @@ fn quantified(l: &Value, items: impl Iterator<Item = Value>, cmp: &crate::plan::
 }
 
 /// Evaluates a predicate: true only for SQL TRUE.
+/// `ExecEvalConstraintNotNull` / `ExecEvalConstraintCheck`: a CHECK that yields NULL passes.
+fn check_domain(d: &crate::plan::DomainCoercion, v: &Value, ctx: &EvalCtx) -> SqlResult<()> {
+    if d.not_null && v.is_null() {
+        return Err(SqlError::new(code::NOT_NULL_VIOLATION, format!("domain {} does not allow null values", d.domain)));
+    }
+    let one = std::slice::from_ref(v);
+    for (name, check) in &d.checks {
+        if matches!(eval(check, one, ctx)?, Value::Bool(false)) {
+            return Err(SqlError::new(
+                code::CHECK_VIOLATION,
+                format!("value for domain {} violates check constraint \"{name}\"", d.domain),
+            )
+            .with_constraint(name.clone()));
+        }
+    }
+    Ok(())
+}
+
 pub fn eval_pred(expr: &Expr, row: &[Value], ctx: &EvalCtx) -> SqlResult<bool> {
     Ok(eval(expr, row, ctx)?.is_true())
 }

@@ -7,7 +7,7 @@ use super::model::{
 use super::{Def, Spec, boolean, ch, int2, int4, name, oid, rows_of, snapshot, txt};
 use crate::eval::EvalCtx;
 use crate::plan::Row;
-use pgmem_catalog::{PG_CATALOG_NAMESPACE_OID, PUBLIC_NAMESPACE_OID};
+use pgmem_catalog::{Oid, PG_CATALOG_NAMESPACE_OID, PUBLIC_NAMESPACE_OID};
 use pgmem_types::{RegKind, SqlResult, Type, Value};
 
 const PG_TYPE_DATA: &str = include_str!("pg_type.tsv");
@@ -123,7 +123,7 @@ pub static DEFS: &[Def] = &[
     def!("pg_language", 2612, 'r', PG_LANGUAGE, pg_language),
     def!("pg_extension", 3079, 'r', PG_EXTENSION, pg_extension),
     def!("pg_proc", 1255, 'r', PG_PROC, empty),
-    def!("pg_enum", 3501, 'r', PG_ENUM, empty),
+    def!("pg_enum", 3501, 'r', PG_ENUM, pg_enum),
     def!("pg_depend", 2608, 'r', PG_DEPEND, pg_depend),
     def!("pg_inherits", 2611, 'r', PG_INHERITS, empty),
     def!("pg_trigger", 2620, 'r', PG_TRIGGER, empty),
@@ -187,6 +187,16 @@ pub fn builtin_type(type_oid: u32) -> Option<BuiltinType<'static>> {
 
 /// Storage facts of a type: (typlen, typbyval, typalign, typstorage, typcollation).
 pub fn type_storage(t: &Type) -> (i16, bool, char, char, u32) {
+    match t {
+        Type::Enum(_) => return (4, true, 'i', 'p', 0),
+        Type::Domain(_) => return type_storage(&t.base()),
+        Type::Composite(_) | Type::Record => return (-1, false, 'd', 'x', 0),
+        Type::Array(e) if matches!(**e, Type::Enum(_) | Type::Domain(_) | Type::Composite(_) | Type::Record) => {
+            let align = if type_storage(e).2 == 'd' { 'd' } else { 'i' };
+            return (-1, false, align, 'x', 0);
+        }
+        _ => {}
+    }
     match builtin_type(t.oid()) {
         Some(b) => (b.len(), b.byval(), b.align(), b.storage(), b.collation()),
         None => (-1, false, 'i', 'x', 0),
@@ -247,6 +257,11 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     }
     for seq in m.sequences() {
         rows.push(class_row(&s, seq.oid, &seq.name, PUBLIC_NAMESPACE_OID, 'S', 3, vec![("relfilenode", oid(seq.oid))]));
+    }
+    for t in m.catalog.types() {
+        if let pgmem_catalog::TypeDefKind::Composite { fields, relid } = &t.kind {
+            rows.push(class_row(&s, *relid, &t.name, PUBLIC_NAMESPACE_OID, 'c', fields.len(), vec![("reltype", oid(t.oid))]));
+        }
     }
     for (_, idx) in m.indexes() {
         let natts = idx.columns.len() + idx.exprs.len();
@@ -341,6 +356,22 @@ fn pg_attribute(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     for seq in m.sequences() {
         rows.extend(Model::sequence_atts(seq).iter().map(|a| att_row(&s, seq.oid, a)));
     }
+    for t in m.catalog.types() {
+        if let pgmem_catalog::TypeDefKind::Composite { fields, relid } = &t.kind {
+            for (i, f) in fields.iter().enumerate() {
+                let a = Att {
+                    attnum: i + 1,
+                    name: f.name.clone(),
+                    ty: f.ty.clone(),
+                    typmod: f.typmod,
+                    not_null: false,
+                    dropped: false,
+                    column: None,
+                };
+                rows.push(att_row(&s, *relid, &a));
+            }
+        }
+    }
     for (t, idx) in m.indexes() {
         rows.extend(Model::index_atts(t, idx).iter().map(|a| att_row(&s, idx.oid, a)));
     }
@@ -405,6 +436,135 @@ fn pg_type(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             ("typstorage", ch('x')),
         ]));
     }
+    for t in m.catalog.types() {
+        rows.extend(user_type_rows(&s, m.catalog, t));
+    }
+    Ok(rows)
+}
+
+/// The `pg_type` rows of a user type and of its array type, as `TypeCreate` fills them.
+fn user_type_rows(s: &Spec, catalog: &pgmem_catalog::Catalog, t: &pgmem_catalog::TypeDef) -> Vec<Row> {
+    use pgmem_catalog::TypeDefKind;
+    let common = |vals: &mut Vec<(&'static str, Value)>| {
+        vals.extend([
+            ("typnamespace", oid(PUBLIC_NAMESPACE_OID)),
+            ("typdelim", ch(',')),
+            ("typmodin", regproc("-")),
+            ("typmodout", regproc("-")),
+        ]);
+    };
+    let mut vals: Vec<(&'static str, Value)> =
+        vec![("oid", oid(t.oid)), ("typname", name(&t.name)), ("typtype", ch(t.typtype())), ("typarray", oid(t.array_oid))];
+    common(&mut vals);
+    let collation = match &t.kind {
+        TypeDefKind::Domain { base, .. } => type_storage(base).4,
+        _ => 0,
+    };
+    let align = match &t.kind {
+        TypeDefKind::Enum { .. } => {
+            vals.extend([
+                ("typlen", Value::Int2(4)),
+                ("typbyval", boolean(true)),
+                ("typcategory", ch('E')),
+                ("typinput", regproc("enum_in")),
+                ("typoutput", regproc("enum_out")),
+                ("typreceive", regproc("enum_recv")),
+                ("typsend", regproc("enum_send")),
+                ("typsubscript", regproc("-")),
+                ("typanalyze", regproc("-")),
+                ("typalign", ch('i')),
+                ("typstorage", ch('p')),
+            ]);
+            'i'
+        }
+        TypeDefKind::Composite { relid, .. } => {
+            vals.extend([
+                ("typlen", Value::Int2(-1)),
+                ("typbyval", boolean(false)),
+                ("typcategory", ch('C')),
+                ("typrelid", oid(*relid)),
+                ("typinput", regproc("record_in")),
+                ("typoutput", regproc("record_out")),
+                ("typreceive", regproc("record_recv")),
+                ("typsend", regproc("record_send")),
+                ("typsubscript", regproc("-")),
+                ("typanalyze", regproc("-")),
+                ("typalign", ch('d')),
+                ("typstorage", ch('x')),
+            ]);
+            'd'
+        }
+        TypeDefKind::Domain { base, typmod, not_null, default, .. } => {
+            let (len, byval, align, storage, collation) = type_storage(base);
+            // I/O functions come from the ultimate (non-domain) base type.
+            let b = builtin_type(base.base().oid());
+            let fname = |i: usize, fallback: &str| b.as_ref().map_or_else(|| fallback.to_owned(), |b| b.field(i).to_owned());
+            let default_text = default.as_ref().and_then(|d| {
+                let empty = pgmem_catalog::TableDef { oid: 0, name: String::new(), columns: vec![], constraints: vec![], indexes: vec![] };
+                let mut col = pgmem_catalog::ColumnDef::new("value", base.clone());
+                col.typmod = *typmod;
+                col.default = Some(d.clone());
+                crate::deparse::deparse_default(catalog, &empty, &col).ok().flatten()
+            });
+            vals.extend([
+                ("typlen", Value::Int2(len)),
+                ("typbyval", boolean(byval)),
+                ("typcategory", ch(base.category())),
+                ("typinput", regproc("domain_in")),
+                ("typoutput", regproc(&fname(10, "record_out"))),
+                ("typreceive", regproc("domain_recv")),
+                ("typsend", regproc(&fname(12, "record_send"))),
+                ("typsubscript", regproc(&fname(18, "-"))),
+                ("typanalyze", regproc(&fname(19, "-"))),
+                ("typalign", ch(align)),
+                ("typstorage", ch(storage)),
+                ("typnotnull", boolean(*not_null)),
+                ("typbasetype", oid(base.oid())),
+                ("typtypmod", Value::Int4(*typmod)),
+                ("typcollation", oid(collation)),
+                ("typdefault", default_text.map_or(Value::Null, Value::Text)),
+            ]);
+            align
+        }
+    };
+    let mut arr: Vec<(&'static str, Value)> = vec![
+        ("oid", oid(t.array_oid)),
+        ("typname", name(&format!("_{}", t.name))),
+        ("typlen", Value::Int2(-1)),
+        ("typbyval", boolean(false)),
+        ("typtype", ch('b')),
+        ("typcategory", ch('A')),
+        ("typelem", oid(t.oid)),
+        ("typinput", regproc("array_in")),
+        ("typoutput", regproc("array_out")),
+        ("typreceive", regproc("array_recv")),
+        ("typsend", regproc("array_send")),
+        ("typsubscript", regproc("array_subscript_handler")),
+        ("typanalyze", regproc("array_typanalyze")),
+        ("typalign", ch(if align == 'd' { 'd' } else { 'i' })),
+        ("typstorage", ch('x')),
+        ("typcollation", oid(collation)),
+    ];
+    common(&mut arr);
+    vec![s.row(vals), s.row(arr)]
+}
+
+fn pg_enum(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let m = snapshot(ctx);
+    let s = Spec::parse(PG_ENUM);
+    let mut rows = Vec::new();
+    for t in m.catalog.types() {
+        if let pgmem_catalog::TypeDefKind::Enum { labels } = &t.kind {
+            for l in labels {
+                rows.push(s.row(vec![
+                    ("oid", oid(l.oid)),
+                    ("enumtypid", oid(t.oid)),
+                    ("enumsortorder", Value::Float4(l.sort)),
+                    ("enumlabel", name(&l.label)),
+                ]));
+            }
+        }
+    }
     Ok(rows)
 }
 
@@ -450,10 +610,74 @@ fn int2_array(attnums: &[usize]) -> Value {
     Value::Array(attnums.iter().map(|a| int2(*a)).collect())
 }
 
+/// A constraint of a domain, as `pg_constraint` records it.
+pub struct DomainCon {
+    pub oid: Oid,
+    pub name: String,
+    pub contype: char,
+    pub validated: bool,
+    /// The CHECK expression as ruleutils prints it (`(VALUE > 0)`); None for NOT NULL.
+    pub check: Option<String>,
+}
+
+impl DomainCon {
+    /// `pg_get_constraintdef`.
+    pub fn def(&self) -> String {
+        match &self.check {
+            Some(e) => format!("CHECK ({e})"),
+            None => "NOT NULL".to_owned(),
+        }
+    }
+}
+
+/// The constraints of a domain: its NOT NULL (Postgres 17+ records it as
+/// `<domain>_not_null`), then its CHECKs.
+pub fn domain_constraints(catalog: &pgmem_catalog::Catalog, t: &pgmem_catalog::TypeDef) -> Vec<DomainCon> {
+    let pgmem_catalog::TypeDefKind::Domain { base, typmod, not_null, checks, .. } = &t.kind else { return Vec::new() };
+    let mut out = Vec::new();
+    if *not_null {
+        out.push(DomainCon {
+            oid: domain_not_null_oid(t.oid),
+            name: format!("{}_not_null", t.name),
+            contype: 'n',
+            validated: true,
+            check: None,
+        });
+    }
+    for c in checks {
+        let check = crate::deparse::deparse_domain_check(catalog, base, *typmod, &c.expr).unwrap_or_default();
+        out.push(DomainCon { oid: c.oid, name: c.name.clone(), contype: 'c', validated: c.validated, check: Some(check) });
+    }
+    out
+}
+
+/// The OID of a domain's NOT NULL constraint (pgmem stores the flag, not a constraint).
+pub fn domain_not_null_oid(domain: Oid) -> Oid {
+    0x7000_0000_u32.wrapping_add(domain)
+}
+
 fn pg_constraint(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let m = snapshot(ctx);
     let s = Spec::parse(PG_CONSTRAINT);
-    Ok(m.constraints()
+    let mut domain_rows = Vec::new();
+    for t in m.catalog.types() {
+        for c in domain_constraints(m.catalog, t) {
+            let mut vals = vec![
+                ("oid", oid(c.oid)),
+                ("conname", name(&c.name)),
+                ("contype", ch(c.contype)),
+                ("conrelid", oid(0)),
+                ("contypid", oid(t.oid)),
+                ("convalidated", boolean(c.validated)),
+            ];
+            if let Some(e) = c.check {
+                vals.push(("conbin", txt(e)));
+            }
+            domain_rows.push(s.row(vals));
+        }
+    }
+    let mut rows: Vec<Row> = m
+        .constraints()
         .iter()
         .map(|c| {
             let mut vals = vec![
@@ -478,7 +702,9 @@ fn pg_constraint(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             }
             s.row(vals)
         })
-        .collect())
+        .collect();
+    rows.extend(domain_rows);
+    Ok(rows)
 }
 
 fn pg_attrdef(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {

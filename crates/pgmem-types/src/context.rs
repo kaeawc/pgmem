@@ -1,5 +1,6 @@
 //! The session settings that change how values are read and printed (`TimeZone`, the date
-//! field order of `DateStyle`), and the statement's start time for `'now'` / `'today'` input.
+//! field order of `DateStyle`), the statement's start time for `'now'` / `'today'` input, and
+//! the user-defined types visible to the transaction (enum labels, composite fields).
 //!
 //! Input and output functions are called from many places (casts, literal folding at bind
 //! time, wire encoding) that don't carry the session, so the session installs its context for
@@ -7,8 +8,10 @@
 //! [`current`]. Outside any session the context is UTC with MDY order, matching pgmem's
 //! defaults.
 
+use crate::usertype::Registry;
 use crate::zone::Zone;
 use std::cell::RefCell;
+use std::sync::Arc;
 
 /// The order `DateStyle` gives to ambiguous numeric dates (`1/2/2024`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -25,11 +28,13 @@ pub struct Context {
     pub date_order: DateOrder,
     /// Statement start, microseconds since 2000-01-01 UTC (for `'now'`, `'today'`, ...).
     pub now: i64,
+    /// User-defined types of the running transaction's catalog.
+    pub types: Arc<Registry>,
 }
 
 impl Default for Context {
     fn default() -> Context {
-        Context { zone: Zone::utc(), date_order: DateOrder::Mdy, now: 0 }
+        Context { zone: Zone::utc(), date_order: DateOrder::Mdy, now: 0, types: Arc::default() }
     }
 }
 
@@ -47,6 +52,14 @@ pub fn with_zone<R>(f: impl FnOnce(&Zone) -> R) -> R {
     CURRENT.with(|c| match c.borrow().as_ref() {
         Some(ctx) => f(&ctx.zone),
         None => f(&Zone::utc()),
+    })
+}
+
+/// Runs `f` with the current user-type registry without cloning the context.
+pub fn with_types<R>(f: impl FnOnce(&Registry) -> R) -> R {
+    CURRENT.with(|c| match c.borrow().as_ref() {
+        Some(ctx) => f(&ctx.types),
+        None => f(&Registry::default()),
     })
 }
 

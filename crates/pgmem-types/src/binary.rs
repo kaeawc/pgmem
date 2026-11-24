@@ -92,7 +92,62 @@ pub fn encode(v: &Value, ty: &Type) -> SqlResult<Vec<u8>> {
             Value::Array(items) => encode_array(items, elem)?,
             _ => return Err(mismatch()),
         },
+        // enum_send is the label's text.
+        Type::Enum(_) => match v {
+            Value::Enum(t, label) => crate::usertype::enum_label(*t, *label)?.into_bytes(),
+            _ => return Err(mismatch()),
+        },
+        Type::Domain(_) => encode(v, &ty.base())?,
+        Type::Composite(_) | Type::Record => match v {
+            Value::Record(t, fields) => encode_record(*t, fields)?,
+            _ => return Err(mismatch()),
+        },
     })
+}
+
+/// `record_send`: the column count, then each column's type OID, length (-1 for NULL) and
+/// binary value.
+fn encode_record(type_oid: u32, fields: &[Value]) -> SqlResult<Vec<u8>> {
+    let declared = crate::usertype::lookup(type_oid);
+    let mut out = Vec::new();
+    put_i32(&mut out, i32::try_from(fields.len()).map_err(|_| SqlError::internal("record too wide"))?);
+    for (n, v) in fields.iter().enumerate() {
+        let ty = declared.as_ref().and_then(|t| t.fields().get(n).map(|f| f.ty.clone())).unwrap_or_else(|| v.natural_type());
+        // Like RowDescription, a domain column reports its base type.
+        let ty = ty.base();
+        out.extend_from_slice(&ty.oid().to_be_bytes());
+        if v.is_null() {
+            put_i32(&mut out, -1);
+        } else {
+            let b = encode(v, &ty)?;
+            put_i32(&mut out, i32::try_from(b.len()).map_err(|_| SqlError::internal("field too large"))?);
+            out.extend_from_slice(&b);
+        }
+    }
+    Ok(out)
+}
+
+/// `record_recv` for a named composite type.
+fn decode_record(b: &[u8], type_oid: u32, ty: &Type) -> SqlResult<Value> {
+    let t = crate::usertype::lookup(type_oid).ok_or_else(|| SqlError::internal(format!("cache lookup failed for type {type_oid}")))?;
+    let fields = t.fields();
+    let mut r = Reader { b, pos: 0, ty };
+    let n = usize::try_from(r.i32()?).map_err(|_| bad(ty, "negative column count"))?;
+    if n != fields.len() {
+        return Err(SqlError::datatype_mismatch(format!("wrong number of columns: {n}, expected {}", fields.len())));
+    }
+    let mut out = Vec::with_capacity(n);
+    for f in fields {
+        let _oid = r.i32()?;
+        let len = r.i32()?;
+        if len < 0 {
+            out.push(Value::Null);
+            continue;
+        }
+        let chunk = r.bytes(usize::try_from(len).map_err(|_| bad(ty, "bad length"))?)?;
+        out.push(decode(chunk, &f.ty)?);
+    }
+    Ok(Value::Record(type_oid, out))
 }
 
 fn put_i32(out: &mut Vec<u8>, n: i32) {
@@ -179,6 +234,13 @@ pub fn decode(b: &[u8], ty: &Type) -> SqlResult<Value> {
         }
         Type::Array(elem) => Value::Array(decode_array(b, elem, ty)?),
         Type::Int2Vector | Type::OidVector => Value::Array(decode_array(b, ty.element().unwrap_or(&Type::Int2), ty)?),
+        Type::Enum(oid) => {
+            let s = std::str::from_utf8(b).map_err(|_| bad(ty, "invalid UTF-8"))?;
+            crate::usertype::parse_enum(s, *oid)?
+        }
+        Type::Domain(_) => decode(b, &ty.base())?,
+        Type::Composite(oid) => decode_record(b, *oid, ty)?,
+        Type::Record => return Err(SqlError::feature_not_supported("input of anonymous composite types is not implemented")),
     })
 }
 

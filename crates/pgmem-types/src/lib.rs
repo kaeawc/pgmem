@@ -12,6 +12,7 @@ mod go_port;
 pub mod json;
 pub mod numeric;
 pub mod text;
+pub mod usertype;
 mod value;
 pub mod zone;
 
@@ -66,6 +67,16 @@ pub enum Type {
     Int2Vector,
     OidVector,
     Array(Box<Type>),
+    /// A user-defined enum (`CREATE TYPE ... AS ENUM`), by OID.
+    Enum(u32),
+    /// A domain (`CREATE DOMAIN`), by OID. Values are values of the base type; operators and
+    /// functions see the base type (Postgres' `getBaseType`), casts and assignments to the
+    /// domain check its constraints.
+    Domain(u32),
+    /// A named composite type: `CREATE TYPE ... AS (...)` or a table's row type, by OID.
+    Composite(u32),
+    /// `record`: an anonymous row (`ROW(1, 'a')`).
+    Record,
 }
 
 /// The `reg*` OID alias types.
@@ -127,6 +138,8 @@ impl Type {
             Type::Void => 2278,
             Type::Int2Vector => 22,
             Type::OidVector => 30,
+            Type::Enum(o) | Type::Domain(o) | Type::Composite(o) => *o,
+            Type::Record => usertype::RECORD_OID,
             Type::Array(elem) => match elem.as_ref() {
                 Type::Bool => 1000,
                 Type::Bytea => 1001,
@@ -155,6 +168,8 @@ impl Type {
                 Type::Reg(RegKind::Type) => 2211,
                 Type::Reg(RegKind::Proc) => 1008,
                 Type::Reg(RegKind::Namespace) => 4090,
+                Type::Enum(o) | Type::Domain(o) | Type::Composite(o) => usertype::array_oid(*o),
+                Type::Record => usertype::RECORD_ARRAY_OID,
                 _ => 0,
             },
         }
@@ -194,6 +209,7 @@ impl Type {
             2950 => Some(Type::Uuid),
             3802 => Some(Type::Jsonb),
             705 => Some(Type::Unknown),
+            usertype::RECORD_OID => Some(Type::Record),
             _ => None,
         };
         if let Some(t) = scalar(oid) {
@@ -227,7 +243,8 @@ impl Type {
             1187 => Type::Interval,
             2951 => Type::Uuid,
             3807 => Type::Jsonb,
-            _ => return None,
+            usertype::RECORD_ARRAY_OID => Type::Record,
+            _ => return usertype::type_for_oid(oid),
         };
         Some(Type::array_of(elem))
     }
@@ -244,7 +261,9 @@ impl Type {
             Type::Interval | Type::Uuid => 16,
             Type::Unknown => -2,
             Type::Void => 4,
-            Type::Int2Vector | Type::OidVector => -1,
+            Type::Int2Vector | Type::OidVector | Type::Composite(_) | Type::Record => -1,
+            Type::Enum(_) => 4,
+            Type::Domain(_) => self.base().size(),
             Type::Numeric | Type::Text | Type::Bytea | Type::Jsonb | Type::Array(_) | Type::Varchar | Type::Bpchar | Type::Json => -1,
         }
     }
@@ -253,6 +272,7 @@ impl Type {
     pub fn name(&self) -> String {
         match self {
             Type::Array(elem) => format!("{}[]", elem.name()),
+            Type::Enum(o) | Type::Domain(o) | Type::Composite(o) => usertype::type_name(*o),
             other => other.scalar_name().to_owned(),
         }
     }
@@ -288,6 +308,8 @@ impl Type {
             Type::Int2Vector => "int2vector",
             Type::OidVector => "oidvector",
             Type::Array(_) => "array",
+            Type::Record => "record",
+            Type::Enum(_) | Type::Domain(_) | Type::Composite(_) => "???",
         }
     }
 
@@ -323,7 +345,27 @@ impl Type {
             Type::Int2Vector => "int2vector".into(),
             Type::OidVector => "oidvector".into(),
             Type::Array(elem) => format!("_{}", elem.typname()),
+            Type::Record => "record".into(),
+            Type::Enum(o) | Type::Domain(o) | Type::Composite(o) => usertype::raw_type_name(*o),
         }
+    }
+
+    /// The type operators and functions see: a domain's base type (Postgres' `getBaseType`),
+    /// every other type itself.
+    pub fn base(&self) -> Type {
+        match self {
+            Type::Domain(o) => usertype::domain_base(*o).map_or(Type::Unknown, |(b, _)| b),
+            other => other.clone(),
+        }
+    }
+
+    pub fn is_domain(&self) -> bool {
+        matches!(self, Type::Domain(_))
+    }
+
+    /// True for named composite types and `record`.
+    pub fn is_composite(&self) -> bool {
+        matches!(self, Type::Composite(_) | Type::Record)
     }
 
     /// Resolves a SQL type name as written in DDL or a cast (`int`, `bigint`, `varchar`,
@@ -384,7 +426,8 @@ impl Type {
     /// The type a function or operator lookup sees: string types resolve through `text`, as
     /// Postgres' implicit casts make them do.
     pub fn lookup_type(&self) -> Type {
-        if self.is_string() { Type::Text } else { self.clone() }
+        let base = self.base();
+        if base.is_string() { Type::Text } else { base }
     }
 
     pub fn is_numeric(&self) -> bool {
@@ -415,6 +458,9 @@ impl Type {
             Type::Interval => 'T',
             Type::Array(_) => 'A',
             Type::Unknown => 'X',
+            Type::Enum(_) => 'E',
+            Type::Composite(_) | Type::Record => 'C',
+            Type::Domain(_) => self.base().category(),
             Type::Bytea | Type::Uuid | Type::Jsonb => 'U',
         }
     }

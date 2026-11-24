@@ -112,7 +112,7 @@ fn namespace_name_oid(name: &str) -> Option<u32> {
 
 /// `regtypein`: a type name as `format_type` or SQL writes it (`integer`, `int4`,
 /// `character varying(10)`, `text[]`, `pg_catalog.int8`).
-fn lookup_type(s: &str) -> SqlResult<Value> {
+fn lookup_type(s: &str, catalog: &Catalog) -> SqlResult<Value> {
     let missing = || SqlError::new(code::UNDEFINED_OBJECT, format!("type \"{}\" does not exist", s.trim()));
     let mut name = s.trim().to_ascii_lowercase();
     let mut dims = 0;
@@ -125,7 +125,23 @@ fn lookup_type(s: &str) -> SqlResult<Value> {
         name = format!("{}{}", name[..open].trim_end(), &name[close + 1..]);
     }
     let name = name.strip_prefix("pg_catalog.").unwrap_or(&name);
-    let mut ty = Type::from_sql_name(name).ok_or_else(missing)?;
+    let mut ty = match Type::from_sql_name(name) {
+        Some(t) => t,
+        // A user type: the name as written (quoted names keep their case), optionally public.
+        None => {
+            let mut written = s.trim();
+            while let Some(base) = written.strip_suffix("[]") {
+                written = base.trim_end();
+            }
+            let parts = parse_qualified(written)?;
+            let user = match parts.as_slice() {
+                [n] => Some(n),
+                [schema, n] if schema == "public" => Some(n),
+                _ => None,
+            };
+            user.and_then(|n| crate::usertypes::lookup_type(catalog, n)).ok_or_else(missing)?
+        }
+    };
     for _ in 0..dims {
         ty = Type::array_of(ty);
     }
@@ -163,7 +179,7 @@ pub fn to_reg(v: Value, kind: RegKind, catalog: &Catalog) -> SqlResult<Value> {
             }
             match kind {
                 RegKind::Class => lookup_class(&s, catalog),
-                RegKind::Type => lookup_type(&s),
+                RegKind::Type => lookup_type(&s, catalog),
                 RegKind::Namespace => lookup_namespace(&s),
                 RegKind::Proc => {
                     let parts = parse_qualified(&s)?;
@@ -189,7 +205,8 @@ mod tests {
 
     #[test]
     fn regtype_names() {
-        let name = |s: &str| match lookup_type(s) {
+        let catalog = Catalog::new();
+        let name = |s: &str| match lookup_type(s, &catalog) {
             Ok(Value::Reg(_, _, n)) => n,
             other => format!("{other:?}"),
         };
@@ -197,6 +214,6 @@ mod tests {
         assert_eq!(name("character varying(10)"), "character varying");
         assert_eq!(name("text[]"), "text[]");
         assert_eq!(name("pg_catalog.int8"), "bigint");
-        assert!(lookup_type("nope").is_err());
+        assert!(lookup_type("nope", &catalog).is_err());
     }
 }

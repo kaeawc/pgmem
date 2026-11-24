@@ -52,6 +52,19 @@ pub fn deparse_predicate(catalog: &Catalog, table: &TableDef, e: &ir::Expr) -> S
     Ok(expr_text(&n))
 }
 
+/// The range-table name standing for a domain constraint's `VALUE`.
+const DOMAIN_VALUE_REF: &str = "\0domain value";
+
+/// A domain CHECK expression as `pg_get_constraintdef` prints it inside `CHECK (...)`:
+/// `(VALUE > 0)`.
+pub fn deparse_domain_check(catalog: &Catalog, base: &pgmem_types::Type, typmod: i32, e: &ir::Expr) -> SqlResult<String> {
+    let cols = vec![ScopeCol { name: "value".into(), ty: base.clone(), typmod, hidden: false }];
+    let rte = Rte { qualifier: String::new(), refname: DOMAIN_VALUE_REF.into(), cols };
+    let mut a = Analyzer { catalog, levels: vec![Level { rtes: vec![rte], names: vec![], ..Level::default() }] };
+    let n = a.boolean(e);
+    Ok(expr_text(&n))
+}
+
 /// The expression coerced to the column's type, as `cookDefault` stores it.
 fn column_expr(catalog: &Catalog, table: &TableDef, column: &ColumnDef, e: &ir::Expr) -> Node {
     let mut a = table_analyzer(catalog, table);

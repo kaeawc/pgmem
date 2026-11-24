@@ -145,8 +145,26 @@ pub(crate) fn lower_expr(e: sq::Expr) -> SqlResult<Expr> {
         E::Tuple(items) => Expr::Row(lower_exprs(items)?),
         E::Array(arr) => Expr::Array(lower_exprs(arr.elem)?),
         E::CompoundFieldAccess { root, access_chain } => {
-            let mut cur = lower_expr(*root)?;
-            for access in access_chain {
+            // `t.col[1]` arrives as `t` with `.col[1]` accessors: dotted names right after a
+            // bare identifier are a column reference, as in Postgres' grammar (`columnref`);
+            // only a parenthesized root (`(t).col`) selects a field.
+            let mut chain = access_chain.into_iter().peekable();
+            let mut cur = match *root {
+                root @ (E::Identifier(_) | E::CompoundIdentifier(_)) => {
+                    let mut parts = match &root {
+                        E::Identifier(i) => vec![ident(i)],
+                        E::CompoundIdentifier(ids) => ids.iter().map(ident).collect(),
+                        _ => Vec::new(),
+                    };
+                    while let Some(sq::AccessExpr::Dot(sq::Expr::Identifier(i))) = chain.peek() {
+                        parts.push(ident(i));
+                        chain.next();
+                    }
+                    if parts.len() == 1 { lower_expr(root)? } else { Expr::Column(parts) }
+                }
+                other => lower_expr(other)?,
+            };
+            for access in chain {
                 cur = match access {
                     sq::AccessExpr::Subscript(sq::Subscript::Index { index }) => {
                         Expr::Subscript { expr: b(cur), index: Subscript::Index(b(lower_expr(index)?)) }
@@ -163,6 +181,7 @@ pub(crate) fn lower_expr(e: sq::Expr) -> SqlResult<Expr> {
                             },
                         }
                     }
+                    sq::AccessExpr::Dot(sq::Expr::Identifier(field)) => Expr::FieldAccess { expr: b(cur), field: ident(&field) },
                     sq::AccessExpr::Dot(_) => return Err(unsupported("composite field access")),
                 };
             }
@@ -446,6 +465,10 @@ fn lower_function(f: sq::Function) -> SqlResult<Expr> {
                 }
             }
         }
+    }
+    // `ROW(a, b)` is a row constructor, not a function call.
+    if base == "row" && call.name.0.len() == 1 && f.filter.is_none() && f.over.is_none() && !call.star {
+        return Ok(Expr::Row(call.args));
     }
     if let Some(filter) = f.filter {
         call.filter = Some(b(lower_expr(*filter)?));

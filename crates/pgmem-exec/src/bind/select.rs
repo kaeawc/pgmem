@@ -224,6 +224,13 @@ impl Binder<'_> {
                         });
                     }
                 }
+                ir::SelectItem::FieldStar(expr) => {
+                    let (e, t) = self.bind_expr(expr, &list_ctx)?;
+                    for (fe, name, ty) in super::expr::expand_fields(e, &t)? {
+                        exprs.push(fe);
+                        columns.push(OutCol::new(name, ty));
+                    }
+                }
                 ir::SelectItem::Expr { expr, alias } => {
                     let (e, t) = self.bind_expr(expr, &list_ctx)?;
                     // An untyped literal in the select list becomes text, as in Postgres.
@@ -986,6 +993,17 @@ fn map_children(e: Expr, f: &mut dyn FnMut(Expr) -> SqlResult<Expr>) -> SqlResul
         Expr::Array(v) => Expr::Array(v.into_iter().map(&mut *f).collect::<SqlResult<Vec<_>>>()?),
         Expr::Subscript { expr, index, upper, slice } => {
             Expr::Subscript { expr: b(expr, f)?, index: b(index, f)?, upper: upper.map(|u| b(u, f)).transpose()?, slice }
+        }
+        Expr::Row { fields, types, type_oid } => {
+            Expr::Row { fields: fields.into_iter().map(&mut *f).collect::<SqlResult<Vec<_>>>()?, types, type_oid }
+        }
+        Expr::Field { expr, idx } => Expr::Field { expr: b(expr, f)?, idx },
+        Expr::FieldStore { expr, idx, value, type_oid, width } => {
+            Expr::FieldStore { expr: b(expr, f)?, idx, value: b(value, f)?, type_oid, width }
+        }
+        Expr::CoerceToDomain(mut d) => {
+            d.expr = f(d.expr)?;
+            Expr::CoerceToDomain(d)
         }
     })
 }

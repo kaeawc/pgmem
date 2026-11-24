@@ -175,10 +175,22 @@ impl Conn {
     }
 
     fn row_description(&mut self, cols: &[OutCol], formats: &[i16]) {
+        // User types' OIDs (array types, domains' base types) come from the session's types.
+        let _ctx = pgmem_types::context::enter(self.session.format_context());
         let fields: Vec<(String, u32, i16, u32, i16, i32, i16)> = cols
             .iter()
             .enumerate()
-            .map(|(i, c)| (c.name.clone(), c.table_oid, c.attnum, c.ty.oid(), c.ty.size(), c.typmod, format_for(formats, i).code()))
+            .map(|(i, c)| {
+                // Like printtup, a domain column is described by its base type and typmod.
+                let (ty, typmod) = match &c.ty {
+                    Type::Domain(oid) => {
+                        let (base, dmod) = pgmem_types::usertype::domain_base(*oid).unwrap_or((Type::Unknown, -1));
+                        (base, if c.typmod >= 0 { c.typmod } else { dmod })
+                    }
+                    other => (other.clone(), c.typmod),
+                };
+                (c.name.clone(), c.table_oid, c.attnum, ty.oid(), ty.size(), typmod, format_for(formats, i).code())
+            })
             .collect();
         self.out.row_description(&fields);
     }

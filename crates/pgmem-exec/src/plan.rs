@@ -173,11 +173,46 @@ pub enum Expr {
         upper: Option<Box<Expr>>,
         slice: bool,
     },
+    /// A composite value built from its fields (`ROW(...)`, a whole-row reference); the type
+    /// OID is a named composite type or `record`. `types` are the fields' bound types (string
+    /// literals stay `unknown` until the row is coerced to a named type).
+    Row {
+        fields: Vec<Expr>,
+        types: Vec<Type>,
+        type_oid: u32,
+    },
+    /// `(composite).field`, by field position.
+    Field {
+        expr: Box<Expr>,
+        idx: usize,
+    },
+    /// The composite `expr` with field `idx` replaced by `value` (`UPDATE ... SET col.f = v`);
+    /// a NULL composite becomes a row of NULLs first, as in Postgres.
+    FieldStore {
+        expr: Box<Expr>,
+        idx: usize,
+        value: Box<Expr>,
+        type_oid: u32,
+        width: usize,
+    },
+    /// Coercion to a domain (`CoerceToDomain`): the value passes through after the domain's
+    /// NOT NULL and CHECK constraints accept it.
+    CoerceToDomain(Box<DomainCoercion>),
     /// Placeholder for an aggregate call while binding a grouped select list; replaced by a
     /// column reference into the aggregate's output before execution.
     AggCall(Box<AggCall>),
     /// Placeholder for a window function call; replaced like `AggCall`.
     WindowCall(Box<WinCall>),
+}
+
+/// A domain's constraints, bound for [`Expr::CoerceToDomain`]. The CHECK expressions see the
+/// value as column 0 of a one-column row (`VALUE`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DomainCoercion {
+    pub expr: Expr,
+    pub domain: String,
+    pub not_null: bool,
+    pub checks: Vec<(String, Expr)>,
 }
 
 impl Expr {
@@ -213,7 +248,14 @@ impl Expr {
             | Expr::MinMax { args, .. } => {
                 args.iter().for_each(|a| a.walk(f));
             }
-            Expr::Cast { expr, .. } | Expr::Not(expr) | Expr::IsNull { expr, .. } => expr.walk(f),
+            Expr::Cast { expr, .. } | Expr::Not(expr) | Expr::IsNull { expr, .. } | Expr::Field { expr, .. } => expr.walk(f),
+            Expr::Row { fields, .. } => fields.iter().for_each(|a| a.walk(f)),
+            Expr::FieldStore { expr, value, .. } => {
+                expr.walk(f);
+                value.walk(f);
+            }
+            // The CHECK expressions run against their own one-column row.
+            Expr::CoerceToDomain(d) => d.expr.walk(f),
             Expr::IsDistinct { left, right, .. } | Expr::NullIf(left, right) => {
                 left.walk(f);
                 right.walk(f);
@@ -295,6 +337,15 @@ impl Expr {
             Expr::Array(v) => Expr::Array(vec(v, f)?),
             Expr::Subscript { expr, index, upper, slice } => {
                 Expr::Subscript { expr: boxed(expr, f)?, index: boxed(index, f)?, upper: upper.map(|u| boxed(u, f)).transpose()?, slice }
+            }
+            Expr::Row { fields, types, type_oid } => Expr::Row { fields: vec(fields, f)?, types, type_oid },
+            Expr::Field { expr, idx } => Expr::Field { expr: boxed(expr, f)?, idx },
+            Expr::FieldStore { expr, idx, value, type_oid, width } => {
+                Expr::FieldStore { expr: boxed(expr, f)?, idx, value: boxed(value, f)?, type_oid, width }
+            }
+            Expr::CoerceToDomain(mut d) => {
+                d.expr = d.expr.transform(f)?;
+                Expr::CoerceToDomain(d)
             }
         };
         f(node)

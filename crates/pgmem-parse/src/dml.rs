@@ -40,10 +40,10 @@ fn lower_assignments(items: Vec<sq::Assignment>) -> SqlResult<Vec<Assignment>> {
         .collect()
 }
 
-/// SET targets may be written `col` or `tbl.col`; Postgres rejects the latter unless the
-/// qualifier is a composite field, so pgmem takes the last part (matching common usage).
-fn column_target(n: &sq::ObjectName) -> SqlResult<String> {
-    Ok(object_name(n)?.base().to_owned())
+/// A SET target: the column name, then composite field names (`SET addr.zip = ...`). The
+/// binder decides whether a qualified target names a field.
+fn column_target(n: &sq::ObjectName) -> SqlResult<Vec<String>> {
+    Ok(object_name(n)?.0)
 }
 
 pub(crate) fn lower_insert(i: sq::Insert) -> SqlResult<Insert> {

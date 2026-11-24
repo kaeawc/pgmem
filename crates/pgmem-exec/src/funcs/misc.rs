@@ -185,3 +185,43 @@ fn setval(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
     }
     Ok(Value::Int8(v))
 }
+
+// ---------------------------------------------------------------------------------------------
+// Enum support functions (enum.c). The first argument is the enum type's OID, added by the
+// binder; the labels are read from the statement's type registry.
+// ---------------------------------------------------------------------------------------------
+
+fn enum_labels(a: &[Value]) -> SqlResult<(u32, Vec<pgmem_types::usertype::EnumLabel>)> {
+    let Value::Oid(oid) = a[0] else { return Err(SqlError::internal("enum function without its type")) };
+    let t = pgmem_types::usertype::lookup(oid).ok_or_else(|| SqlError::internal(format!("cache lookup failed for type {oid}")))?;
+    match &t.kind {
+        pgmem_types::usertype::UserKind::Enum { labels } => Ok((oid, labels.clone())),
+        _ => Err(SqlError::internal(format!("type {} is not an enum", t.name))),
+    }
+}
+
+pub fn enum_first(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let (oid, labels) = enum_labels(a)?;
+    Ok(labels.first().map_or(Value::Null, |l| Value::Enum(oid, l.oid)))
+}
+
+pub fn enum_last(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let (oid, labels) = enum_labels(a)?;
+    Ok(labels.last().map_or(Value::Null, |l| Value::Enum(oid, l.oid)))
+}
+
+/// `enum_range(e)`: every label; `enum_range(lo, hi)`: the labels from `lo` to `hi`
+/// inclusive, a NULL bound meaning the first / last label.
+pub fn enum_range(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let (oid, labels) = enum_labels(a)?;
+    let pos = |v: &Value| match v {
+        Value::Enum(_, l) => labels.iter().position(|x| x.oid == *l),
+        _ => None,
+    };
+    let (lo, hi) = match a.len() {
+        2 => (0, labels.len()),
+        _ => (pos(&a[1]).unwrap_or(0), pos(&a[2]).map_or(labels.len(), |p| p + 1)),
+    };
+    let items = if lo < hi { labels[lo..hi].iter().map(|l| Value::Enum(oid, l.oid)).collect() } else { Vec::new() };
+    Ok(Value::Array(items))
+}

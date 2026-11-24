@@ -11,6 +11,9 @@ use pgmem_storage::Txn;
 use pgmem_types::{GroupKey, SqlError, SqlResult, Value, code, text};
 use std::sync::Arc;
 
+/// `pg_type`'s OID, the `classoid` of comments on types.
+const TYPE_CLASS_OID: u32 = 1247;
+
 fn tag(t: &str) -> QueryResult {
     QueryResult { tag: t.to_owned(), ..Default::default() }
 }
@@ -79,6 +82,16 @@ fn comment_target(
                 Ok(Value::Reg(_, o, _)) => (NAMESPACE_CLASS_OID, o, 0),
                 _ => return Ok(None),
             }
+        }
+        T::Type | T::Domain => {
+            let base = catalog.normalize(name)?;
+            let ty = catalog
+                .type_by_name(base)
+                .ok_or_else(|| SqlError::new(code::UNDEFINED_OBJECT, format!("type \"{base}\" does not exist")))?;
+            if *target == T::Domain && !matches!(ty.kind, pgmem_catalog::TypeDefKind::Domain { .. }) {
+                return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{base}\" is not a domain")));
+            }
+            (TYPE_CLASS_OID, ty.oid, 0)
         }
         T::Other => return Ok(None),
     }))
@@ -159,42 +172,60 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
             }
             let mut current = name;
             for action in &at.actions {
-                let table = txn.catalog().table(&current).cloned().ok_or_else(|| SqlError::undefined_table(&current))?;
-                let has_rows = !txn.scan(table.oid).is_empty();
-                let snapshot = txn.catalog().clone();
-                let b = Binder::new(&snapshot, &[]);
-                match bind::bind_alter_table(&b, &table, action, has_rows)? {
-                    AlterOutcome::Nothing => {}
-                    AlterOutcome::Replace { def, rename_from, sequences, validate } => {
-                        let mut def = *def;
-                        assign_oids(txn.catalog_mut(), &mut def);
-                        let mut renamed_seqs = Vec::new();
-                        for mut seq in sequences {
-                            seq.oid = txn.catalog_mut().alloc_oid();
-                            renamed_seqs.push(seq);
-                        }
-                        for seq in renamed_seqs {
-                            txn.catalog_mut().create_sequence(seq)?;
-                        }
-                        if let ir::AlterTableAction::RenameColumn { old, new } = action {
-                            rename_column_refs(&mut def, old, new);
-                            rename_fk_column_refs(txn.catalog_mut(), &def.name, old, new);
-                        }
-                        apply_validation(txn, &table, &def, validate, &snapshot, env, state)?;
-                        if let Some(old) = &rename_from {
-                            rename_table_refs(txn.catalog_mut(), old, &def.name);
-                        }
-                        let new_name = def.name.clone();
-                        txn.catalog_mut().replace_table(rename_from.as_deref().unwrap_or(&current), def);
-                        current = new_name;
-                    }
-                }
+                current = alter_table_action(txn, &current, action, env, state)?;
             }
             Ok(tag("ALTER TABLE"))
+        }
+        Statement::CreateType(ct) => crate::typeddl::create_type(ct, txn, binder),
+        Statement::CreateDomain(cd) => crate::typeddl::create_domain(cd, txn, binder),
+        Statement::AlterType(at) => crate::typeddl::alter_type(at, txn, binder),
+        Statement::AlterDomain(ad) => crate::typeddl::alter_domain(ad, txn, binder, env, state),
+        Statement::Drop(d) if matches!(d.object_type, ObjectType::Type | ObjectType::Domain) => {
+            crate::typeddl::drop_types(d, txn, env, state)
         }
         Statement::Drop(d) => drop(d, txn, binder),
         Statement::Truncate(t) => truncate(t, txn, binder),
         other => Err(SqlError::feature_not_supported(format!("statement {other:?} is not supported by pgmem"))),
+    }
+}
+
+/// Applies one ALTER TABLE action to table `current`; returns the table's name afterwards.
+pub(crate) fn alter_table_action(
+    txn: &mut Txn,
+    current: &str,
+    action: &ir::AlterTableAction,
+    env: &SessionEnv,
+    state: &StatementState,
+) -> SqlResult<String> {
+    let table = txn.catalog().table(current).cloned().ok_or_else(|| SqlError::undefined_table(current))?;
+    let has_rows = !txn.scan(table.oid).is_empty();
+    let snapshot = txn.catalog().clone();
+    let b = Binder::new(&snapshot, &[]);
+    match bind::bind_alter_table(&b, &table, action, has_rows)? {
+        AlterOutcome::Nothing => Ok(current.to_owned()),
+        AlterOutcome::Replace { def, rename_from, sequences, validate } => {
+            let mut def = *def;
+            assign_oids(txn.catalog_mut(), &mut def);
+            let mut renamed_seqs = Vec::new();
+            for mut seq in sequences {
+                seq.oid = txn.catalog_mut().alloc_oid();
+                renamed_seqs.push(seq);
+            }
+            for seq in renamed_seqs {
+                txn.catalog_mut().create_sequence(seq)?;
+            }
+            if let ir::AlterTableAction::RenameColumn { old, new } = action {
+                rename_column_refs(&mut def, old, new);
+                rename_fk_column_refs(txn.catalog_mut(), &def.name, old, new);
+            }
+            apply_validation(txn, &table, &def, validate, &snapshot, env, state)?;
+            if let Some(old) = &rename_from {
+                rename_table_refs(txn.catalog_mut(), old, &def.name);
+            }
+            let new_name = def.name.clone();
+            txn.catalog_mut().replace_table(rename_from.as_deref().unwrap_or(current), def);
+            Ok(new_name)
+        }
     }
 }
 
@@ -218,7 +249,7 @@ fn display(v: &Value) -> String {
     if v.is_null() { "null".into() } else { text::encode(v, &v.natural_type()).unwrap_or_default() }
 }
 
-fn padded_rows(txn: &Txn, def: &TableDef) -> Vec<(u64, Vec<Value>)> {
+pub(crate) fn padded_rows(txn: &Txn, def: &TableDef) -> Vec<(u64, Vec<Value>)> {
     txn.scan(def.oid)
         .into_iter()
         .map(|(id, mut r)| {
@@ -372,6 +403,12 @@ fn apply_validation(
             };
             let rows = padded_rows(txn, old);
             let mut new_values = Vec::with_capacity(rows.len());
+            // Converting into a domain checks its constraints on every value.
+            let domain_check = if column.ty.is_domain() {
+                Some(bind::coerce_assignment(&b, crate::plan::Expr::Col(0), &column.ty.base(), &column.ty, column.typmod, &column.name)?)
+            } else {
+                None
+            };
             {
                 let ctx = EvalCtx::new(txn, &[], env, state);
                 for (_, row) in &rows {
@@ -410,6 +447,9 @@ fn apply_validation(
                             code::NOT_NULL_VIOLATION,
                             format!("column \"{}\" of relation \"{}\" contains null values", column.name, def.name),
                         ));
+                    }
+                    if let Some(check) = &domain_check {
+                        eval(check, std::slice::from_ref(&v), &ctx)?;
                     }
                     new_values.push(v);
                 }
@@ -562,7 +602,7 @@ fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> 
         ObjectType::Sequence => "SEQUENCE",
         ObjectType::Schema => return Ok(tag("DROP SCHEMA")),
         ObjectType::Extension => return Ok(tag("DROP EXTENSION")),
-        ObjectType::Type => return Err(SqlError::feature_not_supported("DROP TYPE is not supported by pgmem")),
+        ObjectType::Type | ObjectType::Domain => return Err(SqlError::internal("DROP TYPE is handled by typeddl")),
         ObjectType::Function => return Err(SqlError::feature_not_supported("DROP FUNCTION is not supported by pgmem")),
     };
     let mut notices = Vec::new();

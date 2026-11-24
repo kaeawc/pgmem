@@ -34,6 +34,8 @@ pub fn encode(v: &Value, ty: &Type) -> SqlResult<String> {
         (Value::Jsonb(j), _) => j.to_string(),
         (Value::Oid(o), _) => o.to_string(),
         (Value::Reg(_, _, name), _) => name.clone(),
+        (Value::Enum(t, label), _) => crate::usertype::enum_label(*t, *label)?,
+        (Value::Record(t, fields), _) => crate::usertype::format_record(*t, fields)?,
         (Value::Array(items), Type::Int2Vector | Type::OidVector) => {
             items.iter().map(|i| encode(i, &i.natural_type())).collect::<SqlResult<Vec<_>>>()?.join(" ")
         }
@@ -91,6 +93,11 @@ pub fn decode(s: &str, ty: &Type) -> SqlResult<Value> {
         Type::Interval => parse_interval(s).map(Value::Interval),
         Type::Jsonb => Jsonb::parse(s).map(Value::Jsonb),
         Type::Array(elem) => parse_array(s, elem).map(Value::Array),
+        Type::Enum(oid) => crate::usertype::parse_enum(s, *oid),
+        Type::Composite(oid) => crate::usertype::parse_record(s, *oid),
+        // Domain input is the base type's; the executor checks the constraints.
+        Type::Domain(_) => decode(s, &ty.base()),
+        Type::Record => Err(SqlError::feature_not_supported("input of anonymous composite types is not implemented")),
     }
 }
 

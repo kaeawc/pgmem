@@ -131,6 +131,9 @@ impl Binder<'_> {
                     let (e, t) = self.bind_expr(d, &empty_ctx)?;
                     Some(coerce_assignment(self, e, &t, &c.ty, c.typmod, &c.name)?)
                 }
+                None if !c.dropped && c.identity.is_none() && c.generated.is_none() && c.ty.is_domain() => {
+                    self.domain_default(&c.ty, c.typmod, &c.name, &empty_ctx)?
+                }
                 _ => None,
             });
             generated.push(match &c.generated {
@@ -160,6 +163,28 @@ impl Binder<'_> {
             });
         }
         Ok(RowRules { table: Arc::clone(table), defaults, generated, checks, uniques })
+    }
+
+    /// The default of a column without its own DEFAULT whose type is a domain: the nearest
+    /// domain DEFAULT along the domain's base chain, else NULL coerced to the domain (so its
+    /// NOT NULL and CHECK constraints apply), else none.
+    fn domain_default(&self, ty: &Type, typmod: i32, column: &str, ctx: &Ctx) -> SqlResult<Option<Expr>> {
+        let mut cur = ty.clone();
+        let mut constrained = false;
+        while let Type::Domain(oid) = cur {
+            let Some(def) = self.catalog.type_by_oid(oid).filter(|t| t.oid == oid) else { break };
+            let pgmem_catalog::TypeDefKind::Domain { base, not_null, default, checks, .. } = &def.kind else { break };
+            if let Some(d) = default {
+                let (e, t) = self.bind_expr(d, ctx)?;
+                return Ok(Some(coerce_assignment(self, e, &t, ty, typmod, column)?));
+            }
+            constrained |= *not_null || !checks.is_empty();
+            cur = base.clone();
+        }
+        if !constrained {
+            return Ok(None);
+        }
+        Ok(Some(coerce_assignment(self, Expr::null(), &Type::Unknown, ty, typmod, column)?))
     }
 
     fn bind_returning(&self, items: &[ir::SelectItem], ctx: &Ctx) -> SqlResult<(Vec<Expr>, Vec<OutCol>)> {
@@ -197,6 +222,13 @@ impl Binder<'_> {
                             attnum: c.attnum,
                             typmod: c.typmod,
                         });
+                    }
+                }
+                ir::SelectItem::FieldStar(expr) => {
+                    let (e, t) = self.bind_expr(expr, &rctx)?;
+                    for (fe, name, ty) in super::expr::expand_fields(e, &t)? {
+                        exprs.push(fe);
+                        cols.push(OutCol::new(name, ty));
                     }
                 }
                 ir::SelectItem::Expr { expr, alias } => {
@@ -381,10 +413,23 @@ fn bind_assignments(b: &Binder, table: &TableDef, assignments: &[ir::Assignment]
     Ok(out)
 }
 
-fn bind_one_assignment(b: &Binder, table: &TableDef, column: &str, value: &ir::Expr, ctx: &Ctx) -> SqlResult<(usize, Option<Expr>)> {
+/// One SET target: `col`, or `col.field` for a composite column. A qualified target whose
+/// first part is not a column is taken as `table.col` (pgmem accepts that; Postgres reads it
+/// as a field of a column named like the table and fails).
+fn bind_one_assignment(b: &Binder, table: &TableDef, target: &[String], value: &ir::Expr, ctx: &Ctx) -> SqlResult<(usize, Option<Expr>)> {
+    let (column, fields): (&str, &[String]) = match target {
+        [first, rest @ ..] if !rest.is_empty() && table.column_index(first).is_some() => (first, rest),
+        _ => (target.last().map_or("", String::as_str), &[]),
+    };
     let slot =
         table.column_index(column).ok_or_else(|| SqlError::undefined_column(&format!("\"{column}\" of relation \"{}\"", table.name)))?;
     let col = &table.columns[slot];
+    if let [field] = fields {
+        return bind_field_assignment(b, table, slot, field, value, ctx);
+    }
+    if fields.len() > 1 {
+        return Err(super::feature("assignment to nested composite fields"));
+    }
     if matches!(value, ir::Expr::Default) {
         return Ok((slot, None));
     }
@@ -398,6 +443,38 @@ fn bind_one_assignment(b: &Binder, table: &TableDef, column: &str, value: &ir::E
     }
     let (e, t) = b.bind_expr(value, &ctx.with_clause(Clause::Other))?;
     Ok((slot, Some(coerce_assignment(b, e, &t, &col.ty, col.typmod, &col.name)?)))
+}
+
+/// `SET col.field = value`: the column's composite value with one field replaced.
+fn bind_field_assignment(
+    b: &Binder,
+    table: &TableDef,
+    slot: usize,
+    field: &str,
+    value: &ir::Expr,
+    ctx: &Ctx,
+) -> SqlResult<(usize, Option<Expr>)> {
+    let col = &table.columns[slot];
+    let Type::Composite(oid) = col.ty.base() else {
+        return Err(SqlError::datatype_mismatch(format!(
+            "cannot assign to field \"{field}\" of column \"{}\" because its type {} is not a composite type",
+            col.name,
+            col.ty.name()
+        )));
+    };
+    let fields = crate::usertypes::composite_fields(oid);
+    let idx = fields.iter().position(|f| f.name == field).ok_or_else(|| {
+        SqlError::undefined_column(&format!("\"{field}\" of relation \"{}\"", table.name)).with_detail(format!(
+            "cannot assign to field \"{field}\" of column \"{}\" because there is no such column in data type {}",
+            col.name,
+            col.ty.name()
+        ))
+    })?;
+    let f = &fields[idx];
+    let (e, t) = b.bind_expr(value, &ctx.with_clause(Clause::Other))?;
+    let v = coerce_assignment(b, e, &t, &f.ty, f.typmod, &format!("{}.{field}", col.name))?;
+    let store = Expr::FieldStore { expr: Box::new(Expr::Col(slot)), idx, value: Box::new(v), type_oid: oid, width: fields.len() };
+    Ok((slot, Some(store)))
 }
 
 pub fn bind_update(b: &Binder, upd: &ir::Update, outer: &Ctx) -> SqlResult<UpdatePlan> {

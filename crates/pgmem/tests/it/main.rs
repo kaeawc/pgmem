@@ -124,6 +124,7 @@ mod union;
 mod unique;
 mod update;
 mod update_from;
+mod user_types;
 mod uuid;
 mod view;
 mod window;

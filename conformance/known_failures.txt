@@ -1,8 +1,6 @@
 # Corpus records pgmem fails today, by key (file:hash of the SQL); the first line of the SQL
 # follows for reading. Regenerate with `cargo run -p pgmem-conformance -- --update`.
 catalog/comments.slt:c0292f8e8802feb1  # SELECT obj_description('docs'::regnamespace, 'pg_namespace')
-catalog/comments.slt:7479e02d259b1af5  # CREATE TYPE level AS ENUM ('low', 'high')
-catalog/comments.slt:0b79ed662e717ac8  # SELECT obj_description('level'::regtype, 'pg_type')
 catalog/comments.slt:fd85b83918947b92  # SELECT obj_description(oid, 'pg_constraint') FROM pg_constraint WHERE conname = 'notes_pkey'
 catalog/comments.slt:65b6351ec417f350  # CREATE FUNCTION f1() RETURNS int LANGUAGE sql AS 'SELECT 1'
 catalog/comments.slt:e39bb176e5b46bd3  # SELECT obj_description('f1'::regproc, 'pg_proc')
@@ -16,51 +14,16 @@ catalog/information_schema.slt:7935bc054dfeb0da  # SELECT constraint_name, uniqu
 catalog/information_schema.slt:b852cfc0efeccc1d  # SELECT tc.table_schema, tc.table_name, kcu.column_name,
 catalog/information_schema.slt:5eeda95b92993c1a  # SELECT sequence_name, data_type, numeric_precision, start_value, minimum_value, maximum_value, increment, cycle_option
 catalog/information_schema.slt:bcd84fafea9ffe59  # SELECT c.column_name, e.data_type
-catalog/information_schema.slt:98ceafb2f0429aee  # CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')
-catalog/information_schema.slt:13d4b7368e3031a0  # CREATE TABLE people (id int, feeling mood)
-catalog/information_schema.slt:2dd3baf0b7106e3a  # SELECT column_name, data_type, udt_schema, udt_name
 catalog/information_schema.slt:dcbc700fd5754b49  # CREATE FUNCTION add_one(x int) RETURNS int LANGUAGE sql AS 'SELECT x + 1'
 catalog/information_schema.slt:7650ba5efab0cdd3  # SELECT routine_name, routine_type, data_type
-catalog/orm_reflection.slt:cfdf95b926386d47  # CREATE TYPE role_kind AS ENUM ('admin', 'member', 'guest')
-catalog/orm_reflection.slt:7898ca550364be75  # CREATE TABLE users (
-catalog/orm_reflection.slt:81fb736508cd14d2  # CREATE UNIQUE INDEX index_users_on_login ON users (login)
-catalog/orm_reflection.slt:37c73cba0a515edf  # CREATE TABLE posts (
-catalog/orm_reflection.slt:b8f92a6a19eda22a  # COMMENT ON TABLE users IS 'app users'
-catalog/orm_reflection.slt:3faba62d6bab065c  # COMMENT ON COLUMN users.login IS 'login name'
-catalog/orm_reflection.slt:4ad96db3261016a6  # SELECT c.relname FROM pg_class c LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
-catalog/orm_reflection.slt:600696c0b1650efa  # SELECT a.attname, format_type(a.atttypid, a.atttypmod),
 catalog/orm_reflection.slt:dd8b06fac31bd173  # SELECT a.attname
-catalog/orm_reflection.slt:bcc557f2e5d684e7  # SELECT distinct i.relname, d.indisunique, d.indkey, pg_get_indexdef(d.indexrelid)
-catalog/orm_reflection.slt:8059498101251258  # SELECT t2.oid::regclass::text AS to_table, a1.attname AS column, a2.attname AS primary_key,
-catalog/orm_reflection.slt:1a804e7e5bd4c7fc  # SELECT pg_catalog.obj_description(c.oid, 'pg_class')
-catalog/orm_reflection.slt:53f1537836701ced  # SELECT t.typname, t.typtype
 catalog/orm_reflection.slt:8a89934c4b7330b3  # SELECT c.relname,
-catalog/orm_reflection.slt:38ea5be4a2fa20e2  # SELECT s.relname, a.attname
-catalog/orm_reflection.slt:2916f4229838f4e3  # SELECT c.conname,
 catalog/orm_reflection.slt:63a6c813bc48d939  # SELECT indexname, array_agg(attname ORDER BY arridx), indisunique, indisprimary, amname
-catalog/orm_reflection.slt:753e09c1dd03054c  # SELECT pg_catalog.pg_class.relname
-catalog/orm_reflection.slt:8bdfbfd4b3d018be  # SELECT pg_catalog.format_type(pg_catalog.pg_type.oid, NULL) AS name,
-catalog/orm_reflection.slt:aaa470f8f0c4afdd  # SELECT oid.namespace, info.table_name, info.column_name,
-catalog/orm_reflection.slt:59df53d2c4a4c440  # SELECT t.typname as name, e.enumlabel as value, n.nspname as namespace
 catalog/orm_reflection.slt:6896fb4f15691a85  # SELECT con.conname AS constraint_name, child.attname AS child_column, parent_class.relname AS parent_table,
-catalog/orm_reflection.slt:56bbea9b07889908  # SELECT NULL AS TABLE_CAT, n.nspname AS TABLE_SCHEM, c.relname AS TABLE_NAME,
-catalog/orm_reflection.slt:351b98475be611ff  # SELECT sequence_catalog IS NOT NULL AS has_catalog, sequence_schema, sequence_name, start_value, minimum_value, maximum_value, increment
-catalog/orm_reflection.slt:427cdb119ed01ed2  # SELECT t.typname, t.typtype, coalesce(e.typname, '') AS elem
-catalog/orm_reflection.slt:bdae98a052d12af8  # SELECT enumlabel FROM pg_enum WHERE enumtypid = to_regtype('role_kind') ORDER BY enumsortorder
-catalog/orm_reflection.slt:5c6e092a8a46f2ea  # CREATE TYPE address AS (street text, zip varchar(10))
-catalog/orm_reflection.slt:fc2081fc56d6485f  # SELECT a.attname, format_type(a.atttypid, a.atttypmod)
 catalog/orm_reflection.slt:b4efb73737c9ebd0  # SELECT ns.nspname, typ.typname, typ.typtype, typ.typcategory,
 catalog/orm_reflection.slt:ee468900ba31ee71  # SELECT r.rngsubtype::regtype::text FROM pg_range r WHERE r.rngtypid = 'int4range'::regtype
 catalog/pg_catalog.slt:a46a24d5a4ee97c4  # CREATE MATERIALIZED VIEW totals AS SELECT from_id, sum(amount) AS total FROM transfers GROUP BY from_id
-catalog/pg_catalog.slt:edb62477cca693b6  # CREATE TYPE color AS ENUM ('red', 'green', 'blue')
-catalog/pg_catalog.slt:9faae7a5378d8a6f  # CREATE TYPE pair AS (a int, b text)
-catalog/pg_catalog.slt:91dc29240d93776f  # CREATE DOMAIN posint AS int CHECK (VALUE > 0)
 catalog/pg_catalog.slt:3ae94af5d92c31f6  # SELECT c.relname, c.relkind
-catalog/pg_catalog.slt:e9722139a6e40dea  # SELECT typname, typtype
-catalog/pg_catalog.slt:2ae3830770fb5ff2  # SELECT format_type(typbasetype, typtypmod), typnotnull FROM pg_type WHERE typname = 'posint'
-catalog/pg_catalog.slt:433dc15682cf9d3a  # SELECT enumlabel, enumsortorder FROM pg_enum WHERE enumtypid = 'color'::regtype ORDER BY enumsortorder
-catalog/pg_catalog.slt:814040561f71aefb  # ALTER TYPE color ADD VALUE 'yellow' AFTER 'red'
-catalog/pg_catalog.slt:99ea1be28893206f  # SELECT enumlabel FROM pg_enum WHERE enumtypid = 'color'::regtype ORDER BY enumsortorder
 catalog/pg_catalog.slt:11ba6aa684a25920  # SELECT sequencename, data_type::text, start_value, min_value, max_value, increment_by, cycle, cache_size, last_value
 catalog/pg_catalog.slt:41f2057bee0e6dd5  # SELECT pg_get_viewdef('rich'::regclass, true)
 catalog/pg_catalog.slt:eceff294cfbb8e20  # SELECT matviewname, ispopulated FROM pg_matviews WHERE schemaname = 'public'
@@ -69,21 +32,18 @@ catalog/pg_catalog.slt:8a7afb8930dc40b5  # SELECT proname, pronargs, provolatile
 catalog/pg_catalog.slt:a085ef479946ad0c  # CREATE TABLE events_2024 PARTITION OF events FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
 catalog/pg_catalog.slt:d26d4fea085e04ff  # SELECT c.relname, c.relkind, c.relispartition, pg_get_expr(c.relpartbound, c.oid)
 catalog/pg_catalog.slt:48122fca8c801c55  # SELECT pg_get_partkeydef('events'::regclass)
-catalog/psql_describe.slt:6de89b87b9ef885b  # CREATE TYPE status AS ENUM ('open', 'closed')
 catalog/psql_describe.slt:bbede3599730d5d7  # SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity,
 catalog/psql_describe.slt:0a56de6a8ba8d11b  # SELECT a.attname,
 catalog/psql_describe.slt:dee11004c6bbafbd  # SELECT r.conname, pg_catalog.pg_get_constraintdef(r.oid, true)
 catalog/psql_describe.slt:17a1b25d4d29cb62  # SELECT true as sametable, conname,
 catalog/psql_describe.slt:55a36843bc50c0ea  # SELECT conname, conrelid::pg_catalog.regclass AS ontable,
 catalog/psql_describe.slt:44733f14a996f863  # SELECT pol.polname FROM pg_catalog.pg_policy pol WHERE pol.polrelid = 'orders'::regclass ORDER BY 1
-catalog/psql_describe.slt:c63e61ef119ac639  # SELECT n.nspname as "Schema",
 catalog/psql_describe.slt:b4a232974cda9996  # SELECT pg_catalog.pg_get_viewdef('big_orders'::regclass, true)
 catalog/regtypes.slt:209fce473162f6bf  # CREATE TABLE other.thing (x int)
 catalog/regtypes.slt:14048f7f9e264ca2  # SELECT 'other.thing'::regclass::text
 catalog/regtypes.slt:04104fd63a6eb57a  # SELECT to_regclass('other.thing') IS NOT NULL, to_regclass('thing') IS NULL
 catalog/regtypes.slt:1238c168bb65155b  # SELECT 'other.thing'::regclass::text, 't'::regclass::text
 catalog/regtypes.slt:a9ad1acbbcdab0ae  # SELECT 'text[]'::regtype::text, '_int4'::regtype::text, 'double precision'::regtype::text
-catalog/regtypes.slt:308ca72692b033f8  # SELECT 't'::regtype::text
 catalog/regtypes.slt:4ceb755fe5cff65e  # SELECT format_type('timestamptz'::regtype, 3), format_type('_text'::regtype, -1)
 catalog/regtypes.slt:e1b41969bcc4d789  # SELECT 'now'::regproc::text, 'lower(text)'::regprocedure::text
 catalog/regtypes.slt:4f75d112acc7d9bf  # SELECT to_regproc('upper')::text, to_regprocedure('abs(integer)')::text
@@ -93,9 +53,6 @@ catalog/settings.slt:b5a44c9e9c412853  # SELECT setting FROM pg_settings WHERE n
 catalog/settings.slt:83a5425c178e720d  # UPDATE pg_settings SET setting = 'via_update' WHERE name = 'application_name'
 catalog/settings.slt:77a2ba0cde58e2c2  # SHOW application_name
 constraints/check_notnull.slt:b60524f33966de18  # CREATE TABLE bad (a int CHECK (a IN (SELECT 1)))
-constraints/check_notnull.slt:3b9a4c237ed4e305  # CREATE DOMAIN posint AS int CHECK (VALUE > 0); CREATE DOMAIN email_nn AS text NOT NULL; CREATE TABLE dom (n posint, e email_nn)
-constraints/check_notnull.slt:ca20bb29f62a5a51  # INSERT INTO dom VALUES (0, 'x')
-constraints/check_notnull.slt:29a0728fec7c00b3  # INSERT INTO dom VALUES (1, NULL)
 constraints/check_notnull.slt:5729fde6aff1cc84  # SELECT conname, contype FROM pg_constraint WHERE conrelid = 'nnc'::regclass ORDER BY conname
 constraints/check_notnull.slt:04bad43bc2fd289f  # ALTER TABLE nnc DROP CONSTRAINT a_required; INSERT INTO nnc VALUES (NULL, 1)
 constraints/check_notnull.slt:9f207aff5faba0d1  # CREATE TABLE legacy (v int); INSERT INTO legacy VALUES (-1); ALTER TABLE legacy ADD CONSTRAINT v_pos CHECK (v > 0) NOT VALID
@@ -389,7 +346,6 @@ dml/orm_patterns.slt:8b90eccb6de1819c  # SELECT sku, name, price, version, delet
 dml/truncate.slt:00736d9607b8baa5  # INSERT INTO solo (v) VALUES ('w') RETURNING id
 dml/truncate.slt:c5e2868900861524  # INSERT INTO solo (v) VALUES ('v') RETURNING id
 dml/update.slt:c10c03da7225fd9b  # UPDATE emp SET (salary, bonus) = (SELECT budget / 10, budget / 100 FROM dept WHERE dept.id = emp.dept_id) WHERE id = 1 RETURNING salary, bonus
-dml/update.slt:9ffd41f38729b3e3  # UPDATE emp SET (name, bonus) = ROW('ann2', DEFAULT) WHERE id = 1 RETURNING name, bonus
 dml/update.slt:de50aaa2ed6f2397  # UPDATE emp SET (salary, bonus) = (SELECT budget, budget FROM dept) WHERE id = 1
 dml/update.slt:b373947fdc01381c  # UPDATE emp e SET e.salary = 1 WHERE id = 1
 dml/update.slt:88a1d5dd908ed4bd  # UPDATE emp SET tags[2] = 'z' WHERE id = 1 RETURNING tags
@@ -450,7 +406,6 @@ functions/conditional_misc.slt:85ec463ae213a964  # SELECT generate_subscripts(AR
 functions/conditional_misc.slt:7e28717042d08aa6  # SELECT generate_subscripts('[3:5]={x,y,z}'::text[], 1), generate_subscripts(ARRAY[1, 2], 1, true)
 functions/conditional_misc.slt:cc51e3db8447f1f2  # SELECT generate_subscripts(ARRAY[[1, 2, 3], [4, 5, 6]], 2)
 functions/conditional_misc.slt:798d7c4d5544036e  # SELECT num_nulls(1, NULL, 2, NULL), num_nonnulls(1, NULL, 2, NULL), num_nulls(VARIADIC ARRAY[NULL, 1])
-functions/conditional_misc.slt:f1ab761e0adcfb37  # SELECT pg_typeof(ARRAY[1]), pg_typeof('{}'::jsonb), pg_typeof(date '2024-01-01' - 1), pg_typeof(interval '1 day'), pg_typeof(ROW(1, 2))
 functions/conditional_misc.slt:e2078d87afc205fd  # SELECT set_config('application_name', 'conf', false), current_setting('application_name')
 functions/conditional_misc.slt:3ea2063f8247bffe  # SELECT set_config('my.custom', 'v1', false), current_setting('my.custom')
 functions/conditional_misc.slt:38d2a338c483f4bb  # SELECT pg_column_size(1::int4), pg_column_size(1::int8), pg_column_size('abc'::text)
@@ -517,7 +472,6 @@ functions/json.slt:ebc38ada9c609036  # SELECT JSON_QUERY(jsonb '{"a": [1, 2]}', 
 functions/json.slt:0ab0378274a60f2f  # SELECT * FROM JSON_TABLE(jsonb '[{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]', '$[*]' COLUMNS (id int PATH '$.id', name text PATH '$.name'))
 functions/json.slt:d921c1d2f8b850c3  # SELECT * FROM JSON_TABLE(jsonb '{"items": [{"x": 1}, {"x": 2}]}', '$.items[*]' COLUMNS (ord FOR ORDINALITY, x int PATH '$.x', missing text PATH '$.nope'))
 functions/json.slt:fdfc0e37e1604642  # SELECT JSON('{"a": 1}'), JSON_SCALAR(42), JSON_SERIALIZE(json '{"a": 1}')
-functions/json.slt:a21154789a50593d  # CREATE TYPE person AS (name text, age int, tags text[])
 functions/json.slt:2f2eb6cf9db67538  # SELECT * FROM json_populate_record(NULL::person, '{"name": "Ann", "age": 30, "tags": ["x", "y"], "extra": 1}')
 functions/json.slt:29e3503193087ec2  # SELECT * FROM jsonb_populate_recordset(NULL::person, '[{"name": "A", "age": 1}, {"name": "B"}]')
 functions/json.slt:a720891e6f66a9b6  # SELECT * FROM jsonb_to_record('{"a": 1, "b": "x", "c": [1, 2]}') AS t(a int, b text, c int[])
@@ -613,7 +567,6 @@ queries/joins.slt:0000c1b795109963  # SELECT * FROM l JOIN r
 queries/ordering_limits.slt:27cdd0d26a7cf581  # SELECT id, val FROM p ORDER BY val FETCH FIRST 2 ROWS WITH TIES
 queries/ordering_limits.slt:0c18a84fec2a4377  # SELECT id, val FROM p ORDER BY val DESC NULLS LAST FETCH FIRST 3 ROWS WITH TIES
 queries/ordering_limits.slt:ee80b36ca42351ae  # SELECT id FROM p FETCH FIRST 2 ROWS WITH TIES
-queries/select_basics.slt:d2c68f2996508997  # SELECT CAST('12' AS int), '12'::int, int '5', CASE WHEN true THEN 1 END, ARRAY[1,2], ROW(1, 'a')
 queries/select_basics.slt:757fd12582e1c7ca  # TABLE items ORDER BY id LIMIT 2
 queries/set_operations.slt:e3f012e19e9c9c62  # SELECT x FROM a UNION SELECT x FROM b ORDER BY x + 1
 queries/set_operations.slt:6680237cbd789fd6  # SELECT NULL UNION SELECT 1
@@ -623,8 +576,6 @@ queries/subqueries.slt:21720c2728cb3dda  # SELECT name FROM customers WHERE id I
 queries/subqueries.slt:2d997a8d5d5f51b5  # SELECT c.name FROM customers c, (SELECT amount FROM orders o WHERE o.customer_id = c.id) x
 queries/where_operators.slt:3ae4ae7bfffbfc40  # SELECT 'b' LIKE ANY (ARRAY['a%', 'b%']), 'abc' ILIKE ALL (ARRAY['A%', '%C'])
 queries/where_operators.slt:a2fcc075a17be2ed  # SELECT id FROM t WHERE a BETWEEN SYMMETRIC 20 AND 10 ORDER BY id
-queries/where_operators.slt:89e87a552f981c56  # SELECT NULL IS DISTINCT FROM NULL, 1 IS DISTINCT FROM NULL, 1 IS NOT DISTINCT FROM 1, ROW(1, NULL) IS DISTINCT FROM ROW(1, NULL)
-queries/where_operators.slt:ea43531f0ab247ea  # SELECT ROW(1, 2) < ROW(1, 3), (1, 2) = (1, 2), (1, NULL) = (1, 2), (2, NULL) > (1, 5)
 queries/windows.slt:8e6a7feca8367b46  # SELECT id, pts, sum(pts) OVER (ORDER BY pts RANGE BETWEEN 5 PRECEDING AND 5 FOLLOWING) FROM scores WHERE pts IS NOT NULL ORDER BY id
 queries/windows.slt:992690e3a8e0ab60  # SELECT d, count(*) OVER (ORDER BY d RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW) FROM (VALUES (DATE '2024-01-01'), (DATE '2024-01-02'), (DATE '2024-01-04'), (DATE '2024-01-05')) v(d) ORDER BY d
 queries/windows.slt:6060d6e030ce44c4  # SELECT id, sum(pts) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW) FROM scores ORDER BY id
@@ -952,49 +903,6 @@ types/datetime.slt:06ff5e5c264ab748  # SELECT make_date(2024, 2, 29), make_time(
 types/datetime.slt:c278ab0040c2def6  # SELECT (date '2024-01-01', date '2024-02-01') OVERLAPS (date '2024-01-15', date '2024-03-01'), date '2024-01-01' = timestamp '2024-01-01 00:00', timestamp '2024-01-01' < timestamptz '2024-01-01 00:00:01+00'
 types/datetime.slt:3873b9f28787e416  # SELECT id, d, ts, tstz, dur FROM events ORDER BY id
 types/datetime.slt:284343f0f263b083  # SELECT id, ts + dur, tstz::date, d::timestamp FROM events ORDER BY id
-types/enums_domains.slt:98ceafb2f0429aee  # CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')
-types/enums_domains.slt:b2a53b020399d171  # CREATE TABLE person (name text, current_mood mood)
-types/enums_domains.slt:6e90db4dc5ef61c8  # INSERT INTO person VALUES ('a', 'happy'), ('b', 'sad'), ('c', 'ok'), ('d', NULL)
-types/enums_domains.slt:226c9abf869cf124  # INSERT INTO person VALUES ('e', 'angry')
-types/enums_domains.slt:3c5a7150bad54214  # SELECT name, current_mood FROM person ORDER BY current_mood
-types/enums_domains.slt:44b7e3e2c89e0507  # SELECT name FROM person WHERE current_mood > 'sad' ORDER BY name
-types/enums_domains.slt:eaf1eeb379691b77  # SELECT 'ok'::mood, pg_typeof('ok'::mood), enum_range(NULL::mood), enum_first(NULL::mood), enum_last(NULL::mood)
-types/enums_domains.slt:fbdf3cdcf6742cde  # SELECT min(current_mood), max(current_mood) FROM person
-types/enums_domains.slt:02bc948386a168e6  # SELECT 'Happy'::mood
-types/enums_domains.slt:a7589516189f6347  # SELECT current_mood = 'happy'::text FROM person
-types/enums_domains.slt:f2603f3db1d7382d  # SELECT current_mood::text = 'happy' FROM person WHERE name = 'a'
-types/enums_domains.slt:fdc7ea95af9c4fc4  # ALTER TYPE mood ADD VALUE 'ecstatic' AFTER 'happy'
-types/enums_domains.slt:b907e8abac2825bd  # ALTER TYPE mood ADD VALUE IF NOT EXISTS 'meh' BEFORE 'ok'
-types/enums_domains.slt:16f815965b78fd02  # ALTER TYPE mood RENAME VALUE 'ok' TO 'fine'
-types/enums_domains.slt:a79b63cbe420ffe3  # SELECT enum_range(NULL::mood)
-types/enums_domains.slt:ca805b1409c4ca00  # ALTER TYPE mood ADD VALUE 'sad'
-types/enums_domains.slt:bfa19fa722403db2  # CREATE TYPE mood AS ENUM ('x')
-types/enums_domains.slt:17eaf2a5098d8f6b  # SELECT ARRAY['sad', 'happy']::mood[]
-types/enums_domains.slt:bb820b0f13c9d62c  # CREATE DOMAIN posint AS integer CHECK (VALUE > 0)
-types/enums_domains.slt:5b3c6fce9795a34e  # CREATE DOMAIN email AS text NOT NULL CHECK (VALUE ~ '@')
-types/enums_domains.slt:68de2b4068b97363  # CREATE DOMAIN short_code AS varchar(3) DEFAULT 'abc'
-types/enums_domains.slt:46f4802388f47c8d  # CREATE TABLE acct (id posint, mail email, code short_code)
-types/enums_domains.slt:18d24f200a2ba827  # INSERT INTO acct (id, mail) VALUES (1, 'a@b')
-types/enums_domains.slt:c21cd8485a2658fc  # INSERT INTO acct (id, mail) VALUES (0, 'a@b')
-types/enums_domains.slt:ec4298e374ca7761  # INSERT INTO acct (id, mail) VALUES (2, 'nope')
-types/enums_domains.slt:1632beedfa879fa5  # INSERT INTO acct (id, mail) VALUES (3, NULL)
-types/enums_domains.slt:16fa9a7ec60978bd  # INSERT INTO acct (id, mail, code) VALUES (4, 'x@y', 'toolong')
-types/enums_domains.slt:5a4b2aab1f00eb12  # SELECT id, mail, code, pg_typeof(id) FROM acct
-types/enums_domains.slt:b0a3780b6b65edf1  # SELECT 5::posint + 1, pg_typeof(5::posint + 1)
-types/enums_domains.slt:afd2ef0ad6aae213  # SELECT (-1)::posint
-types/enums_domains.slt:e3d3952976232e69  # UPDATE acct SET id = -5
-types/enums_domains.slt:9573cf1e047f5bf5  # CREATE DOMAIN pct AS numeric(5,2) CONSTRAINT pct_range CHECK (VALUE BETWEEN 0 AND 100)
-types/enums_domains.slt:383e6d7f91ca694c  # SELECT 100.5::pct
-types/enums_domains.slt:1d62377674025f77  # SELECT 99.999::pct
-types/enums_domains.slt:4ce1b218cd96a1ae  # CREATE TYPE address AS (street text, zip int)
-types/enums_domains.slt:ecaf5bbef88a5791  # CREATE TABLE customer (id int, addr address)
-types/enums_domains.slt:b87250bf99c67c29  # INSERT INTO customer VALUES (1, ROW('Main St', 12345)), (2, '("Elm, Rd",)'), (3, NULL)
-types/enums_domains.slt:e820a1f647331343  # SELECT id, addr, (addr).street, (addr).zip FROM customer ORDER BY id
-types/enums_domains.slt:68f1fef39b22ca9b  # SELECT ROW(1, 'a', NULL), ROW(1, 2) = ROW(1, 2), ROW(1, 2) < ROW(1, 3), (ROW('x', 1)::address).street
-types/enums_domains.slt:161b209d94b6561c  # UPDATE customer SET addr.zip = 99999 WHERE id = 1
-types/enums_domains.slt:94a090f35d460b7d  # SELECT (addr).* FROM customer WHERE id = 1
-types/enums_domains.slt:4579697b41116005  # SELECT '(a,b)'::address
-types/enums_domains.slt:805a9f7ddf7b2745  # SELECT c FROM customer c WHERE id = 1
 types/enums_domains.slt:b5e57415a34a43d3  # SELECT int4range(1, 10), int4range(1, 10, '[]'), '[1,5)'::int4range, '(1,5]'::int4range, 'empty'::int4range
 types/enums_domains.slt:041be401fd87f6b4  # SELECT numrange(1.5, 2.5), int8range(NULL, 5), '[2024-01-01,2024-02-01)'::daterange, daterange('2024-01-01', '2024-01-31', '[]')
 types/enums_domains.slt:bfd7281f2d9528f4  # SELECT tsrange('2024-01-01 00:00', '2024-01-02 00:00'), tstzrange('2024-01-01 00:00+00', NULL)

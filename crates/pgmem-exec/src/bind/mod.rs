@@ -335,11 +335,20 @@ pub fn is_reserved_keyword(s: &str) -> bool {
     )
 }
 
-/// Resolves a declared type name (`int4`, `varchar(20)`, `text[]`) to a type and typmod.
-/// `serial` family names are handled by CREATE TABLE before this is called.
-pub fn resolve_type_name(t: &pgmem_ir::TypeName) -> SqlResult<(Type, i32)> {
-    let base =
-        Type::from_sql_name(&t.name).ok_or_else(|| SqlError::new(code::UNDEFINED_OBJECT, format!("type \"{}\" does not exist", t.name)))?;
+/// Resolves a declared type name (`int4`, `varchar(20)`, `text[]`, a user type) to a type
+/// and typmod. `serial` family names are handled by CREATE TABLE before this is called.
+pub fn resolve_type_name(catalog: &Catalog, t: &pgmem_ir::TypeName) -> SqlResult<(Type, i32)> {
+    let base = match Type::from_sql_name(&t.name) {
+        Some(b) => b,
+        None => {
+            let user = crate::usertypes::lookup_type(catalog, &t.name)
+                .ok_or_else(|| SqlError::new(code::UNDEFINED_OBJECT, format!("type \"{}\" does not exist", t.name)))?;
+            if !t.modifiers.is_empty() {
+                return Err(SqlError::syntax(format!("type modifier is not allowed for type \"{}\"", t.name)));
+            }
+            user
+        }
+    };
     let typmod = match (t.name.as_str(), t.modifiers.as_slice()) {
         ("varchar" | "character varying" | "bpchar" | "char" | "character", [n]) => {
             if *n < 1 {
