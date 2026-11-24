@@ -1,35 +1,41 @@
-.PHONY: build test vet lint fmt complexity security licenses tidy ci clean all
+# Rust (the default) — plain cargo underneath. Go targets remain until the Go code is removed.
+.PHONY: check test lint fmt deny parity fidelity ci build serve go-build go-test go-vet
 
-build:
-	go build ./...
+check:            ## type-check everything (no codegen, no link)
+	cargo check --all-targets
 
-test:
-	go test ./... -count=1
-
-vet:
-	go vet ./...
-
-fmt:
-	gofmt -s -w .
+test:             ## all tests against pgmem (nextest if installed)
+	@command -v cargo-nextest >/dev/null && cargo nextest run --workspace || cargo test --workspace
 
 lint:
-	golangci-lint run
+	cargo clippy --workspace --all-targets -- -D warnings
 
-complexity:
-	gocyclo -over 30 -ignore '_test\.go$$' .
+fmt:
+	cargo fmt --all
 
-security:
-	gosec -exclude=G104,G115,G404 ./...
+deny:             ## dependency policy: duplicates, advisories, licenses
+	cargo deny check
 
-licenses:
-	go-licenses report ./...
+parity:           ## every pgmem-go test has a Rust port
+	python3 scripts/parity.py check
 
-tidy:
-	go mod tidy
+fidelity:         ## the integration suite against real Postgres (set PGMEM_TEST_DSN)
+	@test -n "$$PGMEM_TEST_DSN" || (echo "set PGMEM_TEST_DSN, e.g. host=127.0.0.1 port=5432 user=postgres" && exit 2)
+	cargo nextest run -p pgmem --test it
 
-ci: vet test complexity lint security
+ci: fmt lint deny test parity
 
-clean:
-	rm -f junit-report.xml gosec-report.xml coverage.txt
+build:
+	cargo build --release -p pgmem
 
-all: build vet test
+serve:            ## run a standalone server on port 5432
+	cargo run --release -p pgmem -- --port 5432
+
+go-build:
+	go build ./...
+
+go-test:
+	go test ./... -count=1
+
+go-vet:
+	go vet ./...

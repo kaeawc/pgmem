@@ -1,142 +1,96 @@
-# pgmem-go — design
+# pgmem — design
 
-Answers to the six design questions in the README, plus the implicit
-seventh: how the pieces talk to each other.
+pgmem is an AST-walking SQL engine behind a PostgreSQL wire-protocol server, built for tests:
+it optimizes for behaving exactly like PostgreSQL 18, then for simplicity, and only then for
+speed (every operator materializes its rows; there is no planner).
 
-## 1. Parser strategy
+```
+client ──wire──► pgmem-wire ──SQL──► pgmem-parse ──IR──► pgmem-exec ──► pgmem-storage
+                  (protocol)          (sqlparser)          binder           rows, snapshots
+                                                           executor         pgmem-catalog
+                                                           builtins
+```
 
-**Default: pure-Go parser (`auxten/postgresql-parser`). Opt-in cgo path
-(`pganalyze/pg_query_go`) behind a `cgo_pgquery` build tag.**
+## Parsing: sqlparser behind an IR
 
-The README treats "pure Go, no cgo by default" as a hard requirement, so
-this is barely a choice — it's a consequence. What's worth defending is
-the *layering*: both parsers emit their own AST, neither of which we want
-leaking through the codebase. Both implementations live under
-`postgres/parse/` and produce the same `ir.Node` tree. Switching parsers
-is a build-tag flip, not a rewrite.
+`pgmem-parse` lowers `sqlparser`'s PostgreSQL-dialect AST into `pgmem-ir`, a small SQL-shaped
+tree. Lowering is where Postgres' surface rules live: unquoted identifiers fold to lower case,
+special syntax becomes function calls the way Postgres' grammar does it (`EXTRACT`, `POSITION`,
+`SUBSTRING`, `TRIM`), a minus sign folds into numeric literals, and syntax errors become `42601
+syntax error at or near "..."`. Utility statements clients send at connect time and migration
+tools emit (`SET` variants, `COMMENT ON`, `CREATE EXTENSION`, ...) are recognized even when
+sqlparser can't parse them, and a token-level rewrite covers the few Postgres forms it lacks
+(`FOR NO KEY UPDATE`, `DROP INDEX CONCURRENTLY`).
 
-The pure-Go parser will mis-parse some Postgres syntax. We accept that as
-the cost of the no-cgo guarantee, and document the cgo path as the
-escape hatch for users whose schemas hit those gaps.
+Options considered: porting pgmem-go's hand-written parser (exact parity, but a narrow grammar
+every future feature would have to extend); `pg_query` (libpg_query — the real grammar, but its
+build compiles Postgres' C sources and runs bindgen, a heavy requirement for a test dependency);
+`sqlparser` (pure Rust, broad PostgreSQL coverage, widely used). The IR boundary keeps a
+`pg_query` front end possible as an opt-in feature without touching the engine.
 
-## 2. IR shape
+## Binding: Postgres' analyzer, simplified
 
-**Yes, a thin IR — a logical plan tree, not relational algebra.**
+`pgmem-exec::bind` resolves the IR against the catalog the way Postgres' parse analysis does:
+scopes for each query level (with correlation tracking), column resolution with Postgres'
+ambiguity rules and error codes, operator and function overload resolution with Postgres' type
+promotion (unknown-typed literals and parameters take their type from context; numeric literals
+are `int4`/`int8`/`numeric` by magnitude), and the SELECT pipeline: FROM → WHERE → GROUP BY /
+aggregates (with the functional-dependency rule) → HAVING → windows → projection → ORDER BY
+(output names, ordinals, hidden sort columns) → DISTINCT [ON] → LIMIT. Binding happens at Parse
+time, so Describe knows parameter and result types and semantic errors surface where Postgres
+reports them; Execute re-binds with the final parameter types (cheap, and always sees the current
+schema).
 
-Nodes: `Scan`, `Filter`, `Project`, `Join`, `Aggregate`, `Sort`, `Limit`,
-`Insert`, `Update`, `Delete`, `Values`, plus `Expr` for scalar
-expressions. No optimizer, no rewrite rules — `parse` builds it,
-`exec` walks it.
+## Execution
 
-Reasons to pay the abstraction cost on day one:
+Plans (`plan.rs`) are trees of relational operators over materialized rows, with expressions
+resolved to row positions and function pointers. Correlated subqueries and LATERAL items re-run
+per outer row (an outer-row stack in the evaluation context); uncorrelated subqueries run once per
+statement. DML computes all of a statement's effects against its snapshot first (a statement
+never sees its own changes), then validates them against the table's final state — NOT NULL,
+CHECK, unique indexes (including partial and expression indexes), foreign keys in both directions
+with referential actions — and applies them.
 
-- Two parsers (pure-Go, cgo) need a common output. Without an IR we'd
-  fork the executor.
-- The catalog (`pg_catalog`, `information_schema`) is implemented as
-  IR-backed views. Without an IR those become a second code path.
-- The MySQL-sibling argument from the README is real but secondary —
-  the parser-swap argument alone justifies it.
+## Storage and transactions
 
-Reasons it's *thin*: no cost-based planning, no statistics, no
-rewrite-to-canonical-form. Operators map almost 1:1 to AST nodes.
+The committed database is an immutable `DbState` (catalog + table contents) behind an `Arc`;
+readers never block writers. A transaction records a row-level overlay — inserted rows and deleted
+row ids; an UPDATE is a delete plus an insert under a new row id, so updated rows move to the end
+of a scan as in a Postgres heap — plus a private catalog copy once it runs DDL, which makes DDL
+transactional. COMMIT replays the overlay onto the latest committed state under a short lock.
 
-## 3. Storage model
+- READ COMMITTED takes a fresh snapshot per statement; REPEATABLE READ and SERIALIZABLE keep the
+  snapshot of their first statement.
+- Conflicts are per row: committing a delete/update of a row another transaction already
+  changed fails with `40001` (where Postgres would have waited on the row lock).
+- Savepoints snapshot the overlay; sequences are non-transactional, as in Postgres.
+- Tables keep dropped columns' slots and give added columns a "missing" value (Postgres'
+  `attisdropped` / `attmissingval`), so ADD/DROP COLUMN don't rewrite rows.
 
-**v0: copy-on-write tables behind `sync.RWMutex`. Transactions get a
-snapshot on `BEGIN`; writes copy-on-modify into a per-tx overlay; commit
-applies the overlay under the table write lock.**
+Serializable snapshot isolation (detecting read/write dependency cycles) is not implemented.
 
-This gives us:
+## Types
 
-- Snapshot read isolation for free (the tx holds its snapshot pointer).
-- No version chains, no vacuum, no xmin/xmax bookkeeping.
-- Trivially correct rollback: drop the overlay.
+`pgmem-types` holds `Type` (with real OIDs, so `RowDescription` matches Postgres), runtime
+`Value`s and both wire formats for every type. `numeric` is arbitrary precision with Postgres'
+display-scale rules (`select_div_scale`, round half away from zero); date/time arithmetic is a
+port of Postgres' own calendar code (`date2j`/`j2date`, `timestamp2tm`, ISO weeks), so ranges and
+corner cases match; jsonb is normalized as Postgres stores it (deduplicated keys sorted by length,
+Postgres' spacing). Output formats follow the settings pgmem reports: `DateStyle=ISO, MDY`,
+`TimeZone=UTC`, `IntervalStyle=postgres`, `extra_float_digits=1`, `bytea_output=hex`.
 
-It does **not** give us:
+## Wire protocol
 
-- True serializable isolation. Concurrent write-write conflicts on the
-  same row are detected at commit (overlay vs current head) and the
-  later tx errors. Read-skew across tables is possible. We document
-  this as a known fidelity gap; sqlc-style test code rarely exercises
-  it.
+`pgmem-wire` implements protocol 3.0 directly on tokio (one task per connection): startup with
+trust authentication, simple query (multiple statements share an implicit transaction), extended
+query with named statements and portals, and Postgres' error recovery (discard messages until
+Sync). The message codec is hand-written — about 400 lines — which keeps full control over message
+ordering, the part of the protocol drivers are most sensitive to.
 
-Migration path to real MVCC, when we need it: add `xmin`/`xmax` to row
-storage, replace snapshot-COW with version chains, keep the executor's
-table-iterator API unchanged. The exec layer never sees snapshots
-directly — it sees an `storage.Txn` handle.
+## Testing strategy
 
-## 4. Catalog implementation
-
-**Virtual views computed from schema metadata.**
-
-`pg_catalog.pg_type`, `pg_catalog.pg_class`, `information_schema.columns`
-— each is a struct that implements the same row-iterator interface as a
-real table. They read from the live `catalog.Schema` on each query.
-
-Cost: more code per catalog table.
-
-Benefit: zero drift. When `CREATE TABLE` adds an entry to the schema, it
-is *immediately* visible in `pg_catalog.pg_class` because there's no
-materialized copy to update. The alternative (materialize on startup,
-rebuild on DDL) sounds simpler until the first bug where a catalog
-lookup returns stale rows.
-
-We start with the handful of catalog tables pgx queries on startup
-(`pg_type`, `pg_range`, a few `information_schema` views) and add more
-as failing tests demand.
-
-## 5. Type coercion
-
-**Implement only the casts sqlc-generated code actually emits. Maintain
-a `TYPES.md` listing what's supported and what's known-missing.**
-
-The full PG cast lattice is a research project. sqlc emits a narrow,
-predictable set: literal-to-column-type at parameter binding, numeric
-widening in arithmetic, text↔varchar interchange. We implement that
-slice end-to-end and reject (with a clear error) anything outside it.
-
-This is a deliberate fidelity sacrifice — the README's "fidelity over
-performance" doesn't mean "fidelity over scope." We pick the scope (sqlc
-output) and aim for fidelity *within* it.
-
-## 6. Concurrency model
-
-- One goroutine per client connection (pgproto3's natural shape).
-- Storage layer: `sync.RWMutex` per table.
-- Writes inside a transaction land in a per-tx overlay (no lock held
-  between statements).
-- `COMMIT` acquires the table write locks in a deterministic order
-  (table OID ascending, to prevent deadlock), checks the overlay
-  against current head for write-write conflicts, and applies.
-- `LISTEN`/`NOTIFY` (post-v0) routes through a per-server channel
-  registry — does not touch the storage path.
-
-No global write lock. Tests inside one process must be able to run
-parallel transactions against independent tables without serializing.
-
-## Cross-cutting: clock and randomness
-
-`Server` takes an optional `clock.Clock` (default: real wall clock) and
-`rand.Source` (default: crypto/rand). `now()`, `current_timestamp`,
-`gen_random_uuid()` route through these. This is the README's "time
-travel" requirement — exposed as `srv.SetNow(time.Time)` for test
-ergonomics.
-
-## Cross-cutting: error model
-
-Wire-protocol errors must look like real PG errors (SQLSTATE + message)
-because pgx pattern-matches on them. We maintain a small
-`postgres/wire/errors.go` mapping internal error types to SQLSTATE
-codes. Internal errors (executor panics, type-system bugs) map to
-`XX000 internal_error` with the Go error chained for test debugging.
-
-## What this design explicitly does *not* commit to
-
-- Query planner. Operators run in the order the IR specifies.
-- Cost model, statistics, ANALYZE.
-- Index selection. Indexes exist for uniqueness enforcement; the
-  executor never reads from them for SELECT in v0.
-- Parallel query, vectorized execution, JIT.
-
-These are non-goals per the README and we should resist the urge to
-add scaffolding for them.
+Every integration test is written against a real client and runs twice in CI: against pgmem and
+against PostgreSQL 18 (`PGMEM_TEST_DSN`). An assertion that doesn't hold on real Postgres is a
+broken test. The pgmem-go suite was ported this way ([PARITY.md](PARITY.md)); Phase 2 adds a
+sqllogictest conformance corpus whose expected results are recorded from PostgreSQL
+([PROGRESS.md](PROGRESS.md)).
