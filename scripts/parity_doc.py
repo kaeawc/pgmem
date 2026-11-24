@@ -6,6 +6,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 rows = [l.split("\t") for l in open(os.path.join(ROOT, "parity/go_tests.tsv")).read().splitlines()[1:] if l.strip()]
 dev = [r for r in rows if r[4] == "deviation"]
 done = sum(1 for r in rows if r[4] in ("ported", "deviation"))
+integration = sum(1 for r in rows if r[4] in ("ported", "deviation") and "/tests/it/" in r[3])
 out = [
     "# Parity with pgmem-go",
     "",
@@ -16,11 +17,13 @@ out = [
     "",
     f"**Status: {done}/{len(rows)} Go tests ported** ({done - len(dev)} with identical assertions, {len(dev)} deviations).",
     "",
-    "How the port was verified: the 515 integration-level tests (pgmem-go's `postgres/`, `examples/` and",
+    f"How the port is verified: the {integration} integration-level tests ported so far (from pgmem-go's `postgres/`, `examples/` and",
     "`exec/` packages) run as Rust integration tests in `crates/pgmem/tests/it/`, driven by a real",
     "Postgres client (tokio-postgres). The same tests also run against real PostgreSQL 18 (CI job",
     "`postgres-fidelity`), and every assertion holds there too. Unit tests of Go-internal packages",
     "(`types`, `storage`, `postgres/parse`) are ported into the corresponding crates.",
+    "",
+    "Pending tests are ported by area in follow-up PRs.",
     "",
     "Where a Go test only checked that *an* error occurred, the Rust test usually also asserts the",
     "SQLSTATE and message real Postgres produces.",

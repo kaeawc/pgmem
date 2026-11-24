@@ -1,0 +1,33 @@
+[package]
+name = "pgmem"
+description = "An in-memory, Postgres-wire-compatible database for tests. Fidelity over performance."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+doctest = false
+
+[[bin]]
+name = "pgmem"
+path = "src/bin/pgmem.rs"
+test = false
+
+[dependencies]
+pgmem-exec = { workspace = true }
+pgmem-storage = { workspace = true }
+pgmem-types = { workspace = true }
+pgmem-wire = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+pgmem-types = { workspace = true }
+postgres = { workspace = true }
+jiff = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true
