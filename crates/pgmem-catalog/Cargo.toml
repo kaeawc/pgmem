@@ -1,0 +1,18 @@
+[package]
+name = "pgmem-catalog"
+description = "Schema metadata for pgmem: tables, columns, constraints, views, sequences."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+pgmem-ir = { workspace = true }
+pgmem-types = { workspace = true }
+
+[lints]
+workspace = true
