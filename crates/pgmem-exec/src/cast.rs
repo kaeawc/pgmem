@@ -45,10 +45,20 @@ pub fn cast_context(from: &Type, to: &Type) -> Option<CoercionContext> {
         (Date, Timestamp | Timestamptz) | (Timestamp, Timestamptz) | (Time, TimeTz | Interval) => Implicit,
         (Timestamptz, Timestamp | Date | Time | TimeTz) | (Timestamp, Date | Time) | (TimeTz, Time) | (Interval, Time) => Assignment,
         (Jsonb, Bool | Int2 | Int4 | Int8 | Float4 | Float8 | Numeric) => Explicit,
-        // Every type converts to text via its output function in assignment context, and from
-        // text via its input function only when asked explicitly.
-        (_, Text) => Assignment,
-        (Text, _) => Explicit,
+        // The string types (pg_cast): text, varchar, bpchar and name convert among themselves
+        // implicitly; "char" converts to text implicitly and to the others by assignment.
+        (Text | Varchar | Bpchar | Name, Text | Varchar | Bpchar | Name) | (Char, Text) => Implicit,
+        (Char, Varchar | Bpchar) | (Text | Varchar | Bpchar, Char) => Assignment,
+        (Char, Int4) | (Int4, Char) => Explicit,
+        (Json, Jsonb) | (Jsonb, Json) => Assignment,
+        // OIDs: integers and oid convert to the reg* aliases implicitly, and back by
+        // assignment; text and varchar name a relation implicitly (`'t'::regclass`).
+        (Int2 | Int4 | Int8 | Oid | Reg(_), Oid | Reg(_)) => Implicit,
+        (Oid | Reg(_), Int4 | Int8) => Assignment,
+        // Every type converts to a string type via its output function in assignment context,
+        // and from one via its input function only when asked explicitly.
+        (_, Text | Varchar | Bpchar | Name) => Assignment,
+        (Text | Varchar | Bpchar | Name, _) => Explicit,
         (Array(a), Array(b)) => cast_context(a, b)?,
         _ => return None,
     })
@@ -101,6 +111,27 @@ fn float_to_int(f: f64, to: &Type) -> SqlResult<Value> {
     make_int(r as i64, to)
 }
 
+/// Strips a bpchar value's padding (Postgres' `rtrim1`, used by bpchar → text).
+pub fn bpchar_trim(v: Value) -> Value {
+    match v {
+        Value::Text(s) => Value::Text(s.trim_end_matches(' ').to_owned()),
+        other => other,
+    }
+}
+
+pub fn bpchar_trim_fn(a: &[Value], _: &crate::eval::EvalCtx) -> SqlResult<Value> {
+    Ok(bpchar_trim(a[0].clone()))
+}
+
+/// `int8` → `oid`: the value must fit in 32 bits (negative values wrap, as in Postgres).
+fn int_to_oid(n: i64) -> SqlResult<u32> {
+    if !(-2_147_483_648..=4_294_967_295).contains(&n) {
+        return Err(SqlError::out_of_range("OID"));
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Ok(n as u32)
+}
+
 fn convert(v: Value, to: &Type) -> SqlResult<Value> {
     use Value as V;
     let from_ty = v.natural_type();
@@ -109,6 +140,18 @@ fn convert(v: Value, to: &Type) -> SqlResult<Value> {
     }
     Ok(match (v, to) {
         (V::Text(s), t) => text::decode(&s, t)?,
+        (V::Oid(o) | V::Reg(_, o, _), Type::Oid) => V::Oid(o),
+        (V::Oid(o) | V::Reg(_, o, _), Type::Int8) => V::Int8(i64::from(o)),
+        #[allow(clippy::cast_possible_wrap)]
+        (V::Oid(o) | V::Reg(_, o, _), Type::Int4) => V::Int4(o as i32),
+        (v @ (V::Int2(_) | V::Int4(_) | V::Int8(_)), Type::Oid) => V::Oid(int_to_oid(v.as_i64().unwrap_or_default())?),
+        (v, t @ (Type::Varchar | Type::Bpchar | Type::Name | Type::Char | Type::Json)) => {
+            let s = match &v {
+                V::Bool(b) => (if *b { "true" } else { "false" }).to_owned(),
+                other => text::encode(other, &other.natural_type())?,
+            };
+            text::decode(&s, t)?
+        }
         (v, Type::Text) => V::Text(match &v {
             V::Bool(b) => (if *b { "true" } else { "false" }).to_owned(),
             other => text::encode(other, &other.natural_type())?,
@@ -195,7 +238,19 @@ fn apply_typmod(v: Value, to: &Type, typmod: i32, explicit: bool) -> SqlResult<V
         return Ok(v);
     }
     match (v, to) {
-        (Value::Text(s), Type::Text) => {
+        (Value::Text(s), Type::Bpchar) => {
+            let len = usize::try_from(typmod - 4).unwrap_or(usize::MAX);
+            let n = s.chars().count();
+            if n <= len {
+                return Ok(Value::Text(format!("{s}{}", " ".repeat(len - n))));
+            }
+            if explicit || s.chars().skip(len).all(|c| c == ' ') {
+                Ok(Value::Text(s.chars().take(len).collect()))
+            } else {
+                Err(SqlError::new(code::STRING_DATA_RIGHT_TRUNCATION, format!("value too long for type character({len})")))
+            }
+        }
+        (Value::Text(s), Type::Text | Type::Varchar) => {
             let max = usize::try_from(typmod - 4).unwrap_or(usize::MAX);
             if s.chars().count() <= max {
                 return Ok(Value::Text(s));

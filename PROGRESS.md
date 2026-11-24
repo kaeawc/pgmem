@@ -8,10 +8,10 @@ and what comes next. Updated with every PR.
 | Metric | Value | How it is measured |
 |---|---|---|
 | pgmem-go parity | **564 / 564** Go tests ported | `scripts/parity.py check` ([PARITY.md](PARITY.md)) |
-| Integration suite on pgmem | **517 / 517** pass | `cargo nextest run -p pgmem --test it` |
-| Integration suite on real PostgreSQL 18 | **517 / 517** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
+| Integration suite on pgmem | **526 / 526** pass | `cargo nextest run -p pgmem --test it` |
+| Integration suite on real PostgreSQL 18 | **526 / 526** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
 | Go pgx example suites (sqlc) against the Rust binary | **27 / 27** pass | `make examples` (CI `pgx-examples`) |
-| **SQL conformance corpus** (3309 records, 9 areas) | **2031 / 3309 (61.4%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
+| **SQL conformance corpus** (3309 records, 9 areas) | **2132 / 3309 (64.4%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
 
 ### Conformance history
 
@@ -26,7 +26,8 @@ and what comes next. Updated with every PR.
 | 2026-11-24 | #109 types and expression tests | 466/564 | — |
 | 2026-11-24 | #110 builtin function tests | 564/564 | — |
 | 2026-11-24 | #111 remove the Go implementation; pgx examples run against Rust | 564/564 | — |
-| 2026-11-24 | conformance corpus and runner (baseline) | 564/564 | 2031/3309 (61.4%) |
+| 2026-11-24 | #112 conformance corpus and runner (baseline) | 564/564 | 2031/3309 (61.4%) |
+| 2026-11-24 | varchar/bpchar/name/"char"/json/oid/reg*/void types | 564/564 | 2132/3309 (64.4%) |
 
 ## Supported
 
@@ -36,8 +37,10 @@ and what comes next. Updated with every PR.
   Execute with PortalSuspended), skip-until-Sync after errors, ParameterStatus, notices, error
   fields (SQLSTATE, detail, hint, schema/table/column/constraint).
 - **Types**: bool, int2/4/8, float4/8, numeric (arbitrary precision, Postgres scale rules),
-  text/varchar(n)/char(n) (as text), bytea, uuid, date, time, timetz, timestamp, timestamptz,
-  interval, jsonb (`json` is treated as jsonb), one-dimensional arrays; text and binary formats.
+  text, varchar(n), char(n) (blank-padded, trailing spaces insignificant), name, "char", bytea,
+  uuid, date, time, timetz, timestamp, timestamptz, interval, json (input text kept as written),
+  jsonb, oid, regclass/regtype/regnamespace/regproc (name ↔ OID through the catalog), void,
+  one-dimensional arrays; text and binary formats; Postgres' result-column naming for casts.
 - **Queries**: joins (inner/left/right/full/cross, USING, NATURAL, LATERAL), subqueries (scalar,
   IN, EXISTS, ANY/ALL, ARRAY(), correlated), WITH and WITH RECURSIVE, UNION/INTERSECT/EXCEPT
   [ALL], DISTINCT, DISTINCT ON, GROUP BY (ordinal, alias, functional dependency on the primary
@@ -87,8 +90,9 @@ clients. Each item names the corpus area it moves (see CONFORMANCE.md for per-fi
    constraints, key/constraint column usage, views, sequences); `reg*` types and `to_reg*`,
    `pg_get_*def`, `format_type`, `pg_get_serial_sequence`. Blocks ORM/driver introspection and
    array decoding in drivers that look up `pg_type` (catalog 23%, ddl, types).
-2. **Result types and column names**: `pg_typeof` → regtype, `varchar(n)`/`char(n)` as distinct
-   types with padding, `json` as its own type (not jsonb), `name` results, cast column naming.
+2. **JSON fidelity**: json-typed results from `json_build_object`/`to_json`/`json_agg`/
+   `row_to_json`/`json_array_elements` with Postgres' json formatting; SQL/JSON (`IS JSON`,
+   `JSON_VALUE`, `JSON_TABLE`), jsonpath.
 3. **Named time zones**: `SET TIME ZONE`, `AT TIME ZONE 'Region/City'`, zone names in input.
 4. **Set-returning functions in the select list**, multidimensional arrays, array element
    assignment, `ROW(...)` constructors and row comparisons.

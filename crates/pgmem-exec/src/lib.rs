@@ -11,6 +11,7 @@ pub mod dml;
 pub mod eval;
 pub mod funcs;
 pub mod plan;
+pub mod reg;
 pub mod run;
 pub mod session;
 pub mod window;

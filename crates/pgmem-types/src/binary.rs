@@ -33,7 +33,7 @@ pub fn encode(v: &Value, ty: &Type) -> SqlResult<Vec<u8>> {
                 None => return Err(mismatch()),
             },
         },
-        Type::Text | Type::Unknown => match v {
+        Type::Text | Type::Unknown | Type::Varchar | Type::Bpchar | Type::Name | Type::Char | Type::Json | Type::Void => match v {
             Value::Text(s) => s.as_bytes().to_vec(),
             other => crate::text::encode(other, &other.natural_type())?.into_bytes(),
         },
@@ -78,6 +78,10 @@ pub fn encode(v: &Value, ty: &Type) -> SqlResult<Vec<u8>> {
                 out.extend_from_slice(j.to_string().as_bytes());
                 out
             }
+            _ => return Err(mismatch()),
+        },
+        Type::Oid | Type::Reg(_) => match v {
+            Value::Oid(o) | Value::Reg(_, o, _) => o.to_be_bytes().to_vec(),
             _ => return Err(mismatch()),
         },
         Type::Array(elem) => match v {
@@ -132,10 +136,16 @@ pub fn decode(b: &[u8], ty: &Type) -> SqlResult<Value> {
         Type::Float4 => Value::Float4(f32::from_be_bytes(fixed(b, ty)?)),
         Type::Float8 => Value::Float8(f64::from_be_bytes(fixed(b, ty)?)),
         Type::Numeric => Value::Numeric(crate::Numeric::from_binary(b)?),
-        Type::Text | Type::Unknown => Value::Text(
-            String::from_utf8(b.to_vec())
-                .map_err(|_| SqlError::new(code::INVALID_TEXT_REPRESENTATION, "invalid byte sequence for encoding \"UTF8\""))?,
-        ),
+        Type::Text | Type::Unknown | Type::Varchar | Type::Bpchar | Type::Name | Type::Char | Type::Json | Type::Void => {
+            let s = std::str::from_utf8(b)
+                .map_err(|_| SqlError::new(code::INVALID_TEXT_REPRESENTATION, "invalid byte sequence for encoding \"UTF8\""))?;
+            crate::text::decode(s, ty)?
+        }
+        Type::Oid => Value::Oid(u32::from_be_bytes(fixed(b, ty)?)),
+        Type::Reg(k) => {
+            let o = u32::from_be_bytes(fixed(b, ty)?);
+            Value::Reg(*k, o, o.to_string())
+        }
         Type::Bytea => Value::Bytea(b.to_vec()),
         Type::Uuid => Value::Uuid(fixed(b, ty)?),
         Type::Timestamptz => Value::Timestamptz(i64::from_be_bytes(fixed(b, ty)?)),

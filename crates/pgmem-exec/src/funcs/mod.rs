@@ -57,6 +57,13 @@ pub fn no_operator(op: &str, l: Option<&Type>, r: &Type) -> SqlError {
 /// Resolves a function call by name. `None` means "no such function name" (the caller may
 /// try aggregates); an error means the name exists but no overload fits.
 pub fn resolve_function(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
+    // octet_length(bpchar) counts the padding; every other string function sees it trimmed.
+    if name == "octet_length" && args == [Type::Bpchar] {
+        let f = strict("octet_length", |a, _| Ok(Value::Int4(i32::try_from(a[0].as_str().map_or(0, str::len)).unwrap_or(i32::MAX))));
+        return resolved(f, vec![Type::Bpchar], Type::Int4);
+    }
+    let args: Vec<Type> = args.iter().map(lookup_type).collect();
+    let args = args.as_slice();
     if let Some(r) = math::resolve(name, args)? {
         return Ok(Some(r));
     }
@@ -73,6 +80,15 @@ pub fn resolve_function(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>
         return Ok(Some(r));
     }
     misc::resolve(name, args)
+}
+
+/// The type an overload lookup sees for an argument: the string types resolve through
+/// `text` and `json` through `jsonb` (their implicit and assignment casts).
+fn lookup_type(t: &Type) -> Type {
+    match t {
+        Type::Json => Type::Jsonb,
+        other => other.lookup_type(),
+    }
 }
 
 /// Rank used to pick the common numeric type of mixed operands.
@@ -124,6 +140,10 @@ pub fn common_type(l: &Type, r: &Type) -> Option<Type> {
                 return Some(if a >= b { l.clone() } else { r.clone() });
             }
             match (l, r) {
+                // Different string types meet at text, their preferred type.
+                _ if l.is_string() && r.is_string() => Some(Type::Text),
+                (Type::Oid | Type::Reg(_), Type::Oid | Type::Reg(_)) => Some(Type::Oid),
+                (Type::Oid | Type::Reg(_), t) | (t, Type::Oid | Type::Reg(_)) if t.is_integer() => Some(Type::Oid),
                 (Type::Time, Type::TimeTz) | (Type::TimeTz, Type::Time) => Some(Type::TimeTz),
                 (Type::Array(a), Type::Array(b)) => common_type(a, b).map(Type::array_of),
                 _ => None,
@@ -174,8 +194,49 @@ pub fn comparison(op: &str) -> Option<Func> {
     })
 }
 
+/// The comparison implementation for an operator on operands of type `t` (bpchar ignores
+/// trailing spaces).
+pub fn comparison_for(op: &str, t: &Type) -> Option<Func> {
+    if *t == Type::Bpchar { bpchar_comparison(op) } else { comparison(op) }
+}
+
 fn comparable(t: &Type) -> bool {
-    !matches!(t, Type::Unknown)
+    // json has no equality or ordering operators (jsonb does).
+    !matches!(t, Type::Unknown | Type::Json)
+}
+
+/// bpchar comparisons ignore trailing spaces (`bpchareq`, `bpcharlt`, ...).
+fn bpchar_cmp(a: &[Value]) -> SqlResult<Ordering> {
+    match (&a[0], &a[1]) {
+        (Value::Text(x), Value::Text(y)) => Ok(x.trim_end_matches(' ').cmp(y.trim_end_matches(' '))),
+        _ => cmp_args(a),
+    }
+}
+
+macro_rules! bpchar_op {
+    ($name:ident, $test:ident) => {
+        fn $name(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+            Ok(Value::Bool(bpchar_cmp(a)?.$test()))
+        }
+    };
+}
+bpchar_op!(bp_eq, is_eq);
+bpchar_op!(bp_ne, is_ne);
+bpchar_op!(bp_lt, is_lt);
+bpchar_op!(bp_le, is_le);
+bpchar_op!(bp_gt, is_gt);
+bpchar_op!(bp_ge, is_ge);
+
+fn bpchar_comparison(op: &str) -> Option<Func> {
+    Some(match op {
+        "=" => strict("=", bp_eq),
+        "<>" | "!=" => strict("<>", bp_ne),
+        "<" => strict("<", bp_lt),
+        "<=" => strict("<=", bp_le),
+        ">" => strict(">", bp_gt),
+        ">=" => strict(">=", bp_ge),
+        _ => return None,
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -357,10 +418,12 @@ pub fn resolve_binary(op: &str, l: &Type, r: &Type) -> SqlResult<Resolved> {
         if let Some(t) = common_type(l, r)
             && comparable(&t)
         {
+            let func = if t == Bpchar { bpchar_comparison(op).unwrap_or(func) } else { func };
             return res(func, t.clone(), t, Bool);
         }
         return Err(no_operator(op, Some(l), r));
     }
+    let (l, r) = (&lookup_type(l), &lookup_type(r));
     // Date/time arithmetic first: those operators mix types on purpose.
     if let Some(r) = datetime::resolve_operator(op, l, r)? {
         return Ok(r);

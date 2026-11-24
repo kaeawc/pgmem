@@ -31,6 +31,10 @@ pub enum Value {
     Timestamptz(i64),
     Interval(Interval),
     Jsonb(Jsonb),
+    Oid(u32),
+    /// A `reg*` value: the OID and the name it prints as (resolved when the value was made,
+    /// so output needs no catalog).
+    Reg(crate::RegKind, u32, String),
     /// A one-dimensional array; elements may be `Null`.
     Array(Vec<Value>),
 }
@@ -101,6 +105,8 @@ impl Value {
             Value::Timestamptz(_) => "timestamp with time zone",
             Value::Interval(_) => "interval",
             Value::Jsonb(_) => "jsonb",
+            Value::Oid(_) => "oid",
+            Value::Reg(k, ..) => k.typname(),
             Value::Array(_) => "array",
         }
     }
@@ -135,6 +141,7 @@ impl Value {
             Value::TimeTz(t, z) => GroupKey::Int(*t - i64::from(*z) * 1_000_000),
             Value::Interval(iv) => GroupKey::Int128(iv.total_micros_i128()),
             Value::Jsonb(j) => GroupKey::Text(j.to_string()),
+            Value::Oid(o) | Value::Reg(_, o, _) => GroupKey::Int(i64::from(*o)),
             Value::Array(items) => GroupKey::Array(items.iter().map(Value::group_key).collect()),
         }
     }
@@ -179,6 +186,7 @@ pub fn compare_values(a: &Value, b: &Value) -> SqlResult<Ordering> {
         (TimeTz(x, zx), TimeTz(y, zy)) => (*x - i64::from(*zx) * 1_000_000).cmp(&(*y - i64::from(*zy) * 1_000_000)),
         (Interval(x), Interval(y)) => x.cmp(y),
         (Jsonb(x), Jsonb(y)) => x.total_cmp(y),
+        (Oid(x) | Reg(_, x, _), Oid(y) | Reg(_, y, _)) => x.cmp(y),
         (Array(x), Array(y)) => {
             for (l, r) in x.iter().zip(y.iter()) {
                 let o = compare_values(l, r)?;
@@ -228,6 +236,8 @@ impl Value {
             Value::Timestamptz(_) => Type::Timestamptz,
             Value::Interval(_) => Type::Interval,
             Value::Jsonb(_) => Type::Jsonb,
+            Value::Oid(_) => Type::Oid,
+            Value::Reg(k, ..) => Type::Reg(*k),
             Value::Array(items) => {
                 let elem = items.iter().find(|v| !v.is_null()).map_or(Type::Text, Value::natural_type);
                 Type::array_of(elem)

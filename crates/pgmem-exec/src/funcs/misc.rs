@@ -23,12 +23,12 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
             resolved(lenient("set_config", |a, _| Ok(a[1].clone())), vec![Type::Text, Type::Text, Type::Bool], Type::Text)
         }
         "current_user" | "session_user" | "user" | "current_role" if n == 0 => {
-            resolved(lenient("current_user", |_, c| Ok(Value::Text(c.env.user.clone()))), vec![], Type::Text)
+            resolved(lenient("current_user", |_, c| Ok(Value::Text(c.env.user.clone()))), vec![], Type::Name)
         }
         "current_database" | "current_catalog" if n == 0 => {
-            resolved(lenient("current_database", |_, c| Ok(Value::Text(c.env.database.clone()))), vec![], Type::Text)
+            resolved(lenient("current_database", |_, c| Ok(Value::Text(c.env.database.clone()))), vec![], Type::Name)
         }
-        "current_schema" if n == 0 => resolved(lenient("current_schema", |_, _| Ok(Value::Text("public".into()))), vec![], Type::Text),
+        "current_schema" if n == 0 => resolved(lenient("current_schema", |_, _| Ok(Value::Text("public".into()))), vec![], Type::Name),
         "current_schemas" if n == 1 => resolved(
             strict("current_schemas", |a, _| {
                 let mut v = Vec::new();
@@ -39,7 +39,7 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
                 Ok(Value::Array(v))
             }),
             vec![Type::Bool],
-            Type::array_of(Type::Text),
+            Type::array_of(Type::Name),
         ),
         "pg_backend_pid" if n == 0 => resolved(lenient("pg_backend_pid", |_, c| Ok(Value::Int4(c.env.backend_pid))), vec![], Type::Int4),
         "nextval" if n == 1 => resolved(strict("nextval", nextval), vec![Type::Text], Type::Int8),
@@ -63,7 +63,7 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
         }
         // Advisory locks: pgmem has no lock manager, so they always succeed immediately.
         "pg_advisory_lock" | "pg_advisory_xact_lock" | "pg_advisory_lock_shared" | "pg_advisory_xact_lock_shared" => {
-            resolved(strict(name_static(name), |_, _| Ok(Value::Text(String::new()))), vec![Type::Int8; n.max(1)], Type::Text)
+            resolved(strict(name_static(name), |_, _| Ok(Value::Text(String::new()))), vec![Type::Int8; n.max(1)], Type::Void)
         }
         "pg_try_advisory_lock"
         | "pg_try_advisory_xact_lock"
@@ -73,9 +73,9 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
             resolved(strict(name_static(name), |_, _| Ok(Value::Bool(true))), vec![Type::Int8; n.max(1)], Type::Bool)
         }
         "pg_advisory_unlock_all" if n == 0 => {
-            resolved(lenient("pg_advisory_unlock_all", |_, _| Ok(Value::Text(String::new()))), vec![], Type::Text)
+            resolved(lenient("pg_advisory_unlock_all", |_, _| Ok(Value::Text(String::new()))), vec![], Type::Void)
         }
-        "pg_sleep" if n == 1 => resolved(strict("pg_sleep", |_, _| Ok(Value::Text(String::new()))), vec![Type::Float8], Type::Text),
+        "pg_sleep" if n == 1 => resolved(strict("pg_sleep", |_, _| Ok(Value::Text(String::new()))), vec![Type::Float8], Type::Void),
         "txid_current" | "pg_current_xact_id" if n == 0 => {
             resolved(lenient("txid_current", |_, c| Ok(Value::Int8(c.env.txid))), vec![], Type::Int8)
         }

@@ -36,6 +36,25 @@ fn coerce_inner(b: &Binder, e: Expr, from: &Type, to: &Type, typmod: i32, contex
     if from == to && typmod < 0 {
         return Ok(e);
     }
+    // bpchar → another string type drops the padding (`rtrim1`), as Postgres' cast does.
+    if *from == Type::Bpchar && to.is_string() && *to != Type::Bpchar {
+        let trimmed = match e {
+            Expr::Const(v) => Expr::Const(crate::cast::bpchar_trim(v)),
+            other => Expr::Call { func: crate::funcs::strict("rtrim", crate::cast::bpchar_trim_fn), args: vec![other] },
+        };
+        return coerce_inner(b, trimmed, &Type::Text, to, typmod, context, explicit);
+    }
+    // reg* values are resolved against the catalog when the statement runs.
+    if let Type::Reg(_) = to {
+        if *from != Type::Unknown && cast_context(from, to).is_none_or(|c| c > context) {
+            return Err(SqlError::cannot_coerce(&from.name(), &to.name()));
+        }
+        if let (Expr::Param(i), Type::Unknown) = (&e, from) {
+            b.set_param_type(*i, to);
+            return Ok(e);
+        }
+        return Ok(Expr::Cast { expr: Box::new(e), to: to.clone(), typmod: -1 });
+    }
     match (&e, from) {
         (Expr::Param(i), Type::Unknown) => {
             b.set_param_type(*i, to);
@@ -59,43 +78,49 @@ fn coerce_inner(b: &Binder, e: Expr, from: &Type, to: &Type, typmod: i32, contex
 
 /// The column name Postgres derives for an unaliased select-list expression (`FigureColname`).
 pub fn output_name(e: &ir::Expr) -> String {
-    fn inner(e: &ir::Expr) -> Option<String> {
-        match e {
-            ir::Expr::Column(parts) => parts.last().cloned(),
-            ir::Expr::Function(f) => Some(f.name.base().to_owned()),
-            ir::Expr::Cast { expr, ty } => inner(expr).or_else(|| Some(type_display_name(ty))),
-            ir::Expr::TypedString { ty, .. } => Some(type_display_name(ty)),
-            ir::Expr::Case { .. } => Some("case".into()),
-            ir::Expr::Exists { .. } => Some("exists".into()),
-            ir::Expr::Array(_) | ir::Expr::ArraySubquery(_) => Some("array".into()),
-            ir::Expr::Row(_) => Some("row".into()),
-            ir::Expr::Subquery(q) => match &q.body {
+    figure_colname(e).map_or_else(|| "?column?".into(), |(name, _)| name)
+}
+
+/// `FigureColnameInternal`: a name and its strength. Column references and function calls
+/// (strength 2) beat the type name of a cast around them; a cast of anything weaker (a literal,
+/// a CASE, another cast) is named after its target type (strength 1).
+fn figure_colname(e: &ir::Expr) -> Option<(String, u8)> {
+    match e {
+        ir::Expr::Column(parts) => parts.last().filter(|p| p.as_str() != "*").map(|p| (p.clone(), 2)),
+        ir::Expr::Function(f) => Some((f.name.base().to_owned(), 2)),
+        ir::Expr::Cast { expr, ty } => match figure_colname(expr) {
+            Some((name, 2)) => Some((name, 2)),
+            _ => Some((type_display_name(ty), 1)),
+        },
+        ir::Expr::TypedString { ty, .. } => Some((type_display_name(ty), 1)),
+        ir::Expr::Case { .. } => Some(("case".into(), 1)),
+        ir::Expr::Exists { .. } => Some(("exists".into(), 2)),
+        ir::Expr::ArraySubquery(_) | ir::Expr::Array(_) => Some(("array".into(), 2)),
+        ir::Expr::Row(_) => Some(("row".into(), 2)),
+        // A scalar subquery is named after its first output column, `?column?` included.
+        ir::Expr::Subquery(q) => {
+            let mut body = &q.body;
+            while let ir::SetExpr::SetOp { left, .. } = body {
+                body = left;
+            }
+            match body {
                 ir::SetExpr::Select(s) => match s.projection.first() {
-                    Some(ir::SelectItem::Expr { alias: Some(a), .. }) => Some(a.clone()),
-                    Some(ir::SelectItem::Expr { expr, .. }) => inner(expr),
+                    Some(ir::SelectItem::Expr { alias: Some(a), .. }) => Some((a.clone(), 2)),
+                    Some(ir::SelectItem::Expr { expr, .. }) => Some((output_name(expr), 2)),
                     _ => None,
                 },
                 _ => None,
-            },
-            ir::Expr::Subscript { expr, .. } | ir::Expr::Collate { expr, .. } => inner(expr),
-            ir::Expr::Literal(ir::Literal::Bool(_)) => Some("bool".into()),
-            _ => None,
+            }
         }
+        ir::Expr::Subscript { expr, .. } | ir::Expr::Collate { expr, .. } => figure_colname(expr),
+        _ => None,
     }
-    inner(e).unwrap_or_else(|| "?column?".into())
 }
 
 /// Postgres' name for a type in a cast-derived column name (`'1'::int` → `int4`).
 fn type_display_name(t: &ir::TypeName) -> String {
-    match Type::from_sql_name(&t.name) {
-        Some(ty) => match ty {
-            Type::Text if t.name == "varchar" || t.name == "character varying" => "varchar".to_owned(),
-            Type::Text if t.name == "bpchar" || t.name == "char" || t.name == "character" => "bpchar".to_owned(),
-            Type::Jsonb if t.name == "json" => "json".to_owned(),
-            other => other.typname(),
-        },
-        None => t.name.clone(),
-    }
+    // An array cast is named after its element type (`'{1}'::int[]` → `int4`).
+    Type::from_sql_name(&t.name).map_or_else(|| t.name.clone(), |ty| ty.typname())
 }
 
 fn literal(l: &ir::Literal) -> SqlResult<Bound> {
@@ -253,6 +278,10 @@ impl Binder<'_> {
             }
             ir::Expr::TypedString { ty, value } => {
                 let (t, typmod) = resolve_type_name(ty)?;
+                if let Type::Reg(_) = t {
+                    let e = Expr::Cast { expr: Box::new(Expr::Const(Value::Text(value.clone()))), to: t.clone(), typmod: -1 };
+                    return Ok((e, t));
+                }
                 let v = cast_value(text::decode(value, &t)?, &t, typmod)?;
                 Ok((Expr::Const(v), t))
             }
@@ -596,7 +625,8 @@ impl Binder<'_> {
         })?;
         let probe = coerce(self, probe, &pt, &t, CoercionContext::Implicit)?;
         let list = items.into_iter().map(|(e, et)| coerce(self, e, &et, &t, CoercionContext::Implicit)).collect::<SqlResult<Vec<_>>>()?;
-        Ok((Expr::InList { probe: Box::new(probe), list, cmp: EQ, negated }, Type::Bool))
+        let cmp = funcs::comparison_for("=", &t).unwrap_or(EQ);
+        Ok((Expr::InList { probe: Box::new(probe), list, cmp, negated }, Type::Bool))
     }
 
     fn bind_any_all(&self, left: &ir::Expr, op: &str, right: &ir::AnyAllRight, all: bool, ctx: &Ctx) -> SqlResult<Bound> {
@@ -622,6 +652,7 @@ impl Binder<'_> {
                     }
                 };
                 let t = common_type(&lt, &elem).ok_or_else(|| funcs::no_operator(op, Some(&lt), &elem))?;
+                let cmp = funcs::comparison_for(op, &t).unwrap_or(cmp);
                 let l = coerce(self, l, &lt, &t, CoercionContext::Implicit)?;
                 let a = coerce(self, a, &at, &Type::array_of(t), CoercionContext::Implicit)?;
                 Ok((Expr::AnyAll { left: Box::new(l), array: Box::new(a), cmp, all }, Type::Bool))
@@ -704,10 +735,9 @@ impl Binder<'_> {
             results.push(self.bind_expr(t, ctx)?);
         }
         let else_bound = else_result.map(|e| self.bind_expr(e, ctx)).transpose()?;
-        let mut types: Vec<Type> = results.iter().map(|(_, t)| t.clone()).collect();
-        if let Some((_, t)) = &else_bound {
-            types.push(t.clone());
-        }
+        // Postgres considers the ELSE result first (it heads transformCaseExpr's list).
+        let mut types: Vec<Type> = else_bound.iter().map(|(_, t)| t.clone()).collect();
+        types.extend(results.iter().map(|(_, t)| t.clone()));
         let t = common_of(&types, "CASE")?;
         let mut out_whens = Vec::new();
         for (c, (r, rt)) in conds.into_iter().zip(results) {
@@ -796,8 +826,11 @@ impl Binder<'_> {
                 return Ok((Expr::NullIf(Box::new(a), Box::new(b)), t));
             }
             "pg_typeof" if bound.len() == 1 => {
-                let t = &bound[0].1;
-                return Ok((Expr::Const(Value::Text(if *t == Type::Unknown { "unknown".into() } else { t.name() })), Type::Text));
+                // Keep the argument in the tree (it may hold an aggregate) but return its type.
+                let (arg, t) = bound.into_iter().next().unwrap_or((Expr::null(), Type::Unknown));
+                let v = Value::Reg(pgmem_types::RegKind::Type, t.oid(), t.name());
+                let func = funcs::lenient("pg_typeof", |a, _| Ok(a[1].clone()));
+                return Ok((Expr::Call { func, args: vec![arg, Expr::Const(v)] }, Type::Reg(pgmem_types::RegKind::Type)));
             }
             _ => {}
         }
