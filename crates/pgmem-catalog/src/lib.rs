@@ -769,10 +769,9 @@ impl Catalog {
         if let Some(s) = self.sequences.get(&key) {
             return Some(Relation::Sequence(Arc::clone(s)));
         }
-        self.tables
-            .values()
-            .filter(|t| t.schema == schema)
-            .find_map(|t| t.indexes.iter().find(|i| i.name == name).map(|i| Relation::Index { table: t.qualified(), index: Box::new(i.clone()) }))
+        self.tables.values().filter(|t| t.schema == schema).find_map(|t| {
+            t.indexes.iter().find(|i| i.name == name).map(|i| Relation::Index { table: t.qualified(), index: Box::new(i.clone()) })
+        })
     }
 
     /// Sets (or with `None` removes) the comment on an object.
