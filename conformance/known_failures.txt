@@ -10,7 +10,6 @@ catalog/information_schema.slt:7650ba5efab0cdd3  # SELECT routine_name, routine_
 catalog/orm_reflection.slt:dd8b06fac31bd173  # SELECT a.attname
 catalog/orm_reflection.slt:8a89934c4b7330b3  # SELECT c.relname,
 catalog/orm_reflection.slt:63a6c813bc48d939  # SELECT indexname, array_agg(attname ORDER BY arridx), indisunique, indisprimary, amname
-catalog/orm_reflection.slt:6896fb4f15691a85  # SELECT con.conname AS constraint_name, child.attname AS child_column, parent_class.relname AS parent_table,
 catalog/orm_reflection.slt:b4efb73737c9ebd0  # SELECT ns.nspname, typ.typname, typ.typtype, typ.typcategory,
 catalog/orm_reflection.slt:ee468900ba31ee71  # SELECT r.rngsubtype::regtype::text FROM pg_range r WHERE r.rngtypid = 'int4range'::regtype
 catalog/pg_catalog.slt:a46a24d5a4ee97c4  # CREATE MATERIALIZED VIEW totals AS SELECT from_id, sum(amount) AS total FROM transfers GROUP BY from_id
@@ -35,8 +34,6 @@ catalog/regtypes.slt:4ceb755fe5cff65e  # SELECT format_type('timestamptz'::regty
 catalog/regtypes.slt:e1b41969bcc4d789  # SELECT 'now'::regproc::text, 'lower(text)'::regprocedure::text
 catalog/regtypes.slt:4f75d112acc7d9bf  # SELECT to_regproc('upper')::text, to_regprocedure('abs(integer)')::text
 catalog/regtypes.slt:2fc6c49cbe03bde5  # SELECT pg_table_is_visible('t'::regclass), pg_table_is_visible('other.thing'::regclass)
-catalog/settings.slt:aaf9dcf5e023a4c1  # SELECT name, setting, vartype FROM pg_settings
-catalog/settings.slt:b5a44c9e9c412853  # SELECT setting FROM pg_settings WHERE name = 'application_name'
 catalog/settings.slt:83a5425c178e720d  # UPDATE pg_settings SET setting = 'via_update' WHERE name = 'application_name'
 catalog/settings.slt:77a2ba0cde58e2c2  # SHOW application_name
 constraints/check_notnull.slt:b60524f33966de18  # CREATE TABLE bad (a int CHECK (a IN (SELECT 1)))
@@ -304,7 +301,6 @@ dml/orm_patterns.slt:8b90eccb6de1819c  # SELECT sku, name, price, version, delet
 dml/update.slt:c10c03da7225fd9b  # UPDATE emp SET (salary, bonus) = (SELECT budget / 10, budget / 100 FROM dept WHERE dept.id = emp.dept_id) WHERE id = 1 RETURNING salary, bonus
 dml/update.slt:de50aaa2ed6f2397  # UPDATE emp SET (salary, bonus) = (SELECT budget, budget FROM dept) WHERE id = 1
 dml/update.slt:b373947fdc01381c  # UPDATE emp e SET e.salary = 1 WHERE id = 1
-dml/update.slt:88a1d5dd908ed4bd  # UPDATE emp SET tags[2] = 'z' WHERE id = 1 RETURNING tags
 dml/update.slt:db175a226d88e895  # INSERT INTO box VALUES (2, 3)
 dml/update.slt:4b5554aa6061c232  # UPDATE box SET w = 10 RETURNING w, h, area
 dml/update.slt:430e3fe53e23208c  # UPDATE box SET area = DEFAULT, h = 4 RETURNING area
@@ -331,112 +327,12 @@ dml/writable_cte.slt:b1fd2d4b947c5f52  # SELECT * FROM (WITH d AS (DELETE FROM o
 dml/writable_cte.slt:1f00f4fd1ad308b6  # WITH x AS (SELECT 1) SELECT * FROM x WHERE EXISTS (WITH d AS (DELETE FROM orders RETURNING 1) SELECT 1 FROM d)
 dml/writable_cte.slt:f4a0235fd90c7903  # SELECT id, customer, total, status FROM orders ORDER BY id
 dml/writable_cte.slt:429b23f753372bee  # SELECT order_id IS NOT NULL AS has_order, sku, qty FROM order_line ORDER BY sku
-functions/arrays.slt:f7e465cd6e2bd372  # SELECT array_length(ARRAY[1, 2, 3], 1), array_length(ARRAY[[1, 2], [3, 4], [5, 6]], 2), array_length(ARRAY[]::int[], 1), array_length(ARRAY[1], 2)
-functions/arrays.slt:20958b64aa14615e  # SELECT cardinality(ARRAY[[1, 2], [3, 4]]), cardinality(ARRAY[]::int[]), array_ndims(ARRAY[[1], [2]])
 functions/arrays.slt:32e8f695cdf0b645  # SELECT array_dims(ARRAY[1, 2, 3]), array_dims(ARRAY[[1, 2], [3, 4]]), array_dims('[2:4]={1,2,3}'::int[]), array_dims(ARRAY[]::int[])
 functions/arrays.slt:2dfed30613a3235b  # SELECT array_lower('[2:4]={1,2,3}'::int[], 1), array_upper('[2:4]={1,2,3}'::int[], 1), array_upper(ARRAY[1, 2], 1), array_lower(ARRAY[]::int[], 1)
 functions/arrays.slt:ff7a90f4845cff74  # SELECT ('[2:4]={1,2,3}'::int[])[2], ('[2:4]={1,2,3}'::int[])[1], '[2:4]={1,2,3}'::int[]
-functions/arrays.slt:eb4c59f326adf0d5  # SELECT (ARRAY[10, 20, 30])[2], (ARRAY[10, 20, 30])[5], (ARRAY[[1, 2], [3, 4]])[2][1]
-functions/arrays.slt:6f258ceac367c1a7  # SELECT (ARRAY[1, 2, 3, 4, 5])[2:4], (ARRAY[1, 2, 3, 4, 5])[:2], (ARRAY[1, 2, 3, 4, 5])[4:], (ARRAY[[1, 2], [3, 4]])[1:2][2:2]
-functions/arrays.slt:13feb22f5fdd13e6  # SELECT ARRAY[1, 2] || 3, 0 || ARRAY[1, 2], ARRAY[1, 2] || ARRAY[3], ARRAY[[1, 2]] || ARRAY[3, 4], ARRAY[1] || NULL::int[]
-functions/arrays.slt:bc9ed5597f48038b  # SELECT ARRAY[[1, 2]] || ARRAY[3]
-functions/arrays.slt:da0c691a8fc66d3c  # SELECT array_remove(ARRAY[[1, 2], [3, 4]], 1)
 functions/arrays.slt:c0d77d752209d92f  # SELECT array_fill(7, ARRAY[3]), array_fill(0, ARRAY[2, 2]), array_fill(1, ARRAY[2], ARRAY[5])
-functions/arrays.slt:1e1d0a8ca52402d8  # SELECT trim_array(ARRAY[1, 2, 3, 4, 5], 2), array_sample(ARRAY[1], 1), array_shuffle(ARRAY[7])
-functions/arrays.slt:5c67265f616d426b  # SELECT array_reverse(ARRAY[1, 2, 3]), array_sort(ARRAY[3, 1, 2])
-functions/arrays.slt:851f5e91b5157a20  # SELECT array_to_string(ARRAY[1, 2, 3], ', '), array_to_string(ARRAY[[1, 2], [3, 4]], '-'), array_to_string(ARRAY[]::text[], ',') || '|'
-functions/arrays.slt:c5dea3b714bc636c  # SELECT unnest(ARRAY[1, 2, 3])
-functions/arrays.slt:237fa36fa1df1bf8  # SELECT unnest(ARRAY[[1, 2], [3, 4]])
-functions/arrays.slt:4a3ab1f1ba5d54f2  # SELECT unnest(ARRAY[1, 2]), unnest(ARRAY['a', 'b', 'c'])
-functions/arrays.slt:0e8d79333f230b3a  # SELECT array_agg(ARRAY[x, x * 10]) FROM (VALUES (1), (2)) v(x)
-functions/arrays.slt:f00b8e9669c80d9e  # SELECT '{1,2,3}'::int[], '{{1,2},{3,4}}'::int[], '{"a b",NULL,"","c\"d"}'::text[], ARRAY['a,b', 'c']
-functions/arrays.slt:039ba7655f903c8a  # SELECT '{{1,2},{3}}'::int[]
-functions/arrays.slt:0d879a51b5704d4a  # SELECT ARRAY[[1, 2], [3]]
-functions/arrays.slt:df7c4c7fcd5c823b  # UPDATE t SET tags[3] = 'z' WHERE id = 1
-functions/arrays.slt:c2fe718cdc0a43c9  # SELECT id, tags FROM t ORDER BY id
-functions/arrays.slt:9a9006940458022b  # SELECT id, tags FROM t WHERE tags && ARRAY['z', 'c'] ORDER BY id
-functions/conditional_misc.slt:0279d94087ccfd1f  # SELECT generate_series(1.5, 3.0, 0.5)
-functions/conditional_misc.slt:979c86d38764c5b0  # SELECT generate_series(1::bigint, 3::bigint), pg_typeof(generate_series(1::bigint, 1))
-functions/conditional_misc.slt:85ec463ae213a964  # SELECT generate_subscripts(ARRAY['a', 'b', 'c'], 1)
 functions/conditional_misc.slt:7e28717042d08aa6  # SELECT generate_subscripts('[3:5]={x,y,z}'::text[], 1), generate_subscripts(ARRAY[1, 2], 1, true)
-functions/conditional_misc.slt:cc51e3db8447f1f2  # SELECT generate_subscripts(ARRAY[[1, 2, 3], [4, 5, 6]], 2)
-functions/conditional_misc.slt:798d7c4d5544036e  # SELECT num_nulls(1, NULL, 2, NULL), num_nonnulls(1, NULL, 2, NULL), num_nulls(VARIADIC ARRAY[NULL, 1])
-functions/conditional_misc.slt:e2078d87afc205fd  # SELECT set_config('application_name', 'conf', false), current_setting('application_name')
-functions/conditional_misc.slt:3ea2063f8247bffe  # SELECT set_config('my.custom', 'v1', false), current_setting('my.custom')
-functions/conditional_misc.slt:38d2a338c483f4bb  # SELECT pg_column_size(1::int4), pg_column_size(1::int8), pg_column_size('abc'::text)
 functions/conditional_misc.slt:b5355bcb6afee2be  # SELECT pg_get_viewdef('pg_roles'::regclass) IS NOT NULL
-functions/datetime.slt:d4ebc931d41119e7  # SELECT make_interval(days => 10), make_interval(1, 2, 3, 4, 5, 6, 7.5), make_interval(hours => -3, mins => 30)
-functions/datetime.slt:7d90991c5bd46695  # SELECT to_char(125, '999'), to_char(-125.8, '999D99S'), to_char(1234567.891, '9,999,999.99')
-functions/datetime.slt:47a5139e38b623ec  # SELECT to_char(5.2, 'FM9990.00'), to_char(0.5, '0.99'), to_char(12, '0009'), to_char(485, 'RN')
-functions/datetime.slt:77b4c201e1121463  # SELECT to_char(1234.5::float8, '99999.999'), to_char(-0.1, 'FM90.9'), to_char(12345, '99')
-functions/datetime.slt:3ebaf061acaffa0e  # SELECT to_char(1234, 'S9999'), to_char(42, 'PL999'), to_char(-42, 'MI999'), to_char(3, 'FM9th')
-functions/datetime.slt:0c6020f6c4f6d478  # SELECT to_date('March 15, 2024', 'Month DD, YYYY'), to_date('2024-075', 'YYYY-DDD')
-functions/datetime.slt:ee3c8003a0460b6a  # SELECT to_timestamp('2024-03-15 14:30:45.123', 'YYYY-MM-DD HH24:MI:SS.MS'), to_timestamp('2024-03-15 14:30 +05', 'YYYY-MM-DD HH24:MI TZH')
-functions/datetime.slt:943bd325c7acad11  # SELECT justify_days(interval '35 days'), justify_hours(interval '27 hours'), justify_interval(interval '1 mon -1 hour')
-functions/datetime.slt:10ee424d79472e00  # SELECT timestamptz '2024-03-15 12:00 America/Los_Angeles', timestamptz '2024-03-15 12:00 EST', timestamptz '2024-06-15 12:00 Europe/London'
-functions/datetime.slt:932a6ee49c28fd13  # SELECT timestamptz '2024-03-09 12:00' + interval '1 day', timestamptz '2024-03-09 12:00' + interval '24 hours'
-functions/datetime.slt:698ce51c507f358f  # SELECT (date '2024-03-15', date '2024-03-20') OVERLAPS (date '2024-03-18', date '2024-03-25')
-functions/datetime.slt:2a522709b877315c  # SELECT isfinite(date '2024-03-15'), isfinite(date 'infinity'), isfinite(timestamp '-infinity'), isfinite(interval '1 day'), isfinite(interval 'infinity')
-functions/datetime.slt:c8a8a8133848aab0  # SELECT date 'infinity' > date '9999-12-31', timestamp 'infinity' - interval '1 day', 'infinity'::timestamp - timestamp '2024-01-01'
-functions/datetime.slt:c76a1621c6194087  # SELECT date 'epoch', timestamp 'epoch', timestamp '2024-03-15T14:30:00', date '15 March 2024', date '2024-03-15 BC'
-functions/datetime.slt:6b3d4cab793c1abc  # SELECT date '2024-02-30'
-functions/datetime.slt:9419360dbef61a79  # SELECT timestamp '2024-03-15 25:00'
-functions/datetime.slt:6bfbc20c44a673cb  # SELECT date '2024-03-15', timestamp '2024-03-15 14:30', timestamptz '2024-03-15 14:30+00'
-functions/datetime.slt:9b1bf1235a6082cb  # SELECT interval '1 year 2 months 3 days 4 hours 5 minutes 6.5 seconds', interval '-1 day'
-functions/datetime.slt:66a879e60640dbdb  # SELECT interval '1 year 2 months', interval '3 days 04:05:06'
-functions/json.slt:6b33eb9d27dab8bb  # SELECT array_to_json(ARRAY[[1, 2], [3, 4]])
-functions/json.slt:dcac2c81b250ea67  # SELECT jsonb_path_query('{"a": [1, 2, 3, 4]}', '$.a[*] ? (@ > 2)')
-functions/json.slt:4a91b69c9b4b4366  # SELECT jsonb_path_query('{"x": [1, 5, 9]}', '$.x[*] ? (@ >= $min)', '{"min": 5}')
-functions/json.slt:8185e7ea9538ca00  # SELECT jsonb_path_query('{"a": "abc"}', '$.a.type()'), jsonb_path_query('[1, 2, 3]', '$.size()'), jsonb_path_query('{"a": -2.5}', '$.a.abs().floor()')
-functions/json.slt:0c30050061595a48  # SELECT jsonb_path_query('{"a": {"b": {"c": 1}}}', 'strict $.**.c'), jsonb_path_query('{"s": "Hello"}', '$.s ? (@ like_regex "^h" flag "i")')
-functions/json.slt:ea3b65fe3b0cf660  # SELECT jsonb_path_query('{"a": 1}', 'strict $.b')
-functions/json.slt:46e01978561407c2  # SELECT jsonb_path_query('{"a": 1}', 'lax $.b')
-functions/math.slt:1a316f33e11f949b  # SELECT round(42.4382::float8, 2)
-functions/math.slt:2681d4921ef27f8d  # SELECT 2 ^ 10, 2.0 ^ 0.5, |/ 25, ||/ 27, @ -5
-functions/math.slt:b8e6916f63b47117  # SELECT power(2, 10), power(2.0, 3), power(9, 0.5), power(2::float8, -1)
-functions/math.slt:2af5c793605b3923  # SELECT pow(2, 3), power(-8::float8, 3), power(-8, 3.0)
-functions/math.slt:dd21ebe9187ddd49  # SELECT power(-8.0, 0.5)
-functions/math.slt:922704f4b947a611  # SELECT exp(1), exp(1.0), exp(0)
-functions/math.slt:1085c4ab642f82e1  # SELECT ln(2.718281828459045), ln(10), ln(10::numeric)
-functions/math.slt:f3cb528015e927dc  # SELECT log(100), log(2, 64), log(100::float8), log10(1000), log(2.0, 8.0)
-functions/math.slt:7e4d45c733e19d8d  # SELECT width_bucket(now_val, ARRAY[1, 5, 10]) FROM (VALUES (0), (1), (7), (10), (11)) v(now_val)
-functions/math.slt:7dca2f34eb1ae807  # SELECT sind(30), cosd(60), tand(45), asind(0.5), acosd(0.5), atand(1), atan2d(1, 0), cotd(45)
-functions/math.slt:21f429259be593eb  # SELECT sinh(0), cosh(0), tanh(0), asinh(0), acosh(1), atanh(0)
-functions/math.slt:0d140fb1b4e5079b  # SELECT asin(2)
-functions/math.slt:68aaac9d073579aa  # SELECT stddev(x::float8), variance(x::float8) FROM (VALUES (1), (2), (4)) v(x)
-functions/math.slt:0c5656e9c0365953  # SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x), percentile_disc(0.5) WITHIN GROUP (ORDER BY x), mode() WITHIN GROUP (ORDER BY x) FROM (VALUES (1), (2), (2), (4)) v(x)
-functions/math.slt:7b31b6be7369ea32  # SELECT corr(x, y), covar_pop(x, y), regr_slope(y, x), regr_intercept(y, x) FROM (VALUES (1, 2), (2, 4), (3, 7)) v(x, y)
-functions/math.slt:8a9b7f23bffa5b57  # SELECT bit_and(x), bit_or(x), bit_xor(x) FROM (VALUES (12), (10)) v(x)
-functions/regex.slt:756a443585083b91  # SELECT 'abc' ~ '('
-functions/regex.slt:39eca7842392b35b  # SELECT regexp_matches('foobarbequebaz', 'ba.', 'g')
-functions/regex.slt:a01658291b065014  # SELECT regexp_matches('a1b2c3', '([a-z])(\d)', 'g')
-functions/regex.slt:d7d90a14c9e430f0  # SELECT regexp_matches('ABC', 'b', 'i')
-functions/regex.slt:a14e04631d671c16  # SELECT count(*) FROM regexp_matches('abc', 'z', 'g')
-functions/regex.slt:bba0405deae8d36c  # SELECT regexp_replace('A PostgreSQL function', 'a|e|i|o|u', 'X', 1, 0, 'i')
-functions/regex.slt:0e7ea6ff1f9e706d  # SELECT regexp_replace('A PostgreSQL function', 'a|e|i|o|u', 'X', 1, 3, 'i')
-functions/regex.slt:176b3f1d8d4f91a1  # SELECT regexp_replace('a.c', '.', 'x', 'q')
-functions/regex.slt:d2ded0e57ae8a8a5  # SELECT regexp_count('ABCABCAXYaxy', 'A.'), regexp_count('ABCABCAXYaxy', 'A.', 1, 'i')
-functions/regex.slt:202e8e0eb1f13101  # SELECT regexp_instr('number of your row', '\w+', 1, 3), regexp_instr('ABCDEFGHI', '(c..)(...)', 1, 1, 0, 'i', 2)
-functions/regex.slt:b089208102bf21f8  # SELECT regexp_instr('abcabc', 'b', 1, 2, 1)
-functions/regex.slt:9aced8efa38908fb  # SELECT regexp_substr('number of your row', '\w+', 1, 3), regexp_substr('ABCDEFGHI', '(c..)(...)', 1, 1, 'i', 2)
-functions/regex.slt:83387139cab442bd  # SELECT regexp_substr('abc', 'z')
-functions/string.slt:f7d9059a7f60f495  # SELECT substring('Thomas' similar '%#"o_a#"_' escape '#')
-functions/string.slt:8ac96a95931c442e  # SELECT substring('Thomas' from '%#"o_a#"_' for '#')
-functions/string.slt:38a8c2f4669da602  # SELECT concat(VARIADIC ARRAY['a', 'b', 'c'])
-functions/string.slt:dc18884de72a3cfc  # SELECT format('%*s|', 6, 'ab')
-functions/string.slt:8b0b93f5bec34b30  # SELECT quote_literal('O''Reilly'), quote_literal(42.5), quote_literal(E'back\\slash')
-functions/string.slt:97b6eee8a72167e3  # SELECT to_bin(10), to_oct(64)
-functions/string.slt:e7555f8736a74454  # SELECT * FROM string_to_table('a|b|c', '|')
-functions/string.slt:4341115994d86985  # SELECT regexp_split_to_table('the quick  brown', '\s+')
-functions/string.slt:97bfb0ab0d0dfc6c  # SELECT unistr('d\0061t\+000061')
-functions/string.slt:8294a3308df63767  # SELECT normalize('abc'), 'abc' IS NFC NORMALIZED
-queries/aggregates.slt:4d64654c5d976799  # SELECT array_agg(x) FROM (VALUES (ARRAY[1,2]), (ARRAY[3,4])) v(x)
-queries/aggregates.slt:b7e41ff7491c8753  # SELECT round(corr(qty, f)::numeric, 6), round(regr_slope(f, qty)::numeric, 6), covar_pop(qty, f) FROM sales
-queries/aggregates.slt:15a7ae832eb4c0ba  # SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY qty), percentile_disc(0.5) WITHIN GROUP (ORDER BY qty) FROM sales
-queries/aggregates.slt:6b45eac0144dda72  # SELECT percentile_cont(ARRAY[0.25, 0.75]) WITHIN GROUP (ORDER BY f), percentile_disc(0.9) WITHIN GROUP (ORDER BY price) FROM sales
-queries/aggregates.slt:61f164f717b5db2a  # SELECT mode() WITHIN GROUP (ORDER BY product), mode() WITHIN GROUP (ORDER BY region) FROM sales
-queries/aggregates.slt:b54dc58f0cfa157c  # SELECT region, percentile_cont(0.5) WITHIN GROUP (ORDER BY qty) FROM sales GROUP BY region ORDER BY region
-queries/aggregates.slt:05769ca19681fe1b  # SELECT rank(5) WITHIN GROUP (ORDER BY qty), dense_rank(5) WITHIN GROUP (ORDER BY qty), percent_rank(5) WITHIN GROUP (ORDER BY qty) FROM sales
 queries/aggregates.slt:d3239e5218a86a1d  # SELECT region, product, sum(qty) FROM sales GROUP BY GROUPING SETS ((region), (product), ()) ORDER BY region NULLS LAST, product NULLS LAST
 queries/aggregates.slt:3832d5309aff50a7  # SELECT region, product, sum(qty), grouping(region, product) FROM sales GROUP BY ROLLUP (region, product) ORDER BY region NULLS LAST, product NULLS LAST
 queries/aggregates.slt:896efd16af3ec417  # SELECT region, product, count(*), grouping(region), grouping(product) FROM sales GROUP BY CUBE (region, product) ORDER BY 4, 5, region NULLS LAST, product NULLS LAST
@@ -444,9 +340,6 @@ queries/aggregates.slt:a90d09dec86c76f4  # SELECT coalesce(region, 'ALL') AS reg
 queries/aggregates.slt:71feebe9e961f372  # SELECT region, product, sum(qty) FROM sales GROUP BY region, ROLLUP (product) ORDER BY region, product NULLS LAST
 queries/aggregates.slt:7c2ac9beaeb35252  # SELECT count(*) FROM sales GROUP BY GROUPING SETS ((), ())
 queries/aggregates.slt:b5cc31f3ed549cd6  # SELECT region, grouping(product) FROM sales GROUP BY region
-queries/aggregates.slt:c2c3b7d1065d6d24  # SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY product) FROM sales
-queries/aggregates.slt:8bedfd504585d124  # SELECT percentile_cont(1.5) WITHIN GROUP (ORDER BY qty) FROM sales
-queries/aggregates.slt:b9ace5a48cd7e95e  # SELECT count(*) FILTER (WHERE sum(qty) > 1) FROM sales
 queries/cte.slt:21b0f4daf432275a  # WITH RECURSIVE t(id, name) AS (SELECT id, name FROM nodes WHERE parent_id IS NULL UNION ALL SELECT n.id, n.name FROM nodes n JOIN t ON n.parent_id = t.id) SEARCH DEPTH FIRST BY id SET ord SELECT id, name FROM t ORDER BY ord
 queries/cte.slt:74cdf6f1f5926d19  # WITH RECURSIVE t(id, name) AS (SELECT id, name FROM nodes WHERE parent_id IS NULL UNION ALL SELECT n.id, n.name FROM nodes n JOIN t ON n.parent_id = t.id) SEARCH BREADTH FIRST BY id SET ord SELECT id, name FROM t ORDER BY ord
 queries/cte.slt:b84cbf5e2f8dc873  # WITH RECURSIVE g(src, dst) AS (SELECT src, dst FROM edges WHERE src = 1 UNION ALL SELECT e.src, e.dst FROM edges e JOIN g ON e.src = g.dst) CYCLE src SET is_cycle USING path SELECT src, dst, is_cycle, path::text FROM g ORDER BY path::text
@@ -465,23 +358,6 @@ queries/windows.slt:139b133a787e7674  # SELECT team, sum(pts), rank() OVER (ORDE
 queries/windows.slt:f1a18c2da35f33ba  # SELECT team, sum(pts) * 100 / sum(sum(pts)) OVER () AS share FROM scores GROUP BY team ORDER BY team
 queries/windows.slt:fc078336b10e022a  # SELECT sum(row_number() OVER ()) FROM scores
 queries/windows.slt:15bbe9ed35da9245  # SELECT sum(pts) OVER (ORDER BY team RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM scores
-session/config_functions.slt:e99cd6f34a1f524a  # SELECT current_setting('search_path')
-session/config_functions.slt:1d9945924598a145  # SELECT set_config('myapp.tenant', 'acme', false), current_setting('myapp.tenant')
-session/config_functions.slt:a3c05252bf121624  # SELECT set_config('no_such_setting', 'x', false)
-session/config_functions.slt:77a2ba0cde58e2c2  # SHOW application_name
-session/config_functions.slt:adf537bc5d8e89aa  # SELECT current_setting('myapp.request_id', true)
-session/config_functions.slt:4a2ccdeb090eb12d  # SET statement_timeout = '-5'
-session/config_functions.slt:1fa9f6ce15254ae5  # SELECT set_config('statement_timeout', 'abc', false)
-session/config_functions.slt:f48c9817f0a821fc  # SET client_min_messages = 'chatty'
-session/config_functions.slt:bb4aa685c451ca13  # SET standard_conforming_strings = 'maybe'
-session/config_functions.slt:e25761fbd5e3f44d  # SET extra_float_digits = 'many'
-session/config_functions.slt:85983d46758a4bf5  # SET DateStyle = 'Whatever'
-session/config_functions.slt:adde9212eb6366fb  # SET server_version = '1.0'
-session/config_functions.slt:e4199fb6243d49af  # SET max_connections = 10
-session/config_functions.slt:7788132bd64960a6  # RESET no_such_setting
-session/config_functions.slt:bd8cec3befcf3308#2  # SHOW enable_seqscan
-session/config_functions.slt:bd8cec3befcf3308#3  # SHOW enable_seqscan
-session/config_functions.slt:c9a11cfd3cd0d79d#2  # SHOW work_mem
 session/extensions.slt:b917717b7291b646  # CREATE EXTENSION pgcrypto
 session/extensions.slt:e9c0d9706f574f7f  # SELECT encode(digest('abc', 'sha256'), 'hex')
 session/extensions.slt:33efed8b88c60365  # SELECT encode(hmac('data', 'key', 'sha1'), 'hex')
@@ -603,30 +479,6 @@ session/roles.slt:c212a265a798fcdf  # DROP ROLE conf_sess_writer
 session/roles.slt:c212a265a798fcdf#2  # DROP ROLE conf_sess_writer
 session/roles.slt:4704b79a683ed8c5  # DROP ROLE conf_sess_login
 session/roles.slt:dfbf7fb3babe5bd0#2  # DROP ROLE IF EXISTS conf_sess_login
-session/set_show.slt:fdf3322cbf447175  # SELECT '2024-06-01 12:00:00'::timestamptz AT TIME ZONE 'UTC'
-session/set_show.slt:931b505be3f262c7#2  # SHOW DateStyle
-session/set_show.slt:20f8d7e7e3a98920  # SELECT '2024-03-04'::date
-session/set_show.slt:375d199f2c0fee30  # SELECT '2024-03-04'::date, '05/06/2024'::date::text
-session/set_show.slt:f7e0375faa111036  # SELECT '2024-03-04 05:06:07'::timestamp
-session/set_show.slt:fd85f1df1f8cda23  # SET DateStyle = 'Klingon'
-session/set_show.slt:931b505be3f262c7#3  # SHOW DateStyle
-session/set_show.slt:b0f8cd0dbbe520da#2  # SELECT interval '1 year 2 months 3 days 04:05:06'
-session/set_show.slt:b0f8cd0dbbe520da#3  # SELECT interval '1 year 2 months 3 days 04:05:06'
-session/set_show.slt:f9a19aa7760ab585  # SELECT interval '1 day 02:00:00'
-session/set_show.slt:c6aee0144ca6ea6e  # SET IntervalStyle = 'nope'
-session/set_show.slt:20de562e8d7b9a7a  # SELECT 0.1::float8 + 0.2::float8, 1.0::float4 / 3
-session/set_show.slt:7988a02a5d0b946d  # SELECT pi()
-session/set_show.slt:4c26d7132f35ad6b  # SET extra_float_digits = 10
-session/set_show.slt:7fc28c905c040a83#3  # SHOW statement_timeout
-session/set_show.slt:7d5b90d046cf7fde  # SET statement_timeout = 'soon'
-session/set_show.slt:3e99d4a70d3678f7#2  # SHOW client_min_messages
-session/set_show.slt:1f288008490221ab  # SET client_min_messages = 'loud'
-session/set_show.slt:b4d4cea336c16e53  # SHOW default_transaction_isolation
-session/set_show.slt:50d3c95126ed98c1  # SET no_such_setting = 1
-session/set_show.slt:1e6ceb73a131f40a  # SHOW no_such_setting
-session/set_show.slt:9dcda281caeb3cf4  # SHOW myapp.user_id
-session/set_show.slt:c00a76ba8b0997bc#7  # SHOW search_path
-session/set_show.slt:90ab5e64bdb60a2f  # SELECT count(*) > 100 FROM pg_settings
 session/utility.slt:f742e624a9e4bbd8  # EXPLAIN SELECT * FROM t WHERE id = 1
 session/utility.slt:8a473efd4411b625  # EXPLAIN (COSTS OFF) SELECT * FROM t ORDER BY v
 session/utility.slt:0f527f514dd27c9a  # EXPLAIN ANALYZE SELECT count(*) FROM t
@@ -661,8 +513,6 @@ transactions/basics.slt:04caca50ec3ada76  # SELECT current_setting('transaction_
 transactions/basics.slt:fce4e292ffb44146  # INSERT INTO t VALUES (20, 'ro')
 transactions/basics.slt:018e9706a0892d9e  # UPDATE t SET v = 'ro'
 transactions/basics.slt:d2560187e0a29db3  # CREATE TABLE ro (a int)
-transactions/basics.slt:dfe528957fe06ded#5  # SHOW transaction_isolation
-transactions/basics.slt:b4d4cea336c16e53  # SHOW default_transaction_isolation
 transactions/basics.slt:262cd3bc434184c6  # INSERT INTO t VALUES (21, 'ro default')
 transactions/chain.slt:04caca50ec3ada76  # SELECT current_setting('transaction_isolation') AS iso, current_setting('transaction_read_only') AS ro
 transactions/chain.slt:9d73e647610c45ac  # INSERT INTO t VALUES (1)
@@ -725,57 +575,14 @@ transactions/serialization.slt:acfaacf8e23e6dc4  # SELECT on_duty FROM oncall WH
 transactions/serialization.slt:eafdbe7787827286  # UPDATE oncall SET on_duty = true WHERE doctor = 'bob'
 transactions/serialization.slt:c414f24cab86e436#2  # COMMIT
 transactions/serialization.slt:fe34efe19b672efe  # SELECT room, slot FROM booking ORDER BY slot
-transactions/settings.slt:c9a11cfd3cd0d79d#3  # SHOW work_mem
-transactions/settings.slt:c00a76ba8b0997bc#2  # SHOW search_path
-transactions/settings.slt:c00a76ba8b0997bc#3  # SHOW search_path
-transactions/settings.slt:2002d2f4939e1a30  # SELECT current_setting('app.user_id')
-transactions/settings.slt:3c53b4b86cfc19e6  # SELECT current_setting('app.user_id') AS after_commit
-transactions/settings.slt:71422171cee215a1  # SHOW app.tenant
-transactions/settings.slt:881d1a37758faef2  # SET LOCAL no_such_setting = 1
-transactions/settings.slt:ff6207f64133e1f3  # SET work_mem = 'lots'
-types/arrays.slt:69f9c8b1b5c9e429  # SELECT ARRAY[[1, 2], [3, 4]], '{{a,b},{c,d}}'::text[], array_dims(ARRAY[[1, 2, 3], [4, 5, 6]]), array_ndims(ARRAY[[1]])
-types/arrays.slt:0d879a51b5704d4a  # SELECT ARRAY[[1, 2], [3]]
 types/arrays.slt:59695c5e88ee43b9  # SELECT '[0:2]={a,b,c}'::text[], ('[0:2]={a,b,c}'::text[])[0], array_lower('[0:2]={a,b,c}'::text[], 1)
-types/arrays.slt:c0234659adf84ac8  # SELECT (ARRAY[[1, 2], [3, 4]])[2][1], (ARRAY[[1, 2], [3, 4]])[2]
-types/arrays.slt:a0df37511524523a  # SELECT (ARRAY[[1, 2, 3], [4, 5, 6]])[1:2][2:3]
-types/arrays.slt:e1b6f44846b31f85  # SELECT ARRAY[1, 2] || ARRAY[3], ARRAY[1] || 2, 0 || ARRAY[1], ARRAY[[1, 2]] || ARRAY[3, 4]
-types/arrays.slt:27dbd1f2abb7477c  # SELECT array_length(ARRAY[1, 2, 3], 1), array_length(ARRAY[]::int[], 1), cardinality(ARRAY[[1, 2], [3, 4]]), array_upper(ARRAY[1, 2], 1)
-types/arrays.slt:9d4821296ffb4857  # SELECT trim_array(ARRAY[1, 2, 3], 1), array_fill(0, ARRAY[2]), array_reverse(ARRAY[1, 2, 3]), array_sort(ARRAY[3, 1, 2])
-types/arrays.slt:24e7b314a51b106a  # SELECT ARRAY(SELECT generate_series(1, 3)), ARRAY(SELECT 1 WHERE false)
-types/arrays.slt:51eb47256ce61f12  # INSERT INTO arr VALUES (1, '{a,b}', '{{1,2},{3,4}}', ARRAY['2024-01-01 00:00:00+00'::timestamptz]), (2, ARRAY['c'], NULL, '{}')
-types/arrays.slt:9a7e0eb6830151a6  # UPDATE arr SET tags[3] = 'z' WHERE id = 1
-types/arrays.slt:60b26c138570cb47  # UPDATE arr SET tags[5] = 'gap' WHERE id = 2
-types/arrays.slt:ca763a6e633b027e  # SELECT id, tags, m, ts FROM arr ORDER BY id
-types/arrays.slt:8b4c9d180777546c  # SELECT id FROM arr WHERE 'a' = ANY(tags) OR tags @> '{gap}' ORDER BY id
-types/arrays.slt:8d8de383c5346b66  # UPDATE arr SET m[1:1][1:2] = '{{9,9}}' WHERE id = 1
-types/arrays.slt:915ea4381cece615  # SELECT m FROM arr WHERE id = 1
 types/casts.slt:58960dc407f61ee5  # SELECT 'x'::inet
 types/casts.slt:aa0e6d00a2e1688f  # SELECT '192.168.0.1/24'::inet, '10.0.0.0/8'::cidr, '08:00:2b:01:02:03'::macaddr, '$1,234.50'::money
 types/casts.slt:562a638a088bc3c9  # SELECT 'pg_catalog.lower'::regproc
-types/casts.slt:89f7abced0625365  # SELECT to_char(1234.5, 'FM9,999.00'), to_number('1,234.50', '9G999D99'), to_char(-0.5, '0.0')
 types/casts.slt:f8b08fc4c17fd1b3  # SELECT B'1010', B'1010'::bit(6), 'x0F'::bit(8), 5::bit(4), B'1010'::bit(4)::int
 types/casts.slt:93c53cd1f7e466c8  # SELECT B'102'
 types/casts.slt:377d6b8c0e00c1b0  # SELECT B'10101'::bit(3), x'1'::bit(8)
 types/casts.slt:fc3868fddb298ef7  # INSERT INTO c (v) VALUES (B'1'::text || 'abcd')
-types/datetime.slt:9819dd802373c94b  # SELECT '2024-02-29'::date, 'February 29, 2024'::date, '20240229'::date, '2024-2-9'::date
-types/datetime.slt:c6235d0ed2a8e75e  # SELECT '1/2/2024'::date
-types/datetime.slt:35542fdf9623f1af  # SELECT '2023-02-29'::date
-types/datetime.slt:18f2f7a69e129dfc  # SELECT '2024-13-01'::date
-types/datetime.slt:ac7b58a6734eaac1  # SELECT '4714-11-23 BC'::date
-types/datetime.slt:a5d7e38c2f25da9b  # SELECT '13:45:30'::time, '1:45 PM'::time, '23:59:59.999999'::time, '24:00:00'::time
-types/datetime.slt:5756f1b61ea0fa24  # SELECT '12:34:56.789'::time(1), '12:34:56.789'::time(0)
-types/datetime.slt:577b06d9381a2871  # SELECT '25:00:00'::time
-types/datetime.slt:5b99b80723bd1af1  # SELECT '2024-06-15 13:45:30.1234567'::timestamp, '2024-06-15 13:45:30.555'::timestamp(2)
-types/datetime.slt:271b83418549b5f6  # SELECT '2024-06-15 13:45:30+05'::timestamptz, '2024-06-15 13:45:30 America/New_York'::timestamptz
-types/datetime.slt:8afedc23e0c8b88b  # SELECT '2024-01-15 12:00:00'::timestamptz
-types/datetime.slt:48c8dd623084c98f  # SELECT '2024-03-10 01:30'::timestamptz + interval '1 hour', '2024-03-10 01:30'::timestamptz + interval '1 day'
-types/datetime.slt:3bec26f49463d29a  # SELECT '2024-06-15 25:00:00'::timestamp
-types/datetime.slt:a23a4d339e32b4b6  # SELECT interval '25 hours', justify_hours(interval '25 hours'), justify_days(interval '35 days'), justify_interval(interval '1 mon -1 hour')
-types/datetime.slt:e6c892a0418f0b69  # SELECT 'infinity'::interval, '-infinity'::interval, 'infinity'::timestamp - '2024-01-01'::timestamp
-types/datetime.slt:06ff5e5c264ab748  # SELECT make_date(2024, 2, 29), make_time(13, 45, 30.5), make_timestamp(2024, 6, 15, 13, 45, 30), make_interval(days => 10, hours => 2)
-types/datetime.slt:c278ab0040c2def6  # SELECT (date '2024-01-01', date '2024-02-01') OVERLAPS (date '2024-01-15', date '2024-03-01'), date '2024-01-01' = timestamp '2024-01-01 00:00', timestamp '2024-01-01' < timestamptz '2024-01-01 00:00:01+00'
-types/datetime.slt:3873b9f28787e416  # SELECT id, d, ts, tstz, dur FROM events ORDER BY id
-types/datetime.slt:284343f0f263b083  # SELECT id, ts + dur, tstz::date, d::timestamp FROM events ORDER BY id
 types/enums_domains.slt:b5e57415a34a43d3  # SELECT int4range(1, 10), int4range(1, 10, '[]'), '[1,5)'::int4range, '(1,5]'::int4range, 'empty'::int4range
 types/enums_domains.slt:041be401fd87f6b4  # SELECT numrange(1.5, 2.5), int8range(NULL, 5), '[2024-01-01,2024-02-01)'::daterange, daterange('2024-01-01', '2024-01-31', '[]')
 types/enums_domains.slt:bfd7281f2d9528f4  # SELECT tsrange('2024-01-01 00:00', '2024-01-02 00:00'), tstzrange('2024-01-01 00:00+00', NULL)

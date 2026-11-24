@@ -51,7 +51,7 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
                     let t = float_or_numeric(t).ok_or_else(err)?;
                     resolved(f, vec![t.clone()], t)
                 }
-                [t, s] if (t.is_numeric() || *t == Type::Unknown) && (s.is_integer() || *s == Type::Unknown) => {
+                [t, s] if (t.is_integer() || *t == Type::Numeric || *t == Type::Unknown) && (s.is_integer() || *s == Type::Unknown) => {
                     resolved(f, vec![Type::Numeric, Type::Int4], Type::Numeric)
                 }
                 _ => Err(err()),
@@ -115,21 +115,50 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
         "random" if args.is_empty() => resolved(lenient("random", random_fn), vec![], Type::Float8),
         "degrees" => resolved(strict("degrees", |a, _| Ok(Value::Float8(f(&a[0]).to_degrees()))), vec![Type::Float8], Type::Float8),
         "radians" => resolved(strict("radians", |a, _| Ok(Value::Float8(f(&a[0]).to_radians()))), vec![Type::Float8], Type::Float8),
-        "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "cot" => {
+        "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "cot" | "sind" | "cosd" | "tand" | "asind" | "acosd" | "atand" | "cotd"
+        | "sinh" | "cosh" | "tanh" | "asinh" | "acosh" | "atanh" => {
             let func = match name {
-                "sin" => strict("sin", |a, _| Ok(Value::Float8(f(&a[0]).sin()))),
-                "cos" => strict("cos", |a, _| Ok(Value::Float8(f(&a[0]).cos()))),
-                "tan" => strict("tan", |a, _| Ok(Value::Float8(f(&a[0]).tan()))),
-                "asin" => strict("asin", |a, _| Ok(Value::Float8(f(&a[0]).asin()))),
-                "acos" => strict("acos", |a, _| Ok(Value::Float8(f(&a[0]).acos()))),
-                "atan" => strict("atan", |a, _| Ok(Value::Float8(f(&a[0]).atan()))),
-                _ => strict("cot", |a, _| Ok(Value::Float8(1.0 / f(&a[0]).tan()))),
+                "sin" => strict("sin", |a, _| trig("sin", &a[0])),
+                "cos" => strict("cos", |a, _| trig("cos", &a[0])),
+                "tan" => strict("tan", |a, _| trig("tan", &a[0])),
+                "asin" => strict("asin", |a, _| trig("asin", &a[0])),
+                "acos" => strict("acos", |a, _| trig("acos", &a[0])),
+                "atan" => strict("atan", |a, _| trig("atan", &a[0])),
+                "cot" => strict("cot", |a, _| trig("cot", &a[0])),
+                "sind" => strict("sind", |a, _| trig("sind", &a[0])),
+                "cosd" => strict("cosd", |a, _| trig("cosd", &a[0])),
+                "tand" => strict("tand", |a, _| trig("tand", &a[0])),
+                "asind" => strict("asind", |a, _| trig("asind", &a[0])),
+                "acosd" => strict("acosd", |a, _| trig("acosd", &a[0])),
+                "atand" => strict("atand", |a, _| trig("atand", &a[0])),
+                "cotd" => strict("cotd", |a, _| trig("cotd", &a[0])),
+                "sinh" => strict("sinh", |a, _| trig("sinh", &a[0])),
+                "cosh" => strict("cosh", |a, _| trig("cosh", &a[0])),
+                "tanh" => strict("tanh", |a, _| trig("tanh", &a[0])),
+                "asinh" => strict("asinh", |a, _| trig("asinh", &a[0])),
+                "acosh" => strict("acosh", |a, _| trig("acosh", &a[0])),
+                _ => strict("atanh", |a, _| trig("atanh", &a[0])),
             };
             resolved(func, vec![Type::Float8], Type::Float8)
         }
+        "atan2d" => resolved(
+            strict("atan2d", |a, _| {
+                let (y, x) = (f(&a[0]), f(&a[1]));
+                Ok(Value::Float8(y.atan2(x) / 1.0f64.atan() * 45.0))
+            }),
+            vec![Type::Float8, Type::Float8],
+            Type::Float8,
+        ),
         "atan2" => {
             resolved(strict("atan2", |a, _| Ok(Value::Float8(f(&a[0]).atan2(f(&a[1]))))), vec![Type::Float8, Type::Float8], Type::Float8)
         }
+        "width_bucket" if args.len() == 2 => match args {
+            [t, Type::Array(e)] => {
+                let common = super::numeric_common(t, e).or_else(|| (**e == *t).then(|| t.clone())).unwrap_or_else(|| (**e).clone());
+                resolved(strict("width_bucket", width_bucket_array), vec![common.clone(), Type::array_of(common)], Type::Int4)
+            }
+            _ => Err(err()),
+        },
         "width_bucket" if args.len() == 4 => {
             resolved(strict("width_bucket", width_bucket_fn), vec![Type::Float8, Type::Float8, Type::Float8, Type::Int4], Type::Int4)
         }
@@ -251,8 +280,17 @@ fn ldexp(x: f64, e: i32) -> f64 {
 
 fn exp_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     Ok(match &a[0] {
-        Value::Numeric(n) => Value::Numeric(Numeric::from_f64(n.to_f64().exp())?),
-        v => Value::Float8(f(v).exp()),
+        Value::Numeric(n) => Value::Numeric(n.exp()?),
+        v => {
+            let r = f(v).exp();
+            if r.is_infinite() && f(v).is_finite() {
+                return Err(SqlError::new(code::NUMERIC_VALUE_OUT_OF_RANGE, "value out of range: overflow"));
+            }
+            if r == 0.0 && f(v).is_finite() {
+                return Err(SqlError::new(code::NUMERIC_VALUE_OUT_OF_RANGE, "value out of range: underflow"));
+            }
+            Value::Float8(r)
+        }
     })
 }
 
@@ -267,28 +305,25 @@ fn ln_check(x: f64) -> SqlResult<()> {
 }
 
 fn ln_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    if let Value::Numeric(n) = &a[0] {
+        return Ok(Value::Numeric(n.ln()?));
+    }
     let x = f(&a[0]);
     ln_check(x)?;
-    Ok(match &a[0] {
-        Value::Numeric(_) => Value::Numeric(Numeric::from_f64(x.ln())?),
-        _ => Value::Float8(x.ln()),
-    })
+    Ok(Value::Float8(x.ln()))
 }
 
 fn log10_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    if let Value::Numeric(n) = &a[0] {
+        return Ok(Value::Numeric(Numeric::log(&Numeric::from_i64(10), n)?));
+    }
     let x = f(&a[0]);
     ln_check(x)?;
-    Ok(match &a[0] {
-        Value::Numeric(_) => Value::Numeric(Numeric::from_f64(x.log10())?),
-        _ => Value::Float8(x.log10()),
-    })
+    Ok(Value::Float8(x.log10()))
 }
 
 fn log_base_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
-    let (b, x) = (f(&a[0]), f(&a[1]));
-    ln_check(b)?;
-    ln_check(x)?;
-    Ok(Value::Numeric(Numeric::from_f64(x.ln() / b.ln())?))
+    Ok(Value::Numeric(Numeric::log(&num(&a[0]), &num(&a[1]))?))
 }
 
 fn round_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
@@ -309,24 +344,7 @@ fn trunc_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
 
 pub fn power_values(x: &Value, y: &Value) -> SqlResult<Value> {
     match (x, y) {
-        (Value::Numeric(_), _) | (_, Value::Numeric(_)) => {
-            let (b, e) = (num(x), num(y));
-            if b.is_zero() && e.signum() < 0 {
-                return Err(SqlError::new("2201F", "zero raised to a negative power is undefined"));
-            }
-            // Integral exponents are computed exactly; others go through f64.
-            if (e.scale() == 0 || e.trunc(0).cmp_num(&e).is_eq())
-                && let Some(n) = e.to_i64()
-                && (0..=1000).contains(&n)
-            {
-                let mut acc = Numeric::from_i64(1);
-                for _ in 0..n {
-                    acc = acc.mul(&b);
-                }
-                return Ok(Value::Numeric(acc));
-            }
-            Ok(Value::Numeric(Numeric::from_f64(b.to_f64().powf(e.to_f64()))?))
-        }
+        (Value::Numeric(_), _) | (_, Value::Numeric(_)) => Ok(Value::Numeric(num(x).power(&num(y))?)),
         _ => {
             let (b, e) = (f(x), f(y));
             if b == 0.0 && e < 0.0 {
@@ -394,6 +412,162 @@ fn random_fn(_: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     #[allow(clippy::cast_precision_loss)]
     let x = (u64::from_le_bytes(buf) >> 11) as f64 / (1u64 << 53) as f64;
     Ok(Value::Float8(x))
+}
+
+/// `width_bucket(operand, thresholds)`: the number of thresholds <= operand (binary search,
+/// the array must be sorted).
+fn width_bucket_array(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let Value::Array(th) = &a[1] else { return Ok(Value::Null) };
+    if th.iter().any(|v| matches!(v, Value::Array(_))) {
+        return Err(SqlError::new(code::ARRAY_SUBSCRIPT_ERROR, "thresholds must be one-dimensional array"));
+    }
+    if th.iter().any(Value::is_null) {
+        return Err(SqlError::new(code::NULL_VALUE_NOT_ALLOWED, "thresholds array must not contain NULLs"));
+    }
+    let (mut lo, mut hi) = (0usize, th.len());
+    while lo < hi {
+        let mid = usize::midpoint(lo, hi);
+        if pgmem_types::compare_values(&a[0], &th[mid])?.is_lt() {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    Ok(Value::Int4(i32::try_from(lo).unwrap_or(i32::MAX)))
+}
+
+fn out_of_range_input() -> SqlError {
+    SqlError::new(code::NUMERIC_VALUE_OUT_OF_RANGE, "input is out of range")
+}
+
+const RADIANS_PER_DEGREE: f64 = 0.017_453_292_519_943_295;
+
+/// `float.c`'s degree helpers: exact at the multiples of 30 and 45 degrees.
+fn sind_0_to_30(x: f64) -> f64 {
+    let sin_30 = (30.0 * RADIANS_PER_DEGREE).sin();
+    ((x * RADIANS_PER_DEGREE).sin() / sin_30) / 2.0
+}
+
+fn cosd_0_to_60(x: f64) -> f64 {
+    let one_minus_cos_60 = 1.0 - (60.0 * RADIANS_PER_DEGREE).cos();
+    1.0 - ((1.0 - (x * RADIANS_PER_DEGREE).cos()) / one_minus_cos_60) / 2.0
+}
+
+fn sind_q1(x: f64) -> f64 {
+    if x <= 30.0 { sind_0_to_30(x) } else { cosd_0_to_60(90.0 - x) }
+}
+
+fn cosd_q1(x: f64) -> f64 {
+    if x <= 60.0 { cosd_0_to_60(x) } else { sind_0_to_30(90.0 - x) }
+}
+
+fn asind_q1(x: f64) -> f64 {
+    if x <= 0.5 { (x.asin() / 0.5f64.asin()) * 30.0 } else { 90.0 - (x.acos() / 0.5f64.acos()) * 60.0 }
+}
+
+fn acosd_q1(x: f64) -> f64 {
+    if x <= 0.5 { 90.0 - (x.asin() / 0.5f64.asin()) * 30.0 } else { (x.acos() / 0.5f64.acos()) * 60.0 }
+}
+
+/// Reduces degrees to [0, 90] for sind/cosd/tand/cotd: (reduced, sign).
+fn reduce_degrees(x: f64, odd_at_zero: bool, odd_past_180: bool, odd_past_90: bool) -> (f64, f64) {
+    let mut sign = 1.0;
+    let mut a = x % 360.0;
+    if a < 0.0 {
+        a = -a;
+        if odd_at_zero {
+            sign = -sign;
+        }
+    }
+    if a > 180.0 {
+        a = 360.0 - a;
+        if odd_past_180 {
+            sign = -sign;
+        }
+    }
+    if a > 90.0 {
+        a = 180.0 - a;
+        if odd_past_90 {
+            sign = -sign;
+        }
+    }
+    (a, sign)
+}
+
+/// The trigonometric and hyperbolic functions, with `float.c`'s domain checks.
+fn trig(name: &str, v: &Value) -> SqlResult<Value> {
+    let x = f(v);
+    if x.is_nan() {
+        return Ok(Value::Float8(f64::NAN));
+    }
+    let unit = |ok: bool| if ok { Ok(()) } else { Err(out_of_range_input()) };
+    let r = match name {
+        "sin" | "cos" | "tan" | "cot" | "sind" | "cosd" | "tand" | "cotd" => {
+            unit(x.is_finite())?;
+            match name {
+                "sin" => x.sin(),
+                "cos" => x.cos(),
+                "tan" => x.tan(),
+                "cot" => 1.0 / x.tan(),
+                "sind" => {
+                    let (a, s) = reduce_degrees(x, true, true, false);
+                    s * sind_q1(a)
+                }
+                "cosd" => {
+                    let (a, s) = reduce_degrees(x, false, false, true);
+                    s * cosd_q1(a)
+                }
+                "tand" => {
+                    let (a, s) = reduce_degrees(x, true, true, true);
+                    let tan_45 = sind_q1(45.0) / cosd_q1(45.0);
+                    let r = s * ((sind_q1(a) / cosd_q1(a)) / tan_45);
+                    if r == 0.0 { 0.0 } else { r }
+                }
+                _ => {
+                    let (a, s) = reduce_degrees(x, true, true, true);
+                    let cot_45 = cosd_q1(45.0) / sind_q1(45.0);
+                    let r = s * ((cosd_q1(a) / sind_q1(a)) / cot_45);
+                    if r == 0.0 { 0.0 } else { r }
+                }
+            }
+        }
+        "asin" | "acos" | "asind" | "acosd" => {
+            unit((-1.0..=1.0).contains(&x))?;
+            match name {
+                "asin" => x.asin(),
+                "acos" => x.acos(),
+                "asind" => {
+                    if x >= 0.0 {
+                        asind_q1(x)
+                    } else {
+                        -asind_q1(-x)
+                    }
+                }
+                _ => {
+                    if x >= 0.0 {
+                        acosd_q1(x)
+                    } else {
+                        90.0 + asind_q1(-x)
+                    }
+                }
+            }
+        }
+        "atan" => x.atan(),
+        "atand" => x.atan() / 1.0f64.atan() * 45.0,
+        "sinh" => x.sinh(),
+        "cosh" => x.cosh(),
+        "tanh" => x.tanh(),
+        "asinh" => x.asinh(),
+        "acosh" => {
+            unit(x >= 1.0)?;
+            x.acosh()
+        }
+        _ => {
+            unit((-1.0..=1.0).contains(&x))?;
+            x.atanh()
+        }
+    };
+    Ok(Value::Float8(r))
 }
 
 fn width_bucket_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {

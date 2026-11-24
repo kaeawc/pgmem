@@ -6,6 +6,7 @@ pub mod binary;
 pub mod calendar;
 pub mod context;
 pub mod datetime;
+pub mod dtparse;
 pub mod error;
 #[cfg(test)]
 mod go_port;

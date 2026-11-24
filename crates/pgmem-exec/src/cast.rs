@@ -222,7 +222,19 @@ fn convert(v: Value, to: &Type) -> SqlResult<Value> {
         (V::Interval(iv), Type::Time) => V::Time(iv.micros.rem_euclid(USECS_PER_DAY)),
         (V::Jsonb(j), t) => jsonb_to_scalar(&j, t)?,
         (V::Array(items), Type::Array(elem)) => {
-            V::Array(items.into_iter().map(|i| cast_value(i, elem, -1)).collect::<SqlResult<Vec<_>>>()?)
+            // Inner dimensions are nested arrays of the same type.
+            V::Array(
+                items
+                    .into_iter()
+                    .map(|i| {
+                        if matches!(i, V::Array(_)) && !matches!(**elem, Type::Array(_)) {
+                            cast_value(i, to, -1)
+                        } else {
+                            cast_value(i, elem, -1)
+                        }
+                    })
+                    .collect::<SqlResult<Vec<_>>>()?,
+            )
         }
         (V::Record(_, items), Type::Composite(oid)) => {
             let fields = crate::usertypes::composite_fields(*oid);
@@ -266,6 +278,17 @@ pub fn numeric_typmod_parts(typmod: i32) -> (i32, i32) {
     ((t >> 16) & 0xffff, ((t & 0x7ff) ^ 1024) - 1024)
 }
 
+/// Rounds microseconds to `precision` fractional digits (0..=6).
+fn round_micros(t: i64, precision: i32) -> i64 {
+    let Ok(p) = u32::try_from(precision) else { return t };
+    if p >= 6 {
+        return t;
+    }
+    let scale = 10i64.pow(6 - p);
+    let half = scale / 2;
+    if t >= 0 { (t + half) / scale * scale } else { -((-t + half) / scale * scale) }
+}
+
 fn apply_typmod(v: Value, to: &Type, typmod: i32, explicit: bool) -> SqlResult<Value> {
     if typmod < 0 {
         return Ok(v);
@@ -299,6 +322,14 @@ fn apply_typmod(v: Value, to: &Type, typmod: i32, explicit: bool) -> SqlResult<V
         (Value::Numeric(n), Type::Numeric) => {
             let (precision, scale) = numeric_typmod_parts(typmod);
             Ok(Value::Numeric(n.apply_typmod(precision, scale)?))
+        }
+        // Fractional-second precision (`AdjustTimestampForTypmod`): round half away from zero.
+        (Value::Timestamp(t), Type::Timestamp) if t != i64::MAX && t != i64::MIN => Ok(Value::Timestamp(round_micros(t, typmod))),
+        (Value::Timestamptz(t), Type::Timestamptz) if t != i64::MAX && t != i64::MIN => Ok(Value::Timestamptz(round_micros(t, typmod))),
+        (Value::Time(t), Type::Time) => Ok(Value::Time(round_micros(t, typmod))),
+        (Value::TimeTz(t, z), Type::TimeTz) => Ok(Value::TimeTz(round_micros(t, typmod), z)),
+        (Value::Interval(iv), Type::Interval) => {
+            Ok(Value::Interval(pgmem_types::Interval { micros: round_micros(iv.micros, typmod & 0xFFFF), ..iv }))
         }
         (v, _) => Ok(v),
     }

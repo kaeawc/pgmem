@@ -8,10 +8,10 @@ and what comes next. Updated with every PR.
 | Metric | Value | How it is measured |
 |---|---|---|
 | pgmem-go parity | **564 / 564** Go tests ported | `scripts/parity.py check` ([PARITY.md](PARITY.md)) |
-| Integration suite on pgmem | **571 / 571** pass | `cargo nextest run -p pgmem --test it` |
-| Integration suite on real PostgreSQL 18 | **571 / 571** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
+| Integration suite on pgmem | **584 / 584** pass | `cargo nextest run -p pgmem --test it` |
+| Integration suite on real PostgreSQL 18 | **584 / 584** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
 | Go pgx example suites (sqlc) against the Rust binary | **27 / 27** pass | `make examples` (CI `pgx-examples`) |
-| **SQL conformance corpus** (3309 records, 9 areas) | **2518 / 3309 (76.1%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
+| **SQL conformance corpus** (3309 records, 9 areas) | **2711 / 3309 (81.9%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
 
 ### Conformance history
 
@@ -33,7 +33,8 @@ and what comes next. Updated with every PR.
 | 2026-11-24 | #119 enums, domains and composite types | 564/564 | 2368/3309 (71.6%) |
 | 2026-11-24 | #120 FULL JOIN USING, set-op typing, WITH TIES, numeric infinity, bytea/uuid functions | 564/564 | 2429/3309 (73.4%) |
 | 2026-11-24 | schemas, search_path, temporary tables | 564/564 | 2467/3309 (74.6%) |
-| 2026-11-24 | json fidelity, jsonpath, SQL/JSON | 564/564 | 2518/3309 (76.1%) |
+| 2026-11-24 | #122 json fidelity, jsonpath, SQL/JSON | 564/564 | 2518/3309 (76.1%) |
+| 2026-11-24 | arrays, select-list SRFs, settings, output styles, date/time input, function sweep | 564/564 | 2711/3309 (81.9%) |
 
 ## Supported
 
@@ -47,8 +48,8 @@ and what comes next. Updated with every PR.
   uuid, date, time, timetz, timestamp, timestamptz, interval, json (input text kept as written;
   operators return pieces of it verbatim), jsonb (numbers normalized as numeric), jsonpath
   (canonical text form), oid, regclass/regtype/regnamespace/regproc (name ↔ OID through the catalog), void,
-  enums, domains (NOT NULL / CHECK), composite types and table row types, one-dimensional
-  arrays; text and binary formats; Postgres' result-column naming for casts. numeric has NaN
+  enums, domains (NOT NULL / CHECK), composite types and table row types, multidimensional
+  arrays (subscripts, slices, element and slice assignment in UPDATE); text and binary formats; Postgres' result-column naming for casts. numeric has NaN
   and ±Infinity and accepts negative / large scales (`numeric(5,-2)`); `bytea_output` hex or
   escape.
 - **Queries**: joins (inner/left/right/full/cross, USING with `AS alias`, NATURAL, LATERAL,
@@ -56,10 +57,13 @@ and what comes next. Updated with every PR.
   boolean operator, ARRAY(), correlated), WITH and WITH RECURSIVE, UNION/INTERSECT/EXCEPT [ALL],
   DISTINCT, DISTINCT ON, GROUP BY (ordinal, alias, functional dependency on the primary key),
   HAVING, ORDER BY (ordinal, alias, expression, NULLS FIRST/LAST), LIMIT/OFFSET/FETCH (WITH
-  TIES), `TABLE t`, BETWEEN SYMMETRIC, VALUES, set-returning functions in FROM
-  (generate_series, unnest, jsonb_each, ...), views.
+  TIES), `TABLE t`, BETWEEN SYMMETRIC, VALUES, set-returning functions in FROM and in the select
+  list (run in lockstep, as Postgres 10+ does), views, `(a, b) OVERLAPS (c, d)`.
 - **Aggregates & windows**: count/sum/avg/min/max/bool_and/bool_or/every/string_agg/array_agg/
-  jsonb_agg/jsonb_object_agg/stddev/variance/bit_and/bit_or with DISTINCT, FILTER and ORDER BY;
+  jsonb_agg/jsonb_object_agg/stddev/variance/bit_and/bit_or/bit_xor, corr/covar/regr_*
+  (Postgres' Youngs-Cramer accumulation), ordered-set (`percentile_cont`, `percentile_disc`,
+  `mode`) and hypothetical-set (`rank(..) WITHIN GROUP`, ...) aggregates, with DISTINCT, FILTER
+  and ORDER BY;
   row_number/rank/dense_rank/percent_rank/cume_dist/ntile/lag/lead/first_value/last_value/
   nth_value and aggregates over windows with ROWS/RANGE/GROUPS frames (RANGE without offsets).
 - **DML**: INSERT (VALUES, SELECT, DEFAULT VALUES, DEFAULT), ON CONFLICT DO NOTHING/DO UPDATE with
@@ -81,6 +85,12 @@ and what comes next. Updated with every PR.
 - **Transactions**: BEGIN/COMMIT/ROLLBACK, savepoints, failed-transaction state (25P02),
   READ COMMITTED (per-statement snapshots) and REPEATABLE READ/SERIALIZABLE (transaction
   snapshot), row-level write-conflict detection at commit (40001), non-transactional sequences.
+- **Settings**: every parameter of Postgres 18's `pg_settings` with its validation (bool, integer
+  and real ranges with units, enum spellings, DateStyle), context rules (55P02), `SHOW` /
+  `current_setting` unit formatting, custom `x.y` placeholders, `set_config`, SET LOCAL, undo
+  at ROLLBACK and ROLLBACK TO SAVEPOINT; DateStyle (ISO/SQL/Postgres/German with field order),
+  IntervalStyle (postgres, postgres_verbose, sql_standard, iso_8601) and extra_float_digits
+  shape output.
 - **Catalogs**: `pg_catalog` (pg_class, pg_attribute, pg_type, pg_namespace, pg_index,
   pg_constraint incl. Postgres 18 NOT NULL constraints, pg_attrdef, pg_description, pg_depend,
   pg_sequence(s), pg_tables, pg_views, pg_indexes, pg_settings, pg_roles, pg_database, ...) and
@@ -90,8 +100,14 @@ and what comes next. Updated with every PR.
   `pg_get_constraintdef`, `pg_get_indexdef`, `pg_get_viewdef` (ruleutils-exact deparser),
   `pg_get_serial_sequence`, `obj_description`/`col_description` (COMMENT ON is stored),
   `to_regclass`, privilege checks; int2vector/oidvector with zero-based subscripts.
-- **Functions**: string, regex (`~`, regexp_* ), LIKE/ILIKE/SIMILAR TO, math, date/time (extract,
-  date_trunc, age, make_*, to_char/to_date/to_timestamp, AT TIME ZONE with named zones),
+- **Functions**: string (format with `*` widths, VARIADIC calls, unistr, to_bin/to_oct,
+  string_to_table, SIMILAR substring), regex (`~`, regexp_match(es)/replace/count/instr/substr/
+  split with Postgres' flags and empty-match rules), LIKE/ILIKE/SIMILAR TO, math (numeric
+  exp/ln/log/power with Postgres' result scales, degree trigonometry, hyperbolic functions),
+  date/time (Postgres' full date/time input parser with DateStyle field order, month/day names,
+  zone names and abbreviations, `now`/`today`/`allballs`; fractional-second typmods; infinite
+  intervals; extract, date_trunc, age, make_* with named arguments, to_char for numbers
+  (`formatting.c` port), to_number, to_date/to_timestamp templates, AT TIME ZONE),
   json/jsonb operators and functions with Postgres' json formatting (`json_build_object`,
   `row_to_json`, `json_agg`, ...), jsonb subscripting, jsonpath (lax/strict, filters, methods,
   `like_regex`, variables; `@?`, `@@`, `jsonb_path_*`), SQL/JSON (`IS JSON`, `JSON_OBJECT`,
@@ -107,8 +123,10 @@ and what comes next. Updated with every PR.
   definitions follow ruleutils' non-pretty mode; pretty mode (`pg_get_viewdef(v, true)`) does not
   drop redundant parentheses yet.
 - No COPY, LISTEN/NOTIFY, cursors (DECLARE/FETCH), prepared statements via SQL (PREPARE/EXECUTE),
-  stored procedures, triggers, multidimensional arrays, range types, network types (inet, cidr,
-  macaddr), bit strings, money. Comparison is bytewise, which is what the corpus' `C.UTF-8`
+  stored procedures, triggers, range types, network types (inet, cidr, macaddr), bit strings,
+  money. Arrays always have lower bound 1 (`'[2:4]={...}'` input is read as `{...}`). Unicode
+  normalization (`normalize`, `IS NORMALIZED`) covers ASCII text only. `VARIADIC` needs an
+  array known when the statement is bound. Comparison is bytewise, which is what the corpus' `C.UTF-8`
   database collation does; other collations are not supported.
 - No system columns (`ctid`, `xmin`, `xmax`, `tableoid`), so `RETURNING (xmax = 0)` fails.
 - Concurrent writers never block: where Postgres would wait on a row lock, pgmem detects the
@@ -120,18 +138,16 @@ and what comes next. Updated with every PR.
 Hill-climb, ordered by conformance records recovered per unit of work and by what blocks real
 clients. Each item names the corpus area it moves (see CONFORMANCE.md for per-file rates).
 
-1. **Set-returning functions in the select list**, multidimensional arrays, array element
-   assignment, `ROW(...)` constructors and row comparisons.
-2. **Settings fidelity**: validation (22023/42704), value normalisation, custom `x.y` settings,
-   `SET LOCAL`/savepoint scoping, DateStyle/IntervalStyle output styles.
-3. **Statements**: SQL-level PREPARE/EXECUTE, cursors, LISTEN/NOTIFY, MERGE, writable CTEs,
-   `RETURNING old/new`, GROUPING SETS/ROLLUP/CUBE, ordered-set aggregates, window `RANGE` offsets
-   and `EXCLUDE`, CTE `SEARCH`/`CYCLE`.
-4. **Types**: range types (and EXCLUDE constraints), network types, bit strings.
-5. **Transactions and constraints**: deferred constraints, per-row unique checks, row locks with
+1. **Session statements**: SQL-level PREPARE/EXECUTE, cursors, LISTEN/NOTIFY, utility
+   statements, extended-protocol transactions per Sync.
+2. **Query statements**: MERGE, writable CTEs, `RETURNING old/new`, GROUPING SETS/ROLLUP/CUBE,
+   window `RANGE` offsets and `EXCLUDE`, CTE `SEARCH`/`CYCLE`, system columns
+   (`xmin`/`xmax`/`ctid`/`tableoid`).
+3. **Transactions and constraints**: deferred constraints, per-row unique checks, row locks with
    NOWAIT/SKIP LOCKED between sessions, advisory locks shared across sessions, READ ONLY
    transactions, SERIALIZABLE write-skew detection, dependency errors (2BP01).
-6. **Functions/procedures/triggers** (SQL and PL/pgSQL), `DO` blocks — large; most of ddl/migrations.
+4. **Types and DDL**: range types (and EXCLUDE constraints), network types, bit strings, array
+   lower bounds, CREATE TABLE LIKE/AS, temp ON COMMIT, pretty deparse.
+5. **Functions/procedures/triggers** (SQL and PL/pgSQL), `DO` blocks — large; most of ddl/migrations.
+6. Roles, extensions (pgcrypto, uuid-ossp, citext), COPY, collations, catalog remainder.
 7. Client matrix in CI: psql, tokio-postgres and sqlx (Go pgx is covered by `examples/`).
-
-System columns (`xmin`/`xmax`/`ctid`/`tableoid`) belong with item 3 (RETURNING semantics).

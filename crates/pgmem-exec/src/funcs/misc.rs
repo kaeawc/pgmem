@@ -4,8 +4,8 @@ use super::{Resolved, lenient, no_function, resolved, strict};
 use crate::eval::EvalCtx;
 use pgmem_types::{SqlError, SqlResult, Type, Value, code};
 
-pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
-    let err = || no_function(name, args);
+/// UUID, version and configuration functions.
+fn resolve_uuid_settings(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
     let n = args.len();
     match name {
         "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" if n == 0 => {
@@ -27,9 +27,18 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
             }
             resolved(strict("current_setting", current_setting), t, Type::Text)
         }
-        "set_config" if n == 3 => {
-            resolved(lenient("set_config", |a, _| Ok(a[1].clone())), vec![Type::Text, Type::Text, Type::Bool], Type::Text)
-        }
+        "set_config" if n == 3 => resolved(lenient("set_config", set_config), vec![Type::Text, Type::Text, Type::Bool], Type::Text),
+        _ => Ok(None),
+    }
+}
+
+pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
+    if let Some(r) = resolve_uuid_settings(name, args)? {
+        return Ok(Some(r));
+    }
+    let err = || no_function(name, args);
+    let n = args.len();
+    match name {
         "current_user" | "session_user" | "user" | "current_role" if n == 0 => {
             resolved(lenient("current_user", |_, c| Ok(Value::Text(c.env.user.clone()))), vec![], Type::Name)
         }
@@ -140,8 +149,31 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
                 })
             })
         }
+        "pg_column_size" if n == 1 => {
+            let t = if args[0] == Type::Unknown { Type::Text } else { args[0].clone() };
+            resolved(strict("pg_column_size", pg_column_size), vec![t], Type::Int4)
+        }
         _ => Ok(None),
     }
+}
+
+/// `pg_column_size`: the datum's size as Postgres stores it in memory (fixed-width types, or
+/// a 4-byte varlena header plus the data).
+fn pg_column_size(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let n = match &a[0] {
+        Value::Bool(_) => 1,
+        Value::Int2(_) => 2,
+        Value::Int4(_) | Value::Float4(_) | Value::Date(_) | Value::Oid(_) => 4,
+        Value::Int8(_) | Value::Float8(_) | Value::Timestamp(_) | Value::Timestamptz(_) | Value::Time(_) => 8,
+        Value::TimeTz(..) => 12,
+        Value::Interval(_) | Value::Uuid(_) => 16,
+        Value::Text(s) | Value::Json(s) => s.len() + 4,
+        Value::Bytea(b) => b.len() + 4,
+        // Short numeric: varlena header, 2-byte header, 2 bytes per base-10000 digit.
+        Value::Numeric(n) => n.to_binary().len().saturating_sub(2),
+        other => pgmem_types::text::encode(other, &other.natural_type())?.len() + 4,
+    };
+    Ok(Value::Int4(i32::try_from(n).unwrap_or(i32::MAX)))
 }
 
 fn name_static(name: &str) -> &'static str {
@@ -236,11 +268,42 @@ fn uuid_extract_timestamp(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
 
 fn current_setting(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
     let name = a[0].as_str().unwrap_or("").to_ascii_lowercase();
-    match ctx.env.setting(&name) {
-        Some(v) => Ok(Value::Text(v)),
+    match ctx.state.setting(ctx.env, &name) {
+        Some(v) => Ok(Value::Text(crate::settings::show(crate::settings::lookup(&name), &v))),
         None if a.get(1).and_then(Value::as_bool) == Some(true) => Ok(Value::Null),
-        None => Err(SqlError::new(code::UNDEFINED_OBJECT, format!("unrecognized configuration parameter \"{name}\""))),
+        None => Err(crate::settings::unrecognized(&name)),
     }
+}
+
+/// `set_config(name, value, is_local)`: validated now, applied to the session when the
+/// statement completes (later calls in the same statement see it).
+fn set_config(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
+    let Some(name) = a[0].as_str() else {
+        return Err(SqlError::new(code::NULL_VALUE_NOT_ALLOWED, "SET requires parameter name"));
+    };
+    let name = name.to_ascii_lowercase();
+    let raw = a[1].as_str().map(str::to_owned);
+    let local = a[2].as_bool().unwrap_or(false);
+    let current = ctx.state.setting(ctx.env, &name);
+    let stored = match raw {
+        Some(raw) => crate::session::validate_setting(&name, &raw, current.as_deref())?,
+        // A NULL value resets the parameter.
+        None => {
+            if let Some(def) = crate::settings::lookup(&name) {
+                crate::settings::check_settable(def)?;
+            } else if !crate::settings::is_custom(&name) {
+                return Err(crate::settings::unrecognized(&name));
+            }
+            crate::session::default_settings()
+                .get(&name)
+                .cloned()
+                .or_else(|| crate::settings::lookup(&name).and_then(|d| d.boot).map(str::to_owned))
+                .unwrap_or_default()
+        }
+    };
+    let shown = crate::settings::show(crate::settings::lookup(&name), &stored);
+    ctx.state.settings.borrow_mut().push((name, stored, local));
+    Ok(Value::Text(shown))
 }
 
 /// Resolves a sequence name argument (`'public.users_id_seq'`, `'"MySeq"'`, `'users_id_seq'::regclass`).

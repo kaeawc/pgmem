@@ -15,6 +15,7 @@ pub mod plan;
 pub mod reg;
 pub mod run;
 pub mod session;
+pub mod settings;
 pub mod typeddl;
 pub mod usertypes;
 pub mod window;

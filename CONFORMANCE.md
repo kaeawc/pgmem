@@ -7,20 +7,20 @@ PostgreSQL 18; CI re-verifies every record against PostgreSQL and runs it agains
 A record passes when pgmem returns the same column names, column types and text values, or
 the same SQLSTATE and error message.
 
-pgmem passes **2518 / 3309 records (76.1%)**.
+pgmem passes **2711 / 3309 records (81.9%)**.
 
 | Area | Records | Pass | Rate |
 |---|---:|---:|---:|
-| catalog | 226 | 187 | 82.7% |
+| catalog | 226 | 190 | 84.1% |
 | constraints | 171 | 101 | 59.1% |
 | ddl | 386 | 231 | 59.8% |
-| dml | 282 | 215 | 76.2% |
-| functions | 445 | 346 | 77.8% |
-| queries | 440 | 405 | 92.0% |
-| session | 419 | 239 | 57.0% |
+| dml | 282 | 216 | 76.6% |
+| functions | 445 | 439 | 98.7% |
+| queries | 440 | 415 | 94.3% |
+| session | 419 | 280 | 66.8% |
 | smoke | 7 | 7 | 100.0% |
-| transactions | 522 | 434 | 83.1% |
-| types | 411 | 353 | 85.9% |
+| transactions | 522 | 444 | 85.1% |
+| types | 411 | 388 | 94.4% |
 
 ## By file
 
@@ -28,11 +28,11 @@ pgmem passes **2518 / 3309 records (76.1%)**.
 |---|---:|---:|---:|
 | catalog/comments.slt | 32 | 29 | 90.6% |
 | catalog/information_schema.slt | 38 | 34 | 89.5% |
-| catalog/orm_reflection.slt | 35 | 29 | 82.9% |
+| catalog/orm_reflection.slt | 35 | 30 | 85.7% |
 | catalog/pg_catalog.slt | 51 | 41 | 80.4% |
 | catalog/psql_describe.slt | 22 | 15 | 68.2% |
 | catalog/regtypes.slt | 33 | 28 | 84.8% |
-| catalog/settings.slt | 15 | 11 | 73.3% |
+| catalog/settings.slt | 15 | 13 | 86.7% |
 | constraints/check_notnull.slt | 35 | 27 | 77.1% |
 | constraints/deferrable.slt | 38 | 14 | 36.8% |
 | constraints/exclude.slt | 20 | 0 | 0.0% |
@@ -55,16 +55,16 @@ pgmem passes **2518 / 3309 records (76.1%)**.
 | dml/on_conflict.slt | 45 | 40 | 88.9% |
 | dml/orm_patterns.slt | 29 | 20 | 69.0% |
 | dml/truncate.slt | 37 | 37 | 100.0% |
-| dml/update.slt | 48 | 34 | 70.8% |
+| dml/update.slt | 48 | 35 | 72.9% |
 | dml/writable_cte.slt | 21 | 5 | 23.8% |
-| functions/arrays.slt | 49 | 25 | 51.0% |
-| functions/conditional_misc.slt | 49 | 39 | 79.6% |
-| functions/datetime.slt | 99 | 80 | 80.8% |
-| functions/json.slt | 85 | 78 | 91.8% |
-| functions/math.slt | 61 | 45 | 73.8% |
-| functions/regex.slt | 34 | 21 | 61.8% |
-| functions/string.slt | 68 | 58 | 85.3% |
-| queries/aggregates.slt | 53 | 36 | 67.9% |
+| functions/arrays.slt | 49 | 45 | 91.8% |
+| functions/conditional_misc.slt | 49 | 47 | 95.9% |
+| functions/datetime.slt | 99 | 99 | 100.0% |
+| functions/json.slt | 85 | 85 | 100.0% |
+| functions/math.slt | 61 | 61 | 100.0% |
+| functions/regex.slt | 34 | 34 | 100.0% |
+| functions/string.slt | 68 | 68 | 100.0% |
+| queries/aggregates.slt | 53 | 46 | 86.8% |
 | queries/cte.slt | 36 | 28 | 77.8% |
 | queries/errors.slt | 60 | 60 | 100.0% |
 | queries/joins.slt | 45 | 45 | 100.0% |
@@ -74,28 +74,28 @@ pgmem passes **2518 / 3309 records (76.1%)**.
 | queries/subqueries.slt | 39 | 39 | 100.0% |
 | queries/where_operators.slt | 51 | 51 | 100.0% |
 | queries/windows.slt | 39 | 30 | 76.9% |
-| session/config_functions.slt | 45 | 28 | 62.2% |
+| session/config_functions.slt | 45 | 45 | 100.0% |
 | session/extensions.slt | 46 | 23 | 50.0% |
 | session/listen_notify.slt | 24 | 5 | 20.8% |
 | session/prepare_cursor.slt | 77 | 23 | 29.9% |
 | session/roles.slt | 46 | 21 | 45.7% |
-| session/set_show.slt | 133 | 109 | 82.0% |
+| session/set_show.slt | 133 | 133 | 100.0% |
 | session/utility.slt | 48 | 30 | 62.5% |
 | smoke/basics.slt | 7 | 7 | 100.0% |
 | transactions/advisory.slt | 38 | 26 | 68.4% |
-| transactions/basics.slt | 84 | 77 | 91.7% |
+| transactions/basics.slt | 84 | 79 | 94.0% |
 | transactions/chain.slt | 28 | 20 | 71.4% |
 | transactions/deferred.slt | 59 | 37 | 62.7% |
 | transactions/row_locks.slt | 61 | 40 | 65.6% |
 | transactions/savepoints.slt | 86 | 86 | 100.0% |
 | transactions/serialization.slt | 59 | 49 | 83.1% |
-| transactions/settings.slt | 52 | 44 | 84.6% |
+| transactions/settings.slt | 52 | 52 | 100.0% |
 | transactions/visibility.slt | 55 | 55 | 100.0% |
-| types/arrays.slt | 37 | 21 | 56.8% |
+| types/arrays.slt | 37 | 36 | 97.3% |
 | types/boolean.slt | 17 | 17 | 100.0% |
 | types/bytea.slt | 18 | 18 | 100.0% |
-| types/casts.slt | 55 | 47 | 85.5% |
-| types/datetime.slt | 58 | 39 | 67.2% |
+| types/casts.slt | 55 | 48 | 87.3% |
+| types/datetime.slt | 58 | 58 | 100.0% |
 | types/enums_domains.slt | 58 | 43 | 74.1% |
 | types/float.slt | 24 | 24 | 100.0% |
 | types/integers.slt | 36 | 36 | 100.0% |

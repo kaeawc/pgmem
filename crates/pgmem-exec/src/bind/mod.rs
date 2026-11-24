@@ -93,6 +93,8 @@ pub enum Clause {
     /// Binding an operand of UNION/INTERSECT/EXCEPT: untyped select-list literals stay unknown
     /// until the set operation resolves the column type.
     SetOperand,
+    /// An aggregate's FILTER (WHERE ...).
+    Filter,
     Other,
 }
 
@@ -118,6 +120,7 @@ impl Clause {
             Clause::Returning => "RETURNING",
             Clause::Check => "check constraints",
             Clause::Default => "DEFAULT expressions",
+            Clause::Filter => "FILTER",
             Clause::SetOperand | Clause::Other => "this context",
         }
     }
@@ -380,10 +383,8 @@ pub fn resolve_type_name(catalog: &Catalog, t: &pgmem_ir::TypeName) -> SqlResult
         }
         _ => -1,
     };
-    let mut ty = base;
-    for _ in 0..t.array_dims {
-        ty = Type::array_of(ty);
-    }
+    // `int[]`, `int[][]` and `int[3]` are all the one array type (dimensions are per value).
+    let ty = if t.array_dims > 0 && !matches!(base, Type::Array(_)) { Type::array_of(base) } else { base };
     Ok((ty, if t.array_dims > 0 { -1 } else { typmod }))
 }
 

@@ -13,6 +13,25 @@ fn items(v: &Value) -> &[Value] {
     }
 }
 
+/// The dimensions of an array value (`[]` when empty).
+fn dims(v: &Value) -> Vec<usize> {
+    let it = items(v);
+    if it.is_empty() { Vec::new() } else { pgmem_types::binary::array_dims(it) }
+}
+
+/// Elements in storage order (all dimensions flattened).
+fn flat(v: &Value) -> Vec<Value> {
+    pgmem_types::binary::array_flatten(items(v)).into_iter().cloned().collect()
+}
+
+fn is_multi(v: &Value) -> bool {
+    dims(v).len() > 1
+}
+
+fn incompatible() -> SqlError {
+    SqlError::new(code::ARRAY_SUBSCRIPT_ERROR, "cannot concatenate incompatible arrays")
+}
+
 fn len_i32(n: usize) -> Value {
     Value::Int4(i32::try_from(n).unwrap_or(i32::MAX))
 }
@@ -42,22 +61,56 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
             };
             resolved(f, vec![a, Type::Int4], Type::Int4)
         }
-        "cardinality" if n == 1 => {
-            resolved(strict("cardinality", |a, _| Ok(len_i32(items(&a[0]).len()))), vec![arr_type(&args[0]).ok_or_else(err)?], Type::Int4)
-        }
+        "cardinality" if n == 1 => resolved(
+            strict("cardinality", |a, _| Ok(len_i32(dims(&a[0]).iter().product::<usize>() * usize::from(!items(&a[0]).is_empty())))),
+            vec![arr_type(&args[0]).ok_or_else(err)?],
+            Type::Int4,
+        ),
         "array_ndims" if n == 1 => resolved(
-            strict("array_ndims", |a, _| Ok(if items(&a[0]).is_empty() { Value::Null } else { Value::Int4(1) })),
+            strict("array_ndims", |a, _| {
+                Ok(match dims(&a[0]).len() {
+                    0 => Value::Null,
+                    d => len_i32(d),
+                })
+            }),
             vec![arr_type(&args[0]).ok_or_else(err)?],
             Type::Int4,
         ),
         "array_dims" if n == 1 => resolved(
             strict("array_dims", |a, _| {
-                let n = items(&a[0]).len();
-                Ok(if n == 0 { Value::Null } else { Value::Text(format!("[1:{n}]")) })
+                let d = dims(&a[0]);
+                Ok(if d.is_empty() { Value::Null } else { Value::Text(d.iter().map(|n| format!("[1:{n}]")).collect()) })
             }),
             vec![arr_type(&args[0]).ok_or_else(err)?],
             Type::Text,
         ),
+        "array_fill" if n == 2 || n == 3 => {
+            let t = if args[0] == Type::Unknown { Type::Text } else { args[0].clone() };
+            let mut targets = vec![t.clone(), Type::array_of(Type::Int4)];
+            if n == 3 {
+                targets.push(Type::array_of(Type::Int4));
+            }
+            resolved(super::lenient("array_fill", array_fill), targets, Type::array_of(t))
+        }
+        "trim_array" if n == 2 => {
+            let a = arr_type(&args[0]).ok_or_else(err)?;
+            resolved(strict("trim_array", trim_array), vec![a.clone(), Type::Int4], a)
+        }
+        "array_sample" if n == 2 => {
+            let a = arr_type(&args[0]).ok_or_else(err)?;
+            resolved(strict("array_sample", array_sample), vec![a.clone(), Type::Int4], a)
+        }
+        "array_shuffle" | "array_reverse" if n == 1 => {
+            let a = arr_type(&args[0]).ok_or_else(err)?;
+            let f = if name == "array_shuffle" { strict("array_shuffle", array_shuffle) } else { strict("array_reverse", array_reverse) };
+            resolved(f, vec![a.clone()], a)
+        }
+        "array_sort" if (1..=3).contains(&n) => {
+            let a = arr_type(&args[0]).ok_or_else(err)?;
+            let mut t = vec![a.clone()];
+            t.extend(std::iter::repeat_n(Type::Bool, n - 1));
+            resolved(strict("array_sort", array_sort), t, a)
+        }
         "array_append" if n == 2 => {
             let a = arr_type(&args[0]).filter(|_| args[0] != Type::Unknown).unwrap_or_else(|| Type::array_of(args[1].clone()));
             resolved(super::lenient("array_append", array_append), vec![a.clone(), elem_of(&a)], a)
@@ -100,6 +153,13 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
         }
         "string_to_array" if n == 2 || n == 3 => {
             resolved(super::lenient("string_to_array", string_to_array), vec![Type::Text; n], Type::array_of(Type::Text))
+        }
+        "__pgmem_array_set" | "__pgmem_array_set_slice" if n >= 4 => {
+            let a = arr_type(&args[0]).ok_or_else(err)?;
+            let v = if name == "__pgmem_array_set" { elem_of(&a) } else { a.clone() };
+            let mut t = vec![a.clone(), v, Type::Text];
+            t.extend(std::iter::repeat_n(Type::Int4, n - 3));
+            resolved(super::lenient("array_set", array_set), t, a)
         }
         "unnest" | "generate_series" | "generate_subscripts" => Err(SqlError::feature_not_supported(format!(
             "{name}() must be used in FROM (set-returning functions in the select list are not supported by pgmem yet)"
@@ -182,16 +242,36 @@ pub fn resolve_srf(name: &str, args: &[Type]) -> SqlResult<Option<SrfResolution>
             let out = targets[0].clone();
             Ok(Some((vec![out], targets, generate_series)))
         }
-        "generate_subscripts" if args.len() == 2 => {
-            Ok(Some((vec![Type::Int4], vec![arr_type(&args[0]).unwrap_or(Type::array_of(Type::Text)), Type::Int4], generate_subscripts)))
+        "string_to_table" if args.len() == 2 || args.len() == 3 => {
+            Ok(Some((vec![Type::Text], vec![Type::Text; args.len()], string_to_table)))
+        }
+        "regexp_matches" | "regexp_split_to_table" if args.len() == 2 || args.len() == 3 => {
+            if !args.iter().all(|t| *t == Type::Unknown || super::implicit_ok(t, &Type::Text)) {
+                return Err(no_function(name, args));
+            }
+            let (out, f): (Type, SrfFn) = if name == "regexp_matches" {
+                (Type::array_of(Type::Text), super::string::regexp_matches)
+            } else {
+                (Type::Text, super::string::regexp_split_to_table)
+            };
+            Ok(Some((vec![out], vec![Type::Text; args.len()], f)))
+        }
+        "generate_subscripts" if args.len() == 2 || args.len() == 3 => {
+            let mut t = vec![arr_type(&args[0]).unwrap_or(Type::array_of(Type::Text)), Type::Int4];
+            if args.len() == 3 {
+                t.push(Type::Bool);
+            }
+            Ok(Some((vec![Type::Int4], t, generate_subscripts)))
         }
         _ => Ok(None),
     }
 }
 
+/// `unnest(a [, b ...])`: elements in storage order, the shorter arrays padded with NULLs.
 fn unnest(a: &[Value], _: &EvalCtx) -> SqlResult<Vec<Row>> {
-    let max = a.iter().map(|v| items(v).len()).max().unwrap_or(0);
-    Ok((0..max).map(|i| a.iter().map(|v| items(v).get(i).cloned().unwrap_or(Value::Null)).collect()).collect())
+    let cols: Vec<Vec<Value>> = a.iter().map(flat).collect();
+    let max = cols.iter().map(Vec::len).max().unwrap_or(0);
+    Ok((0..max).map(|i| cols.iter().map(|c| c.get(i).cloned().unwrap_or(Value::Null)).collect()).collect())
 }
 
 fn generate_series(a: &[Value], _: &EvalCtx) -> SqlResult<Vec<Row>> {
@@ -275,38 +355,197 @@ fn generate_series(a: &[Value], _: &EvalCtx) -> SqlResult<Vec<Row>> {
 }
 
 fn generate_subscripts(a: &[Value], _: &EvalCtx) -> SqlResult<Vec<Row>> {
-    if a[1].as_i64() != Some(1) {
-        return Ok(Vec::new());
+    let d = dims(&a[0]);
+    let Some(len) = a[1].as_i64().and_then(|k| usize::try_from(k - 1).ok()).and_then(|k| d.get(k)) else { return Ok(Vec::new()) };
+    let reverse = a.get(2).and_then(Value::as_bool) == Some(true);
+    let mut out: Vec<Row> = (1..=*len).map(|i| vec![len_i32(i)]).collect();
+    if reverse {
+        out.reverse();
     }
-    Ok((1..=items(&a[0]).len()).map(|i| vec![len_i32(i)]).collect())
+    Ok(out)
+}
+
+/// The length of dimension `a[1]` (1-based), NULL when there is none.
+fn dim_len(a: &[Value]) -> Option<usize> {
+    let d = dims(&a[0]);
+    let k = usize::try_from(a[1].as_i64()? - 1).ok()?;
+    d.get(k).copied()
 }
 
 fn array_length(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
-    let n = items(&a[0]).len();
-    Ok(if a[1].as_i64() == Some(1) && n > 0 { len_i32(n) } else { Value::Null })
+    Ok(dim_len(a).map_or(Value::Null, len_i32))
 }
 
 fn array_lower(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
-    Ok(if a[1].as_i64() == Some(1) && !items(&a[0]).is_empty() { Value::Int4(1) } else { Value::Null })
+    Ok(dim_len(a).map_or(Value::Null, |_| Value::Int4(1)))
+}
+
+fn one_dimensional(v: &Value) -> SqlResult<()> {
+    if is_multi(v) {
+        return Err(SqlError::new(code::DATA_EXCEPTION, "argument must be empty or one-dimensional array"));
+    }
+    Ok(())
 }
 
 fn array_append(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    one_dimensional(&a[0])?;
     let mut v = items(&a[0]).to_vec();
     v.push(a[1].clone());
     Ok(Value::Array(v))
 }
 
 fn array_prepend(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    one_dimensional(&a[1])?;
     let mut v = vec![a[0].clone()];
     v.extend_from_slice(items(&a[1]));
     Ok(Value::Array(v))
 }
 
+/// `array_cat` / `||`: arrays of equal rank join along the first dimension; an array of one
+/// rank less becomes a new element of the other. Inner dimensions must match.
 fn array_cat(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
-    match (&a[0], &a[1]) {
-        (Value::Null, Value::Null) => Ok(Value::Null),
-        (x, y) => Ok(Value::Array([items(x), items(y)].concat())),
+    let (x, y) = (&a[0], &a[1]);
+    match (x, y) {
+        (Value::Null, Value::Null) => return Ok(Value::Null),
+        (Value::Null, other) | (other, Value::Null) => return Ok(other.clone()),
+        _ => {}
     }
+    let (dx, dy) = (dims(x), dims(y));
+    if dx.is_empty() {
+        return Ok(y.clone());
+    }
+    if dy.is_empty() {
+        return Ok(x.clone());
+    }
+    if dx.len() == dy.len() {
+        if dx[1..] != dy[1..] {
+            return Err(incompatible().with_detail("Arrays with differing element dimensions are not compatible for concatenation."));
+        }
+        return Ok(Value::Array([items(x), items(y)].concat()));
+    }
+    if dx.len() == dy.len() + 1 {
+        if dx[1..] != dy[..] {
+            return Err(incompatible().with_detail("Arrays with differing dimensions are not compatible for concatenation."));
+        }
+        let mut v = items(x).to_vec();
+        v.push(y.clone());
+        return Ok(Value::Array(v));
+    }
+    if dy.len() == dx.len() + 1 {
+        if dy[1..] != dx[..] {
+            return Err(incompatible().with_detail("Arrays with differing dimensions are not compatible for concatenation."));
+        }
+        let mut v = vec![x.clone()];
+        v.extend_from_slice(items(y));
+        return Ok(Value::Array(v));
+    }
+    Err(incompatible().with_detail(format!("Arrays of {} and {} dimensions are not compatible for concatenation.", dx.len(), dy.len())))
+}
+
+/// `array_fill(value, dims [, lower_bounds])`.
+fn array_fill(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    if a[1].is_null() {
+        return Err(SqlError::new(code::NULL_VALUE_NOT_ALLOWED, "dimension array or low bound array cannot be null"));
+    }
+    let d: Vec<usize> = items(&a[1]).iter().map(|v| v.as_i64().and_then(|n| usize::try_from(n).ok()).unwrap_or(0)).collect();
+    if let Some(lb) = a.get(2)
+        && items(lb).iter().any(|v| v.as_i64() != Some(1))
+    {
+        return Err(SqlError::feature_not_supported("array lower bounds other than 1 are not supported by pgmem"));
+    }
+    fn build(v: &Value, d: &[usize]) -> Vec<Value> {
+        match d {
+            [] => Vec::new(),
+            [n] => vec![v.clone(); *n],
+            [n, rest @ ..] => (0..*n).map(|_| Value::Array(build(v, rest))).collect(),
+        }
+    }
+    if d.contains(&0) {
+        return Ok(Value::Array(Vec::new()));
+    }
+    Ok(Value::Array(build(&a[0], &d)))
+}
+
+fn trim_array(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let v = items(&a[0]);
+    let n = a[1].as_i64().unwrap_or(0);
+    let len = i64::try_from(v.len()).unwrap_or(i64::MAX);
+    if n < 0 || n > len {
+        return Err(SqlError::new(code::ARRAY_SUBSCRIPT_ERROR, format!("number of elements to trim must be between 0 and {len}")));
+    }
+    Ok(Value::Array(v[..usize::try_from(len - n).unwrap_or(0)].to_vec()))
+}
+
+fn random_index(bound: usize) -> SqlResult<usize> {
+    let mut buf = [0u8; 8];
+    getrandom::fill(&mut buf).map_err(|e| SqlError::internal(format!("random: {e}")))?;
+    Ok(usize::try_from(u64::from_le_bytes(buf) % u64::try_from(bound.max(1)).unwrap_or(1)).unwrap_or(0))
+}
+
+fn shuffled(mut v: Vec<Value>) -> SqlResult<Vec<Value>> {
+    for i in (1..v.len()).rev() {
+        let j = random_index(i + 1)?;
+        v.swap(i, j);
+    }
+    Ok(v)
+}
+
+fn array_shuffle(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    Ok(Value::Array(shuffled(items(&a[0]).to_vec())?))
+}
+
+fn array_sample(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let v = items(&a[0]);
+    let n = a[1].as_i64().unwrap_or(0);
+    let len = i64::try_from(v.len()).unwrap_or(i64::MAX);
+    if n < 0 || n > len {
+        return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, format!("sample size must be between 0 and {len}")));
+    }
+    let mut s = shuffled(v.to_vec())?;
+    s.truncate(usize::try_from(n).unwrap_or(0));
+    Ok(Value::Array(s))
+}
+
+fn array_reverse(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let mut v = items(&a[0]).to_vec();
+    v.reverse();
+    Ok(Value::Array(v))
+}
+
+/// `array_sort(a [, descending [, nulls_first]])` (Postgres 18), on the first dimension.
+fn array_sort(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let desc = a.get(1).and_then(Value::as_bool) == Some(true);
+    let nulls_first = a.get(2).and_then(Value::as_bool).unwrap_or(desc);
+    let mut v = items(&a[0]).to_vec();
+    let mut err = None;
+    v.sort_by(|x, y| match (x.is_null(), y.is_null()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => {
+            if nulls_first {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            }
+        }
+        (false, true) => {
+            if nulls_first {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Less
+            }
+        }
+        (false, false) => {
+            let o = compare_values(x, y).unwrap_or_else(|e| {
+                err = Some(e);
+                std::cmp::Ordering::Equal
+            });
+            if desc { o.reverse() } else { o }
+        }
+    });
+    if let Some(e) = err {
+        return Err(e);
+    }
+    Ok(Value::Array(v))
 }
 
 fn same(x: &Value, y: &Value) -> bool {
@@ -321,6 +560,9 @@ fn array_remove(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     if a[0].is_null() {
         return Ok(Value::Null);
     }
+    if is_multi(&a[0]) {
+        return Err(SqlError::feature_not_supported("removing elements from multidimensional arrays is not supported"));
+    }
     Ok(Value::Array(items(&a[0]).iter().filter(|v| !same(v, &a[1])).cloned().collect()))
 }
 
@@ -328,13 +570,31 @@ fn array_replace(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     if a[0].is_null() {
         return Ok(Value::Null);
     }
-    Ok(Value::Array(items(&a[0]).iter().map(|v| if same(v, &a[1]) { a[2].clone() } else { v.clone() }).collect()))
+    fn replace(items: &[Value], from: &Value, to: &Value) -> Vec<Value> {
+        items
+            .iter()
+            .map(|v| match v {
+                Value::Array(inner) => Value::Array(replace(inner, from, to)),
+                v if same(v, from) => to.clone(),
+                v => v.clone(),
+            })
+            .collect()
+    }
+    Ok(Value::Array(replace(items(&a[0]), &a[1], &a[2])))
+}
+
+fn searching_multi(v: &Value) -> SqlResult<()> {
+    if is_multi(v) {
+        return Err(SqlError::feature_not_supported("searching for elements in multidimensional arrays is not supported"));
+    }
+    Ok(())
 }
 
 fn array_position(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     if a[0].is_null() {
         return Ok(Value::Null);
     }
+    searching_multi(&a[0])?;
     let start = a.get(2).and_then(Value::as_i64).unwrap_or(1).max(1);
     let skip = usize::try_from(start - 1).unwrap_or(0);
     Ok(items(&a[0]).iter().enumerate().skip(skip).find(|(_, v)| same(v, &a[1])).map_or(Value::Null, |(i, _)| len_i32(i + 1)))
@@ -344,6 +604,7 @@ fn array_positions(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     if a[0].is_null() {
         return Ok(Value::Null);
     }
+    searching_multi(&a[0])?;
     Ok(Value::Array(items(&a[0]).iter().enumerate().filter(|(_, v)| same(v, &a[1])).map(|(i, _)| len_i32(i + 1)).collect()))
 }
 
@@ -354,7 +615,7 @@ fn array_to_string(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     let delim = a[1].as_str().unwrap_or("");
     let null_str = a.get(2).and_then(Value::as_str);
     let mut parts = Vec::new();
-    for v in items(&a[0]) {
+    for v in &flat(&a[0]) {
         if v.is_null() {
             if let Some(n) = null_str {
                 parts.push(n.to_owned());
@@ -381,20 +642,28 @@ fn string_to_array(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     }))
 }
 
+fn string_to_table(a: &[Value], ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    match string_to_array(a, ctx)? {
+        Value::Array(items) => Ok(items.into_iter().map(|v| vec![v]).collect()),
+        _ => Ok(Vec::new()),
+    }
+}
+
 fn contains(hay: &[Value], needles: &[Value]) -> bool {
     needles.iter().all(|n| !n.is_null() && hay.iter().any(|h| !h.is_null() && same(h, n)))
 }
 
 fn op_contains(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
-    Ok(Value::Bool(contains(items(&a[0]), items(&a[1]))))
+    Ok(Value::Bool(contains(&flat(&a[0]), &flat(&a[1]))))
 }
 
 fn op_contained(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
-    Ok(Value::Bool(contains(items(&a[1]), items(&a[0]))))
+    Ok(Value::Bool(contains(&flat(&a[1]), &flat(&a[0]))))
 }
 
 fn op_overlap(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
-    Ok(Value::Bool(items(&a[0]).iter().any(|x| !x.is_null() && items(&a[1]).iter().any(|y| same(x, y)))))
+    let r = flat(&a[1]);
+    Ok(Value::Bool(flat(&a[0]).iter().any(|x| !x.is_null() && r.iter().any(|y| same(x, y)))))
 }
 
 pub fn resolve_operator(op: &str, l: &Type, r: &Type) -> SqlResult<Option<Resolved>> {
@@ -435,4 +704,112 @@ pub fn resolve_operator(op: &str, l: &Type, r: &Type) -> SqlResult<Option<Resolv
 #[allow(dead_code)]
 fn unused_err() -> SqlError {
     SqlError::internal("unused")
+}
+
+/// Subscripted assignment (`arr[i] = v`, `arr[lo:hi] = sub`): args are the array, the new
+/// value, the subscript kinds (`i` index / `r` range) and their bounds.
+fn array_set(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let flags: Vec<char> = a[2].as_str().unwrap_or("").chars().collect();
+    let mut bounds = a[3..].iter();
+    let mut subs: Vec<(Option<i64>, Option<i64>, bool)> = Vec::new();
+    for f in &flags {
+        let lo = bounds.next().and_then(Value::as_i64);
+        if *f == 'r' {
+            let hi = bounds.next().and_then(Value::as_i64);
+            subs.push((lo, hi, true));
+        } else {
+            if lo.is_none() {
+                return Err(SqlError::new(code::NULL_VALUE_NOT_ALLOWED, "array subscript in assignment must not be null"));
+            }
+            subs.push((lo, None, false));
+        }
+    }
+    let base = match &a[0] {
+        Value::Null => Vec::new(),
+        v => items(v).to_vec(),
+    };
+    let out_of_range = || SqlError::new(code::ARRAY_SUBSCRIPT_ERROR, "array subscript out of range");
+    if flags.iter().all(|f| *f == 'i') {
+        return Ok(Value::Array(set_element(base, &subs, a[1].clone(), &out_of_range)?));
+    }
+    // Slice assignment: replace the addressed block with the source's elements in order.
+    let source: Vec<Value> = match &a[1] {
+        Value::Null => return Ok(a[0].clone()),
+        v => flat(v),
+    };
+    let mut src = source.into_iter();
+    let shape = if base.is_empty() { Vec::new() } else { pgmem_types::binary::array_dims(&base) };
+    if shape.len() > 1 && shape.len() != subs.len() {
+        return Err(out_of_range());
+    }
+    fn assign(
+        items: &mut Vec<Value>,
+        subs: &[(Option<i64>, Option<i64>, bool)],
+        src: &mut std::vec::IntoIter<Value>,
+        err: &dyn Fn() -> SqlError,
+    ) -> SqlResult<()> {
+        let Some(((lo, hi, range), rest)) = subs.split_first() else { return Ok(()) };
+        let len = i64::try_from(items.len()).unwrap_or(i64::MAX);
+        let (lo, hi) = if *range { (lo.unwrap_or(1), hi.unwrap_or(len)) } else { (lo.unwrap_or(1), lo.unwrap_or(1)) };
+        if lo < 1 || hi < lo {
+            return Err(err());
+        }
+        if rest.is_empty() {
+            // One dimension may grow (padding with NULLs).
+            while i64::try_from(items.len()).unwrap_or(i64::MAX) < hi {
+                items.push(Value::Null);
+            }
+            for i in lo..=hi {
+                items[usize::try_from(i - 1).unwrap_or(0)] =
+                    src.next().ok_or_else(|| SqlError::new(code::ARRAY_SUBSCRIPT_ERROR, "source array too small"))?;
+            }
+            return Ok(());
+        }
+        if hi > len {
+            return Err(err());
+        }
+        for i in lo..=hi {
+            match &mut items[usize::try_from(i - 1).unwrap_or(0)] {
+                Value::Array(inner) => assign(inner, rest, src, err)?,
+                _ => return Err(err()),
+            }
+        }
+        Ok(())
+    }
+    let mut out = base;
+    assign(&mut out, &subs, &mut src, &out_of_range)?;
+    Ok(Value::Array(out))
+}
+
+/// `arr[i]...[k] = v`: a one-dimensional array grows to `i` (NULL-padded); a multidimensional
+/// one must already have the element.
+fn set_element(
+    mut items: Vec<Value>,
+    subs: &[(Option<i64>, Option<i64>, bool)],
+    v: Value,
+    err: &dyn Fn() -> SqlError,
+) -> SqlResult<Vec<Value>> {
+    let Some(((Some(i), _, _), rest)) = subs.split_first() else { return Err(err()) };
+    if *i < 1 {
+        return Err(SqlError::feature_not_supported("array lower bounds other than 1 are not supported by pgmem"));
+    }
+    let idx = usize::try_from(i - 1).unwrap_or(usize::MAX);
+    if rest.is_empty() {
+        if items.first().is_some_and(|x| matches!(x, Value::Array(_))) {
+            return Err(err());
+        }
+        while items.len() <= idx {
+            items.push(Value::Null);
+        }
+        items[idx] = v;
+        return Ok(items);
+    }
+    match items.get_mut(idx) {
+        Some(Value::Array(inner)) => {
+            let updated = set_element(std::mem::take(inner), rest, v, err)?;
+            *inner = updated;
+            Ok(items)
+        }
+        _ => Err(err()),
+    }
 }

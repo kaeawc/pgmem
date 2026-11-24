@@ -433,7 +433,43 @@ impl Binder<'_> {
             exprs = exprs.into_iter().map(&replace).collect::<SqlResult<Vec<_>>>()?;
             order_exprs = order_exprs.into_iter().map(|(e, d, n)| Ok((replace(e)?, d, n))).collect::<SqlResult<Vec<_>>>()?;
             distinct_on = distinct_on.map(|d| d.into_iter().map(&replace).collect::<SqlResult<Vec<_>>>()).transpose()?;
-            rel = Rel::Window { input: Box::new(rel), calls: wins };
+            rel = Rel::Window { input: Box::new(rel), calls: wins.clone() };
+        }
+        // Set-returning functions in the select list, innermost first: each level is a
+        // ProjectSet appending one column per function.
+        let mut width = input_width + wins.len();
+        loop {
+            let mut calls: Vec<Expr> = Vec::new();
+            for e in exprs.iter().chain(order_exprs.iter().map(|(e, _, _)| e)) {
+                collect_innermost_srfs(e, &mut calls);
+            }
+            if calls.is_empty() {
+                break;
+            }
+            let base = width;
+            let replace = |e: Expr| -> SqlResult<Expr> {
+                e.transform(&mut |x| {
+                    Ok(match x {
+                        call @ Expr::SrfCall { .. } => match calls.iter().position(|c| *c == call) {
+                            Some(i) => Expr::Col(base + i),
+                            None => call,
+                        },
+                        other => other,
+                    })
+                })
+            };
+            exprs = exprs.into_iter().map(&replace).collect::<SqlResult<Vec<_>>>()?;
+            order_exprs = order_exprs.into_iter().map(|(e, d, n)| Ok((replace(e)?, d, n))).collect::<SqlResult<Vec<_>>>()?;
+            distinct_on = distinct_on.map(|d| d.into_iter().map(&replace).collect::<SqlResult<Vec<_>>>()).transpose()?;
+            width += calls.len();
+            let srfs = calls
+                .into_iter()
+                .filter_map(|c| match c {
+                    Expr::SrfCall { srf, args, cols } => Some((srf, args, cols)),
+                    _ => None,
+                })
+                .collect();
+            rel = Rel::ProjectSet { input: Box::new(rel), srfs };
         }
         let visible = exprs.len();
         let is_distinct = !matches!(distinct, ir::Distinct::All);
@@ -1000,6 +1036,21 @@ fn limit_with_ties(rel: Rel, limit: Option<Expr>, offset: Option<Expr>) -> Rel {
     }
 }
 
+/// Select-list SRF calls whose arguments contain no other SRF call (deduplicated).
+fn collect_innermost_srfs(e: &Expr, out: &mut Vec<Expr>) {
+    e.walk(&mut |x| {
+        if let Expr::SrfCall { args, .. } = x {
+            let mut nested = false;
+            for a in args {
+                a.walk(&mut |y| nested |= matches!(y, Expr::SrfCall { .. }));
+            }
+            if !nested && !out.contains(x) {
+                out.push(x.clone());
+            }
+        }
+    });
+}
+
 /// A non-LATERAL subquery naming a FROM item to its left: Postgres says the entry exists but
 /// can't be referenced from there.
 fn sibling_reference(e: SqlError, left: &Scope) -> SqlError {
@@ -1246,9 +1297,23 @@ fn map_children(e: Expr, f: &mut dyn FnMut(Expr) -> SqlResult<Expr>) -> SqlResul
             Expr::Subquery { id, plan, kind, correlated }
         }
         Expr::Array(v) => Expr::Array(v.into_iter().map(&mut *f).collect::<SqlResult<Vec<_>>>()?),
-        Expr::Subscript { expr, index, upper, slice } => {
-            Expr::Subscript { expr: b(expr, f)?, index: b(index, f)?, upper: upper.map(|u| b(u, f)).transpose()?, slice }
+        Expr::SrfCall { srf, args, cols } => {
+            Expr::SrfCall { srf, args: args.into_iter().map(&mut *f).collect::<SqlResult<Vec<_>>>()?, cols }
         }
+        Expr::Subscript { expr, subs, slice } => Expr::Subscript {
+            expr: b(expr, f)?,
+            subs: subs
+                .into_iter()
+                .map(|s| {
+                    Ok(crate::plan::SubscriptPart {
+                        lower: s.lower.map(&mut *f).transpose()?,
+                        upper: s.upper.map(&mut *f).transpose()?,
+                        range: s.range,
+                    })
+                })
+                .collect::<SqlResult<Vec<_>>>()?,
+            slice,
+        },
         Expr::Row { fields, types, type_oid } => {
             Expr::Row { fields: fields.into_iter().map(&mut *f).collect::<SqlResult<Vec<_>>>()?, types, type_oid }
         }

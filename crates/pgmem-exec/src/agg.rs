@@ -3,7 +3,7 @@
 use crate::eval::{EvalCtx, eval, eval_pred};
 use crate::plan::{AggCall, AggKind, Expr, Row};
 use crate::run::sort_rows;
-use pgmem_types::{GroupKey, Interval, Jsonb, Numeric, SqlError, SqlResult, Type, Value, compare_values};
+use pgmem_types::{GroupKey, Interval, Jsonb, Numeric, SqlError, SqlResult, Type, Value, code, compare_values};
 use std::collections::HashMap;
 
 /// Running state of one aggregate.
@@ -33,6 +33,12 @@ pub enum Accumulator {
     /// Welford-free two-pass variance: keep the inputs.
     Stats(Vec<f64>, Vec<Numeric>),
     Bits(Option<i64>),
+    /// `float8_regr_accum`: N, Sx, Sy, Sxx, Syy, Sxy (Youngs-Cramer).
+    Regr([f64; 6]),
+    /// Ordered-set aggregates: the sorted non-null inputs and the direct argument.
+    Ordered(Vec<Value>, Option<Value>),
+    /// Hypothetical-set aggregates: the sorted rows and the hypothetical row.
+    Hypothetical(Vec<Vec<Value>>, Option<Vec<Value>>),
 }
 
 impl Accumulator {
@@ -55,7 +61,12 @@ impl Accumulator {
                 Accumulator::Pairs(Vec::new())
             }
             AggKind::StddevSamp | AggKind::StddevPop | AggKind::VarSamp | AggKind::VarPop => Accumulator::Stats(Vec::new(), Vec::new()),
-            AggKind::BitAnd | AggKind::BitOr => Accumulator::Bits(None),
+            AggKind::BitAnd | AggKind::BitOr | AggKind::BitXor => Accumulator::Bits(None),
+            AggKind::PercentileCont | AggKind::PercentileDisc | AggKind::Mode => Accumulator::Ordered(Vec::new(), None),
+            AggKind::HypRank | AggKind::HypDenseRank | AggKind::HypPercentRank | AggKind::HypCumeDist => {
+                Accumulator::Hypothetical(Vec::new(), None)
+            }
+            _ => Accumulator::Regr([0.0; 6]),
         }
     }
 
@@ -139,11 +150,7 @@ impl Accumulator {
                     return Err(SqlError::feature_not_supported("string_agg(bytea) is not supported by pgmem"));
                 }
             }
-            Accumulator::Values(items) => {
-                if !(first.is_null() && matches!(call.kind, AggKind::JsonbAggStrict | AggKind::JsonAggStrict)) {
-                    items.push(first);
-                }
-            }
+            Accumulator::Values(items) => add_value(call, items, first)?,
             Accumulator::Pairs(items) => {
                 if first.is_null() {
                     return Err(SqlError::new("22004", "field name must not be null"));
@@ -168,8 +175,26 @@ impl Accumulator {
                     *state = Some(match (*state, call.kind) {
                         (None, _) => v,
                         (Some(s), AggKind::BitAnd) => s & v,
+                        (Some(s), AggKind::BitXor) => s ^ v,
                         (Some(s), _) => s | v,
                     });
+                }
+            }
+            Accumulator::Regr(t) => {
+                // Arguments are (Y, X); a row with either NULL is skipped.
+                if let (Some(y), Some(x)) = (first.as_f64(), args.get(1).and_then(Value::as_f64)) {
+                    regr_accum(t, y, x)?;
+                }
+            }
+            Accumulator::Hypothetical(rows, direct) => {
+                let n = args.len() / 2;
+                direct.get_or_insert_with(|| args[n..].to_vec());
+                rows.push(args[..n].to_vec());
+            }
+            Accumulator::Ordered(values, direct) => {
+                direct.get_or_insert_with(|| args.get(1).cloned().unwrap_or(Value::Null));
+                if !first.is_null() {
+                    values.push(first);
                 }
             }
         }
@@ -245,6 +270,9 @@ impl Accumulator {
                 Value::Jsonb(Jsonb::from_value(serde_json::Value::Object(map)))
             }
             Accumulator::Stats(floats, nums) => stats_finish(call, floats, nums)?,
+            Accumulator::Regr(t) => regr_finish(call.kind, t),
+            Accumulator::Ordered(values, direct) => ordered_finish(call, values, direct.as_ref())?,
+            Accumulator::Hypothetical(rows, direct) => hypothetical_finish(call, rows, direct.as_deref())?,
             Accumulator::Bits(v) => match (v, &call.ty) {
                 (None, _) => Value::Null,
                 (Some(b), Type::Int2) => Value::Int2(i16::try_from(*b).unwrap_or_default()),
@@ -263,11 +291,20 @@ fn stats_finish(call: &AggCall, floats: &[f64], nums: &[Numeric]) -> SqlResult<V
         if n == 0 || (samp && n < 2) {
             return Ok(Value::Null);
         }
-        #[allow(clippy::cast_precision_loss)]
-        let nf = n as f64;
-        let mean = floats.iter().sum::<f64>() / nf;
-        let ss: f64 = floats.iter().map(|x| (x - mean).powi(2)).sum();
-        let var = ss / if samp { nf - 1.0 } else { nf };
+        // float8_accum's Youngs-Cramer update, in input order.
+        let (mut nf, mut sx, mut sxx) = (0.0f64, 0.0f64, 0.0f64);
+        for &x in floats {
+            let prev = nf;
+            nf += 1.0;
+            sx += x;
+            if prev > 0.0 {
+                let tmp = x * nf - sx;
+                sxx += tmp * tmp / (nf * prev);
+            } else if !x.is_finite() {
+                sxx = f64::NAN;
+            }
+        }
+        let var = sxx / if samp { nf - 1.0 } else { nf };
         return Ok(Value::Float8(if sqrt { var.sqrt() } else { var }));
     }
     let n = nums.len();
@@ -279,9 +316,241 @@ fn stats_finish(call: &AggCall, floats: &[f64], nums: &[Numeric]) -> SqlResult<V
     let sum = nums.iter().fold(Numeric::zero(), |a, b| a.add(b));
     let sumsq = nums.iter().fold(Numeric::zero(), |a, b| a.add(&b.mul(b)));
     let numer = count.mul(&sumsq).sub(&sum.mul(&sum));
+    if numer.signum() <= 0 {
+        return Ok(Value::Numeric(Numeric::zero()));
+    }
     let denom = if samp { count.mul(&count.sub(&Numeric::from_i64(1))) } else { count.mul(&count) };
     let var = numer.div(&denom)?;
-    Ok(Value::Numeric(if sqrt { var.sqrt()? } else { var }))
+    // The square root keeps the variance's scale.
+    Ok(Value::Numeric(if sqrt { var.sqrt_to_scale(var.scale())? } else { var }))
+}
+
+/// `array_agg` / `json[b]_agg` input: checks for array inputs, then collects the value.
+fn add_value(call: &AggCall, items: &mut Vec<Value>, first: Value) -> SqlResult<()> {
+    if call.kind == AggKind::ArrayAgg && matches!(call.arg_ty, Type::Array(_)) {
+        match &first {
+            Value::Null => return Err(SqlError::new(code::NULL_VALUE_NOT_ALLOWED, "cannot accumulate null arrays")),
+            Value::Array(a) if a.is_empty() => {
+                return Err(SqlError::new(code::ARRAY_SUBSCRIPT_ERROR, "cannot accumulate empty arrays"));
+            }
+            Value::Array(a) => {
+                if let Some(Value::Array(prev)) = items.first()
+                    && pgmem_types::binary::array_dims(prev) != pgmem_types::binary::array_dims(a)
+                {
+                    return Err(SqlError::new(code::ARRAY_SUBSCRIPT_ERROR, "cannot accumulate arrays of different dimensionality"));
+                }
+            }
+            _ => {}
+        }
+    }
+    if !(first.is_null() && matches!(call.kind, AggKind::JsonbAggStrict | AggKind::JsonAggStrict)) {
+        items.push(first);
+    }
+    Ok(())
+}
+
+fn regr_accum(t: &mut [f64; 6], y: f64, x: f64) -> SqlResult<()> {
+    let [n, sx, sy, sxx, syy, sxy] = t;
+    let prev = *n;
+    *n += 1.0;
+    *sx += x;
+    *sy += y;
+    if prev > 0.0 {
+        let tmp_x = x * *n - *sx;
+        let tmp_y = y * *n - *sy;
+        let scale = 1.0 / (*n * prev);
+        *sxx += tmp_x * tmp_x * scale;
+        *syy += tmp_y * tmp_y * scale;
+        *sxy += tmp_x * tmp_y * scale;
+        if (sx.is_infinite() || sxx.is_infinite() || sy.is_infinite() || syy.is_infinite() || sxy.is_infinite())
+            && x.is_finite()
+            && y.is_finite()
+        {
+            return Err(SqlError::new(code::NUMERIC_VALUE_OUT_OF_RANGE, "value out of range: overflow"));
+        }
+    } else {
+        if !x.is_finite() {
+            *sxx = f64::NAN;
+            *sxy = f64::NAN;
+        }
+        if !y.is_finite() {
+            *syy = f64::NAN;
+            *sxy = f64::NAN;
+        }
+    }
+    Ok(())
+}
+
+/// The final functions of the `float8_regr_*` aggregates.
+fn regr_finish(kind: AggKind, t: &[f64; 6]) -> Value {
+    let [n, sx, sy, sxx, syy, sxy] = *t;
+    let v = |f: f64| Value::Float8(f);
+    if kind == AggKind::RegrCount {
+        #[allow(clippy::cast_possible_truncation)]
+        return Value::Int8(n as i64);
+    }
+    if n < 1.0 {
+        return Value::Null;
+    }
+    match kind {
+        AggKind::RegrSxx => v(sxx),
+        AggKind::RegrSyy => v(syy),
+        AggKind::RegrSxy => v(sxy),
+        AggKind::RegrAvgX => v(sx / n),
+        AggKind::RegrAvgY => v(sy / n),
+        AggKind::CovarPop => v(sxy / n),
+        AggKind::CovarSamp if n < 2.0 => Value::Null,
+        AggKind::CovarSamp => v(sxy / (n - 1.0)),
+        AggKind::Corr => {
+            if sxx == 0.0 || syy == 0.0 {
+                return Value::Null;
+            }
+            let product = sxx * syy;
+            let product = if product == 0.0 || product.is_infinite() { sxx.sqrt() * syy.sqrt() } else { product.sqrt() };
+            v((sxy / product).clamp(-1.0, 1.0))
+        }
+        AggKind::RegrR2 => {
+            if sxx == 0.0 {
+                return Value::Null;
+            }
+            if syy == 0.0 {
+                return v(1.0);
+            }
+            v((sxy * sxy) / (sxx * syy))
+        }
+        AggKind::RegrSlope if sxx == 0.0 => Value::Null,
+        AggKind::RegrSlope => v(sxy / sxx),
+        AggKind::RegrIntercept if sxx == 0.0 => Value::Null,
+        AggKind::RegrIntercept => v((sy - sx * sxy / sxx) / n),
+        _ => Value::Null,
+    }
+}
+
+/// The position of `row` relative to `h` under the aggregate's WITHIN GROUP ordering.
+fn order_cmp(call: &AggCall, row: &[Value], h: &[Value]) -> SqlResult<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    for (i, key) in call.order_by.iter().enumerate() {
+        let (a, b) = (&row[i], &h[i]);
+        let o = match (a.is_null(), b.is_null()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => {
+                if key.nulls_first {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            }
+            (false, true) => {
+                if key.nulls_first {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            }
+            (false, false) => {
+                let o = compare_values(a, b)?;
+                if key.desc { o.reverse() } else { o }
+            }
+        };
+        if o.is_ne() {
+            return Ok(o);
+        }
+    }
+    Ok(Ordering::Equal)
+}
+
+/// `rank`, `dense_rank`, `percent_rank`, `cume_dist` of the hypothetical row among `rows`.
+fn hypothetical_finish(call: &AggCall, rows: &[Vec<Value>], h: Option<&[Value]>) -> SqlResult<Value> {
+    #[allow(clippy::cast_precision_loss)]
+    let total = rows.len() as f64;
+    let Some(h) = h else {
+        return Ok(match call.kind {
+            AggKind::HypRank | AggKind::HypDenseRank => Value::Int8(1),
+            AggKind::HypPercentRank => Value::Float8(0.0),
+            _ => Value::Float8(1.0),
+        });
+    };
+    let mut before = 0i64;
+    let mut not_after = 0i64;
+    let mut distinct_before: Vec<&Vec<Value>> = Vec::new();
+    for r in rows {
+        match order_cmp(call, r, h)? {
+            std::cmp::Ordering::Less => {
+                before += 1;
+                not_after += 1;
+                if !distinct_before.iter().any(|d| order_cmp(call, d, r).is_ok_and(std::cmp::Ordering::is_eq)) {
+                    distinct_before.push(r);
+                }
+            }
+            std::cmp::Ordering::Equal => not_after += 1,
+            std::cmp::Ordering::Greater => {}
+        }
+    }
+    #[allow(clippy::cast_precision_loss)]
+    Ok(match call.kind {
+        AggKind::HypRank => Value::Int8(before + 1),
+        AggKind::HypDenseRank => Value::Int8(i64::try_from(distinct_before.len()).unwrap_or(i64::MAX) + 1),
+        AggKind::HypPercentRank => Value::Float8(if total == 0.0 { 0.0 } else { before as f64 / total }),
+        _ => Value::Float8((not_after as f64 + 1.0) / (total + 1.0)),
+    })
+}
+
+/// `percentile_cont`, `percentile_disc` and `mode` over the sorted inputs.
+fn ordered_finish(call: &AggCall, values: &[Value], direct: Option<&Value>) -> SqlResult<Value> {
+    if call.kind == AggKind::Mode {
+        let mut best: Option<(&Value, usize)> = None;
+        let mut i = 0;
+        while i < values.len() {
+            let mut j = i + 1;
+            while j < values.len() && compare_values(&values[i], &values[j])?.is_eq() {
+                j += 1;
+            }
+            if best.is_none_or(|(_, n)| j - i > n) {
+                best = Some((&values[i], j - i));
+            }
+            i = j;
+        }
+        return Ok(best.map_or(Value::Null, |(v, _)| v.clone()));
+    }
+    let one = |p: &Value| -> SqlResult<Value> {
+        let Some(p) = p.as_f64() else { return Ok(Value::Null) };
+        if !(0.0..=1.0).contains(&p) || p.is_nan() {
+            return Err(SqlError::new(
+                code::NUMERIC_VALUE_OUT_OF_RANGE,
+                format!("percentile value {} is not between 0 and 1", pgmem_types::text::format_float8(p)),
+            ));
+        }
+        if values.is_empty() {
+            return Ok(Value::Null);
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let count = values.len() as f64;
+        if call.kind == AggKind::PercentileDisc {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let row = ((p * count).ceil() as usize).max(1);
+            return Ok(values[row.min(values.len()) - 1].clone());
+        }
+        let pos = p * (count - 1.0);
+        let (lo, hi) = (pos.floor(), pos.ceil());
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let (a, b) = (&values[lo as usize], &values[hi as usize]);
+        if lo == hi {
+            return Ok(a.clone());
+        }
+        let frac = pos - lo;
+        Ok(match (a, b) {
+            (Value::Interval(x), Value::Interval(y)) => Value::Interval(x.checked_add(&y.checked_add(&x.negate()?)?.mul_f64(frac)?)?),
+            _ => {
+                let (x, y) = (a.as_f64().unwrap_or(f64::NAN), b.as_f64().unwrap_or(f64::NAN));
+                Value::Float8(x + (y - x) * frac)
+            }
+        })
+    };
+    match direct {
+        None | Some(Value::Null) => Ok(Value::Null),
+        Some(Value::Array(ps)) => Ok(Value::Array(ps.iter().map(one).collect::<SqlResult<Vec<_>>>()?)),
+        Some(p) => one(p),
+    }
 }
 
 /// Evaluates an aggregate call's inputs over a set of rows and folds them.

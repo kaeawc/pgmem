@@ -115,7 +115,7 @@ pub fn default_settings() -> BTreeMap<String, String> {
         ("transaction_read_only", "off"),
         ("row_security", "on"),
         ("synchronous_commit", "on"),
-        ("work_mem", "4MB"),
+        ("work_mem", "4096"),
         ("max_connections", "100"),
         ("session_authorization", "pgmem"),
     ]
@@ -189,8 +189,10 @@ pub struct Session {
     pub user: String,
     pub database: String,
     pub settings: BTreeMap<String, String>,
-    /// Values of settings set with SET LOCAL, restored at transaction end.
-    local_restore: Vec<(String, String)>,
+    /// Settings changed inside the transaction block (undone at ROLLBACK; SET LOCAL ones at
+    /// any transaction end), with savepoint marks into it.
+    setting_undo: Vec<SettingUndo>,
+    setting_marks: Vec<(String, usize)>,
     txn: Option<Txn>,
     status: TxStatus,
     txn_start: i64,
@@ -216,7 +218,8 @@ impl Session {
             user: user.to_owned(),
             database: database.to_owned(),
             settings,
-            local_restore: Vec::new(),
+            setting_undo: Vec::new(),
+            setting_marks: Vec::new(),
             txn: None,
             status: TxStatus::Idle,
             txn_start: 0,
@@ -266,7 +269,7 @@ impl Session {
         self.implicit_block = false;
         if let Some(txn) = self.txn.take() {
             self.status = TxStatus::Idle;
-            self.end_transaction_settings();
+            self.end_transaction_settings(!failed);
             if failed {
                 txn.rollback();
             } else {
@@ -291,6 +294,7 @@ impl Session {
             .get("timezone")
             .and_then(|z| pgmem_types::zone::Zone::from_setting(z))
             .unwrap_or_else(pgmem_types::zone::Zone::utc);
+        use pgmem_types::context::{DateStyle, IntervalStyle};
         let style = self.settings.get("datestyle").map(|s| s.to_ascii_uppercase()).unwrap_or_default();
         let date_order = if style.contains("DMY") || style.contains("EURO") {
             DateOrder::Dmy
@@ -299,6 +303,22 @@ impl Session {
         } else {
             DateOrder::Mdy
         };
+        let date_style = if style.starts_with("SQL") {
+            DateStyle::Sql
+        } else if style.starts_with("POSTGRES") {
+            DateStyle::Postgres
+        } else if style.starts_with("GERMAN") {
+            DateStyle::German
+        } else {
+            DateStyle::Iso
+        };
+        let interval_style = match self.settings.get("intervalstyle").map(String::as_str) {
+            Some("postgres_verbose") => IntervalStyle::PostgresVerbose,
+            Some("sql_standard") => IntervalStyle::SqlStandard,
+            Some("iso_8601") => IntervalStyle::Iso8601,
+            _ => IntervalStyle::Postgres,
+        };
+        let extra_float_digits = self.settings.get("extra_float_digits").and_then(|v| v.parse().ok()).unwrap_or(1);
         let types = match &self.txn {
             Some(t) => crate::usertypes::registry(t.catalog()),
             None => crate::usertypes::registry(&self.db.current().catalog),
@@ -309,7 +329,17 @@ impl Session {
             user: self.user.clone(),
             temp_schema: self.temp_schema.clone(),
         };
-        Context { zone, date_order, now: self.clock.now_micros(), types, bytea_escape, search_path }
+        Context {
+            zone,
+            date_order,
+            date_style,
+            interval_style,
+            extra_float_digits,
+            now: self.clock.now_micros(),
+            types,
+            bytea_escape,
+            search_path,
+        }
     }
 
     /// Analyzes a statement without running it: parameter types and result columns.
@@ -344,9 +374,17 @@ impl Session {
         true
     }
 
-    fn end_transaction_settings(&mut self) {
-        for (k, v) in std::mem::take(&mut self.local_restore) {
-            self.settings.insert(k, v);
+    /// Ends the transaction's setting changes: a commit keeps plain SETs and undoes SET LOCAL;
+    /// a rollback undoes everything (a custom placeholder stays defined, as empty).
+    fn end_transaction_settings(&mut self, committed: bool) {
+        let undo = std::mem::take(&mut self.setting_undo);
+        self.setting_marks.clear();
+        // A later plain SET of the same name makes a commit keep its value.
+        for (i, u) in undo.iter().enumerate().rev() {
+            if committed && (!u.local || undo[i + 1..].iter().any(|x| x.name == u.name && !x.local)) {
+                continue;
+            }
+            self.restore_setting(&u.name, u.old.clone());
         }
         self.settings
             .insert("transaction_isolation".into(), self.settings.get("default_transaction_isolation").cloned().unwrap_or_default());
@@ -472,6 +510,14 @@ impl Session {
             self.currval.insert(*oid, *v);
             self.lastval = Some(*v);
         }
+        drop(produced);
+        let mut result = result;
+        let pending = state.settings.take();
+        if !pending.is_empty() {
+            let autocommit = self.status == TxStatus::Idle && !self.implicit_block;
+            let reported = self.apply_pending_settings(pending, autocommit);
+            result.changed_settings.extend(reported);
+        }
         Ok(result)
     }
 
@@ -516,7 +562,7 @@ impl Session {
                 };
                 let failed = self.status == TxStatus::Failed;
                 self.status = TxStatus::Idle;
-                self.end_transaction_settings();
+                self.end_transaction_settings(!failed);
                 if failed {
                     txn.rollback();
                     return Ok(tag("ROLLBACK"));
@@ -531,7 +577,7 @@ impl Session {
                     return Ok(r);
                 };
                 self.status = TxStatus::Idle;
-                self.end_transaction_settings();
+                self.end_transaction_settings(false);
                 txn.rollback();
                 Ok(tag("ROLLBACK"))
             }
@@ -547,6 +593,7 @@ impl Session {
                         SqlError::new(code::NO_ACTIVE_SQL_TRANSACTION, "SAVEPOINT can only be used in transaction blocks")
                     })?;
                 txn.savepoint(name);
+                self.setting_marks.push((name.clone(), self.setting_undo.len()));
                 Ok(tag("SAVEPOINT"))
             }
             TransactionStmt::Release(name) => {
@@ -560,6 +607,9 @@ impl Session {
                     SqlError::new(code::NO_ACTIVE_SQL_TRANSACTION, "RELEASE SAVEPOINT can only be used in transaction blocks")
                 })?;
                 txn.release(name)?;
+                if let Some(i) = self.setting_marks.iter().rposition(|(n, _)| n == name) {
+                    self.setting_marks.truncate(i);
+                }
                 Ok(tag("RELEASE"))
             }
             TransactionStmt::RollbackTo(name) => {
@@ -568,6 +618,15 @@ impl Session {
                 })?;
                 txn.rollback_to(name)?;
                 self.status = TxStatus::InBlock;
+                if let Some(i) = self.setting_marks.iter().rposition(|(n, _)| n == name) {
+                    let mark = self.setting_marks[i].1;
+                    self.setting_marks.truncate(i + 1);
+                    while self.setting_undo.len() > mark {
+                        if let Some(u) = self.setting_undo.pop() {
+                            self.restore_setting(&u.name, u.old);
+                        }
+                    }
+                }
                 Ok(tag("ROLLBACK"))
             }
             TransactionStmt::SetTransaction { isolation, .. } => {
@@ -605,6 +664,94 @@ impl Session {
         Ok(())
     }
 
+    /// The stored value of a setting: set in the session, else its default.
+    pub fn setting_value(&self, name: &str) -> Option<String> {
+        let key = name.to_ascii_lowercase();
+        self.settings.get(&key).cloned().or_else(|| crate::settings::lookup(&key).and_then(|d| d.boot).map(str::to_owned))
+    }
+
+    /// Inside a transaction block (explicit, or a multi-statement simple query).
+    fn in_block(&self) -> bool {
+        self.txn.is_some() && (self.status != TxStatus::Idle || self.implicit_block)
+    }
+
+    fn restore_setting(&mut self, name: &str, old: Option<String>) {
+        match old {
+            Some(v) => {
+                self.settings.insert(name.to_owned(), v);
+            }
+            // A custom placeholder outlives the transaction that created it, as empty.
+            None if crate::settings::is_custom(name) => {
+                self.settings.insert(name.to_owned(), String::new());
+            }
+            None => {
+                self.settings.remove(name);
+            }
+        }
+        if name == "default_transaction_isolation" {
+            self.default_isolation = isolation_of(self.settings.get(name).map_or("read committed", String::as_str));
+        }
+    }
+
+    /// Records a change for transaction / savepoint undo, then applies it.
+    fn store_setting(&mut self, name: &str, value: String, local: bool) {
+        if self.in_block() {
+            let old = self.settings.get(name).cloned();
+            self.setting_undo.push(SettingUndo { name: name.to_owned(), old, local });
+        }
+        self.settings.insert(name.to_owned(), value);
+    }
+
+    /// Validates `value` for setting `name` (lower case): the stored form.
+    pub fn validate_setting(&self, name: &str, raw: &str) -> SqlResult<String> {
+        validate_setting(name, raw, self.setting_value(name).as_deref())
+    }
+
+    /// Applies `set_config` calls made by a statement.
+    fn apply_pending_settings(&mut self, pending: Vec<(String, String, bool)>, autocommit: bool) -> Vec<(String, String)> {
+        let mut reported = Vec::new();
+        for (name, value, local) in pending {
+            if local && autocommit {
+                // SET LOCAL semantics: gone with the statement's own transaction.
+                if crate::settings::is_custom(&name) && !self.settings.contains_key(&name) {
+                    self.settings.insert(name, String::new());
+                }
+                continue;
+            }
+            if name == "default_transaction_isolation" {
+                self.default_isolation = isolation_of(&value);
+            }
+            self.store_setting(&name, value, local);
+            if is_reported(&name) {
+                reported.push((setting_display_name(&name).to_owned(), self.show_value(&name)));
+            }
+        }
+        reported
+    }
+}
+
+/// Validates `raw` for setting `name` (lower case) given its current value: the stored form.
+pub fn validate_setting(name: &str, raw: &str, current: Option<&str>) -> SqlResult<String> {
+    if crate::settings::is_custom(name) && crate::settings::lookup(name).is_none() {
+        return Ok(raw.to_owned());
+    }
+    let def = crate::settings::lookup(name).ok_or_else(|| crate::settings::unrecognized(name))?;
+    crate::settings::check_settable(def)?;
+    match name {
+        "timezone" => timezone_setting(raw),
+        "client_encoding" => {
+            if raw.eq_ignore_ascii_case("utf8") || raw.eq_ignore_ascii_case("utf-8") || raw.eq_ignore_ascii_case("unicode") {
+                Ok("UTF8".to_owned())
+            } else {
+                Err(SqlError::feature_not_supported(format!("conversion to encoding \"{raw}\" is not supported by pgmem")))
+            }
+        }
+        "application_name" => Ok(raw.chars().filter(|c| (' '..='~').contains(c)).take(63).collect()),
+        _ => crate::settings::normalize(def, raw, current),
+    }
+}
+
+impl Session {
     fn set(&mut self, name: &str, value: &[String], local: bool) -> SqlResult<QueryResult> {
         let name = name.to_ascii_lowercase();
         let name = match name.as_str() {
@@ -613,85 +760,133 @@ impl Session {
             "session characteristics as transaction isolation level" => "default_transaction_isolation".to_owned(),
             _ => name,
         };
-        let joined = if value.len() == 1 && value[0].eq_ignore_ascii_case("default") {
-            default_settings().get(&name).cloned().unwrap_or_default()
-        } else if name == "search_path" {
-            value
-                .iter()
-                .map(|v| if v.contains('$') || v.chars().any(|c| c.is_ascii_uppercase()) { format!("\"{v}\"") } else { v.clone() })
-                .collect::<Vec<_>>()
-                .join(", ")
+        if name == "transaction_isolation" {
+            let level = match value.join(", ").to_ascii_lowercase().as_str() {
+                "repeatable read" => ir::IsolationLevel::RepeatableRead,
+                "serializable" => ir::IsolationLevel::Serializable,
+                "read uncommitted" => ir::IsolationLevel::ReadUncommitted,
+                "read committed" => ir::IsolationLevel::ReadCommitted,
+                other => {
+                    return Err(SqlError::new(
+                        code::INVALID_PARAMETER_VALUE,
+                        format!("invalid value for parameter \"transaction_isolation\": \"{other}\""),
+                    ));
+                }
+            };
+            self.set_isolation(level)?;
+            return Ok(QueryResult { tag: "SET".into(), ..Default::default() });
+        }
+        if local && self.txn.is_none() {
+            // Validated anyway, then ignored outside a transaction block.
+            if crate::settings::lookup(&name).is_none() && !crate::settings::is_custom(&name) {
+                return Err(crate::settings::unrecognized(&name));
+            }
+            return Ok(QueryResult {
+                tag: "SET".into(),
+                notices: vec![Notice {
+                    severity: "WARNING",
+                    code: code::NO_ACTIVE_SQL_TRANSACTION,
+                    message: "SET LOCAL can only be used in transaction blocks".into(),
+                }],
+                ..Default::default()
+            });
+        }
+        let stored = if value.len() == 1 && value[0].eq_ignore_ascii_case("default") {
+            if crate::settings::lookup(&name).is_none() && !crate::settings::is_custom(&name) {
+                return Err(crate::settings::unrecognized(&name));
+            }
+            if let Some(def) = crate::settings::lookup(&name) {
+                crate::settings::check_settable(def)?;
+            }
+            default_settings()
+                .get(&name)
+                .cloned()
+                .or_else(|| crate::settings::lookup(&name).and_then(|d| d.boot).map(str::to_owned))
+                .unwrap_or_default()
         } else {
-            value.join(", ")
-        };
-        let joined = match name.as_str() {
-            "timezone" => timezone_setting(&joined)?,
-            "client_encoding"
-                if !joined.eq_ignore_ascii_case("utf8")
-                    && !joined.eq_ignore_ascii_case("utf-8")
-                    && !joined.eq_ignore_ascii_case("unicode") =>
-            {
-                return Err(SqlError::feature_not_supported(format!("conversion to encoding \"{joined}\" is not supported by pgmem")));
-            }
-            "client_encoding" => "UTF8".to_owned(),
-            "default_transaction_isolation" => {
-                let lower = joined.to_ascii_lowercase();
-                self.default_isolation = match lower.as_str() {
-                    "repeatable read" => Isolation::RepeatableRead,
-                    "serializable" => Isolation::Serializable,
-                    _ => Isolation::ReadCommitted,
-                };
-                lower
-            }
-            "transaction_isolation" => {
-                let level = match joined.to_ascii_lowercase().as_str() {
-                    "repeatable read" => ir::IsolationLevel::RepeatableRead,
-                    "serializable" => ir::IsolationLevel::Serializable,
-                    "read uncommitted" => ir::IsolationLevel::ReadUncommitted,
-                    _ => ir::IsolationLevel::ReadCommitted,
-                };
-                self.set_isolation(level)?;
-                return Ok(QueryResult { tag: "SET".into(), ..Default::default() });
-            }
-            _ => joined,
-        };
-        if local {
-            if self.txn.is_some() {
-                let old = self.settings.get(&name).cloned().unwrap_or_default();
-                self.local_restore.push((name.clone(), old));
+            let joined = if name == "search_path" {
+                value
+                    .iter()
+                    .map(|v| if v.contains('$') || v.chars().any(|c| c.is_ascii_uppercase()) { format!("\"{v}\"") } else { v.clone() })
+                    .collect::<Vec<_>>()
+                    .join(", ")
             } else {
-                return Ok(QueryResult {
-                    tag: "SET".into(),
-                    notices: vec![Notice {
-                        severity: "WARNING",
-                        code: code::NO_ACTIVE_SQL_TRANSACTION,
-                        message: "SET LOCAL can only be used in transaction blocks".into(),
-                    }],
-                    ..Default::default()
-                });
+                value.join(", ")
+            };
+            self.validate_setting(&name, &joined)?
+        };
+        if name == "default_transaction_isolation" {
+            self.default_isolation = isolation_of(&stored);
+            if self.txn.is_none() {
+                self.settings.insert("transaction_isolation".into(), stored.clone());
             }
         }
-        self.settings.insert(name.clone(), joined.clone());
-        let reported = if is_reported(&name) { vec![(setting_display_name(&name).to_owned(), joined)] } else { Default::default() };
+        self.store_setting(&name, stored.clone(), local);
+        let reported =
+            if is_reported(&name) { vec![(setting_display_name(&name).to_owned(), self.show_value(&name))] } else { Default::default() };
         Ok(QueryResult { tag: "SET".into(), changed_settings: reported, ..Default::default() })
+    }
+
+    /// A setting as SHOW prints it.
+    pub fn show_value(&self, name: &str) -> String {
+        crate::settings::show(crate::settings::lookup(name), &self.setting_value(name).unwrap_or_default())
     }
 
     fn reset(&mut self, name: Option<&str>) -> SqlResult<QueryResult> {
         let defaults = default_settings();
         match name {
             None => {
-                for (k, v) in defaults {
-                    if k != "session_authorization" {
-                        self.settings.insert(k, v);
+                let keys: Vec<String> = self.settings.keys().cloned().collect();
+                for k in keys {
+                    let settable = crate::settings::lookup(&k).is_none_or(|d| crate::settings::check_settable(d).is_ok());
+                    if k == "session_authorization" || !settable {
+                        continue;
+                    }
+                    let v = defaults.get(&k).cloned();
+                    match v {
+                        Some(v) => self.store_setting(&k, v, false),
+                        None if crate::settings::is_custom(&k) => self.store_setting(&k, String::new(), false),
+                        None => {
+                            if self.in_block() {
+                                let old = self.settings.get(&k).cloned();
+                                self.setting_undo.push(SettingUndo { name: k.clone(), old, local: false });
+                            }
+                            self.settings.remove(&k);
+                        }
                     }
                 }
+                self.default_isolation = Isolation::ReadCommitted;
             }
             Some(n) => {
                 let n = n.to_ascii_lowercase();
-                if let Some(v) = defaults.get(&n) {
-                    self.settings.insert(n, v.clone());
-                } else {
-                    self.settings.remove(&n);
+                let n = if n == "time zone" { "timezone".to_owned() } else { n };
+                if n == "role" || n == "session_authorization" {
+                    // Not in pg_settings; SET ROLE / SESSION AUTHORIZATION state.
+                    if n == "role" {
+                        self.settings.remove(&n);
+                    } else {
+                        self.settings.insert(n, self.user.clone());
+                    }
+                    return Ok(QueryResult { tag: "RESET".into(), ..Default::default() });
+                }
+                match crate::settings::lookup(&n) {
+                    Some(def) => crate::settings::check_settable(def)?,
+                    None if crate::settings::is_custom(&n) => {}
+                    None => return Err(crate::settings::unrecognized(&n)),
+                }
+                match defaults.get(&n) {
+                    Some(v) => self.store_setting(&n, v.clone(), false),
+                    None if crate::settings::is_custom(&n) => self.store_setting(&n, String::new(), false),
+                    None => {
+                        if self.in_block() {
+                            let old = self.settings.get(&n).cloned();
+                            self.setting_undo.push(SettingUndo { name: n.clone(), old, local: false });
+                        }
+                        self.settings.remove(&n);
+                    }
+                }
+                if n == "default_transaction_isolation" {
+                    self.default_isolation = Isolation::ReadCommitted;
                 }
             }
         }
@@ -700,15 +895,33 @@ impl Session {
 
     fn show(&self, name: &str) -> SqlResult<QueryResult> {
         let key = show_key(name);
-        let value = self
-            .settings
-            .get(&key)
-            .cloned()
-            .ok_or_else(|| SqlError::new(code::UNDEFINED_OBJECT, format!("unrecognized configuration parameter \"{name}\"")))?;
+        if key == "all" {
+            let mut rows = Vec::new();
+            for d in crate::settings::defs() {
+                let k = d.name.to_ascii_lowercase();
+                rows.push(vec![
+                    Value::Text(d.name.to_owned()),
+                    Value::Text(self.show_value(&k)),
+                    d.short_desc.map_or(Value::Null, |s| Value::Text(s.to_owned())),
+                ]);
+            }
+            return Ok(QueryResult {
+                columns: vec![OutCol::new("name", Type::Text), OutCol::new("setting", Type::Text), OutCol::new("description", Type::Text)],
+                returns_rows: true,
+                rows,
+                tag: "SHOW".into(),
+                ..Default::default()
+            });
+        }
+        let known = crate::settings::lookup(&key).is_some() || self.settings.contains_key(&key);
+        if !known {
+            return Err(crate::settings::unrecognized(&key));
+        }
+        let header = crate::settings::lookup(&key).map_or_else(|| key.clone(), |d| d.name.to_owned());
         Ok(QueryResult {
-            columns: vec![OutCol::new(setting_display_name(&key), Type::Text)],
+            columns: vec![OutCol::new(&header, Type::Text)],
             returns_rows: true,
-            rows: vec![vec![Value::Text(value)]],
+            rows: vec![vec![Value::Text(self.show_value(&key))]],
             tag: "SHOW".into(),
             ..Default::default()
         })
@@ -757,7 +970,23 @@ fn show_key(name: &str) -> String {
     match key.as_str() {
         "time zone" => "timezone".to_owned(),
         "transaction isolation level" => "transaction_isolation".to_owned(),
+        "session authorization" => "session_authorization".to_owned(),
         _ => key,
+    }
+}
+
+/// One setting change inside a transaction block, for undo.
+struct SettingUndo {
+    name: String,
+    old: Option<String>,
+    local: bool,
+}
+
+fn isolation_of(v: &str) -> Isolation {
+    match v.to_ascii_lowercase().as_str() {
+        "repeatable read" => Isolation::RepeatableRead,
+        "serializable" => Isolation::Serializable,
+        _ => Isolation::ReadCommitted,
     }
 }
 

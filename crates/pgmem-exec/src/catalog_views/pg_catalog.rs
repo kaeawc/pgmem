@@ -12,7 +12,6 @@ use pgmem_types::{RegKind, SqlResult, Type, Value};
 
 const PG_TYPE_DATA: &str = include_str!("pg_type.tsv");
 const PG_ROLES_DATA: &str = include_str!("pg_roles.tsv");
-const PG_SETTINGS_DATA: &str = include_str!("pg_settings.tsv");
 const PG_EXTENSIONS_DATA: &str = include_str!("pg_available_extensions.tsv");
 
 const PG_NAMESPACE: &str = "oid:oid, nspname:name, nspowner:oid, nspacl:aclitem[]";
@@ -1073,38 +1072,34 @@ fn pg_sequences(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
 
 fn pg_settings(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let s = Spec::parse(PG_SETTINGS);
-    let meta: Vec<Vec<&str>> = PG_SETTINGS_DATA.lines().filter(|l| !l.is_empty()).map(|l| l.split('\t').collect()).collect();
     let defaults = crate::session::default_settings();
+    let opt = |v: Option<&str>| v.map_or(Value::Null, txt);
     let mut rows = Vec::new();
-    for (key, value) in &ctx.env.settings {
-        let display = crate::session::setting_display_name(key);
-        let m = meta.iter().find(|f| f.first().is_some_and(|n| n.eq_ignore_ascii_case(key)));
-        let field = |i: usize| -> Value {
-            match m.and_then(|f| f.get(i)) {
-                Some(&"\\N") | None => Value::Null,
-                Some(v) => txt(*v),
-            }
+    for d in crate::settings::defs() {
+        let key = d.name.to_ascii_lowercase();
+        let reset = defaults.get(&key).cloned().or_else(|| d.boot.map(str::to_owned));
+        let value = ctx.state.setting(ctx.env, &key).or_else(|| reset.clone());
+        let source = if ctx.env.settings.get(&key).is_some_and(|v| defaults.get(&key) != Some(v)) { "session" } else { "default" };
+        let enumvals = if d.enumvals.is_empty() {
+            Value::Null
+        } else {
+            Value::Array(d.enumvals.iter().map(|e| Value::Text((*e).to_owned())).collect())
         };
-        let enumvals = match m.and_then(|f| f.get(9)) {
-            Some(v) if *v != "\\N" => pgmem_types::text::decode(v, &Type::array_of(Type::Text)).unwrap_or(Value::Null),
-            _ => Value::Null,
-        };
-        let source = if defaults.get(key) == Some(value) { "default" } else { "session" };
         rows.push(s.row(vec![
-            ("name", txt(m.and_then(|f| f.first()).map_or(display, |n| n))),
-            ("setting", txt(value.clone())),
-            ("unit", field(1)),
-            ("category", field(2)),
-            ("short_desc", field(3)),
-            ("extra_desc", field(4)),
-            ("context", field(5)),
-            ("vartype", field(6)),
+            ("name", txt(d.name)),
+            ("setting", opt(value.as_deref())),
+            ("unit", opt(d.unit)),
+            ("category", txt(d.category)),
+            ("short_desc", opt(d.short_desc)),
+            ("extra_desc", opt(d.extra_desc)),
+            ("context", txt(d.context)),
+            ("vartype", txt(d.vartype)),
             ("source", txt(source)),
-            ("min_val", field(7)),
-            ("max_val", field(8)),
+            ("min_val", opt(d.min)),
+            ("max_val", opt(d.max)),
             ("enumvals", enumvals),
-            ("boot_val", field(10)),
-            ("reset_val", txt(defaults.get(key).cloned().unwrap_or_else(|| value.clone()))),
+            ("boot_val", opt(d.boot)),
+            ("reset_val", opt(reset.as_deref())),
         ]));
     }
     Ok(rows)
