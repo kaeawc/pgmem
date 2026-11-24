@@ -1,0 +1,1018 @@
+//! Query binding: WITH, SELECT, VALUES, set operations, FROM, ORDER BY, LIMIT.
+
+use super::expr::{common_of, contains_agg, contains_window, output_name};
+use super::{Binder, Clause, CteBinding, Ctx, Level, Scope, ScopeCol, feature};
+use crate::cast::CoercionContext;
+use crate::plan::{AggCall, CtePlan, Expr, JoinKind, OutCol, Rel, SetOpKind, SortKey, WinCall};
+use pgmem_catalog::Relation;
+use pgmem_ir as ir;
+use pgmem_types::{SqlError, SqlResult, Type, Value, code};
+
+/// A bound query: its plan and result columns.
+#[derive(Clone, Debug)]
+pub struct BoundQuery {
+    pub rel: Rel,
+    pub columns: Vec<OutCol>,
+}
+
+impl Binder<'_> {
+    pub fn bind_query(&self, q: &ir::Query, ctx: &Ctx) -> SqlResult<BoundQuery> {
+        let mut ctx = Ctx { levels: ctx.levels.clone(), ctes: ctx.ctes.clone(), clause: Clause::Other, windows: Vec::new() };
+        let mut cte_plans = Vec::new();
+        if let Some(with) = &q.with {
+            for cte in &with.ctes {
+                let plan = self.bind_cte(cte, with.recursive, &ctx)?;
+                cte_plans.push(plan.0);
+                ctx.ctes.push(plan.1);
+            }
+        }
+        let mut bound = match &q.body {
+            ir::SetExpr::Select(s) => self.bind_select(s, &q.order_by, &ctx)?,
+            body => {
+                let mut b = self.bind_set_expr(body, &ctx)?;
+                if !q.order_by.is_empty() {
+                    b = self.order_by_outputs(b, &q.order_by, &ctx)?;
+                }
+                b
+            }
+        };
+        if q.limit.is_some() || q.offset.is_some() {
+            let lim_ctx = ctx.with_clause(Clause::Other);
+            let as_int8 = |e: &ir::Expr, what: &str| -> SqlResult<Expr> {
+                let (x, t) = self.bind_expr(e, &lim_ctx)?;
+                if contains_column(&x) {
+                    return Err(SqlError::new(code::INVALID_COLUMN_REFERENCE, format!("argument of {what} must not contain variables")));
+                }
+                super::coerce(self, x, &t, &Type::Int8, CoercionContext::Assignment)
+            };
+            let limit = q.limit.as_ref().map(|l| as_int8(l, "LIMIT")).transpose()?;
+            let offset = q.offset.as_ref().map(|o| as_int8(o, "OFFSET")).transpose()?;
+            bound.rel = Rel::Limit { input: Box::new(bound.rel), limit, offset };
+        }
+        if !cte_plans.is_empty() {
+            bound.rel = Rel::With { ctes: cte_plans, body: Box::new(bound.rel) };
+        }
+        Ok(bound)
+    }
+
+    fn bind_cte(&self, cte: &ir::Cte, recursive: bool, ctx: &Ctx) -> SqlResult<(CtePlan, CteBinding)> {
+        let id = self.fresh_id();
+        let self_ref = recursive && query_references(&cte.query, &cte.name);
+        if self_ref {
+            // WITH RECURSIVE name AS (non_recursive UNION [ALL] recursive)
+            let ir::SetExpr::SetOp { op: ir::SetOperator::Union, all, left, right } = &cte.query.body else {
+                return Err(SqlError::new(
+                    code::INVALID_RECURSION,
+                    format!("recursive query \"{}\" does not have the form non-recursive-term UNION [ALL] recursive-term", cte.name),
+                ));
+            };
+            let base_level = Level::new(Scope::default());
+            let base = self.bind_set_expr(left, &ctx.from_item(&[&base_level]))?;
+            let mut columns: Vec<(String, Type)> = base.columns.iter().map(|c| (c.name.clone(), c.ty.clone())).collect();
+            rename_columns(&mut columns, &cte.columns, &cte.name)?;
+            let step_level = Level::new(Scope::default());
+            let mut inner_ctx = ctx.from_item(&[&step_level]);
+            let binding = CteBinding { name: cte.name.clone(), id, columns: columns.clone() };
+            inner_ctx.ctes.push(binding.clone());
+            let step = self.bind_set_expr(right, &inner_ctx)?;
+            if step.columns.len() != columns.len() {
+                return Err(SqlError::syntax("each UNION query must have the same number of columns"));
+            }
+            let step_rel = coerce_columns(
+                self,
+                step.rel,
+                &step.columns.iter().map(|c| c.ty.clone()).collect::<Vec<_>>(),
+                &columns.iter().map(|c| c.1.clone()).collect::<Vec<_>>(),
+            )?;
+            return Ok((CtePlan { id, plan: base.rel, recursive: Some((step_rel, *all)) }, binding));
+        }
+        let level = Level::new(Scope::default());
+        let bound = self.bind_query(&cte.query, &ctx.from_item(&[&level]))?;
+        let mut columns: Vec<(String, Type)> = bound.columns.iter().map(|c| (c.name.clone(), c.ty.clone())).collect();
+        rename_columns(&mut columns, &cte.columns, &cte.name)?;
+        Ok((CtePlan { id, plan: bound.rel, recursive: None }, CteBinding { name: cte.name.clone(), id, columns }))
+    }
+
+    /// Binds a set-expression operand (SELECT, VALUES, nested set op, parenthesized query).
+    pub fn bind_set_expr(&self, body: &ir::SetExpr, ctx: &Ctx) -> SqlResult<BoundQuery> {
+        match body {
+            ir::SetExpr::Select(s) => self.bind_select(s, &[], ctx),
+            ir::SetExpr::Query(q) => self.bind_query(q, ctx),
+            ir::SetExpr::Values(rows) => self.bind_values(rows, ctx),
+            ir::SetExpr::SetOp { op, all, left, right } => {
+                let l = self.bind_set_expr(left, ctx)?;
+                let r = self.bind_set_expr(right, ctx)?;
+                let name = match op {
+                    ir::SetOperator::Union => "UNION",
+                    ir::SetOperator::Intersect => "INTERSECT",
+                    ir::SetOperator::Except => "EXCEPT",
+                };
+                if l.columns.len() != r.columns.len() {
+                    return Err(SqlError::syntax(format!("each {name} query must have the same number of columns")));
+                }
+                let mut types = Vec::new();
+                for (a, b) in l.columns.iter().zip(&r.columns) {
+                    types.push(common_of(&[a.ty.clone(), b.ty.clone()], name)?);
+                }
+                let lrel = coerce_columns(self, l.rel, &l.columns.iter().map(|c| c.ty.clone()).collect::<Vec<_>>(), &types)?;
+                let rrel = coerce_columns(self, r.rel, &r.columns.iter().map(|c| c.ty.clone()).collect::<Vec<_>>(), &types)?;
+                let columns = l.columns.iter().zip(&types).map(|(c, t)| OutCol::new(c.name.clone(), t.clone())).collect();
+                let kind = match op {
+                    ir::SetOperator::Union => SetOpKind::Union,
+                    ir::SetOperator::Intersect => SetOpKind::Intersect,
+                    ir::SetOperator::Except => SetOpKind::Except,
+                };
+                Ok(BoundQuery { rel: Rel::SetOp { op: kind, all: *all, left: Box::new(lrel), right: Box::new(rrel) }, columns })
+            }
+        }
+    }
+
+    fn bind_values(&self, rows: &[Vec<ir::Expr>], ctx: &Ctx) -> SqlResult<BoundQuery> {
+        let width = rows.first().map_or(0, Vec::len);
+        let vctx = ctx.with_clause(Clause::Values);
+        let mut bound_rows = Vec::with_capacity(rows.len());
+        for row in rows {
+            if row.len() != width {
+                return Err(SqlError::syntax("VALUES lists must all be the same length"));
+            }
+            bound_rows.push(row.iter().map(|e| self.bind_expr(e, &vctx)).collect::<SqlResult<Vec<_>>>()?);
+        }
+        let mut types = Vec::with_capacity(width);
+        for col in 0..width {
+            let col_types: Vec<Type> = bound_rows.iter().map(|r| r[col].1.clone()).collect();
+            types.push(common_of(&col_types, "VALUES")?);
+        }
+        let out_rows = bound_rows
+            .into_iter()
+            .map(|r| {
+                r.into_iter()
+                    .zip(&types)
+                    .map(|((e, et), t)| super::coerce(self, e, &et, t, CoercionContext::Implicit))
+                    .collect::<SqlResult<Vec<_>>>()
+            })
+            .collect::<SqlResult<Vec<_>>>()?;
+        let columns = types.iter().enumerate().map(|(i, t)| OutCol::new(format!("column{}", i + 1), t.clone())).collect();
+        Ok(BoundQuery { rel: Rel::Values { rows: out_rows }, columns })
+    }
+
+    /// ORDER BY over a set operation / VALUES: only output columns (by name or position).
+    fn order_by_outputs(&self, b: BoundQuery, order_by: &[ir::OrderByExpr], ctx: &Ctx) -> SqlResult<BoundQuery> {
+        let scope = Scope::from_cols(b.columns.iter().map(|c| ScopeCol::new(None, c.name.clone(), c.ty.clone())).collect());
+        let level = Level::sharing(scope, ctx.current());
+        let octx = ctx.nested_same_level(&level).with_clause(Clause::OrderBy);
+        let mut keys = Vec::new();
+        for o in order_by {
+            let expr = match ordinal(&o.expr) {
+                Some(n) if n >= 1 && n <= b.columns.len() => Expr::Col(n - 1),
+                Some(n) => {
+                    return Err(SqlError::new(code::INVALID_COLUMN_REFERENCE, format!("ORDER BY position {n} is not in select list")));
+                }
+                None => self.bind_expr(&o.expr, &octx)?.0,
+            };
+            keys.push(SortKey { expr, desc: o.desc, nulls_first: o.nulls_first.unwrap_or(o.desc) });
+        }
+        Ok(BoundQuery { rel: Rel::Sort { input: Box::new(b.rel), keys }, columns: b.columns })
+    }
+
+    fn bind_select(&self, s: &ir::Select, order_by: &[ir::OrderByExpr], ctx: &Ctx) -> SqlResult<BoundQuery> {
+        // FROM
+        let (mut rel, scope) = self.bind_from(&s.from, ctx)?;
+        let level = Level::sharing(scope, ctx.current());
+        let mut sctx = ctx.nested_same_level(&level);
+        sctx.windows = s.windows.clone();
+        // WHERE
+        if let Some(w) = &s.selection {
+            let pred = self.bind_predicate(w, "WHERE", &sctx.with_clause(Clause::Where))?;
+            rel = Rel::Filter { input: Box::new(rel), pred };
+        }
+        // Select list.
+        let list_ctx = sctx.with_clause(Clause::SelectList);
+        let mut exprs = Vec::new();
+        let mut columns: Vec<OutCol> = Vec::new();
+        for item in &s.projection {
+            match item {
+                ir::SelectItem::Wildcard => {
+                    if level.scope.star.is_empty() && s.from.is_empty() {
+                        return Err(SqlError::syntax("SELECT * with no tables specified is not valid"));
+                    }
+                    for &i in &level.scope.star {
+                        let c = &level.scope.cols[i];
+                        exprs.push(Expr::Col(i));
+                        columns.push(OutCol {
+                            name: c.name.clone(),
+                            ty: c.ty.clone(),
+                            table_oid: c.table_oid,
+                            attnum: c.attnum,
+                            typmod: c.typmod,
+                        });
+                    }
+                }
+                ir::SelectItem::QualifiedWildcard(q) => {
+                    let qual = q.base();
+                    if !level.scope.has_qualifier(qual) {
+                        return Err(SqlError::new(code::UNDEFINED_TABLE, format!("missing FROM-clause entry for table \"{qual}\"")));
+                    }
+                    for i in level.scope.qualified_star(qual) {
+                        let c = &level.scope.cols[i];
+                        exprs.push(Expr::Col(i));
+                        columns.push(OutCol {
+                            name: c.name.clone(),
+                            ty: c.ty.clone(),
+                            table_oid: c.table_oid,
+                            attnum: c.attnum,
+                            typmod: c.typmod,
+                        });
+                    }
+                }
+                ir::SelectItem::Expr { expr, alias } => {
+                    let (e, t) = self.bind_expr(expr, &list_ctx)?;
+                    // An untyped literal in the select list becomes text, as in Postgres.
+                    let (e, t) = if t == Type::Unknown {
+                        (super::coerce(self, e, &t, &Type::Text, CoercionContext::Implicit)?, Type::Text)
+                    } else {
+                        (e, t)
+                    };
+                    let mut col = OutCol::new(alias.clone().unwrap_or_else(|| output_name(expr)), t);
+                    if let Expr::Col(i) = &e {
+                        let c = &level.scope.cols[*i];
+                        col.table_oid = c.table_oid;
+                        col.attnum = c.attnum;
+                        col.typmod = c.typmod;
+                    }
+                    exprs.push(e);
+                    columns.push(col);
+                }
+            }
+        }
+        // GROUP BY
+        let gctx = sctx.with_clause(Clause::GroupBy);
+        let mut group = Vec::new();
+        for g in &s.group_by {
+            let e = match ordinal(g) {
+                Some(n) if n >= 1 && n <= exprs.len() => exprs[n - 1].clone(),
+                Some(n) => {
+                    return Err(SqlError::new(code::INVALID_COLUMN_REFERENCE, format!("GROUP BY position {n} is not in select list")));
+                }
+                None => match self.bind_expr(g, &gctx) {
+                    Ok((e, _)) => e,
+                    // A bare name that isn't an input column may name an output column.
+                    Err(err) if err.code == code::UNDEFINED_COLUMN => {
+                        match bare_name(g).and_then(|n| columns.iter().position(|c| c.name == n)) {
+                            Some(i) => exprs[i].clone(),
+                            None => return Err(err),
+                        }
+                    }
+                    Err(err) => return Err(err),
+                },
+            };
+            if contains_agg(&e) {
+                return Err(SqlError::new(code::GROUPING_ERROR, "aggregate functions are not allowed in GROUP BY"));
+            }
+            if contains_window(&e) {
+                return Err(SqlError::new(code::WINDOWING_ERROR, "window functions are not allowed in GROUP BY"));
+            }
+            group.push(e);
+        }
+        // HAVING
+        let having = s.having.as_ref().map(|h| self.bind_predicate(h, "HAVING", &sctx.with_clause(Clause::Having))).transpose()?;
+        // ORDER BY (bound against the input scope, or naming output columns).
+        let octx = sctx.with_clause(Clause::OrderBy);
+        let mut order_exprs: Vec<(Expr, bool, bool)> = Vec::new();
+        for o in order_by {
+            let e = match ordinal(&o.expr) {
+                Some(n) if n >= 1 && n <= exprs.len() => OrderTarget::Output(n - 1),
+                Some(n) => {
+                    return Err(SqlError::new(code::INVALID_COLUMN_REFERENCE, format!("ORDER BY position {n} is not in select list")));
+                }
+                None => match bare_name(&o.expr)
+                    .map(|n| columns.iter().enumerate().filter(|(_, c)| c.name == n).map(|(i, _)| i).collect::<Vec<_>>())
+                {
+                    Some(matches) if matches.len() == 1 => OrderTarget::Output(matches[0]),
+                    Some(matches) if matches.len() > 1 && !matches.iter().all(|&m| exprs[m] == exprs[matches[0]]) => {
+                        return Err(SqlError::new(
+                            code::AMBIGUOUS_COLUMN,
+                            format!("ORDER BY \"{}\" is ambiguous", bare_name(&o.expr).unwrap_or_default()),
+                        ));
+                    }
+                    Some(matches) if !matches.is_empty() => OrderTarget::Output(matches[0]),
+                    _ => OrderTarget::Expr(self.bind_expr(&o.expr, &octx)?.0),
+                },
+            };
+            let e = match e {
+                OrderTarget::Output(i) => exprs[i].clone(),
+                OrderTarget::Expr(e) => e,
+            };
+            order_exprs.push((e, o.desc, o.nulls_first.unwrap_or(o.desc)));
+        }
+        // DISTINCT ON expressions.
+        let distinct_on: Option<Vec<Expr>> = match &s.distinct {
+            ir::Distinct::On(items) => Some(
+                items
+                    .iter()
+                    .map(|i| match ordinal(i) {
+                        Some(n) if n >= 1 && n <= exprs.len() => Ok(exprs[n - 1].clone()),
+                        _ => match bare_name(i).and_then(|n| columns.iter().position(|c| c.name == n)) {
+                            Some(p) => Ok(exprs[p].clone()),
+                            None => Ok(self.bind_expr(i, &octx)?.0),
+                        },
+                    })
+                    .collect::<SqlResult<Vec<_>>>()?,
+            ),
+            _ => None,
+        };
+
+        // Aggregation.
+        let mut all_aggs: Vec<AggCall> = Vec::new();
+        let mut collect = |e: &Expr| collect_aggs(e, &mut all_aggs);
+        exprs.iter().for_each(&mut collect);
+        order_exprs.iter().for_each(|(e, _, _)| collect(e));
+        if let Some(h) = &having {
+            collect(h);
+        }
+        if let Some(d) = &distinct_on {
+            d.iter().for_each(&mut collect);
+        }
+        let grouped = !group.is_empty() || !all_aggs.is_empty() || having.is_some();
+        if grouped {
+            let pk_groups = functional_dependencies(&group, &level.scope, self.catalog);
+            let mut grouping = Grouping { group: group.clone(), aggs: all_aggs, scope: &level.scope, pk_tables: pk_groups };
+            exprs = exprs.into_iter().map(|e| grouping.rewrite(e)).collect::<SqlResult<Vec<_>>>()?;
+            order_exprs = order_exprs.into_iter().map(|(e, d, n)| Ok((grouping.rewrite(e)?, d, n))).collect::<SqlResult<Vec<_>>>()?;
+            let having = having.map(|h| grouping.rewrite(h)).transpose()?;
+            let distinct_rw =
+                distinct_on.clone().map(|d| d.into_iter().map(|e| grouping.rewrite(e)).collect::<SqlResult<Vec<_>>>()).transpose()?;
+            rel = Rel::Aggregate { input: Box::new(rel), group: grouping.group.clone(), aggs: grouping.aggs.clone() };
+            if let Some(h) = having {
+                rel = Rel::Filter { input: Box::new(rel), pred: h };
+            }
+            return self.finish_select(
+                rel,
+                exprs,
+                columns,
+                order_exprs,
+                distinct_rw,
+                &s.distinct,
+                grouping.group.len() + grouping.aggs.len(),
+            );
+        }
+        let width = level.scope.width();
+        self.finish_select(rel, exprs, columns, order_exprs, distinct_on, &s.distinct, width)
+    }
+
+    /// Window functions, projection, ORDER BY, DISTINCT and junk-column removal.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_select(
+        &self,
+        mut rel: Rel,
+        mut exprs: Vec<Expr>,
+        columns: Vec<OutCol>,
+        mut order_exprs: Vec<(Expr, bool, bool)>,
+        mut distinct_on: Option<Vec<Expr>>,
+        distinct: &ir::Distinct,
+        input_width: usize,
+    ) -> SqlResult<BoundQuery> {
+        // Window functions over the (possibly aggregated) input.
+        let mut wins: Vec<WinCall> = Vec::new();
+        exprs.iter().for_each(|e| collect_windows(e, &mut wins));
+        order_exprs.iter().for_each(|(e, _, _)| collect_windows(e, &mut wins));
+        if !wins.is_empty() {
+            let replace = |e: Expr| -> SqlResult<Expr> {
+                e.transform(&mut |x| {
+                    Ok(match x {
+                        Expr::WindowCall(w) => Expr::Col(input_width + wins.iter().position(|c| *c == *w).unwrap_or(0)),
+                        other => other,
+                    })
+                })
+            };
+            exprs = exprs.into_iter().map(&replace).collect::<SqlResult<Vec<_>>>()?;
+            order_exprs = order_exprs.into_iter().map(|(e, d, n)| Ok((replace(e)?, d, n))).collect::<SqlResult<Vec<_>>>()?;
+            distinct_on = distinct_on.map(|d| d.into_iter().map(&replace).collect::<SqlResult<Vec<_>>>()).transpose()?;
+            rel = Rel::Window { input: Box::new(rel), calls: wins };
+        }
+        let visible = exprs.len();
+        let is_distinct = !matches!(distinct, ir::Distinct::All);
+        // Sort keys refer to projected columns; expressions not in the list become junk.
+        let mut keys = Vec::new();
+        for (e, desc, nulls_first) in order_exprs {
+            let pos = match exprs.iter().position(|x| *x == e) {
+                Some(p) => p,
+                None => {
+                    if is_distinct && distinct_on.is_none() {
+                        return Err(SqlError::new(
+                            code::INVALID_COLUMN_REFERENCE,
+                            "for SELECT DISTINCT, ORDER BY expressions must appear in select list",
+                        ));
+                    }
+                    exprs.push(e);
+                    exprs.len() - 1
+                }
+            };
+            keys.push(SortKey { expr: Expr::Col(pos), desc, nulls_first });
+        }
+        let distinct_cols = distinct_on.map(|items| {
+            items
+                .into_iter()
+                .map(|e| {
+                    let pos = match exprs.iter().position(|x| *x == e) {
+                        Some(p) => p,
+                        None => {
+                            exprs.push(e);
+                            exprs.len() - 1
+                        }
+                    };
+                    Expr::Col(pos)
+                })
+                .collect::<Vec<_>>()
+        });
+        if let Some(on) = &distinct_cols {
+            // DISTINCT ON keys must lead the ORDER BY.
+            for (k, d) in keys.iter().zip(on) {
+                if k.expr != *d && on.iter().all(|o| *o != k.expr) {
+                    return Err(SqlError::new(
+                        code::INVALID_COLUMN_REFERENCE,
+                        "SELECT DISTINCT ON expressions must match initial ORDER BY expressions",
+                    ));
+                }
+            }
+        }
+        rel = Rel::Project { input: Box::new(rel), exprs: exprs.clone() };
+        if !keys.is_empty() {
+            rel = Rel::Sort { input: Box::new(rel), keys };
+        }
+        match (distinct, distinct_cols) {
+            (_, Some(on)) => rel = Rel::Distinct { input: Box::new(rel), on: Some(on) },
+            (ir::Distinct::Distinct, None) => {
+                rel = if exprs.len() > visible {
+                    Rel::Distinct { input: Box::new(rel), on: Some((0..visible).map(Expr::Col).collect()) }
+                } else {
+                    Rel::Distinct { input: Box::new(rel), on: None }
+                };
+            }
+            _ => {}
+        }
+        if exprs.len() > visible {
+            rel = Rel::Project { input: Box::new(rel), exprs: (0..visible).map(Expr::Col).collect() };
+        }
+        Ok(BoundQuery { rel, columns })
+    }
+
+    /// Binds a FROM list into a plan (cross joins between items) and its scope.
+    pub fn bind_from(&self, items: &[ir::TableRef], ctx: &Ctx) -> SqlResult<(Rel, Scope)> {
+        if items.is_empty() {
+            return Ok((Rel::Values { rows: vec![vec![]] }, Scope::default()));
+        }
+        let mut acc: Option<(Rel, Scope)> = None;
+        for item in items {
+            let left_scope = acc.as_ref().map(|(_, s)| s.clone()).unwrap_or_default();
+            let (rel, scope, lateral) = self.bind_table_ref(item, ctx, &left_scope)?;
+            acc = Some(match acc {
+                None => (rel, scope),
+                Some((lrel, lscope)) => {
+                    check_duplicate_aliases(&lscope, &scope)?;
+                    let (lw, rw) = (lscope.width(), scope.width());
+                    let joined = join_scopes(lscope, scope, &[], JoinKind::Inner);
+                    (
+                        Rel::Join {
+                            kind: JoinKind::Inner,
+                            left: Box::new(lrel),
+                            right: Box::new(rel),
+                            on: None,
+                            lateral,
+                            left_width: lw,
+                            right_width: rw,
+                        },
+                        joined,
+                    )
+                }
+            });
+        }
+        acc.ok_or_else(|| SqlError::internal("empty FROM"))
+    }
+
+    /// Binds one FROM item. `left` is the scope of items to its left (visible to LATERAL
+    /// items as the immediately enclosing level). Returns whether the item is lateral.
+    fn bind_table_ref(&self, item: &ir::TableRef, ctx: &Ctx, left: &Scope) -> SqlResult<(Rel, Scope, bool)> {
+        match item {
+            ir::TableRef::Table { name, alias } => {
+                let (rel, scope) = self.bind_relation(name, alias.as_ref(), ctx)?;
+                Ok((rel, scope, false))
+            }
+            ir::TableRef::Subquery { query, alias, lateral } => {
+                let left_level = Level::new(left.clone());
+                let level = Level::new(Scope::default());
+                let lateral = *lateral && !left.cols.is_empty();
+                let bound = if lateral {
+                    self.bind_query(query, &ctx.from_item(&[&left_level, &level]))?
+                } else {
+                    self.bind_query(query, &ctx.from_item(&[&level]))?
+                };
+                let alias_name = alias.as_ref().map(|a| a.name.clone());
+                let mut cols: Vec<ScopeCol> =
+                    bound.columns.iter().map(|c| ScopeCol::new(alias_name.clone(), c.name.clone(), c.ty.clone())).collect();
+                if let Some(a) = alias {
+                    apply_column_aliases(&mut cols, &a.columns, &a.name)?;
+                }
+                // A lateral item that references anything outside itself is re-evaluated per
+                // left row (which also keeps outer-reference depths consistent).
+                let correlated = lateral && level.correlated.get();
+                Ok((bound.rel, Scope::from_cols(cols), correlated))
+            }
+            ir::TableRef::Function { call, alias, with_ordinality, .. } => {
+                self.bind_function_scan(call, alias.as_ref(), *with_ordinality, ctx, left)
+            }
+            ir::TableRef::Join { left: l, right: r, kind, constraint } => {
+                let (lrel, lscope, _) = self.bind_table_ref(l, ctx, left)?;
+                let (rrel, rscope, lateral) = self.bind_table_ref(r, ctx, &lscope)?;
+                check_duplicate_aliases(&lscope, &rscope)?;
+                let kind = match kind {
+                    ir::JoinKind::Inner | ir::JoinKind::Cross => JoinKind::Inner,
+                    ir::JoinKind::Left => JoinKind::Left,
+                    ir::JoinKind::Right => JoinKind::Right,
+                    ir::JoinKind::Full => JoinKind::Full,
+                };
+                if lateral && matches!(kind, JoinKind::Right | JoinKind::Full) {
+                    return Err(SqlError::syntax("invalid reference to FROM-clause entry for table")
+                        .with_hint("The combining JOIN type must be INNER or LEFT for a LATERAL reference."));
+                }
+                let (lw, rw) = (lscope.width(), rscope.width());
+                let using: Vec<String> = match constraint {
+                    ir::JoinConstraint::Using(cols) => cols.clone(),
+                    ir::JoinConstraint::Natural => {
+                        let lnames: Vec<&String> = lscope.star.iter().map(|i| &lscope.cols[*i].name).collect();
+                        rscope.star.iter().map(|i| rscope.cols[*i].name.clone()).filter(|n| lnames.contains(&n)).collect()
+                    }
+                    _ => Vec::new(),
+                };
+                let scope = join_scopes(lscope.clone(), rscope.clone(), &using, kind);
+                let on = match constraint {
+                    ir::JoinConstraint::On(e) => {
+                        let level = Level::sharing(scope.clone(), ctx.current());
+                        let jctx = ctx.nested_same_level(&level).with_clause(Clause::JoinOn);
+                        Some(self.bind_predicate(e, "JOIN/ON", &jctx)?)
+                    }
+                    ir::JoinConstraint::Using(_) | ir::JoinConstraint::Natural => {
+                        let mut conds = Vec::new();
+                        for name in &using {
+                            let li = find_col(&lscope, name).ok_or_else(|| {
+                                SqlError::undefined_column(&format!("\"{name}\""))
+                                    .with_detail(format!("column \"{name}\" specified in USING clause does not exist in left table"))
+                            })?;
+                            let ri = find_col(&rscope, name).ok_or_else(|| {
+                                SqlError::undefined_column(&format!("\"{name}\""))
+                                    .with_detail(format!("column \"{name}\" specified in USING clause does not exist in right table"))
+                            })?;
+                            let (lt, rt) = (lscope.cols[li].ty.clone(), rscope.cols[ri].ty.clone());
+                            conds.push(self.apply_binary("=", Expr::Col(li), lt, Expr::Col(lw + ri), rt)?.0);
+                        }
+                        if conds.is_empty() { None } else { Some(Expr::And(conds)) }
+                    }
+                    ir::JoinConstraint::None => {
+                        if matches!(kind, JoinKind::Left | JoinKind::Right | JoinKind::Full) {
+                            return Err(
+                                SqlError::syntax("syntax error at or near \"WHERE\"").with_detail("OUTER JOIN requires a join condition")
+                            );
+                        }
+                        None
+                    }
+                };
+                Ok((
+                    Rel::Join { kind, left: Box::new(lrel), right: Box::new(rrel), on, lateral, left_width: lw, right_width: rw },
+                    scope,
+                    false,
+                ))
+            }
+        }
+    }
+
+    fn bind_function_scan(
+        &self,
+        call: &ir::FunctionCall,
+        alias: Option<&ir::TableAlias>,
+        ordinality: bool,
+        ctx: &Ctx,
+        left: &Scope,
+    ) -> SqlResult<(Rel, Scope, bool)> {
+        let name = call.name.base();
+        let left_level = Level::new(left.clone());
+        let own_level = Level::new(Scope::default());
+        let fctx = if left.cols.is_empty() { ctx.from_item(&[&own_level]) } else { ctx.from_item(&[&left_level, &own_level]) }
+            .with_clause(Clause::FromFunction);
+        let bound = call.args.iter().map(|a| self.bind_expr(a, &fctx)).collect::<SqlResult<Vec<_>>>()?;
+        let types: Vec<Type> = bound.iter().map(|(_, t)| t.clone()).collect();
+        let (out_cols, targets, srf): (Vec<(String, Type)>, Vec<Type>, crate::plan::SrfFn) =
+            if let Some((outs, targets, f)) = crate::funcs::array::resolve_srf(name, &types)? {
+                let names: Vec<String> =
+                    if outs.len() == 1 { vec![name.to_owned()] } else { (0..outs.len()).map(|_| name.to_owned()).collect() };
+                (names.into_iter().zip(outs).collect(), targets, f)
+            } else if let Some((cols, f)) = crate::funcs::json::resolve_srf(name, &types) {
+                (cols.into_iter().map(|(n, t)| (n.to_owned(), t)).collect(), vec![Type::Jsonb], f)
+            } else {
+                // A scalar function in FROM yields one row with one column.
+                let (e, t) = self.bind_expr(&ir::Expr::Function(Box::new(call.clone())), &fctx)?;
+                let alias_name = alias.map_or_else(|| name.to_owned(), |a| a.name.clone());
+                let mut cols = vec![ScopeCol::new(Some(alias_name.clone()), name.to_owned(), t)];
+                if let Some(a) = alias {
+                    apply_column_aliases(&mut cols, &a.columns, &a.name)?;
+                    if a.columns.is_empty() {
+                        cols[0].name = a.name.clone();
+                    }
+                }
+                let correlated = !left.cols.is_empty() && own_level.correlated.get();
+                return Ok((Rel::Values { rows: vec![vec![e]] }, Scope::from_cols(cols), correlated));
+            };
+        let args = bound
+            .into_iter()
+            .zip(&targets)
+            .map(|((e, et), t)| super::coerce(self, e, &et, t, CoercionContext::Implicit))
+            .collect::<SqlResult<Vec<_>>>()?;
+        let alias_name = alias.map_or_else(|| name.to_owned(), |a| a.name.clone());
+        let mut cols: Vec<ScopeCol> = out_cols.into_iter().map(|(n, t)| ScopeCol::new(Some(alias_name.clone()), n, t)).collect();
+        if ordinality {
+            cols.push(ScopeCol::new(Some(alias_name.clone()), "ordinality", Type::Int8));
+        }
+        if let Some(a) = alias {
+            // For single-column functions the alias also names the column.
+            if a.columns.is_empty() && cols.len() == 1 + usize::from(ordinality) {
+                cols[0].name = a.name.clone();
+            }
+            apply_column_aliases(&mut cols, &a.columns, &a.name)?;
+        }
+        let correlated = !left.cols.is_empty() && own_level.correlated.get();
+        Ok((Rel::FuncScan { srf: crate::plan::Srf { name: "srf", f: srf }, args, ordinality }, Scope::from_cols(cols), correlated))
+    }
+
+    /// A named relation in FROM: CTE, table, view, or virtual catalog table.
+    fn bind_relation(&self, name: &ir::ObjectName, alias: Option<&ir::TableAlias>, ctx: &Ctx) -> SqlResult<(Rel, Scope)> {
+        let qualifier = alias.map_or_else(|| name.base().to_owned(), |a| a.name.clone());
+        if name.0.len() == 1
+            && let Some(cte) = ctx.ctes.iter().rev().find(|c| c.name == name.base())
+        {
+            let mut cols: Vec<ScopeCol> =
+                cte.columns.iter().map(|(n, t)| ScopeCol::new(Some(qualifier.clone()), n.clone(), t.clone())).collect();
+            if let Some(a) = alias {
+                apply_column_aliases(&mut cols, &a.columns, &a.name)?;
+            }
+            return Ok((Rel::CteScan { id: cte.id }, Scope::from_cols(cols)));
+        }
+        if let Some(schema) = name.schema()
+            && (schema == "pg_catalog" || schema == "information_schema")
+        {
+            return self.bind_virtual(schema, name.base(), &qualifier, alias);
+        }
+        let base = self.catalog.normalize(name)?;
+        match self.catalog.relation(base) {
+            Some(Relation::Table(def)) => {
+                let mut cols = Vec::new();
+                let mut slots = Vec::new();
+                let mut missing = Vec::new();
+                for (i, c) in def.columns.iter().enumerate() {
+                    if c.dropped {
+                        continue;
+                    }
+                    let mut sc = ScopeCol::new(Some(qualifier.clone()), c.name.clone(), c.ty.clone());
+                    sc.table_oid = def.oid;
+                    sc.attnum = i16::try_from(i + 1).unwrap_or(i16::MAX);
+                    sc.typmod = c.typmod;
+                    cols.push(sc);
+                    slots.push(i);
+                    missing.push(c.missing.clone());
+                }
+                if let Some(a) = alias {
+                    apply_column_aliases(&mut cols, &a.columns, &a.name)?;
+                }
+                Ok((Rel::Scan { table: def.oid, slots, missing }, Scope::from_cols(cols)))
+            }
+            Some(Relation::View(view)) => {
+                let top = Level::new(Scope::default());
+                let vctx = Ctx::new(&top);
+                let bound = self.bind_query(&view.query, &vctx)?;
+                let mut cols: Vec<ScopeCol> = bound
+                    .columns
+                    .iter()
+                    .zip(&view.columns)
+                    .map(|(c, n)| ScopeCol::new(Some(qualifier.clone()), n.clone(), c.ty.clone()))
+                    .collect();
+                if let Some(a) = alias {
+                    apply_column_aliases(&mut cols, &a.columns, &a.name)?;
+                }
+                Ok((bound.rel, Scope::from_cols(cols)))
+            }
+            Some(Relation::Sequence(seq)) => {
+                // SELECT * FROM seq: last_value, log_cnt, is_called.
+                let cols = vec![
+                    ScopeCol::new(Some(qualifier.clone()), "last_value", Type::Int8),
+                    ScopeCol::new(Some(qualifier.clone()), "log_cnt", Type::Int8),
+                    ScopeCol::new(Some(qualifier), "is_called", Type::Bool),
+                ];
+                let _ = seq;
+                Err(feature("selecting from a sequence")).or(Ok((Rel::Values { rows: vec![] }, Scope::from_cols(cols))))
+            }
+            Some(Relation::Index { .. }) => Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{base}\" is an index"))),
+            None => match crate::catalog_views::lookup("pg_catalog", base) {
+                Some(_) => self.bind_virtual("pg_catalog", base, &qualifier, alias),
+                None => Err(SqlError::undefined_table(&name.to_string())),
+            },
+        }
+    }
+
+    fn bind_virtual(&self, schema: &str, name: &str, qualifier: &str, alias: Option<&ir::TableAlias>) -> SqlResult<(Rel, Scope)> {
+        let view = crate::catalog_views::lookup(schema, name).ok_or_else(|| SqlError::undefined_table(&format!("{schema}.{name}")))?;
+        let rows = (view.rows)(self.catalog);
+        let mut cols: Vec<ScopeCol> =
+            view.columns.iter().map(|(n, t)| ScopeCol::new(Some(qualifier.to_owned()), (*n).to_owned(), t.clone())).collect();
+        if let Some(a) = alias {
+            apply_column_aliases(&mut cols, &a.columns, &a.name)?;
+        }
+        let rows = rows.into_iter().map(|r| r.into_iter().map(Expr::Const).collect()).collect();
+        Ok((Rel::Values { rows }, Scope::from_cols(cols)))
+    }
+}
+
+enum OrderTarget {
+    Output(usize),
+    Expr(Expr),
+}
+
+fn ordinal(e: &ir::Expr) -> Option<usize> {
+    match e {
+        ir::Expr::Literal(ir::Literal::Integer(s)) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+fn bare_name(e: &ir::Expr) -> Option<String> {
+    match e {
+        ir::Expr::Column(parts) if parts.len() == 1 => Some(parts[0].clone()),
+        _ => None,
+    }
+}
+
+fn contains_column(e: &Expr) -> bool {
+    let mut found = false;
+    e.walk(&mut |x| {
+        if matches!(x, Expr::Col(_)) {
+            found = true;
+        }
+    });
+    found
+}
+
+fn find_col(scope: &Scope, name: &str) -> Option<usize> {
+    scope.cols.iter().position(|c| !c.dropped && !c.hidden_unqualified && c.name == name)
+}
+
+fn check_duplicate_aliases(l: &Scope, r: &Scope) -> SqlResult<()> {
+    let lq: std::collections::HashSet<&str> = l.cols.iter().filter_map(|c| c.qualifier.as_deref()).collect();
+    if let Some(dup) = r.cols.iter().filter_map(|c| c.qualifier.as_deref()).find(|q| lq.contains(q)) {
+        return Err(SqlError::new(code::DUPLICATE_ALIAS, format!("table name \"{dup}\" specified more than once")));
+    }
+    Ok(())
+}
+
+/// Combines two scopes for a join. USING columns appear once in `*` (first), and unqualified
+/// references resolve to the left copy (the right copy for RIGHT JOIN).
+fn join_scopes(l: Scope, r: Scope, using: &[String], kind: JoinKind) -> Scope {
+    let lw = l.width();
+    let mut cols = l.cols.clone();
+    cols.extend(r.cols.iter().cloned());
+    let mut star = Vec::new();
+    let mut merged_l = Vec::new();
+    let mut merged_r = Vec::new();
+    for name in using {
+        let li = find_col(&l, name);
+        let ri = find_col(&r, name);
+        if let (Some(li), Some(ri)) = (li, ri) {
+            let (keep, hide) = if kind == JoinKind::Right { (lw + ri, li) } else { (li, lw + ri) };
+            cols[hide].hidden_unqualified = true;
+            star.push(keep);
+            merged_l.push(li);
+            merged_r.push(lw + ri);
+        }
+    }
+    star.extend(l.star.iter().copied().filter(|i| !merged_l.contains(i)));
+    star.extend(r.star.iter().map(|i| i + lw).filter(|i| !merged_r.contains(i)));
+    Scope { cols, star }
+}
+
+fn apply_column_aliases(cols: &mut [ScopeCol], aliases: &[String], table: &str) -> SqlResult<()> {
+    let live: Vec<usize> = cols.iter().enumerate().filter(|(_, c)| !c.dropped).map(|(i, _)| i).collect();
+    if aliases.len() > live.len() {
+        return Err(SqlError::new(
+            code::INVALID_COLUMN_REFERENCE,
+            format!("table \"{table}\" has {} columns available but {} columns specified", live.len(), aliases.len()),
+        ));
+    }
+    for (a, &i) in aliases.iter().zip(&live) {
+        cols[i].name = a.clone();
+    }
+    for c in cols.iter_mut() {
+        c.qualifier = Some(table.to_owned());
+    }
+    Ok(())
+}
+
+fn rename_columns(columns: &mut [(String, Type)], names: &[String], cte: &str) -> SqlResult<()> {
+    if names.len() > columns.len() {
+        return Err(SqlError::new(
+            code::INVALID_COLUMN_REFERENCE,
+            format!("WITH query \"{cte}\" has {} columns available but {} columns specified", columns.len(), names.len()),
+        ));
+    }
+    for (c, n) in columns.iter_mut().zip(names) {
+        c.0 = n.clone();
+    }
+    Ok(())
+}
+
+/// Wraps a plan in a projection that casts columns to the target types where they differ.
+fn coerce_columns(b: &Binder, rel: Rel, from: &[Type], to: &[Type]) -> SqlResult<Rel> {
+    if from == to {
+        return Ok(rel);
+    }
+    // VALUES rows can be coerced in place (so literals are parsed into the right type).
+    if let Rel::Values { rows } = rel {
+        let rows = rows
+            .into_iter()
+            .map(|r| {
+                r.into_iter()
+                    .zip(from.iter().zip(to))
+                    .map(|(e, (f, t))| super::coerce(b, e, f, t, CoercionContext::Implicit))
+                    .collect::<SqlResult<Vec<_>>>()
+            })
+            .collect::<SqlResult<Vec<_>>>()?;
+        return Ok(Rel::Values { rows });
+    }
+    let exprs = from
+        .iter()
+        .zip(to)
+        .enumerate()
+        .map(|(i, (f, t))| super::coerce(b, Expr::Col(i), f, t, CoercionContext::Implicit))
+        .collect::<SqlResult<Vec<_>>>()?;
+    Ok(Rel::Project { input: Box::new(rel), exprs })
+}
+
+fn collect_aggs(e: &Expr, out: &mut Vec<AggCall>) {
+    e.walk(&mut |x| {
+        if let Expr::AggCall(a) = x
+            && !out.contains(a)
+        {
+            out.push((**a).clone());
+        }
+    });
+}
+
+fn collect_windows(e: &Expr, out: &mut Vec<WinCall>) {
+    e.walk(&mut |x| {
+        if let Expr::WindowCall(w) = x
+            && !out.contains(w)
+        {
+            out.push((**w).clone());
+        }
+    });
+}
+
+/// Tables whose primary key is fully covered by plain-column GROUP BY keys: their other
+/// columns are functionally dependent and may appear ungrouped (Postgres' rule).
+fn functional_dependencies(group: &[Expr], scope: &Scope, catalog: &pgmem_catalog::Catalog) -> Vec<pgmem_catalog::Oid> {
+    let grouped_cols: Vec<usize> = group.iter().filter_map(|g| if let Expr::Col(i) = g { Some(*i) } else { None }).collect();
+    let mut out = Vec::new();
+    for t in catalog.tables() {
+        let Some(pk) = t.primary_key() else { continue };
+        // Every qualifier instance of this table in scope is considered separately.
+        let quals: std::collections::BTreeSet<Option<String>> =
+            scope.cols.iter().filter(|c| c.table_oid == t.oid).map(|c| c.qualifier.clone()).collect();
+        for q in quals {
+            let covered = pk.iter().all(|pkcol| {
+                scope.cols.iter().enumerate().any(|(i, c)| {
+                    c.table_oid == t.oid
+                        && c.qualifier == q
+                        && usize::from(c.attnum.unsigned_abs()) == pkcol + 1
+                        && grouped_cols.contains(&i)
+                })
+            });
+            if covered {
+                out.push(t.oid);
+            }
+        }
+    }
+    out
+}
+
+/// Rewrites grouped-query expressions to reference the Aggregate's output.
+struct Grouping<'s> {
+    group: Vec<Expr>,
+    aggs: Vec<AggCall>,
+    scope: &'s Scope,
+    pk_tables: Vec<pgmem_catalog::Oid>,
+}
+
+impl Grouping<'_> {
+    fn rewrite(&mut self, e: Expr) -> SqlResult<Expr> {
+        if let Some(i) = self.group.iter().position(|g| *g == e) {
+            return Ok(Expr::Col(i));
+        }
+        match e {
+            Expr::AggCall(a) => {
+                let pos = match self.aggs.iter().position(|x| *x == *a) {
+                    Some(p) => p,
+                    None => {
+                        self.aggs.push(*a);
+                        self.aggs.len() - 1
+                    }
+                };
+                Ok(Expr::Col(self.group.len() + pos))
+            }
+            Expr::Col(i) => {
+                let c = &self.scope.cols[i];
+                if c.table_oid != 0 && self.pk_tables.contains(&c.table_oid) {
+                    // Functionally dependent on a grouped primary key: carry it as an extra key.
+                    self.group.push(Expr::Col(i));
+                    return Ok(Expr::Col(self.group.len() - 1));
+                }
+                let qual = c.qualifier.as_deref().map(|q| format!("{q}.")).unwrap_or_default();
+                Err(SqlError::new(
+                    code::GROUPING_ERROR,
+                    format!("column \"{qual}{}\" must appear in the GROUP BY clause or be used in an aggregate function", c.name),
+                ))
+            }
+            Expr::Subquery { correlated: true, .. } => Err(feature("correlated subqueries in the select list of a grouped query")),
+            Expr::WindowCall(mut w) => {
+                w.args = w.args.into_iter().map(|a| self.rewrite(a)).collect::<SqlResult<Vec<_>>>()?;
+                w.partition_by = w.partition_by.into_iter().map(|a| self.rewrite(a)).collect::<SqlResult<Vec<_>>>()?;
+                w.order_by =
+                    w.order_by.into_iter().map(|k| Ok(SortKey { expr: self.rewrite(k.expr)?, ..k })).collect::<SqlResult<Vec<_>>>()?;
+                if let Some(agg) = w.agg.take() {
+                    let mut agg = agg;
+                    agg.args = agg.args.into_iter().map(|a| self.rewrite(a)).collect::<SqlResult<Vec<_>>>()?;
+                    w.agg = Some(agg);
+                }
+                Ok(Expr::WindowCall(w))
+            }
+            other => map_children(other, &mut |c| self.rewrite(c)),
+        }
+    }
+}
+
+/// Applies `f` to each direct child expression.
+fn map_children(e: Expr, f: &mut dyn FnMut(Expr) -> SqlResult<Expr>) -> SqlResult<Expr> {
+    let b = |x: Box<Expr>, f: &mut dyn FnMut(Expr) -> SqlResult<Expr>| -> SqlResult<Box<Expr>> { Ok(Box::new(f(*x)?)) };
+    Ok(match e {
+        leaf @ (Expr::Const(_) | Expr::Col(_) | Expr::Outer { .. } | Expr::Param(_) | Expr::AggCall(_) | Expr::WindowCall(_)) => leaf,
+        Expr::Call { func, args } => Expr::Call { func, args: args.into_iter().map(&mut *f).collect::<SqlResult<Vec<_>>>()? },
+        Expr::Cast { expr, to, typmod } => Expr::Cast { expr: b(expr, f)?, to, typmod },
+        Expr::And(v) => Expr::And(v.into_iter().map(&mut *f).collect::<SqlResult<Vec<_>>>()?),
+        Expr::Or(v) => Expr::Or(v.into_iter().map(&mut *f).collect::<SqlResult<Vec<_>>>()?),
+        Expr::Not(x) => Expr::Not(b(x, f)?),
+        Expr::IsNull { expr, negated } => Expr::IsNull { expr: b(expr, f)?, negated },
+        Expr::IsDistinct { left, right, negated } => Expr::IsDistinct { left: b(left, f)?, right: b(right, f)?, negated },
+        Expr::Case { operand, whens, else_result } => Expr::Case {
+            operand: operand.map(|o| b(o, f)).transpose()?,
+            whens: whens.into_iter().map(|(w, t)| Ok((f(w)?, f(t)?))).collect::<SqlResult<Vec<_>>>()?,
+            else_result: else_result.map(|x| b(x, f)).transpose()?,
+        },
+        Expr::Coalesce(v) => Expr::Coalesce(v.into_iter().map(&mut *f).collect::<SqlResult<Vec<_>>>()?),
+        Expr::MinMax { args, greatest } => Expr::MinMax { args: args.into_iter().map(&mut *f).collect::<SqlResult<Vec<_>>>()?, greatest },
+        Expr::NullIf(x, y) => Expr::NullIf(b(x, f)?, b(y, f)?),
+        Expr::InList { probe, list, cmp, negated } => {
+            Expr::InList { probe: b(probe, f)?, list: list.into_iter().map(&mut *f).collect::<SqlResult<Vec<_>>>()?, cmp, negated }
+        }
+        Expr::AnyAll { left, array, cmp, all } => Expr::AnyAll { left: b(left, f)?, array: b(array, f)?, cmp, all },
+        Expr::Subquery { id, plan, kind, correlated } => {
+            let kind = match kind {
+                crate::plan::SubqueryKind::Quantified { probe, cmp, all } => {
+                    crate::plan::SubqueryKind::Quantified { probe: b(probe, f)?, cmp, all }
+                }
+                k => k,
+            };
+            Expr::Subquery { id, plan, kind, correlated }
+        }
+        Expr::Array(v) => Expr::Array(v.into_iter().map(&mut *f).collect::<SqlResult<Vec<_>>>()?),
+        Expr::Subscript { expr, index, upper, slice } => {
+            Expr::Subscript { expr: b(expr, f)?, index: b(index, f)?, upper: upper.map(|u| b(u, f)).transpose()?, slice }
+        }
+    })
+}
+
+/// True if a query references `name` (a recursive CTE's self-reference) in a FROM clause.
+fn query_references(q: &ir::Query, name: &str) -> bool {
+    fn in_ref(t: &ir::TableRef, name: &str) -> bool {
+        match t {
+            ir::TableRef::Table { name: n, .. } => n.0.len() == 1 && n.base() == name,
+            ir::TableRef::Subquery { query, .. } => query_references(query, name),
+            ir::TableRef::Join { left, right, .. } => in_ref(left, name) || in_ref(right, name),
+            ir::TableRef::Function { .. } => false,
+        }
+    }
+    fn in_set(s: &ir::SetExpr, name: &str) -> bool {
+        match s {
+            ir::SetExpr::Select(sel) => sel.from.iter().any(|t| in_ref(t, name)),
+            ir::SetExpr::Values(_) => false,
+            ir::SetExpr::SetOp { left, right, .. } => in_set(left, name) || in_set(right, name),
+            ir::SetExpr::Query(q) => query_references(q, name),
+        }
+    }
+    in_set(&q.body, name)
+}
+
+#[allow(dead_code)]
+fn unused(_: Value) {}

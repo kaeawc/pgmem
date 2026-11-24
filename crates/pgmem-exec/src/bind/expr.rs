@@ -1,0 +1,1039 @@
+//! Expression binding.
+
+use super::{Binder, Clause, Ctx, Level, agg_misuse, feature, resolve_type_name, window_misuse};
+use crate::cast::{CoercionContext, cast_context, cast_value, cast_value_ctx};
+use crate::funcs::{self, EQ, common_type, comparison, resolve_binary, resolve_function, resolve_unary};
+use crate::plan::{AggCall, AggKind, Expr, Frame, FrameBound, FrameUnits, SortKey, SubqueryKind, WinCall, WinKind};
+use pgmem_ir as ir;
+use pgmem_types::{Numeric, SqlError, SqlResult, Type, Value, code, text};
+
+pub type Bound = (Expr, Type);
+
+/// Converts a bound expression to `to`. Untyped string literals are parsed directly into the
+/// target type (so `'abc'::int` fails at bind time, like Postgres), untyped parameters take
+/// the target type, and constants are folded.
+pub fn coerce(b: &Binder, e: Expr, from: &Type, to: &Type, context: CoercionContext) -> SqlResult<Expr> {
+    coerce_inner(b, e, from, to, -1, context, true)
+}
+
+/// Assignment coercion into a column of type `to` with modifier `typmod` (INSERT / UPDATE).
+pub fn coerce_assignment(b: &Binder, e: Expr, from: &Type, to: &Type, typmod: i32, column: &str) -> SqlResult<Expr> {
+    if cast_context(from, to).is_none_or(|c| c > CoercionContext::Assignment) {
+        return Err(SqlError::datatype_mismatch(format!(
+            "column \"{column}\" is of type {} but expression is of type {}",
+            to.name(),
+            from.name()
+        ))
+        .with_hint("You will need to rewrite or cast the expression."));
+    }
+    coerce_inner(b, e, from, to, typmod, CoercionContext::Assignment, false)
+}
+
+fn coerce_inner(b: &Binder, e: Expr, from: &Type, to: &Type, typmod: i32, context: CoercionContext, explicit: bool) -> SqlResult<Expr> {
+    if *to == Type::Unknown {
+        return Ok(e);
+    }
+    if from == to && typmod < 0 {
+        return Ok(e);
+    }
+    match (&e, from) {
+        (Expr::Param(i), Type::Unknown) => {
+            b.set_param_type(*i, to);
+            return Ok(if typmod >= 0 { Expr::Cast { expr: Box::new(e), to: to.clone(), typmod } } else { e });
+        }
+        (Expr::Const(Value::Text(s)), Type::Unknown) => {
+            let v = text::decode(s, to)?;
+            return Ok(Expr::Const(cast_value_ctx(v, to, typmod, explicit)?));
+        }
+        (Expr::Const(Value::Null), _) => return Ok(Expr::Const(Value::Null)),
+        _ => {}
+    }
+    if *from != Type::Unknown && cast_context(from, to).is_none_or(|c| c > context) {
+        return Err(SqlError::cannot_coerce(&from.name(), &to.name()));
+    }
+    if let Expr::Const(v) = &e {
+        return Ok(Expr::Const(cast_value_ctx(v.clone(), to, typmod, explicit)?));
+    }
+    Ok(Expr::Cast { expr: Box::new(e), to: to.clone(), typmod })
+}
+
+/// The column name Postgres derives for an unaliased select-list expression (`FigureColname`).
+pub fn output_name(e: &ir::Expr) -> String {
+    fn inner(e: &ir::Expr) -> Option<String> {
+        match e {
+            ir::Expr::Column(parts) => parts.last().cloned(),
+            ir::Expr::Function(f) => Some(f.name.base().to_owned()),
+            ir::Expr::Cast { expr, ty } => inner(expr).or_else(|| Some(type_display_name(ty))),
+            ir::Expr::TypedString { ty, .. } => Some(type_display_name(ty)),
+            ir::Expr::Case { .. } => Some("case".into()),
+            ir::Expr::Exists { .. } => Some("exists".into()),
+            ir::Expr::Array(_) | ir::Expr::ArraySubquery(_) => Some("array".into()),
+            ir::Expr::Row(_) => Some("row".into()),
+            ir::Expr::Subquery(q) => match &q.body {
+                ir::SetExpr::Select(s) => match s.projection.first() {
+                    Some(ir::SelectItem::Expr { alias: Some(a), .. }) => Some(a.clone()),
+                    Some(ir::SelectItem::Expr { expr, .. }) => inner(expr),
+                    _ => None,
+                },
+                _ => None,
+            },
+            ir::Expr::Subscript { expr, .. } | ir::Expr::Collate { expr, .. } => inner(expr),
+            ir::Expr::Literal(ir::Literal::Bool(_)) => Some("bool".into()),
+            _ => None,
+        }
+    }
+    inner(e).unwrap_or_else(|| "?column?".into())
+}
+
+/// Postgres' name for a type in a cast-derived column name (`'1'::int` → `int4`).
+fn type_display_name(t: &ir::TypeName) -> String {
+    match Type::from_sql_name(&t.name) {
+        Some(ty) => match ty {
+            Type::Text if t.name == "varchar" || t.name == "character varying" => "varchar".to_owned(),
+            Type::Text if t.name == "bpchar" || t.name == "char" || t.name == "character" => "bpchar".to_owned(),
+            Type::Jsonb if t.name == "json" => "json".to_owned(),
+            other => other.typname(),
+        },
+        None => t.name.clone(),
+    }
+}
+
+fn literal(l: &ir::Literal) -> SqlResult<Bound> {
+    Ok(match l {
+        ir::Literal::Null => (Expr::Const(Value::Null), Type::Unknown),
+        ir::Literal::Bool(b) => (Expr::Const(Value::Bool(*b)), Type::Bool),
+        ir::Literal::Integer(s) => match s.parse::<i64>() {
+            Ok(n) => match i32::try_from(n) {
+                Ok(n) => (Expr::Const(Value::Int4(n)), Type::Int4),
+                Err(_) => (Expr::Const(Value::Int8(n)), Type::Int8),
+            },
+            Err(_) => (Expr::Const(Value::Numeric(Numeric::parse(s)?)), Type::Numeric),
+        },
+        ir::Literal::Decimal(s) => (Expr::Const(Value::Numeric(Numeric::parse(s)?)), Type::Numeric),
+        ir::Literal::String(s) => (Expr::Const(Value::Text(s.clone())), Type::Unknown),
+    })
+}
+
+/// The common type of a set of expressions (CASE branches, COALESCE args, VALUES columns,
+/// UNION columns), following `select_common_type`: all unknown → text.
+pub fn common_of(types: &[Type], what: &str) -> SqlResult<Type> {
+    let mut acc = Type::Unknown;
+    for t in types {
+        acc = match (&acc, t) {
+            (Type::Unknown, t) => t.clone(),
+            (a, Type::Unknown) => a.clone(),
+            (a, t) => common_type(a, t)
+                .filter(|c| *c != Type::Unknown)
+                .ok_or_else(|| SqlError::datatype_mismatch(format!("{what} types {} and {} cannot be matched", a.name(), t.name())))?,
+        };
+    }
+    Ok(if acc == Type::Unknown { Type::Text } else { acc })
+}
+
+fn aggregate_kind(name: &str) -> Option<AggKind> {
+    Some(match name {
+        "count" => AggKind::Count,
+        "sum" => AggKind::Sum,
+        "avg" => AggKind::Avg,
+        "min" => AggKind::Min,
+        "max" => AggKind::Max,
+        "bool_and" | "every" => AggKind::BoolAnd,
+        "bool_or" => AggKind::BoolOr,
+        "string_agg" => AggKind::StringAgg,
+        "array_agg" => AggKind::ArrayAgg,
+        "jsonb_agg" | "json_agg" => AggKind::JsonbAgg,
+        "jsonb_object_agg" | "json_object_agg" => AggKind::JsonbObjectAgg,
+        "stddev" | "stddev_samp" => AggKind::StddevSamp,
+        "stddev_pop" => AggKind::StddevPop,
+        "variance" | "var_samp" => AggKind::VarSamp,
+        "var_pop" => AggKind::VarPop,
+        "bit_and" => AggKind::BitAnd,
+        "bit_or" => AggKind::BitOr,
+        _ => return None,
+    })
+}
+
+fn window_kind(name: &str) -> Option<WinKind> {
+    Some(match name {
+        "row_number" => WinKind::RowNumber,
+        "rank" => WinKind::Rank,
+        "dense_rank" => WinKind::DenseRank,
+        "percent_rank" => WinKind::PercentRank,
+        "cume_dist" => WinKind::CumeDist,
+        "ntile" => WinKind::Ntile,
+        "lag" => WinKind::Lag,
+        "lead" => WinKind::Lead,
+        "first_value" => WinKind::FirstValue,
+        "last_value" => WinKind::LastValue,
+        "nth_value" => WinKind::NthValue,
+        _ => return None,
+    })
+}
+
+/// Argument coercion targets and result type of an aggregate.
+fn aggregate_types(kind: AggKind, name: &str, args: &[Type]) -> SqlResult<(Vec<Type>, Type)> {
+    let err = || funcs::no_function(name, args);
+    let first = args.first().cloned().unwrap_or(Type::Unknown);
+    let numeric_arg = |t: &Type| if *t == Type::Unknown { Type::Numeric } else { t.clone() };
+    Ok(match kind {
+        AggKind::CountStar => (vec![], Type::Int8),
+        AggKind::Count => (vec![if first == Type::Unknown { Type::Text } else { first }], Type::Int8),
+        AggKind::Sum => {
+            let t = numeric_arg(&first);
+            let ret = match t {
+                Type::Int2 | Type::Int4 => Type::Int8,
+                Type::Int8 | Type::Numeric => Type::Numeric,
+                Type::Float4 => Type::Float4,
+                Type::Float8 => Type::Float8,
+                Type::Interval => Type::Interval,
+                _ => return Err(err()),
+            };
+            (vec![t], ret)
+        }
+        AggKind::Avg => {
+            let t = numeric_arg(&first);
+            let ret = match t {
+                Type::Int2 | Type::Int4 | Type::Int8 | Type::Numeric => Type::Numeric,
+                Type::Float4 | Type::Float8 => Type::Float8,
+                Type::Interval => Type::Interval,
+                _ => return Err(err()),
+            };
+            (vec![t], ret)
+        }
+        AggKind::Min | AggKind::Max => {
+            let t = if first == Type::Unknown { Type::Text } else { first };
+            if matches!(t, Type::Jsonb | Type::Bool | Type::Uuid) && !matches!(t, Type::Uuid) {
+                return Err(err());
+            }
+            (vec![t.clone()], t)
+        }
+        AggKind::BoolAnd | AggKind::BoolOr => (vec![Type::Bool], Type::Bool),
+        AggKind::StringAgg => match args {
+            [Type::Bytea, _] => (vec![Type::Bytea, Type::Bytea], Type::Bytea),
+            [_, _] => (vec![Type::Text, Type::Text], Type::Text),
+            _ => return Err(err()),
+        },
+        AggKind::ArrayAgg => {
+            let t = if first == Type::Unknown { Type::Text } else { first };
+            if matches!(t, Type::Array(_)) {
+                return Err(feature("array_agg over arrays (multidimensional arrays)"));
+            }
+            (vec![t.clone()], Type::array_of(t))
+        }
+        AggKind::JsonbAgg => (vec![if first == Type::Unknown { Type::Text } else { first }], Type::Jsonb),
+        AggKind::JsonbObjectAgg => {
+            let v = args.get(1).cloned().unwrap_or(Type::Text);
+            (vec![if first == Type::Unknown { Type::Text } else { first }, if v == Type::Unknown { Type::Text } else { v }], Type::Jsonb)
+        }
+        AggKind::StddevSamp | AggKind::StddevPop | AggKind::VarSamp | AggKind::VarPop => {
+            let t = numeric_arg(&first);
+            match t {
+                Type::Float4 | Type::Float8 => (vec![Type::Float8], Type::Float8),
+                Type::Int2 | Type::Int4 | Type::Int8 | Type::Numeric => (vec![t], Type::Numeric),
+                _ => return Err(err()),
+            }
+        }
+        AggKind::BitAnd | AggKind::BitOr => {
+            if !first.is_integer() {
+                return Err(err());
+            }
+            (vec![first.clone()], first)
+        }
+    })
+}
+
+impl Binder<'_> {
+    pub fn bind_expr(&self, e: &ir::Expr, ctx: &Ctx) -> SqlResult<Bound> {
+        match e {
+            ir::Expr::Literal(l) => literal(l),
+            ir::Expr::Column(parts) => self.bind_column(parts, ctx),
+            ir::Expr::Param(n) => {
+                let idx = n - 1;
+                Ok((Expr::Param(idx), self.param_type(idx)))
+            }
+            ir::Expr::TypedString { ty, value } => {
+                let (t, typmod) = resolve_type_name(ty)?;
+                let v = cast_value(text::decode(value, &t)?, &t, typmod)?;
+                Ok((Expr::Const(v), t))
+            }
+            ir::Expr::Unary { op, expr } => {
+                let (inner, t) = self.bind_expr(expr, ctx)?;
+                let name = match op {
+                    ir::UnaryOp::Minus => "-",
+                    ir::UnaryOp::Plus => "+",
+                    ir::UnaryOp::BitNot => "~",
+                    ir::UnaryOp::SquareRoot => "|/",
+                    ir::UnaryOp::CubeRoot => "||/",
+                    ir::UnaryOp::Abs => "@",
+                };
+                let r = resolve_unary(name, &t)?;
+                let arg = coerce(self, inner, &t, &r.args[0], CoercionContext::Explicit)?;
+                Ok((fold(Expr::Call { func: r.func, args: vec![arg] }), r.ret))
+            }
+            ir::Expr::Binary { op, left, right } => self.bind_binary(op, left, right, ctx),
+            ir::Expr::And(l, r) => {
+                let l = self.bind_bool(l, "AND", ctx)?;
+                let r = self.bind_bool(r, "AND", ctx)?;
+                Ok((flatten(Expr::And(vec![l, r])), Type::Bool))
+            }
+            ir::Expr::Or(l, r) => {
+                let l = self.bind_bool(l, "OR", ctx)?;
+                let r = self.bind_bool(r, "OR", ctx)?;
+                Ok((flatten(Expr::Or(vec![l, r])), Type::Bool))
+            }
+            ir::Expr::Not(inner) => Ok((Expr::Not(Box::new(self.bind_bool(inner, "NOT", ctx)?)), Type::Bool)),
+            ir::Expr::IsNull { expr, negated } => {
+                let (e, t) = self.bind_expr(expr, ctx)?;
+                if let Expr::Param(i) = &e
+                    && t == Type::Unknown
+                {
+                    // Postgres cannot infer a type from IS NULL either.
+                    let _ = i;
+                }
+                Ok((Expr::IsNull { expr: Box::new(e), negated: *negated }, Type::Bool))
+            }
+            ir::Expr::IsBool { expr, value, negated } => {
+                let e = self.bind_bool(expr, "IS", ctx)?;
+                Ok((
+                    match value {
+                        None => Expr::IsNull { expr: Box::new(e), negated: *negated },
+                        Some(v) => {
+                            Expr::IsDistinct { left: Box::new(e), right: Box::new(Expr::Const(Value::Bool(*v))), negated: !*negated }
+                        }
+                    },
+                    Type::Bool,
+                ))
+            }
+            ir::Expr::IsDistinctFrom { left, right, negated } => {
+                let (l, lt) = self.bind_expr(left, ctx)?;
+                let (r, rt) = self.bind_expr(right, ctx)?;
+                let t = common_type(&lt, &rt).ok_or_else(|| funcs::no_operator("=", Some(&lt), &rt))?;
+                let l = coerce(self, l, &lt, &t, CoercionContext::Implicit)?;
+                let r = coerce(self, r, &rt, &t, CoercionContext::Implicit)?;
+                Ok((Expr::IsDistinct { left: Box::new(l), right: Box::new(r), negated: *negated }, Type::Bool))
+            }
+            ir::Expr::Between { expr, low, high, negated, symmetric } => {
+                let ge = ir::Expr::Binary { op: ">=".into(), left: expr.clone(), right: low.clone() };
+                let le = ir::Expr::Binary { op: "<=".into(), left: expr.clone(), right: high.clone() };
+                let mut combined = ir::Expr::And(Box::new(ge), Box::new(le));
+                if *symmetric {
+                    let ge2 = ir::Expr::Binary { op: ">=".into(), left: expr.clone(), right: high.clone() };
+                    let le2 = ir::Expr::Binary { op: "<=".into(), left: expr.clone(), right: low.clone() };
+                    combined = ir::Expr::Or(Box::new(combined), Box::new(ir::Expr::And(Box::new(ge2), Box::new(le2))));
+                }
+                let (b, _) = self.bind_expr(&combined, ctx)?;
+                Ok((if *negated { Expr::Not(Box::new(b)) } else { b }, Type::Bool))
+            }
+            ir::Expr::InList { expr, list, negated } => self.bind_in_list(expr, list, *negated, ctx),
+            ir::Expr::InSubquery { expr, query, negated } => {
+                let (probe, pt) = self.bind_expr(expr, ctx)?;
+                let (plan, ct, correlated) = self.bind_subquery_column(query, ctx)?;
+                let t = common_type(&pt, &ct).ok_or_else(|| funcs::no_operator("=", Some(&pt), &ct))?;
+                let probe = coerce(self, probe, &pt, &t, CoercionContext::Implicit)?;
+                let plan = cast_plan_column(plan, &ct, &t);
+                let sub = Expr::Subquery {
+                    id: self.fresh_id(),
+                    plan: Box::new(plan),
+                    kind: SubqueryKind::Quantified { probe: Box::new(probe), cmp: EQ, all: false },
+                    correlated,
+                };
+                Ok((if *negated { Expr::Not(Box::new(sub)) } else { sub }, Type::Bool))
+            }
+            ir::Expr::Exists { query, negated } => {
+                let (plan, correlated) = self.bind_subquery_plan(query, ctx)?;
+                let sub = Expr::Subquery { id: self.fresh_id(), plan: Box::new(plan), kind: SubqueryKind::Exists, correlated };
+                Ok((if *negated { Expr::Not(Box::new(sub)) } else { sub }, Type::Bool))
+            }
+            ir::Expr::Subquery(query) => {
+                let (plan, t, correlated) = self.bind_subquery_column(query, ctx)?;
+                Ok((Expr::Subquery { id: self.fresh_id(), plan: Box::new(plan), kind: SubqueryKind::Scalar, correlated }, t))
+            }
+            ir::Expr::ArraySubquery(query) => {
+                let (plan, t, correlated) = self.bind_subquery_column(query, ctx)?;
+                Ok((Expr::Subquery { id: self.fresh_id(), plan: Box::new(plan), kind: SubqueryKind::Array, correlated }, Type::array_of(t)))
+            }
+            ir::Expr::AnyAll { left, op, right, all } => self.bind_any_all(left, op, right, *all, ctx),
+            ir::Expr::Like { expr, pattern, escape, negated, case_insensitive } => {
+                let func = if *case_insensitive {
+                    funcs::strict("~~*", funcs::string::ilike_fn)
+                } else {
+                    funcs::strict("~~", funcs::string::like_fn)
+                };
+                let call =
+                    self.bind_text_call(func, expr, pattern, escape.as_deref(), if *case_insensitive { "~~*" } else { "~~" }, ctx)?;
+                Ok((if *negated { Expr::Not(Box::new(call)) } else { call }, Type::Bool))
+            }
+            ir::Expr::SimilarTo { expr, pattern, escape, negated } => {
+                let call = self.bind_text_call(
+                    funcs::strict("similar to", funcs::string::similar_fn),
+                    expr,
+                    pattern,
+                    escape.as_deref(),
+                    "~",
+                    ctx,
+                )?;
+                Ok((if *negated { Expr::Not(Box::new(call)) } else { call }, Type::Bool))
+            }
+            ir::Expr::Case { operand, whens, else_result } => self.bind_case(operand.as_deref(), whens, else_result.as_deref(), ctx),
+            ir::Expr::Cast { expr, ty } => self.bind_cast(expr, ty, ctx),
+            ir::Expr::Function(f) => self.bind_function(f, ctx),
+            ir::Expr::Array(items) => {
+                if items.is_empty() {
+                    return Err(SqlError::new(code::INDETERMINATE_DATATYPE, "cannot determine type of empty array")
+                        .with_hint("Explicitly cast to the desired type, for example ARRAY[]::integer[]."));
+                }
+                let bound = items.iter().map(|i| self.bind_expr(i, ctx)).collect::<SqlResult<Vec<_>>>()?;
+                let types: Vec<Type> = bound.iter().map(|(_, t)| t.clone()).collect();
+                let t = common_of(&types, "ARRAY")?;
+                if matches!(t, Type::Array(_)) {
+                    return Err(feature("multidimensional arrays"));
+                }
+                let items =
+                    bound.into_iter().map(|(e, et)| coerce(self, e, &et, &t, CoercionContext::Implicit)).collect::<SqlResult<Vec<_>>>()?;
+                Ok((fold(Expr::Array(items)), Type::array_of(t)))
+            }
+            ir::Expr::Subscript { expr, index } => {
+                let (arr, t) = self.bind_expr(expr, ctx)?;
+                let elem = match &t {
+                    Type::Array(e) => (**e).clone(),
+                    other => {
+                        return Err(SqlError::datatype_mismatch(format!(
+                            "cannot subscript type {} because it does not support subscripting",
+                            other.name()
+                        )));
+                    }
+                };
+                let int_expr = |e: &ir::Expr| -> SqlResult<Expr> {
+                    let (x, xt) = self.bind_expr(e, ctx)?;
+                    coerce(self, x, &xt, &Type::Int4, CoercionContext::Assignment)
+                };
+                Ok(match index {
+                    ir::Subscript::Index(i) => {
+                        (Expr::Subscript { expr: Box::new(arr), index: Box::new(int_expr(i)?), upper: None, slice: false }, elem)
+                    }
+                    ir::Subscript::Slice { lower, upper } => {
+                        let lo = match lower {
+                            Some(l) => int_expr(l)?,
+                            None => Expr::null(),
+                        };
+                        let hi = upper.as_ref().map(|u| int_expr(u)).transpose()?;
+                        (
+                            Expr::Subscript {
+                                expr: Box::new(arr),
+                                index: Box::new(lo),
+                                upper: Some(Box::new(hi.unwrap_or(Expr::null()))),
+                                slice: true,
+                            },
+                            t,
+                        )
+                    }
+                })
+            }
+            ir::Expr::Row(_) => Err(feature("row constructors outside comparisons")),
+            ir::Expr::Collate { expr, .. } => self.bind_expr(expr, ctx),
+            ir::Expr::AtTimeZone { expr, zone } => {
+                let (e, t) = self.bind_expr(expr, ctx)?;
+                let (z, zt) = self.bind_expr(zone, ctx)?;
+                let r = crate::funcs::datetime::resolve_at_time_zone(&t, &zt)?;
+                let z = coerce(self, z, &zt, &Type::Text, CoercionContext::Explicit)?;
+                let e = coerce(self, e, &t, &r.args[1], CoercionContext::Implicit)?;
+                Ok((Expr::Call { func: r.func, args: vec![z, e] }, r.ret))
+            }
+            ir::Expr::Default => Err(SqlError::syntax("DEFAULT is not allowed in this context")),
+        }
+    }
+
+    fn bind_bool(&self, e: &ir::Expr, what: &str, ctx: &Ctx) -> SqlResult<Expr> {
+        let (x, t) = self.bind_expr(e, ctx)?;
+        if t != Type::Bool && t != Type::Unknown {
+            return Err(SqlError::datatype_mismatch(format!("argument of {what} must be type boolean, not type {}", t.name())));
+        }
+        coerce(self, x, &t, &Type::Bool, CoercionContext::Implicit)
+    }
+
+    /// Binds a WHERE/HAVING/ON-style predicate.
+    pub fn bind_predicate(&self, e: &ir::Expr, what: &str, ctx: &Ctx) -> SqlResult<Expr> {
+        let (x, t) = self.bind_expr(e, ctx)?;
+        if t != Type::Bool && t != Type::Unknown {
+            return Err(SqlError::datatype_mismatch(format!("argument of {what} must be type boolean, not type {}", t.name())));
+        }
+        coerce(self, x, &t, &Type::Bool, CoercionContext::Implicit)
+    }
+
+    fn bind_column(&self, parts: &[String], ctx: &Ctx) -> SqlResult<Bound> {
+        let (qualifier, name) = match parts {
+            [n] => (None, n.as_str()),
+            [q, n] => (Some(q.as_str()), n.as_str()),
+            [s, q, n] if s == "public" => (Some(q.as_str()), n.as_str()),
+            _ => return Err(SqlError::syntax(format!("improper qualified name (too many dotted names): {}", parts.join(".")))),
+        };
+        if name == "*" {
+            return Err(SqlError::syntax("row expansion via \"*\" is not supported here"));
+        }
+        let mut qualifier_seen = false;
+        for (depth, level) in ctx.levels.iter().rev().enumerate() {
+            let scope = &level.scope;
+            let mut found: Option<usize> = None;
+            for (i, c) in scope.cols.iter().enumerate() {
+                if c.dropped || c.name != name {
+                    continue;
+                }
+                match qualifier {
+                    Some(q) => {
+                        if c.qualifier.as_deref() != Some(q) {
+                            continue;
+                        }
+                    }
+                    None => {
+                        if c.hidden_unqualified {
+                            continue;
+                        }
+                    }
+                }
+                if found.is_some() {
+                    return Err(SqlError::new(code::AMBIGUOUS_COLUMN, format!("column reference \"{name}\" is ambiguous")));
+                }
+                found = Some(i);
+            }
+            if let Some(q) = qualifier
+                && scope.has_qualifier(q)
+            {
+                qualifier_seen = true;
+                if found.is_none() {
+                    return Err(SqlError::undefined_column(&format!("{q}.{name}")));
+                }
+            }
+            if let Some(i) = found {
+                let t = scope.cols[i].ty.clone();
+                if depth == 0 {
+                    return Ok((Expr::Col(i), t));
+                }
+                // Every level between the reference and its target is correlated.
+                let n = ctx.levels.len();
+                for l in &ctx.levels[n - depth..] {
+                    l.correlated.set(true);
+                }
+                return Ok((Expr::Outer { depth, idx: i }, t));
+            }
+        }
+        match qualifier {
+            Some(q) if !qualifier_seen => Err(SqlError::new(code::UNDEFINED_TABLE, format!("missing FROM-clause entry for table \"{q}\""))),
+            Some(q) => Err(SqlError::undefined_column(&format!("{q}.{name}"))),
+            None => Err(SqlError::undefined_column(&format!("\"{name}\""))),
+        }
+    }
+
+    fn bind_binary(&self, op: &str, left: &ir::Expr, right: &ir::Expr, ctx: &Ctx) -> SqlResult<Bound> {
+        if let (ir::Expr::Row(l), ir::Expr::Row(r)) = (left, right) {
+            return self.bind_row_compare(op, l, r, ctx);
+        }
+        let (l, lt) = self.bind_expr(left, ctx)?;
+        let (r, rt) = self.bind_expr(right, ctx)?;
+        self.apply_binary(op, l, lt, r, rt)
+    }
+
+    pub fn apply_binary(&self, op: &str, l: Expr, lt: Type, r: Expr, rt: Type) -> SqlResult<Bound> {
+        let res = resolve_binary(op, &lt, &rt)?;
+        let l = coerce(self, l, &lt, &res.args[0], CoercionContext::Explicit)?;
+        let r = coerce(self, r, &rt, &res.args[1], CoercionContext::Explicit)?;
+        Ok((fold(Expr::Call { func: res.func, args: vec![l, r] }), res.ret))
+    }
+
+    fn bind_row_compare(&self, op: &str, l: &[ir::Expr], r: &[ir::Expr], ctx: &Ctx) -> SqlResult<Bound> {
+        if l.len() != r.len() {
+            return Err(SqlError::syntax("unequal number of entries in row expressions"));
+        }
+        let mut parts = Vec::new();
+        for (a, b) in l.iter().zip(r) {
+            let (e, _) = self.bind_binary(if op == "<>" { "<>" } else { "=" }, a, b, ctx)?;
+            parts.push(e);
+        }
+        match op {
+            "=" => Ok((Expr::And(parts), Type::Bool)),
+            "<>" | "!=" => Ok((Expr::Or(parts), Type::Bool)),
+            _ => {
+                // Lexicographic: (a1 op b1) OR (a1 = b1 AND a2 op b2) ...
+                let strict_op = match op {
+                    "<=" => "<",
+                    ">=" => ">",
+                    other => other,
+                };
+                let mut alternatives = Vec::new();
+                for i in 0..l.len() {
+                    let mut conj = Vec::new();
+                    for j in 0..i {
+                        conj.push(self.bind_binary("=", &l[j], &r[j], ctx)?.0);
+                    }
+                    let last_op = if i == l.len() - 1 { op } else { strict_op };
+                    conj.push(self.bind_binary(last_op, &l[i], &r[i], ctx)?.0);
+                    alternatives.push(Expr::And(conj));
+                }
+                Ok((Expr::Or(alternatives), Type::Bool))
+            }
+        }
+    }
+
+    fn bind_in_list(&self, expr: &ir::Expr, list: &[ir::Expr], negated: bool, ctx: &Ctx) -> SqlResult<Bound> {
+        if let ir::Expr::Row(lhs) = expr {
+            let mut alts = Vec::new();
+            for item in list {
+                let ir::Expr::Row(rhs) = item else { return Err(SqlError::syntax("IN list items must be row expressions")) };
+                alts.push(self.bind_row_compare("=", lhs, rhs, ctx)?.0);
+            }
+            let e = Expr::Or(alts);
+            return Ok((if negated { Expr::Not(Box::new(e)) } else { e }, Type::Bool));
+        }
+        let (probe, pt) = self.bind_expr(expr, ctx)?;
+        let items = list.iter().map(|i| self.bind_expr(i, ctx)).collect::<SqlResult<Vec<_>>>()?;
+        let mut types = vec![pt.clone()];
+        types.extend(items.iter().map(|(_, t)| t.clone()));
+        let t = common_of(&types, "IN").map_err(|_| {
+            funcs::no_operator(
+                "=",
+                Some(&pt),
+                &items.iter().map(|(_, t)| t.clone()).find(|t| common_type(&pt, t).is_none()).unwrap_or(Type::Unknown),
+            )
+        })?;
+        let probe = coerce(self, probe, &pt, &t, CoercionContext::Implicit)?;
+        let list = items.into_iter().map(|(e, et)| coerce(self, e, &et, &t, CoercionContext::Implicit)).collect::<SqlResult<Vec<_>>>()?;
+        Ok((Expr::InList { probe: Box::new(probe), list, cmp: EQ, negated }, Type::Bool))
+    }
+
+    fn bind_any_all(&self, left: &ir::Expr, op: &str, right: &ir::AnyAllRight, all: bool, ctx: &Ctx) -> SqlResult<Bound> {
+        let cmp = comparison(op).ok_or_else(|| feature(&format!("operator {op} with ANY/ALL")))?;
+        let (l, lt) = self.bind_expr(left, ctx)?;
+        match right {
+            ir::AnyAllRight::Array(arr) => {
+                let (a, at) = self.bind_expr(arr, ctx)?;
+                let elem = match &at {
+                    Type::Array(e) => (**e).clone(),
+                    Type::Unknown => {
+                        if lt == Type::Unknown {
+                            Type::Text
+                        } else {
+                            lt.clone()
+                        }
+                    }
+                    other => {
+                        return Err(SqlError::datatype_mismatch(format!(
+                            "op ANY/ALL (array) requires array on right side, not {}",
+                            other.name()
+                        )));
+                    }
+                };
+                let t = common_type(&lt, &elem).ok_or_else(|| funcs::no_operator(op, Some(&lt), &elem))?;
+                let l = coerce(self, l, &lt, &t, CoercionContext::Implicit)?;
+                let a = coerce(self, a, &at, &Type::array_of(t), CoercionContext::Implicit)?;
+                Ok((Expr::AnyAll { left: Box::new(l), array: Box::new(a), cmp, all }, Type::Bool))
+            }
+            ir::AnyAllRight::Subquery(q) => {
+                let (plan, ct, correlated) = self.bind_subquery_column(q, ctx)?;
+                let t = common_type(&lt, &ct).ok_or_else(|| funcs::no_operator(op, Some(&lt), &ct))?;
+                let l = coerce(self, l, &lt, &t, CoercionContext::Implicit)?;
+                let plan = cast_plan_column(plan, &ct, &t);
+                Ok((
+                    Expr::Subquery {
+                        id: self.fresh_id(),
+                        plan: Box::new(plan),
+                        kind: SubqueryKind::Quantified { probe: Box::new(l), cmp, all },
+                        correlated,
+                    },
+                    Type::Bool,
+                ))
+            }
+        }
+    }
+
+    fn bind_text_call(
+        &self,
+        func: crate::plan::Func,
+        expr: &ir::Expr,
+        pattern: &ir::Expr,
+        escape: Option<&ir::Expr>,
+        opname: &str,
+        ctx: &Ctx,
+    ) -> SqlResult<Expr> {
+        let (e, et) = self.bind_expr(expr, ctx)?;
+        let (p, pt) = self.bind_expr(pattern, ctx)?;
+        if !(et == Type::Unknown || funcs::implicit_ok(&et, &Type::Text))
+            || !(pt == Type::Unknown || funcs::implicit_ok(&pt, &Type::Text))
+            || matches!(
+                et,
+                Type::Int2
+                    | Type::Int4
+                    | Type::Int8
+                    | Type::Numeric
+                    | Type::Float4
+                    | Type::Float8
+                    | Type::Bool
+                    | Type::Uuid
+                    | Type::Jsonb
+                    | Type::Timestamptz
+                    | Type::Timestamp
+                    | Type::Date
+            )
+        {
+            return Err(funcs::no_operator(opname, Some(&et), &pt));
+        }
+        let mut args = vec![
+            coerce(self, e, &et, &Type::Text, CoercionContext::Implicit)?,
+            coerce(self, p, &pt, &Type::Text, CoercionContext::Implicit)?,
+        ];
+        if let Some(esc) = escape {
+            let (x, xt) = self.bind_expr(esc, ctx)?;
+            args.push(coerce(self, x, &xt, &Type::Text, CoercionContext::Implicit)?);
+        }
+        Ok(Expr::Call { func, args })
+    }
+
+    fn bind_case(
+        &self,
+        operand: Option<&ir::Expr>,
+        whens: &[(ir::Expr, ir::Expr)],
+        else_result: Option<&ir::Expr>,
+        ctx: &Ctx,
+    ) -> SqlResult<Bound> {
+        let mut conds = Vec::with_capacity(whens.len());
+        let mut results = Vec::with_capacity(whens.len() + 1);
+        for (w, t) in whens {
+            let cond = match operand {
+                Some(op) => self.bind_binary("=", op, w, ctx)?.0,
+                None => self.bind_bool(w, "CASE/WHEN", ctx)?,
+            };
+            conds.push(cond);
+            results.push(self.bind_expr(t, ctx)?);
+        }
+        let else_bound = else_result.map(|e| self.bind_expr(e, ctx)).transpose()?;
+        let mut types: Vec<Type> = results.iter().map(|(_, t)| t.clone()).collect();
+        if let Some((_, t)) = &else_bound {
+            types.push(t.clone());
+        }
+        let t = common_of(&types, "CASE")?;
+        let mut out_whens = Vec::new();
+        for (c, (r, rt)) in conds.into_iter().zip(results) {
+            out_whens.push((c, coerce(self, r, &rt, &t, CoercionContext::Implicit)?));
+        }
+        let else_expr = else_bound.map(|(e, et)| coerce(self, e, &et, &t, CoercionContext::Implicit)).transpose()?;
+        Ok((Expr::Case { operand: None, whens: out_whens, else_result: else_expr.map(Box::new) }, t))
+    }
+
+    fn bind_cast(&self, expr: &ir::Expr, ty: &ir::TypeName, ctx: &Ctx) -> SqlResult<Bound> {
+        let (t, typmod) = resolve_type_name(ty)?;
+        if let ir::Expr::Array(items) = expr
+            && items.is_empty()
+            && matches!(t, Type::Array(_))
+        {
+            return Ok((Expr::Const(Value::Array(Vec::new())), t));
+        }
+        let (e, et) = self.bind_expr(expr, ctx)?;
+        if et != Type::Unknown && cast_context(&et, &t).is_none() {
+            return Err(SqlError::cannot_coerce(&et.name(), &t.name()));
+        }
+        let out = coerce_inner(self, e, &et, &t, typmod, CoercionContext::Explicit, true)?;
+        // A cast always produces the target type even when no conversion was needed.
+        Ok((out, t))
+    }
+
+    fn bind_function(&self, f: &ir::FunctionCall, ctx: &Ctx) -> SqlResult<Bound> {
+        let name = match f.name.0.as_slice() {
+            [n] => n.as_str(),
+            [s, n] if s == "pg_catalog" || s == "public" => n.as_str(),
+            _ => return Err(funcs::no_function(&f.name.to_string(), &[])),
+        };
+        if let Some(kind) = window_kind(name) {
+            return self.bind_window_call(name, kind, None, f, ctx);
+        }
+        if let Some(mut kind) = aggregate_kind(name) {
+            if f.star {
+                if kind != AggKind::Count {
+                    return Err(SqlError::syntax(format!("{name}(*) specified, but {name} is not an aggregate function that takes *")));
+                }
+                kind = AggKind::CountStar;
+            }
+            if f.over.is_some() {
+                return self.bind_window_call(name, WinKind::Agg(kind), Some(kind), f, ctx);
+            }
+            return self.bind_aggregate(name, kind, f, ctx);
+        }
+        if f.over.is_some() {
+            return Err(SqlError::new(
+                code::WRONG_OBJECT_TYPE,
+                format!("OVER specified, but {name} is not a window function nor an aggregate function"),
+            ));
+        }
+        if f.distinct || f.filter.is_some() || !f.order_by.is_empty() {
+            return Err(SqlError::new(
+                code::WRONG_OBJECT_TYPE,
+                format!("DISTINCT/FILTER/ORDER BY specified, but {name} is not an aggregate function"),
+            ));
+        }
+        if f.star {
+            return Err(SqlError::syntax(format!("{name}(*) specified, but {name} is not an aggregate function")));
+        }
+        let bound = f.args.iter().map(|a| self.bind_expr(a, ctx)).collect::<SqlResult<Vec<_>>>()?;
+        match name {
+            "coalesce" | "greatest" | "least" => {
+                if bound.is_empty() {
+                    return Err(SqlError::syntax(format!("syntax error: {name}() requires arguments")));
+                }
+                let types: Vec<Type> = bound.iter().map(|(_, t)| t.clone()).collect();
+                let t = common_of(&types, &name.to_ascii_uppercase())?;
+                let args =
+                    bound.into_iter().map(|(e, et)| coerce(self, e, &et, &t, CoercionContext::Implicit)).collect::<SqlResult<Vec<_>>>()?;
+                let e = match name {
+                    "coalesce" => Expr::Coalesce(args),
+                    "greatest" => Expr::MinMax { args, greatest: true },
+                    _ => Expr::MinMax { args, greatest: false },
+                };
+                return Ok((e, t));
+            }
+            "nullif" => {
+                let [(a, at), (b, bt)] = <[Bound; 2]>::try_from(bound).map_err(|_| funcs::no_function(name, &[]))?;
+                let t = common_type(&at, &bt).ok_or_else(|| funcs::no_operator("=", Some(&at), &bt))?;
+                let t = if t == Type::Unknown { Type::Text } else { t };
+                let a = coerce(self, a, &at, &t, CoercionContext::Implicit)?;
+                let b = coerce(self, b, &bt, &t, CoercionContext::Implicit)?;
+                return Ok((Expr::NullIf(Box::new(a), Box::new(b)), t));
+            }
+            "pg_typeof" if bound.len() == 1 => {
+                let t = &bound[0].1;
+                return Ok((Expr::Const(Value::Text(if *t == Type::Unknown { "unknown".into() } else { t.name() })), Type::Text));
+            }
+            _ => {}
+        }
+        let types: Vec<Type> = bound.iter().map(|(_, t)| t.clone()).collect();
+        let res = resolve_function(name, &types)?.ok_or_else(|| funcs::no_function(name, &types))?;
+        let args = bound
+            .into_iter()
+            .zip(&res.args)
+            .map(|((e, et), target)| coerce(self, e, &et, target, CoercionContext::Explicit))
+            .collect::<SqlResult<Vec<_>>>()?;
+        Ok((Expr::Call { func: res.func, args }, res.ret))
+    }
+
+    fn bind_agg_args(&self, f: &ir::FunctionCall, ctx: &Ctx) -> SqlResult<Vec<Bound>> {
+        let inner = ctx.with_clause(Clause::Other);
+        let mut out = Vec::new();
+        for a in &f.args {
+            let b = self.bind_expr(a, &inner)?;
+            if contains_agg(&b.0) {
+                return Err(SqlError::new(code::GROUPING_ERROR, "aggregate function calls cannot be nested"));
+            }
+            out.push(b);
+        }
+        Ok(out)
+    }
+
+    fn make_agg(&self, name: &str, kind: AggKind, f: &ir::FunctionCall, ctx: &Ctx) -> SqlResult<AggCall> {
+        let bound = self.bind_agg_args(f, ctx)?;
+        let types: Vec<Type> = bound.iter().map(|(_, t)| t.clone()).collect();
+        let expected_args = match kind {
+            AggKind::CountStar => 0,
+            AggKind::StringAgg | AggKind::JsonbObjectAgg => 2,
+            _ => 1,
+        };
+        if bound.len() != expected_args {
+            return Err(funcs::no_function(name, &types));
+        }
+        let (targets, ret) = aggregate_types(kind, name, &types)?;
+        let args = bound
+            .into_iter()
+            .zip(&targets)
+            .map(|((e, et), t)| coerce(self, e, &et, t, CoercionContext::Implicit))
+            .collect::<SqlResult<Vec<_>>>()?;
+        let inner = ctx.with_clause(Clause::Other);
+        let filter = f.filter.as_ref().map(|fl| self.bind_predicate(fl, "FILTER", &inner)).transpose()?;
+        let order_by = f
+            .order_by
+            .iter()
+            .map(|o| {
+                let (e, _) = self.bind_expr(&o.expr, &inner)?;
+                Ok(SortKey { expr: e, desc: o.desc, nulls_first: o.nulls_first.unwrap_or(o.desc) })
+            })
+            .collect::<SqlResult<Vec<_>>>()?;
+        Ok(AggCall {
+            kind,
+            args,
+            distinct: f.distinct,
+            filter,
+            order_by,
+            arg_ty: targets.first().cloned().unwrap_or(Type::Unknown),
+            ty: ret,
+        })
+    }
+
+    fn bind_aggregate(&self, name: &str, kind: AggKind, f: &ir::FunctionCall, ctx: &Ctx) -> SqlResult<Bound> {
+        if !ctx.clause.agg_allowed() {
+            if ctx.clause == Clause::Other {
+                return Err(SqlError::new(code::GROUPING_ERROR, "aggregate function calls cannot be nested"));
+            }
+            return Err(agg_misuse(ctx.clause, "aggregate functions"));
+        }
+        let call = self.make_agg(name, kind, f, ctx)?;
+        let ty = call.ty.clone();
+        ctx.current().aggs.borrow_mut().push(call.clone());
+        Ok((Expr::AggCall(Box::new(call)), ty))
+    }
+
+    fn bind_window_call(&self, name: &str, kind: WinKind, agg: Option<AggKind>, f: &ir::FunctionCall, ctx: &Ctx) -> SqlResult<Bound> {
+        let Some(over) = &f.over else {
+            return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("window function {name} requires an OVER clause")));
+        };
+        if !ctx.clause.window_allowed() {
+            return Err(window_misuse(ctx.clause));
+        }
+        let spec = resolve_window_spec(over, &ctx.windows)?;
+        let inner = ctx.with_clause(Clause::Other);
+        let agg_call = match agg {
+            Some(k) => Some(self.make_agg(name, k, f, ctx)?),
+            None => None,
+        };
+        let (args, ty) = match &agg_call {
+            Some(a) => (a.args.clone(), a.ty.clone()),
+            None => {
+                let bound = f.args.iter().map(|a| self.bind_expr(a, &inner)).collect::<SqlResult<Vec<_>>>()?;
+                let ty = match kind {
+                    WinKind::RowNumber | WinKind::Rank | WinKind::DenseRank => Type::Int8,
+                    WinKind::PercentRank | WinKind::CumeDist => Type::Float8,
+                    WinKind::Ntile => Type::Int4,
+                    _ => bound
+                        .first()
+                        .map(|(_, t)| if *t == Type::Unknown { Type::Text } else { t.clone() })
+                        .ok_or_else(|| funcs::no_function(name, &[]))?,
+                };
+                let mut args = Vec::new();
+                for (i, (e, et)) in bound.into_iter().enumerate() {
+                    let target = match (kind, i) {
+                        (WinKind::Ntile, 0) | (WinKind::Lag | WinKind::Lead, 1) | (WinKind::NthValue, 1) => Type::Int4,
+                        (WinKind::Lag | WinKind::Lead, 2) => ty.clone(),
+                        _ => {
+                            if et == Type::Unknown {
+                                Type::Text
+                            } else {
+                                et.clone()
+                            }
+                        }
+                    };
+                    args.push(coerce(self, e, &et, &target, CoercionContext::Implicit)?);
+                }
+                (args, ty)
+            }
+        };
+        let partition_by = spec.partition_by.iter().map(|p| Ok(self.bind_expr(p, &inner)?.0)).collect::<SqlResult<Vec<_>>>()?;
+        let order_by = spec
+            .order_by
+            .iter()
+            .map(|o| Ok(SortKey { expr: self.bind_expr(&o.expr, &inner)?.0, desc: o.desc, nulls_first: o.nulls_first.unwrap_or(o.desc) }))
+            .collect::<SqlResult<Vec<_>>>()?;
+        let frame = match &spec.frame {
+            None => Frame::default_frame(),
+            Some(fr) => {
+                let bound = |b: &ir::FrameBound| -> SqlResult<FrameBound> {
+                    Ok(match b {
+                        ir::FrameBound::UnboundedPreceding => FrameBound::UnboundedPreceding,
+                        ir::FrameBound::Preceding(e) => FrameBound::Preceding(self.bind_expr(e, &inner)?.0),
+                        ir::FrameBound::CurrentRow => FrameBound::CurrentRow,
+                        ir::FrameBound::Following(e) => FrameBound::Following(self.bind_expr(e, &inner)?.0),
+                        ir::FrameBound::UnboundedFollowing => FrameBound::UnboundedFollowing,
+                    })
+                };
+                Frame {
+                    units: match fr.units {
+                        ir::FrameUnits::Rows => FrameUnits::Rows,
+                        ir::FrameUnits::Range => FrameUnits::Range,
+                        ir::FrameUnits::Groups => FrameUnits::Groups,
+                    },
+                    start: bound(&fr.start)?,
+                    end: bound(&fr.end)?,
+                }
+            }
+        };
+        let call = WinCall { kind, args, partition_by, order_by, frame, ty: ty.clone(), agg: agg_call };
+        ctx.current().windows.borrow_mut().push(call.clone());
+        Ok((Expr::WindowCall(Box::new(call)), ty))
+    }
+
+    /// Binds a subquery and returns its plan and whether it references enclosing rows.
+    pub fn bind_subquery_plan(&self, q: &ir::Query, ctx: &Ctx) -> SqlResult<(crate::plan::Rel, bool)> {
+        let level = Level::new(super::Scope::default());
+        let nested = ctx.nested(&level);
+        let bound = self.bind_query(q, &nested)?;
+        Ok((bound.rel, level.correlated.get()))
+    }
+
+    fn bind_subquery_column(&self, q: &ir::Query, ctx: &Ctx) -> SqlResult<(crate::plan::Rel, Type, bool)> {
+        let level = Level::new(super::Scope::default());
+        let nested = ctx.nested(&level);
+        let bound = self.bind_query(q, &nested)?;
+        if bound.columns.len() != 1 {
+            return Err(SqlError::syntax(if bound.columns.len() > 1 {
+                "subquery must return only one column"
+            } else {
+                "subquery has too few columns"
+            }));
+        }
+        Ok((bound.rel, bound.columns[0].ty.clone(), level.correlated.get()))
+    }
+}
+
+/// Wraps a single-column plan in a cast when its column type differs from `to`.
+fn cast_plan_column(plan: crate::plan::Rel, from: &Type, to: &Type) -> crate::plan::Rel {
+    if from == to {
+        return plan;
+    }
+    crate::plan::Rel::Project {
+        input: Box::new(plan),
+        exprs: vec![Expr::Cast { expr: Box::new(Expr::Col(0)), to: to.clone(), typmod: -1 }],
+    }
+}
+
+/// Merges a named window into an OVER spec (`OVER (w ORDER BY x)`).
+fn resolve_window_spec(spec: &ir::WindowSpec, named: &[ir::NamedWindow]) -> SqlResult<ir::WindowSpec> {
+    let Some(base) = &spec.base else { return Ok(spec.clone()) };
+    let parent = named
+        .iter()
+        .find(|w| &w.name == base)
+        .ok_or_else(|| SqlError::new(code::UNDEFINED_OBJECT, format!("window \"{base}\" does not exist")))?;
+    let parent = resolve_window_spec(&parent.spec, named)?;
+    Ok(ir::WindowSpec {
+        base: None,
+        partition_by: if spec.partition_by.is_empty() { parent.partition_by } else { spec.partition_by.clone() },
+        order_by: if spec.order_by.is_empty() { parent.order_by } else { spec.order_by.clone() },
+        frame: spec.frame.clone().or(parent.frame),
+    })
+}
+
+pub fn contains_agg(e: &Expr) -> bool {
+    let mut found = false;
+    e.walk(&mut |x| {
+        if matches!(x, Expr::AggCall(_)) {
+            found = true;
+        }
+    });
+    found
+}
+
+pub fn contains_window(e: &Expr) -> bool {
+    let mut found = false;
+    e.walk(&mut |x| {
+        if matches!(x, Expr::WindowCall(_)) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// Folds constant function calls whose arguments are all constants (immutable builtins only;
+/// volatile ones like `random()` and `now()` take no arguments and are never folded here).
+fn fold(e: Expr) -> Expr {
+    e
+}
+
+/// Flattens nested AND/OR lists.
+fn flatten(e: Expr) -> Expr {
+    match e {
+        Expr::And(items) => Expr::And(items.into_iter().flat_map(|i| if let Expr::And(inner) = i { inner } else { vec![i] }).collect()),
+        Expr::Or(items) => Expr::Or(items.into_iter().flat_map(|i| if let Expr::Or(inner) = i { inner } else { vec![i] }).collect()),
+        other => other,
+    }
+}
