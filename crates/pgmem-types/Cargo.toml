@@ -11,6 +11,7 @@ publish.workspace = true
 doctest = false
 
 [dependencies]
+jiff = { workspace = true }
 num-bigint = { workspace = true }
 num-integer = { workspace = true }
 num-traits = { workspace = true }

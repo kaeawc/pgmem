@@ -4,6 +4,7 @@
 
 pub mod binary;
 pub mod calendar;
+pub mod context;
 pub mod datetime;
 pub mod error;
 #[cfg(test)]
@@ -11,6 +12,7 @@ mod go_port;
 pub mod json;
 pub mod numeric;
 pub mod text;
+pub mod zone;
 mod value;
 
 pub use datetime::Interval;
