@@ -108,7 +108,7 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
             col.default = Some(nextval_default(&seq));
             col
         } else {
-            let (ty, typmod) = resolve_type_name(&c.ty)?;
+            let (ty, typmod) = resolve_type_name(catalog, &c.ty)?;
             let mut col = ColumnDef::new(c.name.clone(), ty);
             col.typmod = typmod;
             col
@@ -641,7 +641,7 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
         }
         ir::AlterTableAction::AlterType { column, ty, using } => {
             let slot = def.column_index(column).ok_or_else(|| not_found(column))?;
-            let (t, typmod) = resolve_type_name(ty)?;
+            let (t, typmod) = resolve_type_name(b.catalog, ty)?;
             def.columns[slot].ty = t;
             def.columns[slot].typmod = typmod;
             Ok(AlterOutcome::Replace {

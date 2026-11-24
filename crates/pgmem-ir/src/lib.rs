@@ -46,6 +46,10 @@ pub enum Statement {
     CreateIndex(Box<CreateIndex>),
     CreateSequence(Box<CreateSequence>),
     AlterTable(Box<AlterTable>),
+    CreateType(Box<CreateType>),
+    CreateDomain(Box<CreateDomain>),
+    AlterType(Box<AlterType>),
+    AlterDomain(Box<AlterDomain>),
     Drop(Box<Drop>),
     Truncate(Box<Truncate>),
     Transaction(TransactionStmt),
@@ -90,6 +94,8 @@ pub enum CommentTarget {
     Index,
     Column,
     Schema,
+    Type,
+    Domain,
     /// Object kinds pgmem has no catalog entry for (functions, types, extensions, roles,
     /// databases, ...): accepted without effect.
     Other,
@@ -216,6 +222,8 @@ pub enum SelectItem {
     Wildcard,
     /// `t.*`
     QualifiedWildcard(ObjectName),
+    /// `(composite_expr).*`: one output column per field.
+    FieldStar(Expr),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -470,6 +478,11 @@ pub enum Expr {
         expr: Box<Expr>,
         zone: Box<Expr>,
     },
+    /// `(composite_expr).field`.
+    FieldAccess {
+        expr: Box<Expr>,
+        field: String,
+    },
     /// The bare `DEFAULT` keyword in an INSERT VALUES row or an UPDATE SET.
     Default,
 }
@@ -577,8 +590,9 @@ pub enum ConflictAction {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Assignment {
-    /// One column, or several for `SET (a, b) = (x, y)`.
-    pub columns: Vec<String>,
+    /// One target, or several for `SET (a, b) = (x, y)`. A target is a column name followed
+    /// by composite field names (`SET addr.zip = ...` is `["addr", "zip"]`).
+    pub columns: Vec<Vec<String>>,
     pub value: Expr,
 }
 
@@ -733,6 +747,85 @@ pub enum AlterTableAction {
     DropConstraint { name: String, if_exists: bool, cascade: bool },
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateType {
+    pub name: ObjectName,
+    pub kind: CreateTypeKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum CreateTypeKind {
+    /// `AS ENUM ('a', 'b')`.
+    Enum(Vec<String>),
+    /// `AS (field type, ...)`.
+    Composite(Vec<(String, TypeName)>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateDomain {
+    pub name: ObjectName,
+    pub ty: TypeName,
+    pub default: Option<Expr>,
+    pub not_null: bool,
+    /// CHECK constraints (optional name, expression over `VALUE`), in declaration order.
+    pub checks: Vec<(Option<String>, Expr)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AlterType {
+    pub name: ObjectName,
+    pub action: AlterTypeAction,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum AlterTypeAction {
+    /// `ADD VALUE [IF NOT EXISTS] 'v' [BEFORE | AFTER 'x']` (`before` is true for BEFORE).
+    AddValue {
+        value: String,
+        if_not_exists: bool,
+        neighbor: Option<(bool, String)>,
+    },
+    RenameValue {
+        from: String,
+        to: String,
+    },
+    Rename(String),
+    AddAttribute {
+        name: String,
+        ty: TypeName,
+    },
+    DropAttribute {
+        name: String,
+        if_exists: bool,
+    },
+    RenameAttribute {
+        from: String,
+        to: String,
+    },
+    /// `OWNER TO`, `SET SCHEMA public`: accepted without effect.
+    NoOp,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AlterDomain {
+    pub name: ObjectName,
+    pub action: AlterDomainAction,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum AlterDomainAction {
+    SetDefault(Expr),
+    DropDefault,
+    SetNotNull,
+    DropNotNull,
+    AddCheck { name: Option<String>, expr: Expr, not_valid: bool },
+    DropConstraint { name: String, if_exists: bool },
+    RenameConstraint { from: String, to: String },
+    ValidateConstraint(String),
+    Rename(String),
+    NoOp,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObjectType {
     Table,
@@ -742,6 +835,7 @@ pub enum ObjectType {
     Schema,
     Extension,
     Type,
+    Domain,
     Function,
 }
 
@@ -786,6 +880,7 @@ impl Expr {
                 expr.walk(f);
                 zone.walk(f);
             }
+            Expr::FieldAccess { expr, .. } => expr.walk(f),
             Expr::Between { expr, low, high, .. } => {
                 expr.walk(f);
                 low.walk(f);

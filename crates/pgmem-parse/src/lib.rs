@@ -13,6 +13,7 @@ mod ddl;
 mod dml;
 mod expr;
 mod query;
+mod typeddl;
 
 use pgmem_ir::{IsolationLevel, ObjectName, ObjectType, Statement, TransactionStmt};
 use pgmem_types::{SqlError, SqlResult, code};
@@ -26,13 +27,19 @@ pub fn parse(sql: &str) -> SqlResult<Vec<Statement>> {
     if sql.trim().trim_matches(';').trim().is_empty() {
         return Ok(vec![Statement::Empty]);
     }
-    let parsed = Parser::parse_sql(&PostgreSqlDialect {}, sql).or_else(|err| match rewrite_unsupported(sql) {
+    let parsed = parse_statements(sql).or_else(|err| match rewrite_unsupported(sql) {
         // Retry Postgres syntax sqlparser lacks after rewriting it to an equivalent form.
-        Some(rewritten) => Parser::parse_sql(&PostgreSqlDialect {}, &rewritten).map_err(|_| err),
+        Some(rewritten) => parse_statements(&rewritten).map_err(|_| err),
         None => Err(err),
     });
     match parsed {
-        Ok(stmts) => stmts.into_iter().map(lower_statement).collect(),
+        Ok(stmts) => stmts
+            .into_iter()
+            .map(|s| match s {
+                Parsed::Sql(s) => lower_statement(*s),
+                Parsed::TypeDdl(t) => typeddl::lower(*t),
+            })
+            .collect(),
         Err(err) => {
             // Fall back to per-statement prefix recognition for the utility statements
             // sqlparser doesn't model; only when every piece is recognized do we accept it.
@@ -41,6 +48,42 @@ pub fn parse(sql: &str) -> SqlResult<Vec<Statement>> {
             fallback.ok_or_else(|| map_parser_error(&err, sql))
         }
     }
+}
+
+/// The function name `(x).*` is rewritten to before parsing; the select-list lowering turns
+/// it back into a field expansion.
+pub(crate) const FIELD_STAR_MARKER: &str = "__pgmem_field_star";
+
+enum Parsed {
+    Sql(Box<sq::Statement>),
+    TypeDdl(Box<typeddl::TypeDdl>),
+}
+
+/// `Parser::parse_statements`, with the statements sqlparser models incompletely (domains,
+/// `ALTER TYPE`) parsed by [`typeddl`].
+fn parse_statements(sql: &str) -> Result<Vec<Parsed>, ParserError> {
+    use sqlparser::tokenizer::Token;
+    let dialect = PostgreSqlDialect {};
+    let mut p = Parser::new(&dialect).try_with_sql(sql)?;
+    let mut out = Vec::new();
+    let mut expecting_delimiter = false;
+    loop {
+        while p.consume_token(&Token::SemiColon) {
+            expecting_delimiter = false;
+        }
+        if p.peek_token().token == Token::EOF {
+            break;
+        }
+        if expecting_delimiter {
+            return p.expected("end of statement", p.peek_token());
+        }
+        match typeddl::try_parse(&mut p)? {
+            Some(t) => out.push(Parsed::TypeDdl(Box::new(t))),
+            None => out.push(Parsed::Sql(Box::new(p.parse_statement()?))),
+        }
+        expecting_delimiter = true;
+    }
+    Ok(out)
 }
 
 /// Parses exactly one statement (the extended-query `Parse` message). Postgres rejects
@@ -68,6 +111,28 @@ fn rewrite_unsupported(sql: &str) -> Option<String> {
     let mut drop = vec![false; tokens.len()];
     let mut replace: Vec<Option<&str>> = vec![None; tokens.len()];
     for (k, &i) in sig.iter().enumerate() {
+        // `(expr).*` → `__pgmem_field_star((expr))`.
+        if tokens[i] == Token::RParen
+            && sig.get(k + 1).is_some_and(|&j| tokens[j] == Token::Period)
+            && sig.get(k + 2).is_some_and(|&j| tokens[j] == Token::Mul)
+        {
+            let mut depth = 0usize;
+            let open = sig[..=k].iter().rev().find(|&&j| {
+                match tokens[j] {
+                    Token::RParen => depth += 1,
+                    Token::LParen => depth -= 1,
+                    _ => {}
+                }
+                depth == 0
+            });
+            if let Some(&open) = open {
+                replace[open] = Some("__pgmem_field_star((");
+                replace[i] = Some("))");
+                drop[sig[k + 1]] = true;
+                drop[sig[k + 2]] = true;
+            }
+            continue;
+        }
         let at = |o: usize, w: &str| sig.get(k + o).is_some_and(|&j| word(&tokens[j], w));
         if word(&tokens[i], "FOR") && at(1, "NO") && at(2, "KEY") && at(3, "UPDATE") {
             drop[sig[k + 1]] = true;
@@ -210,6 +275,24 @@ fn lower_statement(stmt: sq::Statement) -> SqlResult<Statement> {
             let names = names.iter().map(object_name).collect::<SqlResult<Vec<_>>>()?;
             Statement::Drop(Box::new(pgmem_ir::Drop { object_type, names, if_exists, cascade }))
         }
+        S::CreateType { name, representation } => {
+            use pgmem_ir::CreateTypeKind as K;
+            let kind = match representation {
+                Some(sq::UserDefinedTypeRepresentation::Enum { labels }) => K::Enum(labels.into_iter().map(|l| l.value).collect()),
+                Some(sq::UserDefinedTypeRepresentation::Composite { attributes }) => K::Composite(
+                    attributes.iter().map(|a| Ok((ident(&a.name), expr::lower_type(&a.data_type)?))).collect::<SqlResult<Vec<_>>>()?,
+                ),
+                // `CREATE TYPE name` (a shell type) and range / base types.
+                _ => return Err(unsupported("this form of CREATE TYPE")),
+            };
+            Statement::CreateType(Box::new(pgmem_ir::CreateType { name: object_name(&name)?, kind }))
+        }
+        S::DropDomain(d) => Statement::Drop(Box::new(pgmem_ir::Drop {
+            object_type: ObjectType::Domain,
+            names: vec![object_name(&d.name)?],
+            if_exists: d.if_exists,
+            cascade: matches!(d.drop_behavior, Some(sq::DropBehavior::Cascade)),
+        })),
         S::Truncate(t) => Statement::Truncate(Box::new(pgmem_ir::Truncate {
             tables: t.table_names.iter().map(|tt| object_name(&tt.name)).collect::<SqlResult<Vec<_>>>()?,
             restart_identity: matches!(t.identity, Some(sq::TruncateIdentityOption::Restart)),
@@ -254,6 +337,8 @@ fn lower_statement(stmt: sq::Statement) -> SqlResult<Statement> {
                 sq::CommentObject::Index => T::Index,
                 sq::CommentObject::Column => T::Column,
                 sq::CommentObject::Schema => T::Schema,
+                sq::CommentObject::Type => T::Type,
+                sq::CommentObject::Domain => T::Domain,
                 _ => T::Other,
             };
             Statement::Comment { target, name: object_name(&target_name)?, text: comment }

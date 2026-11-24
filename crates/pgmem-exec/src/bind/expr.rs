@@ -5,6 +5,7 @@ use crate::cast::{CoercionContext, cast_context, cast_value, cast_value_ctx};
 use crate::funcs::{self, EQ, common_type, comparison, resolve_binary, resolve_function, resolve_unary};
 use crate::plan::{AggCall, AggKind, Expr, Frame, FrameBound, FrameUnits, SortKey, SubqueryKind, WinCall, WinKind};
 use pgmem_ir as ir;
+use pgmem_types::usertype::RECORD_OID;
 use pgmem_types::{Numeric, SqlError, SqlResult, Type, Value, code, text};
 
 pub type Bound = (Expr, Type);
@@ -34,6 +35,23 @@ fn coerce_inner(b: &Binder, e: Expr, from: &Type, to: &Type, typmod: i32, contex
         return Ok(e);
     }
     if from == to && typmod < 0 {
+        return Ok(e);
+    }
+    // Into a domain: convert to its base type, then check its constraints.
+    if let Type::Domain(oid) = to {
+        return b.coerce_to_domain(e, from, *oid, typmod, context, explicit);
+    }
+    // Out of a domain: the value already is a value of the base type.
+    if from.is_domain() {
+        return coerce_inner(b, e, &from.base(), to, typmod, context, explicit);
+    }
+    if let Type::Composite(oid) = to
+        && *from == Type::Record
+    {
+        return b.coerce_record(e, *oid, context, explicit);
+    }
+    // Any composite is a `record`.
+    if *to == Type::Record && from.is_composite() {
         return Ok(e);
     }
     // bpchar → another string type drops the padding (`rtrim1`), as Postgres' cast does.
@@ -76,6 +94,64 @@ fn coerce_inner(b: &Binder, e: Expr, from: &Type, to: &Type, typmod: i32, contex
     Ok(Expr::Cast { expr: Box::new(e), to: to.clone(), typmod })
 }
 
+impl Binder<'_> {
+    /// `CoerceToDomain`: the conversion to the domain's base type (with the domain's typmod),
+    /// wrapped in a check of its NOT NULL and CHECK constraints.
+    fn coerce_to_domain(&self, e: Expr, from: &Type, oid: u32, typmod: i32, context: CoercionContext, explicit: bool) -> SqlResult<Expr> {
+        let def = self.catalog.type_by_oid(oid).filter(|t| t.oid == oid).cloned();
+        let Some(def) = def else { return Err(SqlError::internal(format!("cache lookup failed for type {oid}"))) };
+        let pgmem_catalog::TypeDefKind::Domain { base, typmod: dmod, not_null, checks, .. } = &def.kind else {
+            return Err(SqlError::internal(format!("type {} is not a domain", def.name)));
+        };
+        let inner = coerce_inner(self, e, from, base, if typmod >= 0 { typmod } else { *dmod }, context, explicit)?;
+        let checks = checks.iter().map(|c| Ok((c.name.clone(), self.bind_domain_check(&c.expr, base)?))).collect::<SqlResult<Vec<_>>>()?;
+        Ok(Expr::CoerceToDomain(Box::new(crate::plan::DomainCoercion {
+            expr: inner,
+            domain: def.name.clone(),
+            not_null: *not_null,
+            checks,
+        })))
+    }
+
+    /// Binds a domain CHECK expression; `VALUE` is the only column in scope.
+    pub fn bind_domain_check(&self, e: &ir::Expr, base: &Type) -> SqlResult<Expr> {
+        let level = Level::new(super::Scope::from_cols(vec![super::ScopeCol::new(None, "value", base.clone())]));
+        let ctx = Ctx::new(&level).with_clause(Clause::Check);
+        self.bind_predicate(e, "CHECK", &ctx)
+    }
+
+    /// `coerce_record_to_complex`: a row value becomes a named composite, field by field.
+    fn coerce_record(&self, e: Expr, oid: u32, context: CoercionContext, explicit: bool) -> SqlResult<Expr> {
+        let fields = crate::usertypes::composite_fields(oid);
+        let target = Type::Composite(oid);
+        let Expr::Row { fields: items, types, .. } = e else {
+            // A record computed at run time is converted when the statement runs.
+            return Ok(Expr::Cast { expr: Box::new(e), to: target, typmod: -1 });
+        };
+        let cannot = || SqlError::cannot_coerce("record", &target.name());
+        if items.len() < fields.len() {
+            return Err(cannot().with_detail("Input has too few columns."));
+        }
+        if items.len() > fields.len() {
+            return Err(cannot().with_detail("Input has too many columns."));
+        }
+        let mut out = Vec::with_capacity(items.len());
+        for ((item, ty), f) in items.into_iter().zip(types).zip(&fields) {
+            if ty != Type::Unknown && cast_context(&ty, &f.ty).is_none_or(|c| c > context) {
+                return Err(cannot().with_detail(format!(
+                    "Cannot cast type {} to {} in column {}.",
+                    ty.name(),
+                    f.ty.name(),
+                    out.len() + 1
+                )));
+            }
+            out.push(coerce_inner(self, item, &ty, &f.ty, f.typmod, context, explicit)?);
+        }
+        let types = fields.iter().map(|f| f.ty.clone()).collect();
+        Ok(Expr::Row { fields: out, types, type_oid: oid })
+    }
+}
+
 /// The column name Postgres derives for an unaliased select-list expression (`FigureColname`).
 pub fn output_name(e: &ir::Expr) -> String {
     figure_colname(e).map_or_else(|| "?column?".into(), |(name, _)| name)
@@ -115,6 +191,7 @@ fn figure_colname(e: &ir::Expr) -> Option<(String, u8)> {
             }
         }
         ir::Expr::Subscript { expr, .. } | ir::Expr::Collate { expr, .. } => figure_colname(expr),
+        ir::Expr::FieldAccess { field, .. } => Some((field.clone(), 2)),
         _ => None,
     }
 }
@@ -200,6 +277,8 @@ fn window_kind(name: &str) -> Option<WinKind> {
 /// Argument coercion targets and result type of an aggregate.
 fn aggregate_types(kind: AggKind, name: &str, args: &[Type]) -> SqlResult<(Vec<Type>, Type)> {
     let err = || funcs::no_function(name, args);
+    // Aggregates see a domain's base type.
+    let args: &[Type] = &args.iter().map(Type::base).collect::<Vec<_>>();
     let first = args.first().cloned().unwrap_or(Type::Unknown);
     let numeric_arg = |t: &Type| if *t == Type::Unknown { Type::Numeric } else { t.clone() };
     Ok(match kind {
@@ -279,7 +358,7 @@ impl Binder<'_> {
                 Ok((Expr::Param(idx), self.param_type(idx)))
             }
             ir::Expr::TypedString { ty, value } => {
-                let (t, typmod) = resolve_type_name(ty)?;
+                let (t, typmod) = resolve_type_name(self.catalog, ty)?;
                 if let Type::Reg(_) = t {
                     let e = Expr::Cast { expr: Box::new(Expr::Const(Value::Text(value.clone()))), to: t.clone(), typmod: -1 };
                     return Ok((e, t));
@@ -467,7 +546,15 @@ impl Binder<'_> {
                     }
                 })
             }
-            ir::Expr::Row(_) => Err(feature("row constructors outside comparisons")),
+            ir::Expr::Row(items) => {
+                let bound = items.iter().map(|i| self.bind_expr(i, ctx)).collect::<SqlResult<Vec<_>>>()?;
+                let (fields, types): (Vec<Expr>, Vec<Type>) = bound.into_iter().unzip();
+                Ok((Expr::Row { fields, types, type_oid: RECORD_OID }, Type::Record))
+            }
+            ir::Expr::FieldAccess { expr, field } => {
+                let (e, t) = self.bind_expr(expr, ctx)?;
+                select_field(e, &t, field)
+            }
             ir::Expr::Collate { expr, .. } => self.bind_expr(expr, ctx),
             ir::Expr::AtTimeZone { expr, zone } => {
                 let (e, t) = self.bind_expr(expr, ctx)?;
@@ -502,7 +589,7 @@ impl Binder<'_> {
         let (qualifier, name) = match parts {
             [n] => (None, n.as_str()),
             [q, n] => (Some(q.as_str()), n.as_str()),
-            [s, q, n] if s == "public" => (Some(q.as_str()), n.as_str()),
+            [s, q, n] if s == "public" || s == "pg_catalog" || s == "information_schema" => (Some(q.as_str()), n.as_str()),
             _ => return Err(SqlError::syntax(format!("improper qualified name (too many dotted names): {}", parts.join(".")))),
         };
         if name == "*" {
@@ -554,10 +641,43 @@ impl Binder<'_> {
                 return Ok((Expr::Outer { depth, idx: i }, t));
             }
         }
+        // A bare name that is no column may name a FROM item: a whole-row reference.
+        if qualifier.is_none() {
+            for (depth, level) in ctx.levels.iter().rev().enumerate() {
+                if level.scope.has_qualifier(name) {
+                    return Ok(self.whole_row(name, depth, ctx));
+                }
+            }
+        }
         match qualifier {
             Some(q) if !qualifier_seen => Err(SqlError::new(code::UNDEFINED_TABLE, format!("missing FROM-clause entry for table \"{q}\""))),
             Some(q) => Err(SqlError::undefined_column(&format!("{q}.{name}"))),
             None => Err(SqlError::undefined_column(&format!("\"{name}\""))),
+        }
+    }
+
+    /// The row of FROM item `name` as one composite value: the table's row type when the item
+    /// is a table, `record` otherwise.
+    fn whole_row(&self, name: &str, depth: usize, ctx: &Ctx) -> Bound {
+        let n = ctx.levels.len();
+        let level = ctx.levels[n - 1 - depth];
+        if depth > 0 {
+            for l in &ctx.levels[n - depth..] {
+                l.correlated.set(true);
+            }
+        }
+        let positions = level.scope.qualified_star(name);
+        let cols: Vec<&super::ScopeCol> = positions.iter().map(|&i| &level.scope.cols[i]).collect();
+        let fields = positions.iter().map(|&i| if depth == 0 { Expr::Col(i) } else { Expr::Outer { depth, idx: i } }).collect();
+        let types = cols.iter().map(|c| c.ty.clone()).collect();
+        let table = cols.first().map(|c| c.table_oid).filter(|&t| t != 0 && cols.iter().all(|c| c.table_oid == t));
+        let row_type = table.and_then(|t| self.catalog.table_by_oid(t)).filter(|t| t.live_columns().count() == cols.len());
+        match row_type {
+            Some(t) => {
+                let oid = crate::catalog_views::rowtype_oid_of(t.oid);
+                (Expr::Row { fields, types, type_oid: oid }, Type::Composite(oid))
+            }
+            None => (Expr::Row { fields, types, type_oid: RECORD_OID }, Type::Record),
         }
     }
 
@@ -765,7 +885,7 @@ impl Binder<'_> {
     }
 
     fn bind_cast(&self, expr: &ir::Expr, ty: &ir::TypeName, ctx: &Ctx) -> SqlResult<Bound> {
-        let (t, typmod) = resolve_type_name(ty)?;
+        let (t, typmod) = resolve_type_name(self.catalog, ty)?;
         if let ir::Expr::Array(items) = expr
             && items.is_empty()
             && matches!(t, Type::Array(_))
@@ -851,6 +971,11 @@ impl Binder<'_> {
             }
             _ => {}
         }
+        if let ("enum_first" | "enum_last" | "enum_range", Some(Type::Enum(oid))) =
+            (name, bound.iter().map(|(_, t)| t).find(|t| **t != Type::Unknown))
+        {
+            return self.bind_enum_function(name, *oid, bound);
+        }
         let types: Vec<Type> = bound.iter().map(|(_, t)| t.clone()).collect();
         let res = resolve_function(name, &types)?.ok_or_else(|| funcs::no_function(name, &types))?;
         let args = bound
@@ -859,6 +984,27 @@ impl Binder<'_> {
             .map(|((e, et), target)| coerce(self, e, &et, target, CoercionContext::Explicit))
             .collect::<SqlResult<Vec<_>>>()?;
         Ok((Expr::Call { func: res.func, args }, res.ret))
+    }
+
+    /// `enum_first(anyenum)`, `enum_last(anyenum)`, `enum_range(anyenum [, anyenum])`: only the
+    /// argument types matter for the one-argument forms; the labels are read when the
+    /// statement runs.
+    fn bind_enum_function(&self, name: &str, oid: u32, bound: Vec<Bound>) -> SqlResult<Bound> {
+        let ty = Type::Enum(oid);
+        let arity_ok = matches!((name, bound.len()), ("enum_first" | "enum_last", 1) | ("enum_range", 1 | 2));
+        if !arity_ok || bound.iter().any(|(_, t)| *t != Type::Unknown && *t != ty) {
+            let types: Vec<Type> = bound.iter().map(|(_, t)| t.clone()).collect();
+            return Err(funcs::no_function(name, &types));
+        }
+        let mut args =
+            bound.into_iter().map(|(e, t)| coerce(self, e, &t, &ty, CoercionContext::Implicit)).collect::<SqlResult<Vec<_>>>()?;
+        args.insert(0, Expr::Const(Value::Oid(oid)));
+        let (func, ret) = match name {
+            "enum_first" => (funcs::lenient("enum_first", funcs::misc::enum_first), ty),
+            "enum_last" => (funcs::lenient("enum_last", funcs::misc::enum_last), ty),
+            _ => (funcs::lenient("enum_range", funcs::misc::enum_range), Type::array_of(ty)),
+        };
+        Ok((Expr::Call { func, args }, ret))
     }
 
     fn bind_agg_args(&self, f: &ir::FunctionCall, ctx: &Ctx) -> SqlResult<Vec<Bound>> {
@@ -1023,6 +1169,66 @@ impl Binder<'_> {
             }));
         }
         Ok((bound.rel, bound.columns[0].ty.clone(), level.correlated.get()))
+    }
+}
+
+/// `(expr).field` on a bound composite expression.
+pub fn select_field(e: Expr, t: &Type, field: &str) -> SqlResult<Bound> {
+    match t {
+        Type::Composite(oid) => {
+            let fields = crate::usertypes::composite_fields(*oid);
+            let idx = fields
+                .iter()
+                .position(|f| f.name == field)
+                .ok_or_else(|| SqlError::new(code::UNDEFINED_COLUMN, format!("column \"{field}\" not found in data type {}", t.name())))?;
+            let ty = fields[idx].ty.clone();
+            Ok((field_of(e, idx), ty))
+        }
+        // The fields of ROW(...) are f1, f2, ...
+        Type::Record => {
+            let unknown = || SqlError::new(code::UNDEFINED_COLUMN, format!("could not identify column \"{field}\" in record data type"));
+            let Expr::Row { types, .. } = &e else { return Err(unknown()) };
+            let n = field
+                .strip_prefix('f')
+                .and_then(|n| n.parse::<usize>().ok())
+                .filter(|n| (1..=types.len()).contains(n))
+                .ok_or_else(unknown)?;
+            let ty = types[n - 1].clone();
+            Ok((field_of(e, n - 1), if ty == Type::Unknown { Type::Text } else { ty }))
+        }
+        Type::Domain(_) => select_field(e, &t.base(), field),
+        other => Err(SqlError::new(
+            code::WRONG_OBJECT_TYPE,
+            format!("column notation .{field} applied to type {}, which is not a composite type", other.name()),
+        )),
+    }
+}
+
+/// `(expr).*`: one (expression, name, type) per field of a composite expression.
+pub fn expand_fields(e: Expr, t: &Type) -> SqlResult<Vec<(Expr, String, Type)>> {
+    let names: Vec<String> = match t {
+        Type::Composite(oid) => crate::usertypes::composite_fields(*oid).into_iter().map(|f| f.name).collect(),
+        Type::Record => match &e {
+            Expr::Row { fields, .. } => (1..=fields.len()).map(|n| format!("f{n}")).collect(),
+            _ => return Err(SqlError::new(code::FEATURE_NOT_SUPPORTED, "record type has not been registered")),
+        },
+        Type::Domain(_) => return expand_fields(e, &t.base()),
+        other => return Err(SqlError::syntax(format!("type {} is not composite", other.name()))),
+    };
+    names
+        .into_iter()
+        .map(|n| {
+            let (fe, ty) = select_field(e.clone(), t, &n)?;
+            Ok((fe, n, ty))
+        })
+        .collect()
+}
+
+/// Field `idx` of `e`, taken directly from a row constructor.
+fn field_of(e: Expr, idx: usize) -> Expr {
+    match e {
+        Expr::Row { mut fields, .. } if idx < fields.len() => fields.swap_remove(idx),
+        other => Expr::Field { expr: Box::new(other), idx },
     }
 }
 

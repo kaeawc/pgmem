@@ -468,6 +468,11 @@ impl Analyzer<'_> {
                         }
                     }
                 }
+                ir::SelectItem::FieldStar(expr) => {
+                    let inner = self.expr(expr);
+                    let text = format!("({}).*", super::print::expr_text(&inner));
+                    out.push(Target { expr: Node::Raw { text, ty: Type::Unknown }, resname: "?column?".into() });
+                }
                 ir::SelectItem::Expr { expr, alias } => {
                     let n = self.expr(expr);
                     // Unknown-typed outputs resolve to text (`resolveTargetListUnknowns`).

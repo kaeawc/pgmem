@@ -34,6 +34,10 @@ pub fn cast_context(from: &Type, to: &Type) -> Option<CoercionContext> {
     if from == to || *from == Unknown {
         return Some(Implicit);
     }
+    // A domain converts like its base type, in either direction.
+    if from.is_domain() || to.is_domain() {
+        return cast_context(&from.base(), &to.base());
+    }
     Some(match (from, to) {
         (Int2, Int4 | Int8 | Float4 | Float8 | Numeric) | (Int4, Int8 | Float4 | Float8 | Numeric) | (Int8, Float4 | Float8 | Numeric) => {
             Implicit
@@ -60,6 +64,8 @@ pub fn cast_context(from: &Type, to: &Type) -> Option<CoercionContext> {
         (_, Text | Varchar | Bpchar | Name) => Assignment,
         (Text | Varchar | Bpchar | Name, _) => Explicit,
         (Array(a), Array(b)) => cast_context(a, b)?,
+        // Row constructors convert to any composite type; every composite is a record.
+        (Record, Composite(_)) | (Composite(_), Record) => Implicit,
         _ => return None,
     })
 }
@@ -77,6 +83,11 @@ pub fn cast_value(v: Value, to: &Type, typmod: i32) -> SqlResult<Value> {
 pub fn cast_value_ctx(v: Value, to: &Type, typmod: i32, explicit: bool) -> SqlResult<Value> {
     if v.is_null() {
         return Ok(Value::Null);
+    }
+    // The binder checks domain constraints (CoerceToDomain); the value is a base-type value.
+    if let Type::Domain(oid) = to {
+        let (base, dmod) = pgmem_types::usertype::domain_base(*oid).unwrap_or((Type::Unknown, -1));
+        return cast_value_ctx(v, &base, if typmod >= 0 { typmod } else { dmod }, explicit);
     }
     let out = convert(v, to)?;
     apply_typmod(out, to, typmod, explicit)
@@ -210,6 +221,15 @@ fn convert(v: Value, to: &Type) -> SqlResult<Value> {
         (V::Array(items), Type::Array(elem)) => {
             V::Array(items.into_iter().map(|i| cast_value(i, elem, -1)).collect::<SqlResult<Vec<_>>>()?)
         }
+        (V::Record(_, items), Type::Composite(oid)) => {
+            let fields = crate::usertypes::composite_fields(*oid);
+            if items.len() != fields.len() {
+                let detail = if items.len() < fields.len() { "Input has too few columns." } else { "Input has too many columns." };
+                return Err(SqlError::cannot_coerce("record", &to.name()).with_detail(detail));
+            }
+            V::Record(*oid, items.into_iter().zip(&fields).map(|(i, f)| cast_value(i, &f.ty, f.typmod)).collect::<SqlResult<Vec<_>>>()?)
+        }
+        (V::Record(_, items), Type::Record) => V::Record(pgmem_types::usertype::RECORD_OID, items),
         (v, t) => return Err(SqlError::cannot_coerce(&v.natural_type().name(), &t.name())),
     })
 }

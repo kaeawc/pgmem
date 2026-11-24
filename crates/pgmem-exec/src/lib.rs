@@ -15,6 +15,8 @@ pub mod plan;
 pub mod reg;
 pub mod run;
 pub mod session;
+pub mod typeddl;
+pub mod usertypes;
 pub mod window;
 
 pub use plan::{OutCol, Row};

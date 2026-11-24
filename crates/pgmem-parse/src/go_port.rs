@@ -307,7 +307,7 @@ fn parse_update() {
         ("UPDATE t SET label = 'x' WHERE id = 1 RETURNING id, label", vec!["label"], true, vec!["id", "label"]),
     ] {
         let Statement::Update(u) = stmt(sql) else { panic!("{sql}: not an UPDATE") };
-        let cols: Vec<&str> = u.assignments.iter().map(|a| a.columns[0].as_str()).collect();
+        let cols: Vec<&str> = u.assignments.iter().map(|a| a.columns[0][0].as_str()).collect();
         assert_eq!(cols, assigns, "{sql}");
         assert_eq!(u.selection.is_some(), want_where, "{sql}");
         assert_eq!(returning_names(&u.returning), want_returning, "{sql}");

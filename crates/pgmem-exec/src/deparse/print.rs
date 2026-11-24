@@ -111,6 +111,8 @@ impl Printer {
                 let s = const_text(ty, *typmod, value.as_deref(), 0);
                 self.push(&s);
             }
+            // A domain constraint's placeholder (`CoerceToDomainValue`).
+            Node::Var { refname, .. } if refname == super::DOMAIN_VALUE_REF => self.push("VALUE"),
             Node::Var { refname, name, .. } => {
                 if self.varprefix && !refname.is_empty() {
                     self.push(&quote_ident(refname));

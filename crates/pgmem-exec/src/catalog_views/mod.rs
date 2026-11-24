@@ -20,6 +20,7 @@ pub use model::{
     ATTRDEF_CLASS_OID, CLASS_CLASS_OID, CONSTRAINT_CLASS_OID, INFORMATION_SCHEMA_NAMESPACE_OID, Model, NAMESPACE_CLASS_OID, constraint_def,
     index_def, not_null_constraint_name, sequence_type,
 };
+pub use pg_catalog::{DomainCon, domain_constraints};
 
 pub struct VirtualTable {
     pub columns: Vec<(String, Type)>,

@@ -62,7 +62,13 @@ const TRIGGERS: &str = "trigger_catalog:name, trigger_schema:name, trigger_name:
     action_statement:varchar, action_orientation:varchar, action_timing:varchar, action_reference_old_table:name, \
     action_reference_new_table:name, action_reference_old_row:name, action_reference_new_row:name, created:timestamptz";
 const DOMAINS: &str = "domain_catalog:name, domain_schema:name, domain_name:name, data_type:varchar, character_maximum_length:int4, \
-    numeric_precision:int4, numeric_scale:int4, domain_default:varchar, udt_name:name";
+    character_octet_length:int4, character_set_catalog:name, character_set_schema:name, character_set_name:name, \
+    collation_catalog:name, collation_schema:name, collation_name:name, numeric_precision:int4, numeric_precision_radix:int4, \
+    numeric_scale:int4, datetime_precision:int4, interval_type:varchar, interval_precision:int4, domain_default:varchar, \
+    udt_catalog:name, udt_schema:name, udt_name:name, scope_catalog:name, scope_schema:name, scope_name:name, \
+    maximum_cardinality:int4, dtd_identifier:name";
+const DOMAIN_CONSTRAINTS: &str = "constraint_catalog:name, constraint_schema:name, constraint_name:name, domain_catalog:name, \
+    domain_schema:name, domain_name:name, is_deferrable:varchar, initially_deferred:varchar";
 
 macro_rules! def {
     ($name:literal, $oid:expr, $spec:expr, $rows:expr) => {
@@ -89,8 +95,65 @@ pub static DEFS: &[Def] = &[
     def!("routines", 13_115, ROUTINES, empty),
     def!("parameters", 13_116, PARAMETERS, empty),
     def!("triggers", 13_117, TRIGGERS, empty),
-    def!("domains", 13_118, DOMAINS, empty),
+    def!("domains", 13_118, DOMAINS, domains),
+    def!("domain_constraints", 13_119, DOMAIN_CONSTRAINTS, domain_constraints),
 ];
+
+fn domains(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let m = snapshot(ctx);
+    let s = Spec::parse(DOMAINS);
+    let cat = catalog_name(ctx);
+    let mut rows = Vec::new();
+    for t in m.catalog.types() {
+        let pgmem_catalog::TypeDefKind::Domain { base, typmod, default, .. } = &t.kind else { continue };
+        // A domain over a domain is USER-DEFINED (its immediate base is a user type).
+        let mut vals = match base {
+            Type::Domain(_) => {
+                vec![("data_type", txt("USER-DEFINED")), ("udt_schema", name("public")), ("udt_name", name(&base.typname()))]
+            }
+            _ => type_columns(base, *typmod, &cat),
+        };
+        let default_text = default.as_ref().and_then(|d| {
+            let empty = TableDef { oid: 0, name: String::new(), columns: vec![], constraints: vec![], indexes: vec![] };
+            let mut col = pgmem_catalog::ColumnDef::new("value", base.clone());
+            col.typmod = *typmod;
+            col.default = Some(d.clone());
+            crate::deparse::deparse_default(m.catalog, &empty, &col).ok().flatten()
+        });
+        vals.extend([
+            ("domain_catalog", cat.clone()),
+            ("domain_schema", name("public")),
+            ("domain_name", name(&t.name)),
+            ("domain_default", default_text.map_or(Value::Null, txt)),
+            ("udt_catalog", cat.clone()),
+            ("dtd_identifier", name("1")),
+        ]);
+        rows.push(s.row(vals));
+    }
+    Ok(rows)
+}
+
+fn domain_constraints(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let m = snapshot(ctx);
+    let s = Spec::parse(DOMAIN_CONSTRAINTS);
+    let cat = catalog_name(ctx);
+    let mut rows = Vec::new();
+    for t in m.catalog.types() {
+        for c in crate::catalog_views::domain_constraints(m.catalog, t) {
+            rows.push(s.row(vec![
+                ("constraint_catalog", cat.clone()),
+                ("constraint_schema", name("public")),
+                ("constraint_name", name(&c.name)),
+                ("domain_catalog", cat.clone()),
+                ("domain_schema", name("public")),
+                ("domain_name", name(&t.name)),
+                ("is_deferrable", txt("NO")),
+                ("initially_deferred", txt("NO")),
+            ]));
+        }
+    }
+    Ok(rows)
+}
 
 fn empty(_: &EvalCtx) -> SqlResult<Vec<Row>> {
     Ok(Vec::new())
@@ -150,12 +213,24 @@ fn tables(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
 
 /// The information_schema type columns of a column type: data_type, character lengths,
 /// numeric precision/radix/scale and datetime precision.
-fn type_columns(ty: &Type, typmod: i32) -> Vec<(&'static str, Value)> {
+fn type_columns(ty: &Type, typmod: i32, catalog: &Value) -> Vec<(&'static str, Value)> {
+    // A domain column is described by its base type (with the domain's typmod) and names the
+    // domain in the domain_* columns.
+    if let Type::Domain(oid) = ty {
+        let (base, dmod) = pgmem_types::usertype::domain_base(*oid).unwrap_or((Type::Unknown, -1));
+        let mut out = type_columns(&base, if typmod >= 0 { typmod } else { dmod }, catalog);
+        out.extend([("domain_catalog", catalog.clone()), ("domain_schema", name("public")), ("domain_name", name(&ty.typname()))]);
+        return out;
+    }
+    let user = |t: &Type| matches!(t, Type::Enum(_) | Type::Composite(_));
     let data_type = match ty {
         Type::Array(_) => "ARRAY".to_owned(),
+        t if user(t) => "USER-DEFINED".to_owned(),
         other => other.name(),
     };
-    let mut out = vec![("data_type", txt(data_type)), ("udt_schema", name("pg_catalog")), ("udt_name", name(&ty.typname()))];
+    let elem_user = matches!(ty, Type::Array(e) if user(e) || e.is_domain());
+    let schema = if user(ty) || elem_user { "public" } else { "pg_catalog" };
+    let mut out = vec![("data_type", txt(data_type)), ("udt_schema", name(schema)), ("udt_name", name(&ty.typname()))];
     let null = || Value::Null;
     let n = |v: i64| int4(v);
     match ty {
@@ -208,7 +283,7 @@ fn column_row(ctx: &EvalCtx, m: &Model, s: &Spec, rel: &str, table: Option<&Tabl
         ("dtd_identifier", name(&a.attnum.to_string())),
         ("is_updatable", yes_no(updatable)),
     ];
-    vals.extend(type_columns(&a.ty, a.typmod));
+    vals.extend(type_columns(&a.ty, a.typmod, &catalog_name(ctx)));
     if let (Some(t), Some(c)) = (table, a.column) {
         if c.generated.is_none()
             && let Ok(Some(d)) = crate::deparse::deparse_default(m.catalog, t, c)
@@ -402,6 +477,14 @@ fn check_constraints(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("check_clause", txt(clause)),
             ])
         })
+        .chain(m.catalog.types().flat_map(|t| crate::catalog_views::domain_constraints(m.catalog, t)).map(|c| {
+            s.row(vec![
+                ("constraint_catalog", catalog_name(ctx)),
+                ("constraint_schema", name("public")),
+                ("constraint_name", name(&c.name)),
+                ("check_clause", txt(c.check.unwrap_or_else(|| "VALUE IS NOT NULL".to_owned()))),
+            ])
+        }))
         .collect())
 }
 

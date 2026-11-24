@@ -37,6 +37,11 @@ pub enum Value {
     Reg(crate::RegKind, u32, String),
     /// A one-dimensional array; elements may be `Null`.
     Array(Vec<Value>),
+    /// An enum value: the enum type's OID and the label's OID (`pg_enum.oid`), so renaming a
+    /// label changes stored values too, as in Postgres.
+    Enum(u32, u32),
+    /// A composite value: its type's OID (`record` for anonymous rows) and the fields.
+    Record(u32, Vec<Value>),
 }
 
 impl Value {
@@ -108,6 +113,8 @@ impl Value {
             Value::Oid(_) => "oid",
             Value::Reg(k, ..) => k.typname(),
             Value::Array(_) => "array",
+            Value::Enum(..) => "enum",
+            Value::Record(..) => "record",
         }
     }
 
@@ -142,7 +149,8 @@ impl Value {
             Value::Interval(iv) => GroupKey::Int128(iv.total_micros_i128()),
             Value::Jsonb(j) => GroupKey::Text(j.to_string()),
             Value::Oid(o) | Value::Reg(_, o, _) => GroupKey::Int(i64::from(*o)),
-            Value::Array(items) => GroupKey::Array(items.iter().map(Value::group_key).collect()),
+            Value::Array(items) | Value::Record(_, items) => GroupKey::Array(items.iter().map(Value::group_key).collect()),
+            Value::Enum(_, label) => GroupKey::Int(i64::from(*label)),
         }
     }
 }
@@ -187,6 +195,21 @@ pub fn compare_values(a: &Value, b: &Value) -> SqlResult<Ordering> {
         (Interval(x), Interval(y)) => x.cmp(y),
         (Jsonb(x), Jsonb(y)) => x.total_cmp(y),
         (Oid(x) | Reg(_, x, _), Oid(y) | Reg(_, y, _)) => x.cmp(y),
+        (Enum(t, x), Enum(u, y)) if t == u => crate::usertype::compare_enum(*t, *x, *y),
+        // Composite values compare field by field; two NULL fields are equal and NULL sorts
+        // above non-NULL (btree record_cmp semantics).
+        (Record(_, x), Record(_, y)) => {
+            if x.len() != y.len() {
+                return Err(SqlError::new(crate::code::DATATYPE_MISMATCH, "cannot compare record types with different numbers of columns"));
+            }
+            for (l, r) in x.iter().zip(y.iter()) {
+                let o = compare_values(l, r)?;
+                if o != Ordering::Equal {
+                    return Ok(o);
+                }
+            }
+            Ordering::Equal
+        }
         (Array(x), Array(y)) => {
             for (l, r) in x.iter().zip(y.iter()) {
                 let o = compare_values(l, r)?;
@@ -242,6 +265,9 @@ impl Value {
                 let elem = items.iter().find(|v| !v.is_null()).map_or(Type::Text, Value::natural_type);
                 Type::array_of(elem)
             }
+            Value::Enum(t, _) => Type::Enum(*t),
+            Value::Record(crate::usertype::RECORD_OID, _) => Type::Record,
+            Value::Record(t, _) => Type::Composite(*t),
         }
     }
 }

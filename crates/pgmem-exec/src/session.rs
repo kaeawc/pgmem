@@ -295,7 +295,11 @@ impl Session {
         } else {
             DateOrder::Mdy
         };
-        Context { zone, date_order, now: self.clock.now_micros() }
+        let types = match &self.txn {
+            Some(t) => crate::usertypes::registry(t.catalog()),
+            None => crate::usertypes::registry(&self.db.current().catalog),
+        };
+        Context { zone, date_order, now: self.clock.now_micros(), types }
     }
 
     /// Analyzes a statement without running it: parameter types and result columns.

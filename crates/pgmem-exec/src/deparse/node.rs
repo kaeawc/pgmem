@@ -359,7 +359,7 @@ impl Analyzer<'_> {
             ir::Expr::Literal(l) => literal(l),
             ir::Expr::Column(parts) => self.column(parts),
             ir::Expr::Param(n) => Node::Param { n: *n, ty: Type::Unknown },
-            ir::Expr::TypedString { ty, value } => typed_string(ty, value),
+            ir::Expr::TypedString { ty, value } => typed_string(self.catalog, ty, value),
             ir::Expr::Unary { op, expr } => self.unary(*op, expr),
             ir::Expr::Binary { op, left, right } => {
                 let (l, r) = (self.expr(left), self.expr(right));
@@ -665,7 +665,7 @@ impl Analyzer<'_> {
     }
 
     fn cast(&mut self, expr: &ir::Expr, ty: &ir::TypeName) -> Node {
-        let Ok((t, typmod)) = resolve_type_name(ty) else {
+        let Ok((t, typmod)) = resolve_type_name(self.catalog, ty) else {
             let inner = self.expr(expr);
             let text = format!("({})::{}", super::print::expr_text(&inner), ty.name);
             return Node::Raw { text, ty: Type::Unknown };
@@ -840,8 +840,8 @@ fn literal(l: &ir::Literal) -> Node {
     }
 }
 
-fn typed_string(ty: &ir::TypeName, value: &str) -> Node {
-    match resolve_type_name(ty) {
+fn typed_string(catalog: &Catalog, ty: &ir::TypeName, value: &str) -> Node {
+    match resolve_type_name(catalog, ty) {
         Ok((t, typmod)) => coerce(Node::Const { ty: Type::Unknown, typmod: -1, value: Some(value.to_owned()) }, &t, typmod, true),
         Err(_) => Node::Raw { text: format!("{}::{}", pg::quote_literal(value), ty.name), ty: Type::Unknown },
     }
