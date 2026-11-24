@@ -59,7 +59,10 @@ After any change: `cargo c && cargo lint && cargo t`.
 - `crates/pgmem-storage` — committed state + per-transaction row overlays, snapshots, savepoints,
   sequences.
 - `crates/pgmem-exec` — binder (`bind/`), executor (`run.rs`, `agg.rs`, `window.rs`), DML/DDL,
-  builtins (`funcs/`), `Session` (transaction state machine, settings).
+  builtins (`funcs/`), `Session` (transaction state machine, settings), virtual
+  `pg_catalog`/`information_schema` relations (`catalog_views/`, builtin data recorded from
+  Postgres in `*.tsv`), and `deparse/` (ruleutils-compatible SQL for defaults, CHECKs, indexes,
+  views).
 - `crates/pgmem-wire` — protocol v3 server (startup, simple and extended query).
 - `crates/pgmem` — public `Server` API, the `pgmem` binary, integration tests.
 - `crates/pgmem-conformance` — corpus runner (records from Postgres, ratchets pgmem's pass rate).

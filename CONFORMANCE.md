@@ -7,17 +7,17 @@ PostgreSQL 18; CI re-verifies every record against PostgreSQL and runs it agains
 A record passes when pgmem returns the same column names, column types and text values, or
 the same SQLSTATE and error message.
 
-pgmem passes **2132 / 3309 records (64.4%)**.
+pgmem passes **2238 / 3309 records (67.6%)**.
 
 | Area | Records | Pass | Rate |
 |---|---:|---:|---:|
-| catalog | 226 | 63 | 27.9% |
-| constraints | 171 | 94 | 55.0% |
-| ddl | 386 | 189 | 49.0% |
+| catalog | 226 | 134 | 59.3% |
+| constraints | 171 | 98 | 57.3% |
+| ddl | 386 | 205 | 53.1% |
 | dml | 282 | 209 | 74.1% |
-| functions | 445 | 275 | 61.8% |
+| functions | 445 | 278 | 62.5% |
 | queries | 440 | 373 | 84.8% |
-| session | 419 | 212 | 50.6% |
+| session | 419 | 224 | 53.5% |
 | smoke | 7 | 7 | 100.0% |
 | transactions | 522 | 432 | 82.8% |
 | types | 411 | 278 | 67.6% |
@@ -26,28 +26,28 @@ pgmem passes **2132 / 3309 records (64.4%)**.
 
 | File | Records | Pass | Rate |
 |---|---:|---:|---:|
-| catalog/comments.slt | 32 | 14 | 43.8% |
-| catalog/information_schema.slt | 38 | 7 | 18.4% |
-| catalog/orm_reflection.slt | 35 | 6 | 17.1% |
-| catalog/pg_catalog.slt | 51 | 10 | 19.6% |
-| catalog/psql_describe.slt | 22 | 4 | 18.2% |
-| catalog/regtypes.slt | 33 | 15 | 45.5% |
-| catalog/settings.slt | 15 | 7 | 46.7% |
-| constraints/check_notnull.slt | 35 | 22 | 62.9% |
+| catalog/comments.slt | 32 | 26 | 81.2% |
+| catalog/information_schema.slt | 38 | 23 | 60.5% |
+| catalog/orm_reflection.slt | 35 | 5 | 14.3% |
+| catalog/pg_catalog.slt | 51 | 33 | 64.7% |
+| catalog/psql_describe.slt | 22 | 13 | 59.1% |
+| catalog/regtypes.slt | 33 | 23 | 69.7% |
+| catalog/settings.slt | 15 | 11 | 73.3% |
+| constraints/check_notnull.slt | 35 | 24 | 68.6% |
 | constraints/deferrable.slt | 38 | 14 | 36.8% |
 | constraints/exclude.slt | 20 | 0 | 0.0% |
 | constraints/foreign_keys.slt | 46 | 31 | 67.4% |
-| constraints/keys_unique.slt | 32 | 27 | 84.4% |
-| ddl/alter_table.slt | 46 | 31 | 67.4% |
-| ddl/create_table.slt | 40 | 21 | 52.5% |
-| ddl/drop.slt | 36 | 15 | 41.7% |
+| constraints/keys_unique.slt | 32 | 29 | 90.6% |
+| ddl/alter_table.slt | 46 | 36 | 78.3% |
+| ddl/create_table.slt | 40 | 23 | 57.5% |
+| ddl/drop.slt | 36 | 16 | 44.4% |
 | ddl/generated.slt | 23 | 9 | 39.1% |
-| ddl/identity.slt | 38 | 23 | 60.5% |
-| ddl/indexes.slt | 33 | 23 | 69.7% |
+| ddl/identity.slt | 38 | 26 | 68.4% |
+| ddl/indexes.slt | 33 | 25 | 75.8% |
 | ddl/migrations.slt | 58 | 19 | 32.8% |
 | ddl/schema.slt | 31 | 15 | 48.4% |
 | ddl/sequences.slt | 34 | 19 | 55.9% |
-| ddl/truncate_comment.slt | 14 | 9 | 64.3% |
+| ddl/truncate_comment.slt | 14 | 12 | 85.7% |
 | ddl/views.slt | 33 | 5 | 15.2% |
 | dml/delete.slt | 32 | 26 | 81.2% |
 | dml/insert.slt | 45 | 44 | 97.8% |
@@ -58,7 +58,7 @@ pgmem passes **2132 / 3309 records (64.4%)**.
 | dml/update.slt | 48 | 33 | 68.8% |
 | dml/writable_cte.slt | 21 | 5 | 23.8% |
 | functions/arrays.slt | 49 | 24 | 49.0% |
-| functions/conditional_misc.slt | 49 | 32 | 65.3% |
+| functions/conditional_misc.slt | 49 | 35 | 71.4% |
 | functions/datetime.slt | 99 | 64 | 64.6% |
 | functions/json.slt | 85 | 38 | 44.7% |
 | functions/math.slt | 61 | 39 | 63.9% |
@@ -74,13 +74,13 @@ pgmem passes **2132 / 3309 records (64.4%)**.
 | queries/subqueries.slt | 39 | 36 | 92.3% |
 | queries/where_operators.slt | 51 | 47 | 92.2% |
 | queries/windows.slt | 39 | 28 | 71.8% |
-| session/config_functions.slt | 45 | 26 | 57.8% |
-| session/extensions.slt | 46 | 22 | 47.8% |
+| session/config_functions.slt | 45 | 27 | 60.0% |
+| session/extensions.slt | 46 | 23 | 50.0% |
 | session/listen_notify.slt | 24 | 5 | 20.8% |
-| session/prepare_cursor.slt | 77 | 21 | 27.3% |
-| session/roles.slt | 46 | 19 | 41.3% |
+| session/prepare_cursor.slt | 77 | 23 | 29.9% |
+| session/roles.slt | 46 | 21 | 45.7% |
 | session/set_show.slt | 133 | 95 | 71.4% |
-| session/utility.slt | 48 | 24 | 50.0% |
+| session/utility.slt | 48 | 30 | 62.5% |
 | smoke/basics.slt | 7 | 7 | 100.0% |
 | transactions/advisory.slt | 38 | 26 | 68.4% |
 | transactions/basics.slt | 84 | 77 | 91.7% |

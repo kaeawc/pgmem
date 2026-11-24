@@ -7,6 +7,7 @@ pub mod bind;
 pub mod cast;
 pub mod catalog_views;
 pub mod ddl;
+pub mod deparse;
 pub mod dml;
 pub mod eval;
 pub mod funcs;

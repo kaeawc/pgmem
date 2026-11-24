@@ -8,10 +8,10 @@ and what comes next. Updated with every PR.
 | Metric | Value | How it is measured |
 |---|---|---|
 | pgmem-go parity | **564 / 564** Go tests ported | `scripts/parity.py check` ([PARITY.md](PARITY.md)) |
-| Integration suite on pgmem | **526 / 526** pass | `cargo nextest run -p pgmem --test it` |
-| Integration suite on real PostgreSQL 18 | **526 / 526** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
+| Integration suite on pgmem | **534 / 534** pass | `cargo nextest run -p pgmem --test it` |
+| Integration suite on real PostgreSQL 18 | **534 / 534** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
 | Go pgx example suites (sqlc) against the Rust binary | **27 / 27** pass | `make examples` (CI `pgx-examples`) |
-| **SQL conformance corpus** (3309 records, 9 areas) | **2132 / 3309 (64.4%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
+| **SQL conformance corpus** (3309 records, 9 areas) | **2238 / 3309 (67.6%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
 
 ### Conformance history
 
@@ -27,7 +27,8 @@ and what comes next. Updated with every PR.
 | 2026-11-24 | #110 builtin function tests | 564/564 | — |
 | 2026-11-24 | #111 remove the Go implementation; pgx examples run against Rust | 564/564 | — |
 | 2026-11-24 | #112 conformance corpus and runner (baseline) | 564/564 | 2031/3309 (61.4%) |
-| 2026-11-24 | varchar/bpchar/name/"char"/json/oid/reg*/void types | 564/564 | 2132/3309 (64.4%) |
+| 2026-11-24 | #113 varchar/bpchar/name/"char"/json/oid/reg*/void types | 564/564 | 2132/3309 (64.4%) |
+| 2026-11-24 | pg_catalog / information_schema, COMMENT ON, deparser | 564/564 | 2238/3309 (67.6%) |
 
 ## Supported
 
@@ -63,6 +64,15 @@ and what comes next. Updated with every PR.
 - **Transactions**: BEGIN/COMMIT/ROLLBACK, savepoints, failed-transaction state (25P02),
   READ COMMITTED (per-statement snapshots) and REPEATABLE READ/SERIALIZABLE (transaction
   snapshot), row-level write-conflict detection at commit (40001), non-transactional sequences.
+- **Catalogs**: `pg_catalog` (pg_class, pg_attribute, pg_type, pg_namespace, pg_index,
+  pg_constraint incl. Postgres 18 NOT NULL constraints, pg_attrdef, pg_description, pg_depend,
+  pg_sequence(s), pg_tables, pg_views, pg_indexes, pg_settings, pg_roles, pg_database, ...) and
+  `information_schema` (tables, columns, table_constraints, key_column_usage,
+  referential_constraints, constraint_column_usage, check_constraints, views, sequences,
+  privileges), computed from the live catalog; `format_type`, `pg_get_expr`,
+  `pg_get_constraintdef`, `pg_get_indexdef`, `pg_get_viewdef` (ruleutils-exact deparser),
+  `pg_get_serial_sequence`, `obj_description`/`col_description` (COMMENT ON is stored),
+  `to_regclass`, privilege checks; int2vector/oidvector with zero-based subscripts.
 - **Functions**: string, regex (`~`, regexp_* ), LIKE/ILIKE/SIMILAR TO, math, date/time (extract,
   date_trunc, age, make_*, to_char/to_date/to_timestamp, AT TIME ZONE for UTC and fixed offsets),
   jsonb operators and functions, array operators and functions, sequences, session information,
@@ -71,7 +81,10 @@ and what comes next. Updated with every PR.
 ## Known gaps
 
 - Session time zone is fixed at UTC; named time zones are not supported.
-- No `pg_catalog` / `information_schema` relations yet (drivers that introspect will fail).
+- Catalogs cover one schema (`public`); `CREATE SCHEMA` is accepted without effect. `pg_proc`,
+  `pg_enum`, `pg_trigger` are empty (no user functions, enums or triggers yet). Deparsed
+  definitions follow ruleutils' non-pretty mode; pretty mode (`pg_get_viewdef(v, true)`) does not
+  drop redundant parentheses yet.
 - No COPY, LISTEN/NOTIFY, cursors (DECLARE/FETCH), prepared statements via SQL (PREPARE/EXECUTE),
   stored procedures, triggers, multidimensional arrays, range types, enums, domains, composite
   types, collations (comparison is bytewise, like the C collation).
@@ -84,12 +97,7 @@ and what comes next. Updated with every PR.
 Hill-climb, ordered by conformance records recovered per unit of work and by what blocks real
 clients. Each item names the corpus area it moves (see CONFORMANCE.md for per-file rates).
 
-1. **System catalogs**: `pg_catalog` (pg_class, pg_namespace, pg_attribute, pg_type, pg_index,
-   pg_constraint, pg_attrdef, pg_proc, pg_description, pg_settings, pg_sequences, pg_views,
-   pg_tables, pg_indexes, pg_roles, pg_extension) and `information_schema` (tables, columns,
-   constraints, key/constraint column usage, views, sequences); `reg*` types and `to_reg*`,
-   `pg_get_*def`, `format_type`, `pg_get_serial_sequence`. Blocks ORM/driver introspection and
-   array decoding in drivers that look up `pg_type` (catalog 23%, ddl, types).
+1. **Schemas**: `CREATE SCHEMA`, qualified names, `search_path` resolution (catalog, ddl).
 2. **JSON fidelity**: json-typed results from `json_build_object`/`to_json`/`json_agg`/
    `row_to_json`/`json_array_elements` with Postgres' json formatting; SQL/JSON (`IS JSON`,
    `JSON_VALUE`, `JSON_TABLE`), jsonpath.

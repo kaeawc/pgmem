@@ -63,6 +63,13 @@ pub enum Statement {
     Show {
         name: String,
     },
+    /// `COMMENT ON object name IS 'text' | NULL`.
+    Comment {
+        target: CommentTarget,
+        /// The object's name; for a column, the table name followed by the column name.
+        name: ObjectName,
+        text: Option<String>,
+    },
     /// Statements accepted for client and migration-tool compatibility that have no effect in
     /// pgmem (`COMMENT ON`, `CREATE EXTENSION`, `ANALYZE`, `VACUUM`, `DISCARD ALL`, ...).
     /// `tag` is the CommandComplete tag Postgres sends.
@@ -71,6 +78,21 @@ pub enum Statement {
     },
     /// Statements with no SQL content (`;` alone): Postgres answers EmptyQueryResponse.
     Empty,
+}
+
+/// What a `COMMENT ON` names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommentTarget {
+    Table,
+    View,
+    MaterializedView,
+    Sequence,
+    Index,
+    Column,
+    Schema,
+    /// Object kinds pgmem has no catalog entry for (functions, types, extensions, roles,
+    /// databases, ...): accepted without effect.
+    Other,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

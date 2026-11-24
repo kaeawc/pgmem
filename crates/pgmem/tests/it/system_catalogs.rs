@@ -1,0 +1,216 @@
+//! pg_catalog and information_schema: the introspection queries drivers, ORMs and psql run.
+
+use crate::support::{expect_code, setup, text_value, texts};
+
+fn rows(c: &mut postgres::Client, sql: &str) -> Vec<Vec<String>> {
+    texts(c, sql).into_iter().map(|r| r.into_iter().map(|v| v.unwrap_or_else(|| "NULL".into())).collect()).collect()
+}
+
+fn schema(c: &mut postgres::Client) {
+    c.batch_execute(
+        "CREATE TABLE authors (id serial PRIMARY KEY, name varchar(40) NOT NULL, email text UNIQUE, rating numeric(3,1));
+         CREATE TABLE books (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                             author_id int NOT NULL REFERENCES authors (id) ON DELETE CASCADE, title text);
+         CREATE INDEX books_title_idx ON books (title);
+         CREATE VIEW author_names AS SELECT id, name FROM authors;",
+    )
+    .expect("schema");
+}
+
+#[test]
+fn pg_class_lists_relations_by_kind() {
+    let (_db, mut c) = setup();
+    schema(&mut c);
+    let got = rows(
+        &mut c,
+        "SELECT c.relname, c.relkind, c.relnatts FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' ORDER BY c.relname",
+    );
+    let want: Vec<Vec<&str>> = vec![
+        vec!["author_names", "v", "2"],
+        vec!["authors", "r", "4"],
+        vec!["authors_email_key", "i", "1"],
+        vec!["authors_id_seq", "S", "3"],
+        vec!["authors_pkey", "i", "1"],
+        vec!["books", "r", "3"],
+        vec!["books_id_seq", "S", "3"],
+        vec!["books_pkey", "i", "1"],
+        vec!["books_title_idx", "i", "1"],
+    ];
+    assert_eq!(got, want);
+}
+
+#[test]
+fn pg_attribute_and_format_type() {
+    let (_db, mut c) = setup();
+    schema(&mut c);
+    let got = rows(
+        &mut c,
+        "SELECT attname, format_type(atttypid, atttypmod), attnotnull, atthasdef, attidentity FROM pg_attribute
+         WHERE attrelid = 'authors'::regclass AND attnum > 0 AND NOT attisdropped ORDER BY attnum",
+    );
+    assert_eq!(
+        got,
+        vec![
+            vec!["id", "integer", "t", "t", ""],
+            vec!["name", "character varying(40)", "t", "f", ""],
+            vec!["email", "text", "f", "f", ""],
+            vec!["rating", "numeric(3,1)", "f", "f", ""],
+        ]
+    );
+    // System columns sit at negative attnums.
+    assert_eq!(
+        text_value(&mut c, "SELECT attname FROM pg_attribute WHERE attrelid = 'books'::regclass AND attnum = -1").as_deref(),
+        Some("ctid")
+    );
+    assert_eq!(
+        text_value(&mut c, "SELECT attidentity FROM pg_attribute WHERE attrelid = 'books'::regclass AND attname = 'id'").as_deref(),
+        Some("a")
+    );
+}
+
+#[test]
+fn pg_constraint_includes_not_null_constraints() {
+    let (_db, mut c) = setup();
+    schema(&mut c);
+    let got = rows(
+        &mut c,
+        "SELECT conname, contype, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'books'::regclass ORDER BY conname",
+    );
+    assert_eq!(
+        got,
+        vec![
+            vec!["books_author_id_fkey", "f", "FOREIGN KEY (author_id) REFERENCES authors(id) ON DELETE CASCADE"],
+            vec!["books_author_id_not_null", "n", "NOT NULL author_id"],
+            vec!["books_id_not_null", "n", "NOT NULL id"],
+            vec!["books_pkey", "p", "PRIMARY KEY (id)"],
+        ]
+    );
+    // The foreign key references the primary key's index.
+    assert_eq!(
+        text_value(
+            &mut c,
+            "SELECT i.relname FROM pg_constraint k JOIN pg_class i ON i.oid = k.conindid WHERE k.conname = 'books_author_id_fkey'"
+        )
+        .as_deref(),
+        Some("authors_pkey")
+    );
+}
+
+#[test]
+fn pg_index_keys_and_indexdef() {
+    let (_db, mut c) = setup();
+    schema(&mut c);
+    let got = rows(
+        &mut c,
+        "SELECT i.relname, x.indisunique, x.indisprimary, x.indkey, pg_get_indexdef(x.indexrelid)
+         FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid WHERE x.indrelid = 'books'::regclass ORDER BY i.relname",
+    );
+    assert_eq!(
+        got,
+        vec![
+            vec!["books_pkey", "t", "t", "1", "CREATE UNIQUE INDEX books_pkey ON public.books USING btree (id)"],
+            vec!["books_title_idx", "f", "f", "3", "CREATE INDEX books_title_idx ON public.books USING btree (title)"],
+        ]
+    );
+    // int2vector subscripts start at 0, and = ANY works over the vector.
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT a.attname FROM pg_index x JOIN pg_attribute a ON a.attrelid = x.indrelid AND a.attnum = ANY (x.indkey)
+             WHERE x.indrelid = 'books'::regclass AND x.indisprimary"
+        ),
+        vec![vec!["id"]]
+    );
+    assert_eq!(text_value(&mut c, "SELECT indkey[0] FROM pg_index WHERE indexrelid = 'books_title_idx'::regclass").as_deref(), Some("3"));
+}
+
+#[test]
+fn information_schema_columns_and_constraints() {
+    let (_db, mut c) = setup();
+    schema(&mut c);
+    let got = rows(
+        &mut c,
+        "SELECT column_name, data_type, is_nullable, character_maximum_length, numeric_precision, numeric_scale, is_identity
+         FROM information_schema.columns WHERE table_name = 'authors' ORDER BY ordinal_position",
+    );
+    assert_eq!(
+        got,
+        vec![
+            vec!["id", "integer", "NO", "NULL", "32", "0", "NO"],
+            vec!["name", "character varying", "NO", "40", "NULL", "NULL", "NO"],
+            vec!["email", "text", "YES", "NULL", "NULL", "NULL", "NO"],
+            vec!["rating", "numeric", "YES", "NULL", "3", "1", "NO"],
+        ]
+    );
+    let got = rows(
+        &mut c,
+        "SELECT constraint_name, constraint_type FROM information_schema.table_constraints WHERE table_name = 'authors' ORDER BY 1",
+    );
+    assert_eq!(
+        got,
+        vec![
+            vec!["authors_email_key", "UNIQUE"],
+            vec!["authors_id_not_null", "CHECK"],
+            vec!["authors_name_not_null", "CHECK"],
+            vec!["authors_pkey", "PRIMARY KEY"],
+        ]
+    );
+    let got = rows(
+        &mut c,
+        "SELECT kcu.column_name, ccu.table_name, ccu.column_name, rc.delete_rule
+         FROM information_schema.referential_constraints rc
+         JOIN information_schema.key_column_usage kcu ON kcu.constraint_name = rc.constraint_name
+         JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = rc.constraint_name",
+    );
+    assert_eq!(got, vec![vec!["author_id", "authors", "id", "CASCADE"]]);
+    assert_eq!(
+        rows(&mut c, "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = 'public' ORDER BY 1"),
+        vec![vec!["author_names", "VIEW"], vec!["authors", "BASE TABLE"], vec!["books", "BASE TABLE"]]
+    );
+}
+
+#[test]
+fn comments_round_trip() {
+    let (_db, mut c) = setup();
+    schema(&mut c);
+    c.batch_execute("COMMENT ON TABLE authors IS 'people who write'; COMMENT ON COLUMN authors.email IS 'contact'").expect("comment");
+    assert_eq!(text_value(&mut c, "SELECT obj_description('authors'::regclass, 'pg_class')").as_deref(), Some("people who write"));
+    assert_eq!(text_value(&mut c, "SELECT col_description('authors'::regclass, 3)").as_deref(), Some("contact"));
+    c.batch_execute("COMMENT ON TABLE authors IS NULL").expect("uncomment");
+    assert_eq!(text_value(&mut c, "SELECT obj_description('authors'::regclass, 'pg_class')"), None);
+    expect_code(c.simple_query("COMMENT ON COLUMN authors.nope IS 'x'"), "42703");
+    expect_code(c.simple_query("COMMENT ON TABLE nope IS 'x'"), "42P01");
+    expect_code(c.simple_query("COMMENT ON TABLE author_names IS 'x'"), "42809");
+}
+
+#[test]
+fn serial_sequences_and_regclass_of_catalogs() {
+    let (_db, mut c) = setup();
+    schema(&mut c);
+    assert_eq!(text_value(&mut c, "SELECT pg_get_serial_sequence('authors', 'id')").as_deref(), Some("public.authors_id_seq"));
+    assert_eq!(text_value(&mut c, "SELECT pg_get_serial_sequence('books', 'id')").as_deref(), Some("public.books_id_seq"));
+    assert_eq!(text_value(&mut c, "SELECT pg_get_serial_sequence('authors', 'name')"), None);
+    assert_eq!(text_value(&mut c, "SELECT 'pg_class'::regclass::text").as_deref(), Some("pg_class"));
+    assert_eq!(text_value(&mut c, "SELECT to_regclass('nope')"), None);
+    assert_eq!(
+        rows(&mut c, "SELECT sequencename, data_type FROM pg_sequences ORDER BY 1"),
+        vec![vec!["authors_id_seq", "integer"], vec!["books_id_seq", "bigint"]]
+    );
+}
+
+#[test]
+fn pg_type_and_namespaces() {
+    let (_db, mut c) = setup();
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT typname, typlen, typcategory, typelem::regtype FROM pg_type WHERE typname IN ('int4', '_int4', 'varchar') ORDER BY 1"
+        ),
+        vec![vec!["_int4", "-1", "A", "integer"], vec!["int4", "4", "N", "-"], vec!["varchar", "-1", "S", "-"]]
+    );
+    assert_eq!(
+        rows(&mut c, "SELECT nspname FROM pg_namespace WHERE nspname IN ('public', 'pg_catalog', 'information_schema') ORDER BY 1"),
+        vec![vec!["information_schema"], vec!["pg_catalog"], vec!["public"]]
+    );
+}

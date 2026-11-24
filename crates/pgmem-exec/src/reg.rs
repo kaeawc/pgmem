@@ -7,8 +7,12 @@ use pgmem_types::{RegKind, SqlError, SqlResult, Type, Value, code, text};
 
 /// Namespaces pgmem knows, with Postgres' fixed OIDs (information_schema's varies per
 /// cluster; any stable value will do).
-const NAMESPACES: &[(&str, u32)] =
-    &[("pg_catalog", PG_CATALOG_NAMESPACE_OID), ("public", PUBLIC_NAMESPACE_OID), ("pg_toast", 99), ("information_schema", 13_000)];
+const NAMESPACES: &[(&str, u32)] = &[
+    ("pg_catalog", PG_CATALOG_NAMESPACE_OID),
+    ("public", PUBLIC_NAMESPACE_OID),
+    ("pg_toast", 99),
+    ("information_schema", crate::catalog_views::INFORMATION_SCHEMA_NAMESPACE_OID),
+];
 
 /// Splits a possibly qualified, possibly quoted name (`public."My Table"`) into folded parts.
 pub fn parse_qualified(s: &str) -> SqlResult<Vec<String>> {
@@ -62,7 +66,10 @@ pub fn reg_name(kind: RegKind, oid: u32, catalog: &Catalog) -> String {
         return "-".to_owned();
     }
     let name = match kind {
-        RegKind::Class => catalog.relation_by_oid(oid).map(|r| quote_ident(r.name())),
+        RegKind::Class => catalog
+            .relation_by_oid(oid)
+            .map(|r| quote_ident(r.name()))
+            .or_else(|| crate::catalog_views::system_relation_by_oid(oid).map(system_display)),
         RegKind::Type => Type::from_oid(oid).map(|t| t.name()),
         RegKind::Namespace => namespace_name(oid).map(quote_ident),
         RegKind::Proc => None,
@@ -73,6 +80,15 @@ pub fn reg_name(kind: RegKind, oid: u32, catalog: &Catalog) -> String {
 fn lookup_class(s: &str, catalog: &Catalog) -> SqlResult<Value> {
     let parts = parse_qualified(s)?;
     let missing = || SqlError::undefined_table(s.trim());
+    // pg_catalog is searched first, as in Postgres' effective search_path.
+    let system = match parts.as_slice() {
+        [n] => crate::catalog_views::system_relation(None, n),
+        [schema, n] if schema == "pg_catalog" || schema == "information_schema" => crate::catalog_views::system_relation(Some(schema), n),
+        _ => None,
+    };
+    if let Some(d) = system {
+        return Ok(Value::Reg(RegKind::Class, d.oid, system_display(d)));
+    }
     let name = match parts.as_slice() {
         [n] => n,
         [schema, n] if schema == "public" => n,
@@ -83,6 +99,11 @@ fn lookup_class(s: &str, catalog: &Catalog) -> SqlResult<Value> {
     };
     let rel = catalog.relation(name).ok_or_else(missing)?;
     Ok(Value::Reg(RegKind::Class, rel.oid(), quote_ident(rel.name())))
+}
+
+/// How a system relation prints as regclass: unqualified when on the search path.
+fn system_display(d: &crate::catalog_views::Def) -> String {
+    if d.schema == "pg_catalog" { d.name.to_owned() } else { format!("{}.{}", d.schema, d.name) }
 }
 
 fn namespace_name_oid(name: &str) -> Option<u32> {

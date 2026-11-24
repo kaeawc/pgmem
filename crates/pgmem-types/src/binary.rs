@@ -84,6 +84,10 @@ pub fn encode(v: &Value, ty: &Type) -> SqlResult<Vec<u8>> {
             Value::Oid(o) | Value::Reg(_, o, _) => o.to_be_bytes().to_vec(),
             _ => return Err(mismatch()),
         },
+        Type::Int2Vector | Type::OidVector => match v {
+            Value::Array(items) => encode_array(items, ty.element().unwrap_or(&Type::Int2))?,
+            _ => return Err(mismatch()),
+        },
         Type::Array(elem) => match v {
             Value::Array(items) => encode_array(items, elem)?,
             _ => return Err(mismatch()),
@@ -174,6 +178,7 @@ pub fn decode(b: &[u8], ty: &Type) -> SqlResult<Value> {
             Value::Jsonb(Jsonb::parse(text)?)
         }
         Type::Array(elem) => Value::Array(decode_array(b, elem, ty)?),
+        Type::Int2Vector | Type::OidVector => Value::Array(decode_array(b, ty.element().unwrap_or(&Type::Int2), ty)?),
     })
 }
 

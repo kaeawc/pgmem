@@ -110,6 +110,7 @@ mod string_and_oid_types;
 mod string_funcs_more;
 mod strings;
 mod subquery;
+mod system_catalogs;
 mod table_alias;
 mod table_fk;
 mod text_numeric_funcs;

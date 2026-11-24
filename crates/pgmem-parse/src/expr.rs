@@ -501,7 +501,10 @@ pub(crate) fn lower_type(dt: &sq::DataType) -> SqlResult<TypeName> {
             let name = if matches!(tz, sq::TimezoneInfo::WithTimeZone | sq::TimezoneInfo::Tz) { "timestamptz" } else { "timestamp" };
             TypeName { modifiers: p.iter().filter_map(|n| i64::try_from(*n).ok()).collect(), ..simple(name) }
         }
-        D::Time(_, tz) => simple(if matches!(tz, sq::TimezoneInfo::WithTimeZone | sq::TimezoneInfo::Tz) { "timetz" } else { "time" }),
+        D::Time(p, tz) => TypeName {
+            modifiers: p.iter().filter_map(|n| i64::try_from(*n).ok()).collect(),
+            ..simple(if matches!(tz, sq::TimezoneInfo::WithTimeZone | sq::TimezoneInfo::Tz) { "timetz" } else { "time" })
+        },
         D::Date => simple("date"),
         D::Interval { .. } => simple("interval"),
         D::JSON => simple("json"),

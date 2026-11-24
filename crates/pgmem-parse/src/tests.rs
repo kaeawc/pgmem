@@ -61,7 +61,18 @@ fn utility_statements() {
     assert!(matches!(one("END"), Statement::Transaction(TransactionStmt::Commit { .. })));
     assert!(matches!(one("ABORT"), Statement::Transaction(TransactionStmt::Rollback { .. })));
     assert_eq!(one("ROLLBACK TO SAVEPOINT sp1"), Statement::Transaction(TransactionStmt::RollbackTo("sp1".into())));
-    assert_eq!(one("COMMENT ON TABLE t IS 'x'"), Statement::NoOp { tag: "COMMENT".into() });
+    assert_eq!(
+        one("COMMENT ON TABLE t IS 'x'"),
+        Statement::Comment { target: pgmem_ir::CommentTarget::Table, name: pgmem_ir::ObjectName(vec!["t".into()]), text: Some("x".into()) }
+    );
+    assert_eq!(
+        one("COMMENT ON COLUMN t.c IS NULL"),
+        Statement::Comment {
+            target: pgmem_ir::CommentTarget::Column,
+            name: pgmem_ir::ObjectName(vec!["t".into(), "c".into()]),
+            text: None
+        }
+    );
     assert_eq!(one("DISCARD ALL"), Statement::NoOp { tag: "DISCARD ALL".into() });
     assert!(matches!(one("SET search_path TO \"$user\", public"), Statement::Set { .. }));
     assert_eq!(one(""), Statement::Empty);

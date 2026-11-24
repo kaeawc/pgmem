@@ -34,6 +34,9 @@ pub fn encode(v: &Value, ty: &Type) -> SqlResult<String> {
         (Value::Jsonb(j), _) => j.to_string(),
         (Value::Oid(o), _) => o.to_string(),
         (Value::Reg(_, _, name), _) => name.clone(),
+        (Value::Array(items), Type::Int2Vector | Type::OidVector) => {
+            items.iter().map(|i| encode(i, &i.natural_type())).collect::<SqlResult<Vec<_>>>()?.join(" ")
+        }
         (Value::Array(items), ty) => {
             let elem_ty = ty.element().cloned().unwrap_or_else(|| v.natural_type().element().cloned().unwrap_or(Type::Text));
             format_array(items, &elem_ty)?
@@ -46,6 +49,12 @@ pub fn decode(s: &str, ty: &Type) -> SqlResult<Value> {
     match ty {
         Type::Unknown | Type::Text | Type::Varchar | Type::Bpchar => Ok(Value::Text(s.to_owned())),
         Type::Void => Ok(Value::Text(String::new())),
+        Type::Int2Vector => s
+            .split_whitespace()
+            .map(|p| parse_int(p, "smallint").and_then(|n| i16::try_from(n).map_err(|_| out_of_range(p, "smallint"))).map(Value::Int2))
+            .collect::<SqlResult<Vec<_>>>()
+            .map(Value::Array),
+        Type::OidVector => s.split_whitespace().map(|p| parse_oid(p).map(Value::Oid)).collect::<SqlResult<Vec<_>>>().map(Value::Array),
         Type::Name => Ok(Value::Text(truncate_name(s))),
         // "char" keeps the first byte (an ASCII character for every catalog use).
         Type::Char => Ok(Value::Text(s.chars().next().map(String::from).unwrap_or_default())),

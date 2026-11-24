@@ -59,6 +59,10 @@ pub enum Type {
     Reg(RegKind),
     /// The result type of functions called for their side effect; prints as an empty string.
     Void,
+    /// `int2vector` / `oidvector`: catalog arrays with space-separated output and zero-based
+    /// subscripts (`pg_index.indkey`, `pg_proc.proargtypes`).
+    Int2Vector,
+    OidVector,
     Array(Box<Type>),
 }
 
@@ -119,6 +123,8 @@ impl Type {
             Type::Reg(RegKind::Proc) => 24,
             Type::Reg(RegKind::Namespace) => 4089,
             Type::Void => 2278,
+            Type::Int2Vector => 22,
+            Type::OidVector => 30,
             Type::Array(elem) => match elem.as_ref() {
                 Type::Bool => 1000,
                 Type::Bytea => 1001,
@@ -172,6 +178,8 @@ impl Type {
             24 => Some(Type::Reg(RegKind::Proc)),
             4089 => Some(Type::Reg(RegKind::Namespace)),
             2278 => Some(Type::Void),
+            22 => Some(Type::Int2Vector),
+            30 => Some(Type::OidVector),
             700 => Some(Type::Float4),
             701 => Some(Type::Float8),
             1700 => Some(Type::Numeric),
@@ -234,6 +242,7 @@ impl Type {
             Type::Interval | Type::Uuid => 16,
             Type::Unknown => -2,
             Type::Void => 4,
+            Type::Int2Vector | Type::OidVector => -1,
             Type::Numeric | Type::Text | Type::Bytea | Type::Jsonb | Type::Array(_) | Type::Varchar | Type::Bpchar | Type::Json => -1,
         }
     }
@@ -274,6 +283,8 @@ impl Type {
             Type::Oid => "oid",
             Type::Reg(k) => k.typname(),
             Type::Void => "void",
+            Type::Int2Vector => "int2vector",
+            Type::OidVector => "oidvector",
             Type::Array(_) => "array",
         }
     }
@@ -307,6 +318,8 @@ impl Type {
             Type::Oid => "oid".into(),
             Type::Reg(k) => k.typname().into(),
             Type::Void => "void".into(),
+            Type::Int2Vector => "int2vector".into(),
+            Type::OidVector => "oidvector".into(),
             Type::Array(elem) => format!("_{}", elem.typname()),
         }
     }
@@ -335,6 +348,8 @@ impl Type {
             "regproc" => Type::Reg(RegKind::Proc),
             "regnamespace" => Type::Reg(RegKind::Namespace),
             "void" => Type::Void,
+            "int2vector" => Type::Int2Vector,
+            "oidvector" => Type::OidVector,
             "bytea" => Type::Bytea,
             "uuid" => Type::Uuid,
             "timestamptz" | "timestamp with time zone" => Type::Timestamptz,
@@ -377,6 +392,8 @@ impl Type {
     pub fn element(&self) -> Option<&Type> {
         match self {
             Type::Array(e) => Some(e),
+            Type::Int2Vector => Some(&Type::Int2),
+            Type::OidVector => Some(&Type::Oid),
             _ => None,
         }
     }
@@ -389,6 +406,7 @@ impl Type {
             Type::Text | Type::Varchar | Type::Bpchar | Type::Name => 'S',
             Type::Char => 'Z',
             Type::Void => 'P',
+            Type::Int2Vector | Type::OidVector => 'A',
             Type::Oid | Type::Reg(_) => 'N',
             Type::Json => 'U',
             Type::Timestamptz | Type::Timestamp | Type::Date | Type::Time | Type::TimeTz => 'D',

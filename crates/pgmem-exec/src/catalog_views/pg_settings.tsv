@@ -1,0 +1,52 @@
+DateStyle	\N	Client Connection Defaults / Locale and Formatting	Sets the display format for date and time values.	Also controls interpretation of ambiguous date inputs.	user	string	\N	\N	\N	ISO, MDY
+IntervalStyle	\N	Client Connection Defaults / Locale and Formatting	Sets the display format for interval values.	\N	user	enum	\N	\N	{postgres,postgres_verbose,sql_standard,iso_8601}	postgres
+TimeZone	\N	Client Connection Defaults / Locale and Formatting	Sets the time zone for displaying and interpreting time stamps.	\N	user	string	\N	\N	\N	GMT
+application_name	\N	Reporting and Logging / What to Log	Sets the application name to be reported in statistics and logs.	\N	user	string	\N	\N	\N	
+array_nulls	\N	Version and Platform Compatibility / Previous PostgreSQL Versions	Enables input of NULL elements in arrays.	When turned on, unquoted NULL in an array input value means a null value; otherwise it is taken literally.	user	bool	\N	\N	\N	on
+bytea_output	\N	Client Connection Defaults / Statement Behavior	Sets the output format for bytea.	\N	user	enum	\N	\N	{escape,hex}	hex
+check_function_bodies	\N	Client Connection Defaults / Statement Behavior	Check routine bodies during CREATE FUNCTION and CREATE PROCEDURE.	\N	user	bool	\N	\N	\N	on
+client_encoding	\N	Client Connection Defaults / Locale and Formatting	Sets the client's character set encoding.	\N	user	string	\N	\N	\N	SQL_ASCII
+client_min_messages	\N	Client Connection Defaults / Statement Behavior	Sets the message levels that are sent to the client.	Each level includes all the levels that follow it. The later the level, the fewer messages are sent.	user	enum	\N	\N	{debug5,debug4,debug3,debug2,debug1,log,notice,warning,error}	notice
+default_tablespace	\N	Client Connection Defaults / Statement Behavior	Sets the default tablespace to create tables and indexes in.	An empty string means use the database's default tablespace.	user	string	\N	\N	\N	
+default_text_search_config	\N	Client Connection Defaults / Locale and Formatting	Sets default text search configuration.	\N	user	string	\N	\N	\N	pg_catalog.simple
+default_transaction_deferrable	\N	Client Connection Defaults / Statement Behavior	Sets the default deferrable status of new transactions.	\N	user	bool	\N	\N	\N	off
+default_transaction_isolation	\N	Client Connection Defaults / Statement Behavior	Sets the transaction isolation level of each new transaction.	\N	user	enum	\N	\N	{serializable,"repeatable read","read committed","read uncommitted"}	read committed
+default_transaction_read_only	\N	Client Connection Defaults / Statement Behavior	Sets the default read-only status of new transactions.	\N	user	bool	\N	\N	\N	off
+effective_cache_size	8kB	Query Tuning / Planner Cost Constants	Sets the planner's assumption about the total size of the data caches.	That is, the total size of the caches (kernel cache and shared buffers) used for PostgreSQL data files. This is measured in disk pages, which are normally 8 kB each.	user	integer	1	2147483647	\N	524288
+enable_indexscan	\N	Query Tuning / Planner Method Configuration	Enables the planner's use of index-scan plans.	\N	user	bool	\N	\N	\N	on
+enable_seqscan	\N	Query Tuning / Planner Method Configuration	Enables the planner's use of sequential-scan plans.	\N	user	bool	\N	\N	\N	on
+escape_string_warning	\N	Version and Platform Compatibility / Previous PostgreSQL Versions	Warn about backslash escapes in ordinary string literals.	\N	user	bool	\N	\N	\N	on
+extra_float_digits	\N	Client Connection Defaults / Locale and Formatting	Sets the number of digits displayed for floating-point values.	This affects real, double precision, and geometric data types. A zero or negative parameter value is added to the standard number of digits (FLT_DIG or DBL_DIG as appropriate). Any value greater than zero selects precise output mode.	user	integer	-15	3	\N	1
+gin_fuzzy_search_limit	\N	Client Connection Defaults / Other Defaults	Sets the maximum allowed result for exact search by GIN.	0 means no limit.	user	integer	0	2147483647	\N	0
+idle_in_transaction_session_timeout	ms	Client Connection Defaults / Statement Behavior	Sets the maximum allowed idle time between queries, when in a transaction.	0 disables the timeout.	user	integer	0	2147483647	\N	0
+idle_session_timeout	ms	Client Connection Defaults / Statement Behavior	Sets the maximum allowed idle time between queries, when not in a transaction.	0 disables the timeout.	user	integer	0	2147483647	\N	0
+in_hot_standby	\N	Preset Options	Shows whether hot standby is currently active.	\N	internal	bool	\N	\N	\N	off
+integer_datetimes	\N	Preset Options	Shows whether datetimes are integer based.	\N	internal	bool	\N	\N	\N	on
+jit	\N	Query Tuning / Other Planner Options	Allow JIT compilation.	\N	user	bool	\N	\N	\N	on
+lc_messages	\N	Client Connection Defaults / Locale and Formatting	Sets the language in which messages are displayed.	An empty string means use the operating system setting.	superuser	string	\N	\N	\N	
+lc_monetary	\N	Client Connection Defaults / Locale and Formatting	Sets the locale for formatting monetary amounts.	An empty string means use the operating system setting.	user	string	\N	\N	\N	C
+lc_numeric	\N	Client Connection Defaults / Locale and Formatting	Sets the locale for formatting numbers.	An empty string means use the operating system setting.	user	string	\N	\N	\N	C
+lc_time	\N	Client Connection Defaults / Locale and Formatting	Sets the locale for formatting date and time values.	An empty string means use the operating system setting.	user	string	\N	\N	\N	C
+lock_timeout	ms	Client Connection Defaults / Statement Behavior	Sets the maximum allowed duration of any wait for a lock.	0 disables the timeout.	user	integer	0	2147483647	\N	0
+log_statement	\N	Reporting and Logging / What to Log	Sets the type of statements logged.	\N	superuser	enum	\N	\N	{none,ddl,mod,all}	none
+maintenance_work_mem	kB	Resource Usage / Memory	Sets the maximum memory to be used for maintenance operations.	This includes operations such as VACUUM and CREATE INDEX.	user	integer	64	2147483647	\N	65536
+max_connections	\N	Connections and Authentication / Connection Settings	Sets the maximum number of concurrent connections.	\N	postmaster	integer	1	262143	\N	100
+max_identifier_length	\N	Preset Options	Shows the maximum identifier length.	\N	internal	integer	63	63	\N	63
+quote_all_identifiers	\N	Version and Platform Compatibility / Previous PostgreSQL Versions	When generating SQL fragments, quote all identifiers.	\N	user	bool	\N	\N	\N	off
+random_page_cost	\N	Query Tuning / Planner Cost Constants	Sets the planner's estimate of the cost of a nonsequentially fetched disk page.	\N	user	real	0	1.79769e+308	\N	4
+row_security	\N	Client Connection Defaults / Statement Behavior	Enables row security.	When enabled, row security will be applied to all users.	user	bool	\N	\N	\N	on
+search_path	\N	Client Connection Defaults / Statement Behavior	Sets the schema search order for names that are not schema-qualified.	\N	user	string	\N	\N	\N	"$user", public
+server_encoding	\N	Preset Options	Shows the server (database) character set encoding.	\N	internal	string	\N	\N	\N	SQL_ASCII
+server_version	\N	Preset Options	Shows the server version.	\N	internal	string	\N	\N	\N	18.7 (Ubuntu 18.7-1.pgdg22.04+5)
+server_version_num	\N	Preset Options	Shows the server version as an integer.	\N	internal	integer	180007	180007	\N	180007
+shared_buffers	8kB	Resource Usage / Memory	Sets the number of shared memory buffers used by the server.	\N	postmaster	integer	16	1073741823	\N	16384
+standard_conforming_strings	\N	Version and Platform Compatibility / Previous PostgreSQL Versions	Causes '...' strings to treat backslashes literally.	\N	user	bool	\N	\N	\N	on
+statement_timeout	ms	Client Connection Defaults / Statement Behavior	Sets the maximum allowed duration of any statement.	0 disables the timeout.	user	integer	0	2147483647	\N	0
+synchronous_commit	\N	Write-Ahead Log / Settings	Sets the current transaction's synchronization level.	\N	user	enum	\N	\N	{local,remote_write,remote_apply,on,off}	on
+temp_tablespaces	\N	Client Connection Defaults / Statement Behavior	Sets the tablespace(s) to use for temporary tables and sort files.	An empty string means use the database's default tablespace.	user	string	\N	\N	\N	
+timezone_abbreviations	\N	Client Connection Defaults / Locale and Formatting	Selects a file of time zone abbreviations.	\N	user	string	\N	\N	\N	\N
+transaction_deferrable	\N	Client Connection Defaults / Statement Behavior	Whether to defer a read-only serializable transaction until it can be executed with no possible serialization failures.	\N	user	bool	\N	\N	\N	off
+transaction_isolation	\N	Client Connection Defaults / Statement Behavior	Sets the current transaction's isolation level.	\N	user	enum	\N	\N	{serializable,"repeatable read","read committed","read uncommitted"}	read committed
+transaction_read_only	\N	Client Connection Defaults / Statement Behavior	Sets the current transaction's read-only status.	\N	user	bool	\N	\N	\N	off
+work_mem	kB	Resource Usage / Memory	Sets the maximum memory to be used for query workspaces.	This much memory can be used by each internal sort operation and hash table before switching to temporary disk files.	user	integer	64	2147483647	\N	4096
+xmloption	\N	Client Connection Defaults / Statement Behavior	Sets whether XML data in implicit parsing and serialization operations is to be considered as documents or content fragments.	\N	user	enum	\N	\N	{content,document}	content
