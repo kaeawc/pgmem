@@ -7,9 +7,9 @@ and what comes next. Updated with every PR.
 
 | Metric | Value | How it is measured |
 |---|---|---|
-| pgmem-go parity | **268 / 564** Go tests ported | `scripts/parity.py check` ([PARITY.md](PARITY.md)) |
-| Integration suite on pgmem | **221 / 221** pass | `cargo nextest run -p pgmem --test it` |
-| Integration suite on real PostgreSQL 18 | **221 / 221** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
+| pgmem-go parity | **364 / 564** Go tests ported | `scripts/parity.py check` ([PARITY.md](PARITY.md)) |
+| Integration suite on pgmem | **317 / 317** pass | `cargo nextest run -p pgmem --test it` |
+| Integration suite on real PostgreSQL 18 | **317 / 317** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
 | SQL conformance corpus | not yet measured | Phase 2: sqllogictest corpus recorded from real PostgreSQL |
 
 ### Conformance history
@@ -21,6 +21,7 @@ and what comes next. Updated with every PR.
 | 2026-11-24 | executor | 49/564 | — |
 | 2026-11-24 | wire protocol, server, core + example tests | 189/564 | — |
 | 2026-11-24 | transactions, constraints, DDL tests | 268/564 | — |
+| 2026-11-24 | query shape tests (joins, subqueries, CTEs, aggregates, windows) | 364/564 | — |
 
 ## Supported
 
