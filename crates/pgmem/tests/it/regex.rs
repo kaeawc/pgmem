@@ -1,0 +1,43 @@
+use crate::support::{TestDb, setup};
+use postgres::Client;
+use postgres::types::ToSql;
+
+fn fixture() -> (TestDb, Client) {
+    let (db, mut c) = setup();
+    c.batch_execute("CREATE TABLE t (id int PRIMARY KEY, name text NOT NULL); INSERT INTO t (id, name) VALUES (1, 'Alice'), (2, 'Bob'), (3, 'alfred'), (4, 'CAROL')").expect("setup");
+    (db, c)
+}
+
+fn ids(c: &mut Client, sql: &str, params: &[&(dyn ToSql + Sync)]) -> Vec<i32> {
+    c.query(sql, params).unwrap_or_else(|e| panic!("{sql}: {e}")).iter().map(|r| r.get(0)).collect()
+}
+
+#[test]
+fn regex_case_sensitive() {
+    let (_db, mut c) = fixture();
+    assert_eq!(ids(&mut c, "SELECT id FROM t WHERE name ~ '^A' ORDER BY id", &[]), [1]);
+}
+
+#[test]
+fn regex_case_insensitive() {
+    let (_db, mut c) = fixture();
+    assert_eq!(ids(&mut c, "SELECT id FROM t WHERE name ~* '^a' ORDER BY id", &[]), [1, 3]);
+}
+
+#[test]
+fn regex_not_match() {
+    let (_db, mut c) = fixture();
+    assert_eq!(ids(&mut c, "SELECT id FROM t WHERE name !~ '^A' ORDER BY id", &[]), [2, 3, 4]);
+}
+
+#[test]
+fn regex_not_match_case_insensitive() {
+    let (_db, mut c) = fixture();
+    assert_eq!(ids(&mut c, "SELECT id FROM t WHERE name !~* '^a' ORDER BY id", &[]), [2, 4]);
+}
+
+#[test]
+fn regex_anchored_pattern() {
+    let (_db, mut c) = fixture();
+    assert_eq!(ids(&mut c, "SELECT id FROM t WHERE name ~ 'l.+d$' ORDER BY id", &[]), [3]);
+}
