@@ -81,22 +81,22 @@ postgres	aggregates_test.go	TestAggregate_MixedRequiresGroupBy	crates/pgmem/test
 postgres	aggregates_test.go	TestAggregate_OnEmptyTable	crates/pgmem/tests/it/aggregates.rs::aggregate_on_empty_table	pending	Postgres types: sum int8, min/max int4, avg numeric (all NULL)
 postgres	aggregates_test.go	TestAggregate_SumMinMaxAvg	crates/pgmem/tests/it/aggregates.rs::aggregate_sum_min_max_avg	pending	Postgres types: sum(int4)=int8, min/max(int4)=int4, avg(int4)=numeric 20.0000000000000000 (Go scanned all into int64)
 postgres	aggregates_test.go	TestAggregate_WithWhere	crates/pgmem/tests/it/aggregates.rs::aggregate_with_where	pending	
-postgres	alter_column_notnull_test.go	TestAlterColumn_DropNotNull	crates/pgmem/tests/it/alter_column_notnull.rs::alter_column_drop_not_null	pending	error cases additionally assert the real Postgres SQLSTATE.
-postgres	alter_column_notnull_test.go	TestAlterColumn_MissingColumn	crates/pgmem/tests/it/alter_column_notnull.rs::alter_column_missing_column	pending	error cases additionally assert the real Postgres SQLSTATE.
-postgres	alter_column_notnull_test.go	TestAlterColumn_SetNotNull_Existing	crates/pgmem/tests/it/alter_column_notnull.rs::alter_column_set_not_null_existing	pending	error cases additionally assert the real Postgres SQLSTATE.
-postgres	alter_column_notnull_test.go	TestAlterColumn_SetNotNull_NoNulls	crates/pgmem/tests/it/alter_column_notnull.rs::alter_column_set_not_null_no_nulls	pending	error cases additionally assert the real Postgres SQLSTATE.
-postgres	alter_column_notnull_test.go	TestAlterColumn_SetNotNull_OptionalColumnKeyword	crates/pgmem/tests/it/alter_column_notnull.rs::alter_column_set_not_null_optional_column_keyword	pending	error cases additionally assert the real Postgres SQLSTATE.
-postgres	alter_table_test.go	TestAlterTable_AddColumnDuplicate	crates/pgmem/tests/it/alter_table.rs::alter_table_add_column_duplicate	pending	error cases additionally assert the real Postgres SQLSTATE.
-postgres	alter_table_test.go	TestAlterTable_AddColumnIfNotExists	crates/pgmem/tests/it/alter_table.rs::alter_table_add_column_if_not_exists	pending	error cases additionally assert the real Postgres SQLSTATE.
-postgres	alter_table_test.go	TestAlterTable_AddColumnNotNullOnEmpty	crates/pgmem/tests/it/alter_table.rs::alter_table_add_column_not_null_on_empty	pending	error cases additionally assert the real Postgres SQLSTATE.
-postgres	alter_table_test.go	TestAlterTable_AddColumnNotNullOnNonEmpty	crates/pgmem/tests/it/alter_table.rs::alter_table_add_column_not_null_on_non_empty	pending	error cases additionally assert the real Postgres SQLSTATE.
-postgres	alter_table_test.go	TestAlterTable_AddColumnNullable	crates/pgmem/tests/it/alter_table.rs::alter_table_add_column_nullable	pending	error cases additionally assert the real Postgres SQLSTATE.
-postgres	alter_table_test.go	TestAlterTable_DropColumn	crates/pgmem/tests/it/alter_table.rs::alter_table_drop_column	pending	error cases additionally assert the real Postgres SQLSTATE.
-postgres	alter_table_test.go	TestAlterTable_DropColumnCascade	crates/pgmem/tests/it/alter_table.rs::alter_table_drop_column_cascade	pending	error cases additionally assert the real Postgres SQLSTATE.
-postgres	alter_table_test.go	TestAlterTable_DropColumnIfExistsMissing	crates/pgmem/tests/it/alter_table.rs::alter_table_drop_column_if_exists_missing	pending	error cases additionally assert the real Postgres SQLSTATE.
-postgres	alter_table_test.go	TestAlterTable_MissingTable	crates/pgmem/tests/it/alter_table.rs::alter_table_missing_table	pending	error cases additionally assert the real Postgres SQLSTATE.
-postgres	alter_table_test.go	TestAlterTable_RenameColumn	crates/pgmem/tests/it/alter_table.rs::alter_table_rename_column	pending	error cases additionally assert the real Postgres SQLSTATE.
-postgres	alter_table_test.go	TestAlterTable_RenameColumnConflict	crates/pgmem/tests/it/alter_table.rs::alter_table_rename_column_conflict	pending	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_column_notnull_test.go	TestAlterColumn_DropNotNull	crates/pgmem/tests/it/alter_column_notnull.rs::alter_column_drop_not_null	ported	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_column_notnull_test.go	TestAlterColumn_MissingColumn	crates/pgmem/tests/it/alter_column_notnull.rs::alter_column_missing_column	ported	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_column_notnull_test.go	TestAlterColumn_SetNotNull_Existing	crates/pgmem/tests/it/alter_column_notnull.rs::alter_column_set_not_null_existing	ported	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_column_notnull_test.go	TestAlterColumn_SetNotNull_NoNulls	crates/pgmem/tests/it/alter_column_notnull.rs::alter_column_set_not_null_no_nulls	ported	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_column_notnull_test.go	TestAlterColumn_SetNotNull_OptionalColumnKeyword	crates/pgmem/tests/it/alter_column_notnull.rs::alter_column_set_not_null_optional_column_keyword	ported	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_table_test.go	TestAlterTable_AddColumnDuplicate	crates/pgmem/tests/it/alter_table.rs::alter_table_add_column_duplicate	ported	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_table_test.go	TestAlterTable_AddColumnIfNotExists	crates/pgmem/tests/it/alter_table.rs::alter_table_add_column_if_not_exists	ported	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_table_test.go	TestAlterTable_AddColumnNotNullOnEmpty	crates/pgmem/tests/it/alter_table.rs::alter_table_add_column_not_null_on_empty	ported	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_table_test.go	TestAlterTable_AddColumnNotNullOnNonEmpty	crates/pgmem/tests/it/alter_table.rs::alter_table_add_column_not_null_on_non_empty	ported	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_table_test.go	TestAlterTable_AddColumnNullable	crates/pgmem/tests/it/alter_table.rs::alter_table_add_column_nullable	ported	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_table_test.go	TestAlterTable_DropColumn	crates/pgmem/tests/it/alter_table.rs::alter_table_drop_column	ported	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_table_test.go	TestAlterTable_DropColumnCascade	crates/pgmem/tests/it/alter_table.rs::alter_table_drop_column_cascade	ported	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_table_test.go	TestAlterTable_DropColumnIfExistsMissing	crates/pgmem/tests/it/alter_table.rs::alter_table_drop_column_if_exists_missing	ported	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_table_test.go	TestAlterTable_MissingTable	crates/pgmem/tests/it/alter_table.rs::alter_table_missing_table	ported	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_table_test.go	TestAlterTable_RenameColumn	crates/pgmem/tests/it/alter_table.rs::alter_table_rename_column	ported	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_table_test.go	TestAlterTable_RenameColumnConflict	crates/pgmem/tests/it/alter_table.rs::alter_table_rename_column_conflict	ported	error cases additionally assert the real Postgres SQLSTATE.
 postgres	arithmetic_test.go	TestArithmetic_BasicOps	crates/pgmem/tests/it/arithmetic.rs::arithmetic_basic_ops	pending	
 postgres	arithmetic_test.go	TestArithmetic_BigintWidens	crates/pgmem/tests/it/arithmetic.rs::arithmetic_bigint_widens	pending	
 postgres	arithmetic_test.go	TestArithmetic_DivisionByZero	crates/pgmem/tests/it/arithmetic.rs::arithmetic_division_by_zero	pending	
@@ -170,10 +170,10 @@ postgres	cte_test.go	TestCTE_AggregateFromCTE	crates/pgmem/tests/it/cte.rs::cte_
 postgres	cte_test.go	TestCTE_Multiple	crates/pgmem/tests/it/cte.rs::cte_multiple	pending	
 postgres	cte_test.go	TestCTE_ReferencedTwice	crates/pgmem/tests/it/cte.rs::cte_referenced_twice	pending	
 postgres	cte_test.go	TestCTE_Simple	crates/pgmem/tests/it/cte.rs::cte_simple	pending	
-postgres	current_setting_test.go	TestCurrentSetting_Known	crates/pgmem/tests/it/current_setting.rs::current_setting_known	pending	server_version asserted to start with "18." (Go: "16.0"); search_path asserted "\"$user\", public" (Go: "public"); timezone accepts "UTC" or "Etc/UTC" (server-config dependent).
-postgres	current_setting_test.go	TestCurrentSetting_MissingOK	crates/pgmem/tests/it/current_setting.rs::current_setting_missing_ok	pending	
-postgres	current_setting_test.go	TestCurrentSetting_UnknownErrors	crates/pgmem/tests/it/current_setting.rs::current_setting_unknown_errors	pending	
-postgres	current_setting_test.go	TestVersion	crates/pgmem/tests/it/current_setting.rs::version	pending	"pgmem" substring only asserted when running on pgmem (real Postgres build string lacks it).
+postgres	current_setting_test.go	TestCurrentSetting_Known	crates/pgmem/tests/it/current_setting.rs::current_setting_known	deviation	server_version asserted to start with "18." (Go: "16.0"); search_path asserted "\"$user\", public" (Go: "public"); timezone accepts "UTC" or "Etc/UTC" (server-config dependent).
+postgres	current_setting_test.go	TestCurrentSetting_MissingOK	crates/pgmem/tests/it/current_setting.rs::current_setting_missing_ok	ported	
+postgres	current_setting_test.go	TestCurrentSetting_UnknownErrors	crates/pgmem/tests/it/current_setting.rs::current_setting_unknown_errors	ported	
+postgres	current_setting_test.go	TestVersion	crates/pgmem/tests/it/current_setting.rs::version	deviation	"pgmem" substring only asserted when running on pgmem (real Postgres build string lacks it).
 postgres	current_timestamp_test.go	TestCurrentDate_TruncatedToMidnight	crates/pgmem/tests/it/current_timestamp.rs::current_date_truncated_to_midnight	pending	current_date is type date in Postgres (NaiveDate), not a timestamptz at midnight; pinned-clock check pgmem-only, wall-clock check on real Postgres
 postgres	current_timestamp_test.go	TestCurrentTime_DateAtEpoch	crates/pgmem/tests/it/current_timestamp.rs::current_time_date_at_epoch	pending	current_time is timetz in Postgres (text "12:30:45+00"), not a timestamptz on 1970-01-01; pinned-clock check pgmem-only
 postgres	current_timestamp_test.go	TestCurrentTimestamp_AsDefault	crates/pgmem/tests/it/current_timestamp.rs::current_timestamp_as_default	pending	pinned-clock check pgmem-only; real Postgres checks value is near the wall clock
@@ -223,18 +223,18 @@ postgres	float_test.go	TestFloat_DivByZero	crates/pgmem/tests/it/float.rs::float
 postgres	float_test.go	TestFloat_DoublePrecisionAlias	crates/pgmem/tests/it/float.rs::float_double_precision_alias	pending	
 postgres	float_test.go	TestFloat_IntPlusFloat	crates/pgmem/tests/it/float.rs::float_int_plus_float	pending	SELECT 1 + 0.5 is numeric in Postgres (read as Text "1.5"), not float8
 postgres	float_test.go	TestFloat_Roundtrip	crates/pgmem/tests/it/float.rs::float_roundtrip	pending	
-postgres	foreign_key_cascade_test.go	TestFK_DefaultIsRestrict	crates/pgmem/tests/it/foreign_key_cascade.rs::fk_default_is_restrict	pending	
-postgres	foreign_key_cascade_test.go	TestFK_OnDeleteCascade	crates/pgmem/tests/it/foreign_key_cascade.rs::fk_on_delete_cascade	pending	
-postgres	foreign_key_cascade_test.go	TestFK_OnDeleteCascade_Recursive	crates/pgmem/tests/it/foreign_key_cascade.rs::fk_on_delete_cascade_recursive	pending	
-postgres	foreign_key_cascade_test.go	TestFK_OnDeleteSetNull	crates/pgmem/tests/it/foreign_key_cascade.rs::fk_on_delete_set_null	pending	
-postgres	foreign_key_cascade_test.go	TestFK_OnDeleteSetNull_OnlyAffectsMatching	crates/pgmem/tests/it/foreign_key_cascade.rs::fk_on_delete_set_null_only_affects_matching	pending	
-postgres	foreign_key_test.go	TestFK_Delete_ParentWithChildren_Restricts	crates/pgmem/tests/it/foreign_key.rs::fk_delete_parent_with_children_restricts	pending	
-postgres	foreign_key_test.go	TestFK_Delete_ParentWithoutChildren_OK	crates/pgmem/tests/it/foreign_key.rs::fk_delete_parent_without_children_ok	pending	
-postgres	foreign_key_test.go	TestFK_Insert_AcceptsExistingParent	crates/pgmem/tests/it/foreign_key.rs::fk_insert_accepts_existing_parent	pending	
-postgres	foreign_key_test.go	TestFK_Insert_RejectsMissingParent	crates/pgmem/tests/it/foreign_key.rs::fk_insert_rejects_missing_parent	pending	
-postgres	foreign_key_test.go	TestFK_NullValueAllowed	crates/pgmem/tests/it/foreign_key.rs::fk_null_value_allowed	pending	
-postgres	foreign_key_test.go	TestFK_Update_RejectsMissingParent	crates/pgmem/tests/it/foreign_key.rs::fk_update_rejects_missing_parent	pending	
-postgres	foreign_key_test.go	TestFK_VisibleWithinTransaction	crates/pgmem/tests/it/foreign_key.rs::fk_visible_within_transaction	pending	
+postgres	foreign_key_cascade_test.go	TestFK_DefaultIsRestrict	crates/pgmem/tests/it/foreign_key_cascade.rs::fk_default_is_restrict	ported	
+postgres	foreign_key_cascade_test.go	TestFK_OnDeleteCascade	crates/pgmem/tests/it/foreign_key_cascade.rs::fk_on_delete_cascade	ported	
+postgres	foreign_key_cascade_test.go	TestFK_OnDeleteCascade_Recursive	crates/pgmem/tests/it/foreign_key_cascade.rs::fk_on_delete_cascade_recursive	ported	
+postgres	foreign_key_cascade_test.go	TestFK_OnDeleteSetNull	crates/pgmem/tests/it/foreign_key_cascade.rs::fk_on_delete_set_null	ported	
+postgres	foreign_key_cascade_test.go	TestFK_OnDeleteSetNull_OnlyAffectsMatching	crates/pgmem/tests/it/foreign_key_cascade.rs::fk_on_delete_set_null_only_affects_matching	ported	
+postgres	foreign_key_test.go	TestFK_Delete_ParentWithChildren_Restricts	crates/pgmem/tests/it/foreign_key.rs::fk_delete_parent_with_children_restricts	ported	
+postgres	foreign_key_test.go	TestFK_Delete_ParentWithoutChildren_OK	crates/pgmem/tests/it/foreign_key.rs::fk_delete_parent_without_children_ok	ported	
+postgres	foreign_key_test.go	TestFK_Insert_AcceptsExistingParent	crates/pgmem/tests/it/foreign_key.rs::fk_insert_accepts_existing_parent	ported	
+postgres	foreign_key_test.go	TestFK_Insert_RejectsMissingParent	crates/pgmem/tests/it/foreign_key.rs::fk_insert_rejects_missing_parent	ported	
+postgres	foreign_key_test.go	TestFK_NullValueAllowed	crates/pgmem/tests/it/foreign_key.rs::fk_null_value_allowed	ported	
+postgres	foreign_key_test.go	TestFK_Update_RejectsMissingParent	crates/pgmem/tests/it/foreign_key.rs::fk_update_rejects_missing_parent	ported	
+postgres	foreign_key_test.go	TestFK_VisibleWithinTransaction	crates/pgmem/tests/it/foreign_key.rs::fk_visible_within_transaction	ported	
 postgres	generate_series_test.go	TestGenerateSeries_Alias	crates/pgmem/tests/it/generate_series.rs::generate_series_alias	pending	pgmem-go kept column name generate_series under alias gs; Postgres names the column gs, so gs.generate_series is 42703 (asserted) and gs.gs is used
 postgres	generate_series_test.go	TestGenerateSeries_Basic	crates/pgmem/tests/it/generate_series.rs::generate_series_basic	pending	generate_series(int4) yields int4 (Go scanned into int64)
 postgres	generate_series_test.go	TestGenerateSeries_Bigint	crates/pgmem/tests/it/generate_series.rs::generate_series_bigint	pending	
@@ -253,9 +253,9 @@ postgres	group_by_test.go	TestGroupBy_CountAndOrder	crates/pgmem/tests/it/group_
 postgres	group_by_test.go	TestGroupBy_HavingFilter	crates/pgmem/tests/it/group_by.rs::group_by_having_filter	pending	
 postgres	group_by_test.go	TestGroupBy_RejectsBareColumnNotInGroupBy	crates/pgmem/tests/it/group_by.rs::group_by_rejects_bare_column_not_in_group_by	pending	asserts 42803 and message
 postgres	group_by_test.go	TestGroupBy_SumPerRegion	crates/pgmem/tests/it/group_by.rs::group_by_sum_per_region	pending	
-postgres	index_noop_test.go	TestCreateIndex_AllOptions	crates/pgmem/tests/it/index_noop.rs::create_index_all_options	pending	
-postgres	index_noop_test.go	TestCreateIndex_Plain	crates/pgmem/tests/it/index_noop.rs::create_index_plain	pending	
-postgres	index_noop_test.go	TestDropIndex	crates/pgmem/tests/it/index_noop.rs::drop_index	pending	
+postgres	index_noop_test.go	TestCreateIndex_AllOptions	crates/pgmem/tests/it/index_noop.rs::create_index_all_options	ported	
+postgres	index_noop_test.go	TestCreateIndex_Plain	crates/pgmem/tests/it/index_noop.rs::create_index_plain	ported	
+postgres	index_noop_test.go	TestDropIndex	crates/pgmem/tests/it/index_noop.rs::drop_index	ported	
 postgres	insert_default_marker_test.go	TestInsertDefault_AutoColumn	crates/pgmem/tests/it/insert_default_marker.rs::insert_default_auto_column	ported	tightened: id == 1 (Go: >= 1)
 postgres	insert_default_marker_test.go	TestInsertDefault_MultiRow	crates/pgmem/tests/it/insert_default_marker.rs::insert_default_multi_row	ported	
 postgres	insert_default_marker_test.go	TestInsertDefault_NoColumnDefaultLeavesNull	crates/pgmem/tests/it/insert_default_marker.rs::insert_default_no_column_default_leaves_null	ported	
@@ -326,11 +326,11 @@ postgres	like_test.go	TestLike_Underscore	crates/pgmem/tests/it/like.rs::like_un
 postgres	limit_all_test.go	TestLimitAll	crates/pgmem/tests/it/limit_all.rs::limit_all	pending	
 postgres	limit_all_test.go	TestOffsetWithRowSingularNoiseWord	crates/pgmem/tests/it/limit_all.rs::offset_with_row_singular_noise_word	pending	
 postgres	limit_all_test.go	TestOffsetWithRowsNoiseWord	crates/pgmem/tests/it/limit_all.rs::offset_with_rows_noise_word	pending	
-postgres	locking_test.go	TestLocking_ForKeyShareOf	crates/pgmem/tests/it/locking.rs::locking_for_key_share_of	pending	
-postgres	locking_test.go	TestLocking_ForNoKeyUpdate	crates/pgmem/tests/it/locking.rs::locking_for_no_key_update	pending	
-postgres	locking_test.go	TestLocking_ForShare	crates/pgmem/tests/it/locking.rs::locking_for_share	pending	
-postgres	locking_test.go	TestLocking_ForUpdate	crates/pgmem/tests/it/locking.rs::locking_for_update	pending	
-postgres	locking_test.go	TestLocking_ForUpdateSkipLocked	crates/pgmem/tests/it/locking.rs::locking_for_update_skip_locked	pending	
+postgres	locking_test.go	TestLocking_ForKeyShareOf	crates/pgmem/tests/it/locking.rs::locking_for_key_share_of	ported	
+postgres	locking_test.go	TestLocking_ForNoKeyUpdate	crates/pgmem/tests/it/locking.rs::locking_for_no_key_update	ported	
+postgres	locking_test.go	TestLocking_ForShare	crates/pgmem/tests/it/locking.rs::locking_for_share	ported	
+postgres	locking_test.go	TestLocking_ForUpdate	crates/pgmem/tests/it/locking.rs::locking_for_update	ported	
+postgres	locking_test.go	TestLocking_ForUpdateSkipLocked	crates/pgmem/tests/it/locking.rs::locking_for_update_skip_locked	ported	
 postgres	m2_test.go	TestM2_CreateInsertSelect	crates/pgmem/tests/it/m2.rs::m2_create_insert_select	ported	
 postgres	m2_test.go	TestM2_OrderAscWithOffset	crates/pgmem/tests/it/m2.rs::m2_order_asc_with_offset	ported	
 postgres	math_funcs_test.go	TestAbs	crates/pgmem/tests/it/math_funcs.rs::abs	pending	
@@ -352,13 +352,13 @@ postgres	math_text_funcs_test.go	TestRound_Scale	crates/pgmem/tests/it/math_text
 postgres	math_text_funcs_test.go	TestRpad	crates/pgmem/tests/it/math_text_funcs.rs::rpad	pending	
 postgres	math_text_funcs_test.go	TestSign	crates/pgmem/tests/it/math_text_funcs.rs::sign	pending	
 postgres	math_text_funcs_test.go	TestSqrt	crates/pgmem/tests/it/math_text_funcs.rs::sqrt	pending	
-postgres	migration_noops_test.go	TestMigrationNoop_AnalyzeVacuum	crates/pgmem/tests/it/migration_noops.rs::migration_noop_analyze_vacuum	pending	
-postgres	migration_noops_test.go	TestMigrationNoop_CommentOn	crates/pgmem/tests/it/migration_noops.rs::migration_noop_comment_on	pending	COMMENT ON EXTENSION "uuid-ossp" fails (42704) on Postgres unless the extension exists; test creates it first.
-postgres	migration_noops_test.go	TestMigrationNoop_CreateDropSchema	crates/pgmem/tests/it/migration_noops.rs::migration_noop_create_drop_schema	pending	
-postgres	migration_noops_test.go	TestMigrationNoop_CreateExtension	crates/pgmem/tests/it/migration_noops.rs::migration_noop_create_extension	pending	
-postgres	migration_noops_test.go	TestMigrationNoop_DiscardAll	crates/pgmem/tests/it/migration_noops.rs::migration_noop_discard_all	pending	
-postgres	migration_noops_test.go	TestMigrationNoop_DropExtension	crates/pgmem/tests/it/migration_noops.rs::migration_noop_drop_extension	pending	
-postgres	migration_noops_test.go	TestMigrationNoop_Reset	crates/pgmem/tests/it/migration_noops.rs::migration_noop_reset	pending	
+postgres	migration_noops_test.go	TestMigrationNoop_AnalyzeVacuum	crates/pgmem/tests/it/migration_noops.rs::migration_noop_analyze_vacuum	ported	
+postgres	migration_noops_test.go	TestMigrationNoop_CommentOn	crates/pgmem/tests/it/migration_noops.rs::migration_noop_comment_on	deviation	COMMENT ON EXTENSION "uuid-ossp" fails (42704) on Postgres unless the extension exists; test creates it first.
+postgres	migration_noops_test.go	TestMigrationNoop_CreateDropSchema	crates/pgmem/tests/it/migration_noops.rs::migration_noop_create_drop_schema	ported	
+postgres	migration_noops_test.go	TestMigrationNoop_CreateExtension	crates/pgmem/tests/it/migration_noops.rs::migration_noop_create_extension	ported	
+postgres	migration_noops_test.go	TestMigrationNoop_DiscardAll	crates/pgmem/tests/it/migration_noops.rs::migration_noop_discard_all	ported	
+postgres	migration_noops_test.go	TestMigrationNoop_DropExtension	crates/pgmem/tests/it/migration_noops.rs::migration_noop_drop_extension	ported	
+postgres	migration_noops_test.go	TestMigrationNoop_Reset	crates/pgmem/tests/it/migration_noops.rs::migration_noop_reset	ported	
 postgres	named_constraints_test.go	TestNamedConstraint_ColumnLevelCheck	crates/pgmem/tests/it/named_constraints.rs::named_constraint_column_level_check	ported	tightened: asserts 23514 and message
 postgres	named_constraints_test.go	TestNamedConstraint_ColumnLevelPK	crates/pgmem/tests/it/named_constraints.rs::named_constraint_column_level_pk	ported	tightened: asserts 23505 and constraint name in message
 postgres	named_constraints_test.go	TestNamedConstraint_NameRoundTripsInError	crates/pgmem/tests/it/named_constraints.rs::named_constraint_name_round_trips_in_error	ported	also asserts ErrorResponse constraint field
@@ -371,14 +371,14 @@ postgres	nulls_order_test.go	TestNullsOrder_AscDefault	crates/pgmem/tests/it/nul
 postgres	nulls_order_test.go	TestNullsOrder_AscNullsFirst	crates/pgmem/tests/it/nulls_order.rs::nulls_order_asc_nulls_first	pending	
 postgres	nulls_order_test.go	TestNullsOrder_DescDefault	crates/pgmem/tests/it/nulls_order.rs::nulls_order_desc_default	pending	
 postgres	nulls_order_test.go	TestNullsOrder_DescNullsLast	crates/pgmem/tests/it/nulls_order.rs::nulls_order_desc_nulls_last	pending	
-postgres	on_conflict_test.go	TestOnConflict_DoNothing_InsertsNew	crates/pgmem/tests/it/on_conflict.rs::on_conflict_do_nothing_inserts_new	pending	
-postgres	on_conflict_test.go	TestOnConflict_DoNothing_MixedBatch	crates/pgmem/tests/it/on_conflict.rs::on_conflict_do_nothing_mixed_batch	pending	
-postgres	on_conflict_test.go	TestOnConflict_DoNothing_Skips	crates/pgmem/tests/it/on_conflict.rs::on_conflict_do_nothing_skips	pending	
-postgres	on_conflict_test.go	TestOnConflict_DoUpdate_Excluded	crates/pgmem/tests/it/on_conflict.rs::on_conflict_do_update_excluded	pending	
-postgres	on_conflict_test.go	TestOnConflict_DoUpdate_NewRowStillInserts	crates/pgmem/tests/it/on_conflict.rs::on_conflict_do_update_new_row_still_inserts	pending	
-postgres	on_conflict_test.go	TestOnConflict_DoUpdate_ReferencesExisting	crates/pgmem/tests/it/on_conflict.rs::on_conflict_do_update_references_existing	pending	unqualified `name` in DO UPDATE SET expression is ambiguous in Postgres (42702); asserts that error, then the t.name-qualified upsert yields "alice / bob".
-postgres	on_conflict_test.go	TestOnConflict_DoUpdate_Returning	crates/pgmem/tests/it/on_conflict.rs::on_conflict_do_update_returning	pending	
-postgres	on_conflict_test.go	TestOnConflict_Returning_OnlyForActualInserts	crates/pgmem/tests/it/on_conflict.rs::on_conflict_returning_only_for_actual_inserts	pending	
+postgres	on_conflict_test.go	TestOnConflict_DoNothing_InsertsNew	crates/pgmem/tests/it/on_conflict.rs::on_conflict_do_nothing_inserts_new	ported	
+postgres	on_conflict_test.go	TestOnConflict_DoNothing_MixedBatch	crates/pgmem/tests/it/on_conflict.rs::on_conflict_do_nothing_mixed_batch	ported	
+postgres	on_conflict_test.go	TestOnConflict_DoNothing_Skips	crates/pgmem/tests/it/on_conflict.rs::on_conflict_do_nothing_skips	ported	
+postgres	on_conflict_test.go	TestOnConflict_DoUpdate_Excluded	crates/pgmem/tests/it/on_conflict.rs::on_conflict_do_update_excluded	ported	
+postgres	on_conflict_test.go	TestOnConflict_DoUpdate_NewRowStillInserts	crates/pgmem/tests/it/on_conflict.rs::on_conflict_do_update_new_row_still_inserts	ported	
+postgres	on_conflict_test.go	TestOnConflict_DoUpdate_ReferencesExisting	crates/pgmem/tests/it/on_conflict.rs::on_conflict_do_update_references_existing	deviation	unqualified `name` in DO UPDATE SET expression is ambiguous in Postgres (42702); asserts that error, then the t.name-qualified upsert yields "alice / bob".
+postgres	on_conflict_test.go	TestOnConflict_DoUpdate_Returning	crates/pgmem/tests/it/on_conflict.rs::on_conflict_do_update_returning	ported	
+postgres	on_conflict_test.go	TestOnConflict_Returning_OnlyForActualInserts	crates/pgmem/tests/it/on_conflict.rs::on_conflict_returning_only_for_actual_inserts	ported	
 postgres	position_test.go	TestPosition_Found	crates/pgmem/tests/it/position.rs::position_found	pending	
 postgres	position_test.go	TestPosition_NotFound	crates/pgmem/tests/it/position.rs::position_not_found	pending	
 postgres	position_test.go	TestPosition_NullPropagates	crates/pgmem/tests/it/position.rs::position_null_propagates	pending	
@@ -408,24 +408,24 @@ postgres	returning_star_test.go	TestReturningStar_Delete	crates/pgmem/tests/it/r
 postgres	returning_star_test.go	TestReturningStar_Insert	crates/pgmem/tests/it/returning_star.rs::returning_star_insert	ported	
 postgres	returning_star_test.go	TestReturningStar_MixedWithExpr	crates/pgmem/tests/it/returning_star.rs::returning_star_mixed_with_expr	ported	
 postgres	returning_star_test.go	TestReturningStar_Update	crates/pgmem/tests/it/returning_star.rs::returning_star_update	ported	
-postgres	savepoint_test.go	TestSavepoint_OutsideTxIsRejected	crates/pgmem/tests/it/savepoint.rs::savepoint_outside_tx_is_rejected	pending	
-postgres	savepoint_test.go	TestSavepoint_ReleaseDoesNotUndoWork	crates/pgmem/tests/it/savepoint.rs::savepoint_release_does_not_undo_work	pending	
-postgres	savepoint_test.go	TestSavepoint_RollbackToRecoversFromPoisonedBlock	crates/pgmem/tests/it/savepoint.rs::savepoint_rollback_to_recovers_from_poisoned_block	pending	
-postgres	savepoint_test.go	TestSavepoint_UnknownNameRejects	crates/pgmem/tests/it/savepoint.rs::savepoint_unknown_name_rejects	pending	
+postgres	savepoint_test.go	TestSavepoint_OutsideTxIsRejected	crates/pgmem/tests/it/savepoint.rs::savepoint_outside_tx_is_rejected	ported	
+postgres	savepoint_test.go	TestSavepoint_ReleaseDoesNotUndoWork	crates/pgmem/tests/it/savepoint.rs::savepoint_release_does_not_undo_work	ported	
+postgres	savepoint_test.go	TestSavepoint_RollbackToRecoversFromPoisonedBlock	crates/pgmem/tests/it/savepoint.rs::savepoint_rollback_to_recovers_from_poisoned_block	ported	
+postgres	savepoint_test.go	TestSavepoint_UnknownNameRejects	crates/pgmem/tests/it/savepoint.rs::savepoint_unknown_name_rejects	ported	
 postgres	select_star_test.go	TestSelectStar_AllColumns	crates/pgmem/tests/it/select_star.rs::select_star_all_columns	ported	
 postgres	select_star_test.go	TestSelectStar_ColumnNames	crates/pgmem/tests/it/select_star.rs::select_star_column_names	ported	
 postgres	select_star_test.go	TestSelectStar_Join	crates/pgmem/tests/it/select_star.rs::select_star_join	ported	asserts exact left-then-right column order (Go compared sorted names)
 postgres	serial_test.go	TestBigSerial_OverWire	crates/pgmem/tests/it/serial.rs::big_serial_over_wire	ported	
 postgres	serial_test.go	TestSerial_OverWire	crates/pgmem/tests/it/serial.rs::serial_over_wire	ported	
-postgres	serialization_test.go	TestSerialization_ConcurrentWritesOneFails	crates/pgmem/tests/it/serialization.rs::serialization_concurrent_writes_one_fails	pending	pgmem-go failed the second COMMIT with 40001 (per-table conflict detection); real Postgres READ COMMITTED commits both inserts of different rows, asserted ids [1 2]. Same-row UPDATE race not tested (blocks on real Postgres).
-postgres	serialization_test.go	TestSerialization_DisjointWritesNoConflict	crates/pgmem/tests/it/serialization.rs::serialization_disjoint_writes_no_conflict	pending	
+postgres	serialization_test.go	TestSerialization_ConcurrentWritesOneFails	crates/pgmem/tests/it/serialization.rs::serialization_concurrent_writes_one_fails	deviation	pgmem-go failed the second COMMIT with 40001 (per-table conflict detection); real Postgres READ COMMITTED commits both inserts of different rows, asserted ids [1 2]. Same-row UPDATE race not tested (blocks on real Postgres).
+postgres	serialization_test.go	TestSerialization_DisjointWritesNoConflict	crates/pgmem/tests/it/serialization.rs::serialization_disjoint_writes_no_conflict	ported	
 postgres	server_test.go	TestGetUsers_SqlcStyle	crates/pgmem/tests/it/server.rs::get_users_sqlc_style	ported	users table created explicitly; seeded via server.seed on pgmem, SQL INSERT on real Postgres
 postgres	server_test.go	TestSelect1_Pgx	crates/pgmem/tests/it/server.rs::select1_pgx	ported	
 postgres	server_test.go	TestSelect1_Pgxpool	crates/pgmem/tests/it/server.rs::select1_pgxpool	ported	
 postgres	server_test.go	TestSimpleQueryProtocol	crates/pgmem/tests/it/server.rs::simple_query_protocol	ported	simple protocol via text_value
-postgres	setnow_test.go	TestSetNow_PinsClockForBuiltins	crates/pgmem/tests/it/setnow.rs::set_now_pins_clock_for_builtins	pending	pgmem-only API; skipped on real Postgres.
-postgres	setnow_test.go	TestSetNow_TwoServersIndependent	crates/pgmem/tests/it/setnow.rs::set_now_two_servers_independent	pending	pgmem-only API; skipped on real Postgres.
-postgres	setnow_test.go	TestSetNow_ZeroTimeRevertsToWallClock	crates/pgmem/tests/it/setnow.rs::set_now_zero_time_reverts_to_wall_clock	pending	pgmem-only API; skipped on real Postgres.
+postgres	setnow_test.go	TestSetNow_PinsClockForBuiltins	crates/pgmem/tests/it/setnow.rs::set_now_pins_clock_for_builtins	ported	pgmem-only API; skipped on real Postgres.
+postgres	setnow_test.go	TestSetNow_TwoServersIndependent	crates/pgmem/tests/it/setnow.rs::set_now_two_servers_independent	ported	pgmem-only API; skipped on real Postgres.
+postgres	setnow_test.go	TestSetNow_ZeroTimeRevertsToWallClock	crates/pgmem/tests/it/setnow.rs::set_now_zero_time_reverts_to_wall_clock	ported	pgmem-only API; skipped on real Postgres.
 postgres	string_agg_test.go	TestStringAgg_AllNullsIsNull	crates/pgmem/tests/it/string_agg.rs::string_agg_all_nulls_is_null	pending	
 postgres	string_agg_test.go	TestStringAgg_Grouped	crates/pgmem/tests/it/string_agg.rs::string_agg_grouped	pending	order-independent compare
 postgres	string_agg_test.go	TestStringAgg_Scalar	crates/pgmem/tests/it/string_agg.rs::string_agg_scalar	pending	order-independent compare
@@ -449,11 +449,11 @@ postgres	subquery_test.go	TestScalarSubquery_OverWire	crates/pgmem/tests/it/subq
 postgres	table_alias_test.go	TestTableAlias_AS	crates/pgmem/tests/it/table_alias.rs::table_alias_as	ported	
 postgres	table_alias_test.go	TestTableAlias_Implicit	crates/pgmem/tests/it/table_alias.rs::table_alias_implicit	ported	
 postgres	table_alias_test.go	TestTableAlias_Join	crates/pgmem/tests/it/table_alias.rs::table_alias_join	ported	
-postgres	table_fk_test.go	TestTableFK_Basic	crates/pgmem/tests/it/table_fk.rs::table_fk_basic	pending	error cases additionally assert the real Postgres SQLSTATE.
-postgres	table_fk_test.go	TestTableFK_MultiColumnRejected	crates/pgmem/tests/it/table_fk.rs::table_fk_multi_column_rejected	pending	Go only required an error; asserts Postgres code 42830 (duplicate referenced columns).
-postgres	table_fk_test.go	TestTableFK_Named	crates/pgmem/tests/it/table_fk.rs::table_fk_named	pending	additionally asserts SQLSTATE 23503 and constraint name posts_author_fk.
-postgres	table_fk_test.go	TestTableFK_OnDeleteCascade	crates/pgmem/tests/it/table_fk.rs::table_fk_on_delete_cascade	pending	
-postgres	table_fk_test.go	TestTableFK_UnknownColumn	crates/pgmem/tests/it/table_fk.rs::table_fk_unknown_column	pending	error cases additionally assert the real Postgres SQLSTATE.
+postgres	table_fk_test.go	TestTableFK_Basic	crates/pgmem/tests/it/table_fk.rs::table_fk_basic	ported	error cases additionally assert the real Postgres SQLSTATE.
+postgres	table_fk_test.go	TestTableFK_MultiColumnRejected	crates/pgmem/tests/it/table_fk.rs::table_fk_multi_column_rejected	ported	Go only required an error; asserts Postgres code 42830 (duplicate referenced columns).
+postgres	table_fk_test.go	TestTableFK_Named	crates/pgmem/tests/it/table_fk.rs::table_fk_named	ported	additionally asserts SQLSTATE 23503 and constraint name posts_author_fk.
+postgres	table_fk_test.go	TestTableFK_OnDeleteCascade	crates/pgmem/tests/it/table_fk.rs::table_fk_on_delete_cascade	ported	
+postgres	table_fk_test.go	TestTableFK_UnknownColumn	crates/pgmem/tests/it/table_fk.rs::table_fk_unknown_column	ported	error cases additionally assert the real Postgres SQLSTATE.
 postgres	text_numeric_funcs_test.go	TestAscii	crates/pgmem/tests/it/text_numeric_funcs.rs::ascii	pending	
 postgres	text_numeric_funcs_test.go	TestAscii_Empty	crates/pgmem/tests/it/text_numeric_funcs.rs::ascii_empty	pending	
 postgres	text_numeric_funcs_test.go	TestChr	crates/pgmem/tests/it/text_numeric_funcs.rs::chr	pending	
@@ -470,11 +470,11 @@ postgres	text_numeric_funcs_test.go	TestToHex	crates/pgmem/tests/it/text_numeric
 postgres	timestamptz_test.go	TestTimestamptz_AcceptsExplicitValue	crates/pgmem/tests/it/timestamptz.rs::timestamptz_accepts_explicit_value	pending	
 postgres	timestamptz_test.go	TestTimestamptz_NowRoundTrip	crates/pgmem/tests/it/timestamptz.rs::timestamptz_now_round_trip	pending	
 postgres	timestamptz_test.go	TestTimestamptz_OrderByWorks	crates/pgmem/tests/it/timestamptz.rs::timestamptz_order_by_works	pending	
-postgres	transactions_test.go	TestTxn_AbortedStatePoisonsBlock	crates/pgmem/tests/it/transactions.rs::txn_aborted_state_poisons_block	pending	
-postgres	transactions_test.go	TestTxn_CommitAfterErrorActsAsRollback	crates/pgmem/tests/it/transactions.rs::txn_commit_after_error_acts_as_rollback	pending	CommandComplete tag checked via a minimal raw-protocol connection (postgres crate does not expose tags).
-postgres	transactions_test.go	TestTxn_CommitPersistsInsert	crates/pgmem/tests/it/transactions.rs::txn_commit_persists_insert	pending	
-postgres	transactions_test.go	TestTxn_ImplicitAutocommit	crates/pgmem/tests/it/transactions.rs::txn_implicit_autocommit	pending	
-postgres	transactions_test.go	TestTxn_RollbackUndoesInsert	crates/pgmem/tests/it/transactions.rs::txn_rollback_undoes_insert	pending	
+postgres	transactions_test.go	TestTxn_AbortedStatePoisonsBlock	crates/pgmem/tests/it/transactions.rs::txn_aborted_state_poisons_block	ported	
+postgres	transactions_test.go	TestTxn_CommitAfterErrorActsAsRollback	crates/pgmem/tests/it/transactions.rs::txn_commit_after_error_acts_as_rollback	ported	CommandComplete tag checked via a minimal raw-protocol connection (postgres crate does not expose tags).
+postgres	transactions_test.go	TestTxn_CommitPersistsInsert	crates/pgmem/tests/it/transactions.rs::txn_commit_persists_insert	ported	
+postgres	transactions_test.go	TestTxn_ImplicitAutocommit	crates/pgmem/tests/it/transactions.rs::txn_implicit_autocommit	ported	
+postgres	transactions_test.go	TestTxn_RollbackUndoesInsert	crates/pgmem/tests/it/transactions.rs::txn_rollback_undoes_insert	ported	
 postgres	trim_length_test.go	TestBtrim_Cutset	crates/pgmem/tests/it/trim_length.rs::btrim_cutset	pending	
 postgres	trim_length_test.go	TestCharLength	crates/pgmem/tests/it/trim_length.rs::char_length	pending	
 postgres	trim_length_test.go	TestLtrim_Cutset	crates/pgmem/tests/it/trim_length.rs::ltrim_cutset	pending	
@@ -505,11 +505,11 @@ postgres	update_test.go	TestUpdate_UniqueViolation_OverWire	crates/pgmem/tests/i
 postgres	uuid_test.go	TestUUID_Column_GenAndRoundTrip	crates/pgmem/tests/it/uuid.rs::uuid_column_gen_and_round_trip	pending	
 postgres	uuid_test.go	TestUUID_GenInSelect	crates/pgmem/tests/it/uuid.rs::uuid_gen_in_select	pending	
 postgres	uuid_test.go	TestUUID_UnknownFunctionErrors	crates/pgmem/tests/it/uuid.rs::uuid_unknown_function_errors	pending	asserts SQLSTATE 42883 and message (Go only required a PgError)
-postgres	view_test.go	TestCreateView_AggregateView	crates/pgmem/tests/it/view.rs::create_view_aggregate_view	pending	
-postgres	view_test.go	TestCreateView_ConflictWithTableName	crates/pgmem/tests/it/view.rs::create_view_conflict_with_table_name	pending	
-postgres	view_test.go	TestCreateView_FilteringView	crates/pgmem/tests/it/view.rs::create_view_filtering_view	pending	
-postgres	view_test.go	TestCreateView_QualifiedReference	crates/pgmem/tests/it/view.rs::create_view_qualified_reference	pending	
-postgres	view_test.go	TestDropView	crates/pgmem/tests/it/view.rs::drop_view	pending	error cases additionally assert the real Postgres SQLSTATE.
+postgres	view_test.go	TestCreateView_AggregateView	crates/pgmem/tests/it/view.rs::create_view_aggregate_view	ported	
+postgres	view_test.go	TestCreateView_ConflictWithTableName	crates/pgmem/tests/it/view.rs::create_view_conflict_with_table_name	ported	
+postgres	view_test.go	TestCreateView_FilteringView	crates/pgmem/tests/it/view.rs::create_view_filtering_view	ported	
+postgres	view_test.go	TestCreateView_QualifiedReference	crates/pgmem/tests/it/view.rs::create_view_qualified_reference	ported	
+postgres	view_test.go	TestDropView	crates/pgmem/tests/it/view.rs::drop_view	ported	error cases additionally assert the real Postgres SQLSTATE.
 postgres	window_test.go	TestWindow_DenseRank_NoGap	crates/pgmem/tests/it/window.rs::window_dense_rank_no_gap	pending	
 postgres	window_test.go	TestWindow_NoPartition	crates/pgmem/tests/it/window.rs::window_no_partition	pending	
 postgres	window_test.go	TestWindow_Rank_TiesShareRank	crates/pgmem/tests/it/window.rs::window_rank_ties_share_rank	pending	
