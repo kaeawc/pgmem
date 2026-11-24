@@ -16,27 +16,32 @@ pub fn registry(catalog: &Catalog) -> Arc<Registry> {
             oid: rowtype_oid_of(t.oid),
             array_oid: 0,
             name: t.name.clone(),
+            schema: t.schema.clone(),
             kind: UserKind::Composite { fields, relid: t.oid },
         })
     });
     Arc::new(Registry::new(user.chain(rows)))
 }
 
-/// A user type (or a table's row type) by name.
-pub fn lookup_type(catalog: &Catalog, name: &str) -> Option<Type> {
-    if let Some(t) = catalog.type_by_name(name) {
+/// A user type (or a table's row type) by possibly qualified name, through the search path.
+pub fn lookup_type(catalog: &Catalog, name: &pgmem_ir::ObjectName) -> SqlResult<Option<Type>> {
+    catalog.resolve(name, |schema, n| type_in(catalog, schema, n))
+}
+
+fn type_in(catalog: &Catalog, schema: &str, name: &str) -> Option<Type> {
+    if let Some(t) = catalog.type_by_name(schema, name) {
         return Some(t.as_type());
     }
     // `_name` is a user type's array type.
-    if let Some(elem) = name.strip_prefix('_').and_then(|n| catalog.type_by_name(n)) {
+    if let Some(elem) = name.strip_prefix('_').and_then(|n| catalog.type_by_name(schema, n)) {
         return Some(Type::array_of(elem.as_type()));
     }
-    catalog.table(name).map(|t| Type::Composite(rowtype_oid_of(t.oid)))
+    catalog.table(schema, name).map(|t| Type::Composite(rowtype_oid_of(t.oid)))
 }
 
 /// A user type definition by name, or 42704.
-pub fn type_def<'c>(catalog: &'c Catalog, name: &str) -> SqlResult<&'c Arc<TypeDef>> {
-    catalog.type_by_name(name).ok_or_else(|| SqlError::new(code::UNDEFINED_OBJECT, format!("type \"{name}\" does not exist")))
+pub fn type_def(catalog: &Catalog, name: &pgmem_ir::ObjectName) -> SqlResult<Arc<TypeDef>> {
+    catalog.lookup_type(name)?.ok_or_else(|| SqlError::new(code::UNDEFINED_OBJECT, format!("type \"{}\" does not exist", name.base())))
 }
 
 /// The fields of a composite type: a `CREATE TYPE ... AS (...)` type or a table row type.

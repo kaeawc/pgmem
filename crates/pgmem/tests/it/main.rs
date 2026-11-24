@@ -101,6 +101,7 @@ mod regex;
 mod regexp_funcs;
 mod returning_star;
 mod savepoint;
+mod schemas;
 mod select_star;
 mod serial;
 mod serialization;

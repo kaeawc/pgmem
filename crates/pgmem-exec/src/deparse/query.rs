@@ -89,7 +89,9 @@ pub(super) struct Select {
 
 #[derive(Clone, Debug)]
 pub(super) enum FromItem {
+    /// `schema` is set when the relation must print qualified (it isn't visible by name).
     Rel {
+        schema: Option<String>,
         relname: String,
         refname: String,
         print_alias: bool,
@@ -348,13 +350,14 @@ impl Analyzer<'_> {
             ir::TableRef::Table { name, alias } => {
                 let refname = names.pop_front().unwrap_or_default();
                 let relname = name.base().to_owned();
+                let schema = self.relation_schema(name);
                 let mut cols = self.relation_columns(name);
                 let colaliases = alias.as_ref().map(|a| a.columns.clone()).unwrap_or_default();
                 rename(&mut cols, &colaliases);
                 let qualifier = alias.as_ref().map_or_else(|| relname.clone(), |a| a.name.clone());
                 let print_alias = alias.is_some() || refname != relname;
                 let (_, star) = self.push_rte(qualifier, refname.clone(), cols);
-                Built { item: FromItem::Rel { relname, refname, print_alias, colaliases }, star, rtes: 1 }
+                Built { item: FromItem::Rel { schema, relname, refname, print_alias, colaliases }, star, rtes: 1 }
             }
             ir::TableRef::Subquery { query, alias, lateral } => {
                 let refname = names.pop_front().unwrap_or_default();
@@ -502,6 +505,21 @@ impl Analyzer<'_> {
         &self.levels[self.levels.len() - 1]
     }
 
+    /// The schema a FROM relation prints with, if the display search path doesn't find it by
+    /// name alone (CTEs and system relations never print qualified).
+    fn relation_schema(&self, name: &ir::ObjectName) -> Option<String> {
+        if name.0.len() == 1 && self.levels.iter().any(|l| l.ctes.iter().any(|c| c.name == name.base())) {
+            return None;
+        }
+        let rel = self.catalog.lookup_relation(name).ok().flatten()?;
+        let schema = rel.schema().to_owned();
+        let visible = match &self.display_path {
+            Some(path) => pgmem_types::context::with_search_path(path, || self.catalog.relation_visible(&schema, name.base())),
+            None => self.catalog.relation_visible(&schema, name.base()),
+        };
+        (!visible).then_some(schema)
+    }
+
     /// Columns of a relation named in FROM: a CTE, a table or a view.
     fn relation_columns(&self, name: &ir::ObjectName) -> Vec<ScopeCol> {
         if name.0.len() == 1
@@ -509,14 +527,14 @@ impl Analyzer<'_> {
         {
             return cte.cols.clone();
         }
-        let base = name.base();
-        if let Some(t) = self.catalog.table(base) {
+        let rel = self.catalog.lookup_relation(name).ok().flatten();
+        if let Some(pgmem_catalog::Relation::Table(t)) = &rel {
             return t
                 .live_columns()
                 .map(|(_, c)| ScopeCol { name: c.name.clone(), ty: c.ty.clone(), typmod: c.typmod, hidden: false })
                 .collect();
         }
-        if let Some(v) = self.catalog.view(base) {
+        if let Some(pgmem_catalog::Relation::View(v)) = &rel {
             let binder = crate::bind::Binder::new(self.catalog, &[]);
             let top = crate::bind::Level::new(crate::bind::Scope::default());
             let types = binder.bind_query(&v.query, &crate::bind::Ctx::new(&top)).map(|b| b.columns).unwrap_or_default();

@@ -341,11 +341,18 @@ pub fn is_reserved_keyword(s: &str) -> bool {
 /// Resolves a declared type name (`int4`, `varchar(20)`, `text[]`, a user type) to a type
 /// and typmod. `serial` family names are handled by CREATE TABLE before this is called.
 pub fn resolve_type_name(catalog: &Catalog, t: &pgmem_ir::TypeName) -> SqlResult<(Type, i32)> {
-    let base = match Type::from_sql_name(&t.name) {
+    let builtin = match t.schema.as_deref() {
+        None | Some("pg_catalog") => Type::from_sql_name(&t.name),
+        Some(_) => None,
+    };
+    let base = match builtin {
         Some(b) => b,
         None => {
-            let user = crate::usertypes::lookup_type(catalog, &t.name)
-                .ok_or_else(|| SqlError::new(code::UNDEFINED_OBJECT, format!("type \"{}\" does not exist", t.name)))?;
+            let mut parts: Vec<String> = t.schema.iter().cloned().collect();
+            parts.push(t.name.clone());
+            let qualified = parts.join(".");
+            let user = crate::usertypes::lookup_type(catalog, &pgmem_ir::ObjectName(parts))?
+                .ok_or_else(|| SqlError::new(code::UNDEFINED_OBJECT, format!("type \"{qualified}\" does not exist")))?;
             if !t.modifiers.is_empty() {
                 return Err(SqlError::syntax(format!("type modifier is not allowed for type \"{}\"", t.name)));
             }

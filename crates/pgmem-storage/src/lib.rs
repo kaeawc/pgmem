@@ -172,7 +172,9 @@ impl Database {
     pub fn seed(&self, table: &str, rows: Vec<Row>) -> SqlResult<()> {
         let _guard = lock(&self.commit_lock);
         let cur = self.current();
-        let def = cur.catalog.table(table).ok_or_else(|| SqlError::undefined_table(table))?;
+        // `schema.table`, or a table in public.
+        let (schema, name) = table.split_once('.').unwrap_or((pgmem_catalog::PUBLIC_SCHEMA, table));
+        let def = cur.catalog.table(schema, name).ok_or_else(|| SqlError::undefined_table(table))?;
         let mut next = (*cur).clone();
         let data = Arc::make_mut(next.tables.entry(def.oid).or_default());
         for row in rows {

@@ -5,8 +5,8 @@
 use super::dml::physical_scope;
 use super::{Binder, Clause, Ctx, Level, Scope, resolve_type_name};
 use pgmem_catalog::{
-    Catalog, ColumnDef, Constraint, ConstraintKind, FkAction, Identity, IndexDef, SequenceDef, TableDef, ViewDef, default_constraint_name,
-    truncate_identifier,
+    Catalog, ColumnDef, Constraint, ConstraintKind, FkAction, Identity, IndexDef, QualName, SequenceDef, TableDef, ViewDef,
+    default_constraint_name, truncate_identifier,
 };
 use pgmem_ir as ir;
 use pgmem_types::{SqlError, SqlResult, Type, Value, code};
@@ -31,13 +31,21 @@ fn serial_type(name: &str) -> Option<(Type, i64)> {
     }
 }
 
-fn nextval_default(seq: &str) -> ir::Expr {
-    ir::Expr::Function(Box::new(ir::FunctionCall::new("nextval", vec![ir::Expr::Literal(ir::Literal::String(seq.to_owned()))])))
+/// `nextval('schema.seq')`: the sequence is named with its schema so the default keeps
+/// working whatever the search path (Postgres stores the OID; the deparser prints the name
+/// unqualified when it is visible).
+pub fn nextval_default(schema: &str, seq: &str) -> ir::Expr {
+    ir::Expr::Function(Box::new(nextval_call(schema, seq)))
 }
 
-/// Picks a constraint/index name not used in the table or the catalog (`base`, `base1`, ...).
-fn choose_name(catalog: &Catalog, taken: &[String], base: String) -> String {
-    catalog.choose_name(&truncate_identifier(base), taken)
+fn nextval_call(schema: &str, seq: &str) -> ir::FunctionCall {
+    let qualified = format!("{}.{}", crate::funcs::string::quote_ident(schema), crate::funcs::string::quote_ident(seq));
+    ir::FunctionCall::new("nextval", vec![ir::Expr::Literal(ir::Literal::String(qualified))])
+}
+
+/// Picks a constraint/index name not used in the table or its schema (`base`, `base1`, ...).
+fn choose_name(catalog: &Catalog, schema: &str, taken: &[String], base: String) -> String {
+    catalog.choose_name(schema, &truncate_identifier(base), taken)
 }
 
 /// The result of analyzing CREATE TABLE: the table and the sequences it owns.
@@ -73,8 +81,9 @@ fn check_default_binds(b: &Binder, col: &ColumnDef, e: &ir::Expr) -> SqlResult<(
 
 pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<CreateTablePlan>> {
     let catalog = b.catalog;
-    let name = catalog.normalize(&ct.name)?.to_owned();
-    if catalog.relation(&name).is_some() {
+    let schema = catalog.creation_schema(&ct.name)?;
+    let name = ct.name.base().to_owned();
+    if catalog.relation(&schema, &name).is_some() {
         if ct.if_not_exists {
             return Ok(None);
         }
@@ -83,7 +92,8 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
     if ct.as_query.is_some() {
         return Err(super::feature("CREATE TABLE AS"));
     }
-    let mut table = TableDef { oid: 0, name: name.clone(), columns: Vec::new(), constraints: Vec::new(), indexes: Vec::new() };
+    let mut table =
+        TableDef { oid: 0, schema: schema.clone(), name: name.clone(), columns: Vec::new(), constraints: Vec::new(), indexes: Vec::new() };
     let mut sequences = Vec::new();
     let mut taken: Vec<String> = vec![name.clone()];
     // Columns.
@@ -92,10 +102,11 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
             return Err(SqlError::new(code::DUPLICATE_COLUMN, format!("column \"{}\" specified more than once", c.name)));
         }
         let mut col = if let Some((ty, max)) = serial_type(&c.ty.name).filter(|_| c.ty.array_dims == 0) {
-            let seq = choose_name(catalog, &taken, default_constraint_name(&name, &[&c.name], "seq"));
+            let seq = choose_name(catalog, &schema, &taken, default_constraint_name(&name, &[&c.name], "seq"));
             taken.push(seq.clone());
             sequences.push(SequenceDef {
                 oid: 0,
+                schema: schema.clone(),
                 name: seq.clone(),
                 start: 1,
                 increment: 1,
@@ -105,7 +116,7 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
             });
             let mut col = ColumnDef::new(c.name.clone(), ty);
             col.not_null = true;
-            col.default = Some(nextval_default(&seq));
+            col.default = Some(nextval_default(&schema, &seq));
             col
         } else {
             let (ty, typmod) = resolve_type_name(catalog, &c.ty)?;
@@ -136,10 +147,11 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
                             ));
                         }
                     };
-                    let seq = choose_name(catalog, &taken, default_constraint_name(&name, &[&c.name], "seq"));
+                    let seq = choose_name(catalog, &schema, &taken, default_constraint_name(&name, &[&c.name], "seq"));
                     taken.push(seq.clone());
                     sequences.push(SequenceDef {
                         oid: 0,
+                        schema: schema.clone(),
                         name: seq.clone(),
                         start: 1,
                         increment: 1,
@@ -149,7 +161,7 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
                     });
                     col.identity = Some(if *always { Identity::Always } else { Identity::ByDefault });
                     col.not_null = true;
-                    col.default = Some(nextval_default(&seq));
+                    col.default = Some(nextval_default(&schema, &seq));
                 }
                 // Key, check and reference constraints are table constraints in disguise.
                 _ => {}
@@ -228,6 +240,7 @@ pub fn add_constraint(
 ) -> SqlResult<()> {
     let catalog = b.catalog;
     let tname = table.name.clone();
+    let schema = table.schema.clone();
     let col_index = |t: &TableDef, n: &str| -> SqlResult<usize> {
         t.column_index(n).ok_or_else(|| SqlError::undefined_column(&format!("\"{n}\" named in key does not exist")))
     };
@@ -266,6 +279,7 @@ pub fn add_constraint(
             let name = cname.unwrap_or_else(|| {
                 choose_name(
                     catalog,
+                    &schema,
                     &used,
                     if primary { default_constraint_name(&tname, &[], "pkey") } else { default_constraint_name(&tname, &names, "key") },
                 )
@@ -298,21 +312,22 @@ pub fn add_constraint(
                 [only] => default_constraint_name(&tname, &[only], "check"),
                 _ => default_constraint_name(&tname, &[], "check"),
             };
-            let name = cname.unwrap_or_else(|| choose_name(catalog, &used, base));
+            let name = cname.unwrap_or_else(|| choose_name(catalog, &schema, &used, base));
             taken.push(name.clone());
             table.constraints.push(Constraint { oid: 0, name, kind: ConstraintKind::Check { expr: e.clone() } });
         }
         ir::TableConstraintKind::ForeignKey { columns, references } => {
             let local = columns.iter().map(|c| col_index(table, c)).collect::<SqlResult<Vec<_>>>()?;
-            let ref_name = catalog.normalize(&references.table)?.to_owned();
-            let parent: TableDef = if ref_name == tname {
-                table.clone()
-            } else {
-                match catalog.table(&ref_name) {
-                    Some(t) => (**t).clone(),
-                    None => return Err(SqlError::undefined_table(&ref_name)),
-                }
-            };
+            // A reference to the table itself (which isn't in the catalog yet when creating).
+            let self_ref = references.table.base() == tname
+                && match references.table.0.as_slice() {
+                    [_] => catalog.lookup_relation(&references.table)?.is_none_or(|r| r.oid() == table.oid && table.oid != 0),
+                    [s, _] | [_, s, _] => catalog.resolve_schema_name(s) == schema,
+                    _ => false,
+                };
+            let parent: TableDef = if self_ref { table.clone() } else { (*catalog.lookup_table(&references.table)?).clone() };
+            let ref_name = parent.name.clone();
+            let ref_q = QualName::new(&parent.schema, &parent.name);
             let ref_cols = if references.columns.is_empty() {
                 parent.primary_key().map(<[usize]>::to_vec).ok_or_else(|| {
                     SqlError::new(code::INVALID_FOREIGN_KEY, format!("there is no primary key for referenced table \"{ref_name}\""))
@@ -360,14 +375,14 @@ pub fn add_constraint(
                 }
             }
             let names: Vec<&str> = columns.iter().map(String::as_str).collect();
-            let name = cname.unwrap_or_else(|| choose_name(catalog, &used, default_constraint_name(&tname, &names, "fkey")));
+            let name = cname.unwrap_or_else(|| choose_name(catalog, &schema, &used, default_constraint_name(&tname, &names, "fkey")));
             taken.push(name.clone());
             table.constraints.push(Constraint {
                 oid: 0,
                 name,
                 kind: ConstraintKind::ForeignKey {
                     columns: local,
-                    ref_table: ref_name,
+                    ref_table: ref_q,
                     ref_columns: ref_cols,
                     on_delete: fk_action(references.on_delete),
                     on_update: fk_action(references.on_update),
@@ -379,7 +394,8 @@ pub fn add_constraint(
 }
 
 pub fn bind_create_view(b: &Binder, cv: &ir::CreateView) -> SqlResult<ViewDef> {
-    let name = b.catalog.normalize(&cv.name)?.to_owned();
+    let schema = b.catalog.creation_schema(&cv.name)?;
+    let name = cv.name.base().to_owned();
     let top = Level::new(Scope::default());
     let ctx = Ctx::new(&top);
     let bound = b.bind_query(&cv.query, &ctx)?;
@@ -396,13 +412,14 @@ pub fn bind_create_view(b: &Binder, cv: &ir::CreateView) -> SqlResult<ViewDef> {
     if b.params.borrow().iter().any(|_| true) {
         return Err(SqlError::new(code::UNDEFINED_PARAMETER, "there is no parameter $1"));
     }
-    Ok(ViewDef { oid: 0, name, columns, query: (*cv.query).clone() })
+    let search_path = b.catalog.resolved_search_path();
+    Ok(ViewDef { oid: 0, schema, name, columns, query: (*cv.query).clone(), search_path })
 }
 
-pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(String, IndexDef)>> {
+pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(QualName, IndexDef)>> {
     let catalog = b.catalog;
-    let tname = catalog.normalize(&ci.table)?.to_owned();
-    let table = catalog.table(&tname).cloned().ok_or_else(|| SqlError::undefined_table(&tname))?;
+    let table = catalog.lookup_table(&ci.table)?;
+    let tname = table.name.clone();
     let mut columns = Vec::new();
     let mut exprs = Vec::new();
     let mut names = Vec::new();
@@ -430,7 +447,7 @@ pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(
     }
     let name = match &ci.name {
         Some(n) => {
-            if catalog.relation(n).is_some() {
+            if catalog.relation(&table.schema, n).is_some() {
                 if ci.if_not_exists {
                     return Ok(None);
                 }
@@ -440,11 +457,11 @@ pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(
         }
         None => {
             let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-            catalog.choose_name(&default_constraint_name(&tname, &refs, "idx"), &[])
+            catalog.choose_name(&table.schema, &default_constraint_name(&tname, &refs, "idx"), &[])
         }
     };
     Ok(Some((
-        tname,
+        table.qualified(),
         IndexDef {
             oid: 0,
             name,
@@ -459,8 +476,9 @@ pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(
 }
 
 pub fn bind_create_sequence(b: &Binder, cs: &ir::CreateSequence) -> SqlResult<Option<SequenceDef>> {
-    let name = b.catalog.normalize(&cs.name)?.to_owned();
-    if b.catalog.relation(&name).is_some() {
+    let schema = b.catalog.creation_schema(&cs.name)?;
+    let name = cs.name.base().to_owned();
+    if b.catalog.relation(&schema, &name).is_some() {
         if cs.if_not_exists {
             return Ok(None);
         }
@@ -472,7 +490,7 @@ pub fn bind_create_sequence(b: &Binder, cs: &ir::CreateSequence) -> SqlResult<Op
     }
     let (min, max) = if increment > 0 { (1, i64::MAX) } else { (i64::MIN, -1) };
     let start = cs.start.unwrap_or(if increment > 0 { min } else { max });
-    Ok(Some(SequenceDef { oid: 0, name, start, increment, min: min.min(start), max: max.max(start), owned_by: None }))
+    Ok(Some(SequenceDef { oid: 0, schema, name, start, increment, min: min.min(start), max: max.max(start), owned_by: None }))
 }
 
 /// Result of analyzing one ALTER TABLE action.
@@ -481,7 +499,7 @@ pub enum AlterOutcome {
     /// existing row, or check existing rows against new rules.
     Replace {
         def: Box<TableDef>,
-        rename_from: Option<String>,
+        rename_from: Option<QualName>,
         sequences: Vec<SequenceDef>,
         validate: Validation,
     },
@@ -519,7 +537,7 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
             }
             // Analyze the column through a one-column CREATE TABLE to reuse all the rules.
             let ct = ir::CreateTable {
-                name: ir::ObjectName::simple(format!("{tname}__pgmem_add")),
+                name: ir::ObjectName(vec![table.schema.clone(), format!("{tname}__pgmem_add")]),
                 if_not_exists: false,
                 temporary: false,
                 columns: vec![column.clone()],
@@ -535,7 +553,7 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
                 if let Some(ir::Expr::Function(f)) = &mut col.default
                     && f.name.base() == "nextval"
                 {
-                    f.args = vec![ir::Expr::Literal(ir::Literal::String(s.name.clone()))];
+                    **f = nextval_call(&s.schema, &s.name);
                 }
             }
             // Existing rows read the new column as its default when the default is a constant
@@ -606,11 +624,16 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
             Ok(AlterOutcome::Replace { def: Box::new(def), rename_from: None, sequences: vec![], validate: Validation::None })
         }
         ir::AlterTableAction::RenameTable { new } => {
-            if b.catalog.relation(new).is_some() {
+            if b.catalog.relation(&table.schema, new).is_some() {
                 return Err(SqlError::new(code::DUPLICATE_TABLE, format!("relation \"{new}\" already exists")));
             }
             def.name = new.clone();
-            Ok(AlterOutcome::Replace { def: Box::new(def), rename_from: Some(tname), sequences: vec![], validate: Validation::None })
+            Ok(AlterOutcome::Replace {
+                def: Box::new(def),
+                rename_from: Some(table.qualified()),
+                sequences: vec![],
+                validate: Validation::None,
+            })
         }
         ir::AlterTableAction::SetNotNull { column } => {
             let slot = def.column_index(column).ok_or_else(|| not_found(column))?;

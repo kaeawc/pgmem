@@ -725,7 +725,11 @@ impl Printer {
 
     fn print_from_item(&mut self, item: &FromItem) {
         match item {
-            FromItem::Rel { relname, refname, print_alias, colaliases } => {
+            FromItem::Rel { schema, relname, refname, print_alias, colaliases } => {
+                if let Some(s) = schema {
+                    self.push(&quote_ident(s));
+                    self.push(".");
+                }
                 self.push(&quote_ident(relname));
                 if *print_alias || !colaliases.is_empty() {
                     self.push(&format!(" {}", quote_ident(refname)));

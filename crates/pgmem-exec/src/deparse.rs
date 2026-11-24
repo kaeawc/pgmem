@@ -32,7 +32,7 @@ fn table_analyzer<'a>(catalog: &'a Catalog, table: &TableDef) -> Analyzer<'a> {
     let cols =
         table.live_columns().map(|(_, c)| ScopeCol { name: c.name.clone(), ty: c.ty.clone(), typmod: c.typmod, hidden: false }).collect();
     let rte = Rte { qualifier: table.name.clone(), refname: table.name.clone(), cols };
-    Analyzer { catalog, levels: vec![Level { rtes: vec![rte], names: vec![table.name.clone()], ..Level::default() }] }
+    Analyzer { catalog, levels: vec![Level { rtes: vec![rte], names: vec![table.name.clone()], ..Level::default() }], display_path: None }
 }
 
 /// An expression stored on `table` (an index expression or predicate, a CHECK expression),
@@ -60,7 +60,7 @@ const DOMAIN_VALUE_REF: &str = "\0domain value";
 pub fn deparse_domain_check(catalog: &Catalog, base: &pgmem_types::Type, typmod: i32, e: &ir::Expr) -> SqlResult<String> {
     let cols = vec![ScopeCol { name: "value".into(), ty: base.clone(), typmod, hidden: false }];
     let rte = Rte { qualifier: String::new(), refname: DOMAIN_VALUE_REF.into(), cols };
-    let mut a = Analyzer { catalog, levels: vec![Level { rtes: vec![rte], names: vec![], ..Level::default() }] };
+    let mut a = Analyzer { catalog, levels: vec![Level { rtes: vec![rte], names: vec![], ..Level::default() }], display_path: None };
     let n = a.boolean(e);
     Ok(expr_text(&n))
 }
@@ -120,11 +120,12 @@ pub fn deparse_constraint(catalog: &Catalog, table: &TableDef, constraint: &Cons
             format!("UNIQUE {}({})", if *nulls_not_distinct { "NULLS NOT DISTINCT " } else { "" }, column_list(table, columns))
         }
         ConstraintKind::ForeignKey { columns, ref_table, ref_columns, on_delete, on_update } => {
-            let ref_cols = match catalog.table(ref_table) {
-                Some(t) if *ref_table != table.name => column_list(t, ref_columns),
+            let ref_cols = match catalog.table_q(ref_table) {
+                Some(t) if *ref_table != table.qualified() => column_list(t, ref_columns),
                 _ => column_list(table, ref_columns),
             };
-            let mut s = format!("FOREIGN KEY ({}) REFERENCES {}({ref_cols})", column_list(table, columns), quote_ident(ref_table));
+            let target = relation_name(catalog, &ref_table.schema, &ref_table.name);
+            let mut s = format!("FOREIGN KEY ({}) REFERENCES {target}({ref_cols})", column_list(table, columns));
             if *on_update != FkAction::NoAction {
                 s.push_str(&format!(" ON UPDATE {}", fk_action(*on_update)));
             }
@@ -150,7 +151,7 @@ pub fn deparse_index(catalog: &Catalog, table: &TableDef, index: &IndexDef) -> S
         "CREATE {}INDEX {} ON {}.{} USING btree ({})",
         if index.unique { "UNIQUE " } else { "" },
         quote_ident(&index.name),
-        quote_ident(pgmem_catalog::PUBLIC_SCHEMA),
+        quote_ident(&table.schema),
         quote_ident(&table.name),
         keys.join(", ")
     );
@@ -166,9 +167,16 @@ pub fn deparse_index(catalog: &Catalog, table: &TableDef, index: &IndexDef) -> S
 /// A view's query as `pg_get_viewdef(oid)` / `pg_views.definition` /
 /// `information_schema.views.view_definition` print it: pretty format, with the leading
 /// space and the trailing semicolon (`" SELECT id,\n    title\n   FROM books;"`).
+/// ruleutils' `generate_relation_name`: the name alone when the search path finds this
+/// relation by it, else schema-qualified.
+pub fn relation_name(catalog: &Catalog, schema: &str, name: &str) -> String {
+    if catalog.relation_visible(schema, name) { quote_ident(name) } else { format!("{}.{}", quote_ident(schema), quote_ident(name)) }
+}
+
 pub fn deparse_view(catalog: &Catalog, view: &ViewDef) -> SqlResult<String> {
-    let mut a = Analyzer { catalog, levels: Vec::new() };
-    let q = a.query(&view.query, false);
+    let display_path = Some(pgmem_types::context::search_path().entries);
+    let mut a = Analyzer { catalog, levels: Vec::new(), display_path };
+    let q = pgmem_types::context::with_search_path(&view.search_path, || a.query(&view.query, false));
     let mut p = Printer::new(q.varprefix);
     p.query_def(&q, Some(&view.columns), true, 0);
     p.buf.push(';');

@@ -588,9 +588,10 @@ pub(crate) fn lower_type(dt: &sq::DataType) -> SqlResult<TypeName> {
         D::Custom(name, mods) => {
             let n = object_name(name)?;
             TypeName {
-                name: n.base().to_ascii_lowercase(),
+                name: n.base().to_owned(),
                 modifiers: mods.iter().filter_map(|m| m.to_string().parse().ok()).collect(),
                 array_dims: 0,
+                schema: n.schema().map(str::to_owned),
             }
         }
         D::Array(elem) => {

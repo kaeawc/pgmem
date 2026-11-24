@@ -13,11 +13,15 @@ use std::sync::Arc;
 
 pub type Oid = u32;
 
-/// The schema every user object lives in. pgmem models a single schema; `public.x` resolves
-/// to `x`.
+/// The schema every database starts with, first on the default `search_path` after `$user`.
 pub const PUBLIC_SCHEMA: &str = "public";
 pub const PUBLIC_NAMESPACE_OID: Oid = 2200;
+pub const PG_CATALOG: &str = "pg_catalog";
 pub const PG_CATALOG_NAMESPACE_OID: Oid = 11;
+pub const INFORMATION_SCHEMA: &str = "information_schema";
+/// `pg_namespace.oid` of information_schema in a fresh PostgreSQL 18 cluster.
+pub const INFORMATION_SCHEMA_NAMESPACE_OID: Oid = 13_336;
+pub const PG_TOAST_NAMESPACE_OID: Oid = 99;
 /// First OID handed to user objects (Postgres' `FirstNormalObjectId`).
 pub const FIRST_USER_OID: Oid = 16384;
 
@@ -89,7 +93,7 @@ pub enum ConstraintKind {
     PrimaryKey { columns: Vec<usize> },
     Unique { columns: Vec<usize>, nulls_not_distinct: bool },
     Check { expr: Expr },
-    ForeignKey { columns: Vec<usize>, ref_table: String, ref_columns: Vec<usize>, on_delete: FkAction, on_update: FkAction },
+    ForeignKey { columns: Vec<usize>, ref_table: QualName, ref_columns: Vec<usize>, on_delete: FkAction, on_update: FkAction },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -131,6 +135,8 @@ pub struct IndexDef {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TableDef {
     pub oid: Oid,
+    /// The schema (namespace) the table lives in.
+    pub schema: String,
     pub name: String,
     /// Physical column slots in attnum order (attnum = index + 1), including dropped ones.
     pub columns: Vec<ColumnDef>,
@@ -162,26 +168,36 @@ impl TableDef {
     pub fn has_constraint(&self, name: &str) -> bool {
         self.constraints.iter().any(|c| c.name == name)
     }
+
+    pub fn qualified(&self) -> QualName {
+        QualName::new(&self.schema, &self.name)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewDef {
     pub oid: Oid,
+    pub schema: String,
     pub name: String,
     /// Output column names (from the column list or the query's select list).
     pub columns: Vec<String>,
     pub query: pgmem_ir::Query,
+    /// The effective search path when the view was created: its names resolve against it,
+    /// as Postgres binds a view's relations at creation.
+    pub search_path: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SequenceDef {
     pub oid: Oid,
+    pub schema: String,
     pub name: String,
     pub start: i64,
     pub increment: i64,
     pub min: i64,
     pub max: i64,
-    /// `table.column` this sequence is OWNED BY (serial / identity columns).
+    /// The table (in the sequence's schema) and column this sequence is OWNED BY (serial /
+    /// identity columns).
     pub owned_by: Option<(String, String)>,
 }
 
@@ -221,6 +237,7 @@ pub enum TypeDefKind {
 pub struct TypeDef {
     pub oid: Oid,
     pub array_oid: Oid,
+    pub schema: String,
     pub name: String,
     pub kind: TypeDefKind,
 }
@@ -235,7 +252,7 @@ impl TypeDef {
                 UserKind::Domain { base: base.clone(), typmod: *typmod, not_null: *not_null }
             }
         };
-        UserType { oid: self.oid, array_oid: self.array_oid, name: self.name.clone(), kind }
+        UserType { oid: self.oid, array_oid: self.array_oid, name: self.name.clone(), schema: self.schema.clone(), kind }
     }
 
     pub fn as_type(&self) -> Type {
@@ -278,7 +295,7 @@ pub enum Relation {
     Table(Arc<TableDef>),
     View(Arc<ViewDef>),
     Sequence(Arc<SequenceDef>),
-    Index { table: String, index: IndexDef },
+    Index { table: QualName, index: Box<IndexDef> },
 }
 
 impl Relation {
@@ -300,6 +317,15 @@ impl Relation {
         }
     }
 
+    pub fn schema(&self) -> &str {
+        match self {
+            Relation::Table(t) => &t.schema,
+            Relation::View(v) => &v.schema,
+            Relation::Sequence(s) => &s.schema,
+            Relation::Index { table, .. } => &table.schema,
+        }
+    }
+
     pub fn kind_name(&self) -> &'static str {
         match self {
             Relation::Table(_) => "table",
@@ -310,21 +336,82 @@ impl Relation {
     }
 }
 
+/// A schema-qualified object name.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct QualName {
+    pub schema: String,
+    pub name: String,
+}
+
+impl QualName {
+    pub fn new(schema: &str, name: &str) -> QualName {
+        QualName { schema: schema.to_owned(), name: name.to_owned() }
+    }
+}
+
+impl std::fmt::Display for QualName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.schema, self.name)
+    }
+}
+
+/// A schema (`pg_namespace` row).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SchemaDef {
+    pub oid: Oid,
+    pub name: String,
+    pub owner: String,
+}
+
+/// Where an unqualified name resolves: user schemas from the catalog, or the virtual
+/// `pg_catalog` / `information_schema` relations the executor provides.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PathEntry {
+    /// pg_catalog: system relations, types and functions.
+    System,
+    Schema(String),
+}
+
 /// The set of user objects visible to a transaction.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Catalog {
-    tables: BTreeMap<String, Arc<TableDef>>,
-    views: BTreeMap<String, Arc<ViewDef>>,
-    sequences: BTreeMap<String, Arc<SequenceDef>>,
-    types: BTreeMap<String, Arc<TypeDef>>,
+    schemas: BTreeMap<String, SchemaDef>,
+    tables: BTreeMap<QualName, Arc<TableDef>>,
+    views: BTreeMap<QualName, Arc<ViewDef>>,
+    sequences: BTreeMap<QualName, Arc<SequenceDef>>,
+    types: BTreeMap<QualName, Arc<TypeDef>>,
     /// `COMMENT ON` text by (classoid, objoid, objsubid), as in `pg_description`.
     comments: BTreeMap<(Oid, Oid, i32), String>,
     next_oid: Oid,
 }
 
+impl Default for Catalog {
+    fn default() -> Catalog {
+        Catalog::new()
+    }
+}
+
+/// Schemas the catalog knows without them being created: their objects are virtual.
+pub fn is_system_schema(name: &str) -> bool {
+    name == PG_CATALOG || name == INFORMATION_SCHEMA
+}
+
 impl Catalog {
     pub fn new() -> Catalog {
-        Catalog { next_oid: FIRST_USER_OID, ..Default::default() }
+        let mut schemas = BTreeMap::new();
+        schemas.insert(
+            PUBLIC_SCHEMA.to_owned(),
+            SchemaDef { oid: PUBLIC_NAMESPACE_OID, name: PUBLIC_SCHEMA.to_owned(), owner: "pg_database_owner".to_owned() },
+        );
+        Catalog {
+            schemas,
+            tables: BTreeMap::new(),
+            views: BTreeMap::new(),
+            sequences: BTreeMap::new(),
+            types: BTreeMap::new(),
+            comments: BTreeMap::new(),
+            next_oid: FIRST_USER_OID,
+        }
     }
 
     pub fn alloc_oid(&mut self) -> Oid {
@@ -336,30 +423,320 @@ impl Catalog {
         oid
     }
 
-    /// Strips a `public.` qualifier; other schemas are reported as missing relations.
-    pub fn normalize<'a>(&self, name: &'a pgmem_ir::ObjectName) -> SqlResult<&'a str> {
+    // -----------------------------------------------------------------------------------------
+    // Schemas and name resolution
+    // -----------------------------------------------------------------------------------------
+
+    /// User schemas (public and created ones), by name.
+    pub fn schemas(&self) -> impl Iterator<Item = &SchemaDef> {
+        self.schemas.values()
+    }
+
+    pub fn schema(&self, name: &str) -> Option<&SchemaDef> {
+        self.schemas.get(name)
+    }
+
+    pub fn schema_by_oid(&self, oid: Oid) -> Option<&SchemaDef> {
+        self.schemas.values().find(|s| s.oid == oid)
+    }
+
+    /// The namespace OID of a schema name (system schemas included).
+    pub fn namespace_oid(&self, name: &str) -> Option<Oid> {
+        match name {
+            PG_CATALOG => Some(PG_CATALOG_NAMESPACE_OID),
+            INFORMATION_SCHEMA => Some(INFORMATION_SCHEMA_NAMESPACE_OID),
+            "pg_toast" => Some(PG_TOAST_NAMESPACE_OID),
+            _ => self.schemas.get(name).map(|s| s.oid),
+        }
+    }
+
+    /// True if `name` is a schema: a user schema or a system one.
+    pub fn schema_exists(&self, name: &str) -> bool {
+        self.namespace_oid(name).is_some()
+    }
+
+    pub fn create_schema(&mut self, def: SchemaDef) -> SqlResult<()> {
+        if self.schema_exists(&def.name) {
+            return Err(SqlError::new(code::DUPLICATE_SCHEMA, format!("schema \"{}\" already exists", def.name)));
+        }
+        self.schemas.insert(def.name.clone(), def);
+        Ok(())
+    }
+
+    /// Removes a schema (its objects must already be gone).
+    pub fn drop_schema(&mut self, name: &str) -> Option<SchemaDef> {
+        self.schemas.remove(name)
+    }
+
+    /// Renames a schema and moves every object in it.
+    pub fn rename_schema(&mut self, old: &str, new: &str) -> SqlResult<()> {
+        if self.schema_exists(new) {
+            return Err(SqlError::new(code::DUPLICATE_SCHEMA, format!("schema \"{new}\" already exists")));
+        }
+        let mut def = self.schemas.remove(old).ok_or_else(|| undefined_schema(old))?;
+        def.name = new.to_owned();
+        self.schemas.insert(new.to_owned(), def);
+        fn moved<T: Clone>(map: &mut BTreeMap<QualName, Arc<T>>, old: &str, new: &str, set: impl Fn(&mut T)) {
+            let keys: Vec<QualName> = map.keys().filter(|k| k.schema == old).cloned().collect();
+            for k in keys {
+                if let Some(v) = map.remove(&k) {
+                    let mut v = (*v).clone();
+                    set(&mut v);
+                    map.insert(QualName::new(new, &k.name), Arc::new(v));
+                }
+            }
+        }
+        moved(&mut self.tables, old, new, |t: &mut TableDef| t.schema = new.to_owned());
+        moved(&mut self.views, old, new, |t: &mut ViewDef| t.schema = new.to_owned());
+        moved(&mut self.sequences, old, new, |t: &mut SequenceDef| t.schema = new.to_owned());
+        moved(&mut self.types, old, new, |t: &mut TypeDef| t.schema = new.to_owned());
+        // Foreign keys name their referenced table by schema.
+        for t in self.tables.values_mut() {
+            if t.constraints.iter().any(|c| matches!(&c.kind, ConstraintKind::ForeignKey { ref_table, .. } if ref_table.schema == old)) {
+                let def = Arc::make_mut(t);
+                for c in &mut def.constraints {
+                    if let ConstraintKind::ForeignKey { ref_table, .. } = &mut c.kind
+                        && ref_table.schema == old
+                    {
+                        ref_table.schema = new.to_owned();
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// True if anything lives in the schema.
+    pub fn schema_is_empty(&self, name: &str) -> bool {
+        !self.tables.keys().chain(self.views.keys()).chain(self.sequences.keys()).chain(self.types.keys()).any(|k| k.schema == name)
+    }
+
+    /// The effective search path (`recomputeNamespacePath`): the session's temporary schema
+    /// first (for relations and types), pg_catalog first unless listed, `$user` and
+    /// `pg_temp` substituted, schemas that don't exist skipped.
+    pub fn search_path(&self) -> Vec<PathEntry> {
+        let ctx = pgmem_types::context::search_path();
+        let mut out = Vec::new();
+        for entry in &ctx.entries {
+            let name = match entry.as_str() {
+                "$user" => ctx.user.clone(),
+                "pg_temp" => match &ctx.temp_schema {
+                    Some(t) => t.clone(),
+                    None => continue,
+                },
+                other => other.to_owned(),
+            };
+            let e = if name == PG_CATALOG {
+                PathEntry::System
+            } else if self.schemas.contains_key(&name) {
+                PathEntry::Schema(name)
+            } else {
+                continue;
+            };
+            if !out.contains(&e) {
+                out.push(e);
+            }
+        }
+        if !out.contains(&PathEntry::System) {
+            out.insert(0, PathEntry::System);
+        }
+        if let Some(t) = &ctx.temp_schema
+            && self.schemas.contains_key(t)
+        {
+            let e = PathEntry::Schema(t.clone());
+            out.retain(|x| *x != e);
+            out.insert(0, e);
+        }
+        out
+    }
+
+    /// The effective search path as schema names (pg_catalog included), to resolve names
+    /// later exactly as now ([`ViewDef::search_path`]).
+    pub fn resolved_search_path(&self) -> Vec<String> {
+        self.search_path()
+            .into_iter()
+            .map(|e| match e {
+                PathEntry::System => PG_CATALOG.to_owned(),
+                PathEntry::Schema(s) => s,
+            })
+            .collect()
+    }
+
+    /// The explicit path entries that exist (`current_schemas(false)`): no implicit
+    /// pg_catalog or temporary schema.
+    pub fn explicit_search_path(&self) -> Vec<String> {
+        let ctx = pgmem_types::context::search_path();
+        let mut out: Vec<String> = Vec::new();
+        for entry in &ctx.entries {
+            let name = match entry.as_str() {
+                "$user" => ctx.user.clone(),
+                "pg_temp" => continue,
+                other => other.to_owned(),
+            };
+            if self.schema_exists(&name) && !out.contains(&name) {
+                out.push(name);
+            }
+        }
+        out
+    }
+
+    /// The schema a new object named `name` is created in: its qualifier (which must
+    /// exist), else the first existing schema on the search path (3F000 if there is none).
+    pub fn creation_schema(&self, name: &pgmem_ir::ObjectName) -> SqlResult<String> {
         match name.0.as_slice() {
-            [n] => Ok(n),
-            [schema, n] if schema == PUBLIC_SCHEMA => Ok(n),
-            [_, _] | [_, _, _] => Err(SqlError::undefined_table(&name.to_string())),
+            [_] => {
+                let ctx = pgmem_types::context::search_path();
+                for entry in &ctx.entries {
+                    let n = match entry.as_str() {
+                        "$user" => ctx.user.clone(),
+                        "pg_temp" => match &ctx.temp_schema {
+                            Some(t) => t.clone(),
+                            None => continue,
+                        },
+                        other => other.to_owned(),
+                    };
+                    if n == PG_CATALOG {
+                        return Err(system_catalog_denied(name.base()));
+                    }
+                    if self.schemas.contains_key(&n) {
+                        return Ok(n);
+                    }
+                }
+                Err(SqlError::new(code::INVALID_SCHEMA_NAME, "no schema has been selected to create in"))
+            }
+            [schema, _] | [_, schema, _] => self.target_schema(schema, name.base()),
             _ => Err(SqlError::syntax(format!("improper qualified name (too many dotted names): {name}"))),
         }
     }
 
-    pub fn table(&self, name: &str) -> Option<&Arc<TableDef>> {
-        self.tables.get(name)
+    /// The schema named by an explicit qualifier for a new object (`pg_temp` is the session's
+    /// temporary schema).
+    pub fn target_schema(&self, schema: &str, object: &str) -> SqlResult<String> {
+        let schema = self.resolve_schema_name(schema);
+        if is_system_schema(&schema) {
+            return Err(system_catalog_denied(object));
+        }
+        if !self.schemas.contains_key(&schema) {
+            return Err(undefined_schema(&schema));
+        }
+        Ok(schema)
+    }
+
+    /// `pg_temp` stands for the session's temporary schema.
+    pub fn resolve_schema_name(&self, schema: &str) -> String {
+        if schema == "pg_temp" {
+            pgmem_types::context::search_path().temp_schema.clone().unwrap_or_else(|| "pg_temp".to_owned())
+        } else {
+            schema.to_owned()
+        }
+    }
+
+    /// Resolves a possibly qualified name with `find` (which looks in one schema), the way
+    /// Postgres' `RangeVarGetRelid` does: a qualified name looks only in its schema (3F000 if
+    /// it doesn't exist), an unqualified one walks the search path. `System` entries are
+    /// passed to `find` as `pg_catalog`.
+    pub fn resolve<T>(&self, name: &pgmem_ir::ObjectName, find: impl Fn(&str, &str) -> Option<T>) -> SqlResult<Option<T>> {
+        match name.0.as_slice() {
+            [n] => {
+                for e in self.search_path() {
+                    let schema = match &e {
+                        PathEntry::System => PG_CATALOG,
+                        PathEntry::Schema(s) => s.as_str(),
+                    };
+                    if let Some(found) = find(schema, n) {
+                        return Ok(Some(found));
+                    }
+                }
+                Ok(None)
+            }
+            [schema, n] | [_, schema, n] => {
+                let schema = self.resolve_schema_name(schema);
+                if !self.schema_exists(&schema) {
+                    return Err(undefined_schema(&schema));
+                }
+                Ok(find(&schema, n))
+            }
+            _ => Err(SqlError::syntax(format!("improper qualified name (too many dotted names): {name}"))),
+        }
+    }
+
+    /// Looks up a relation by possibly qualified name through the search path.
+    pub fn lookup_relation(&self, name: &pgmem_ir::ObjectName) -> SqlResult<Option<Relation>> {
+        self.resolve(name, |schema, n| self.relation(schema, n))
+    }
+
+    /// [`Catalog::lookup_relation`] as queries resolve names: a qualifier naming no schema
+    /// just finds nothing (Postgres reports the relation, not the schema, as missing).
+    pub fn find_relation(&self, name: &pgmem_ir::ObjectName) -> SqlResult<Option<Relation>> {
+        match self.lookup_relation(name) {
+            Err(e) if e.code == code::INVALID_SCHEMA_NAME => Ok(None),
+            other => other,
+        }
+    }
+
+    /// Like [`Catalog::lookup_relation`] for a table, with Postgres' errors.
+    pub fn lookup_table(&self, name: &pgmem_ir::ObjectName) -> SqlResult<Arc<TableDef>> {
+        match self.lookup_relation(name)? {
+            Some(Relation::Table(t)) => Ok(t),
+            Some(other) => Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{}\" is not a table", other.name()))),
+            None => Err(SqlError::undefined_table(&name.to_string())),
+        }
+    }
+
+    pub fn lookup_type(&self, name: &pgmem_ir::ObjectName) -> SqlResult<Option<Arc<TypeDef>>> {
+        self.resolve(name, |schema, n| self.types.get(&QualName::new(schema, n)).cloned())
+    }
+
+    /// True if an unqualified reference to `name` in `schema` would find it (Postgres'
+    /// `RelationIsVisible`): object names print qualified otherwise.
+    pub fn relation_visible(&self, schema: &str, name: &str) -> bool {
+        for e in self.search_path() {
+            match e {
+                PathEntry::System => {}
+                PathEntry::Schema(s) => {
+                    if self.relation(&s, name).is_some() {
+                        return s == schema;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Like [`Catalog::relation_visible`] for types.
+    pub fn type_visible(&self, schema: &str, name: &str) -> bool {
+        for e in self.search_path() {
+            if let PathEntry::Schema(s) = e
+                && self.types.contains_key(&QualName::new(&s, name))
+            {
+                return s == schema;
+            }
+        }
+        false
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Relations
+    // -----------------------------------------------------------------------------------------
+
+    pub fn table(&self, schema: &str, name: &str) -> Option<&Arc<TableDef>> {
+        self.tables.get(&QualName::new(schema, name))
+    }
+
+    pub fn table_q(&self, q: &QualName) -> Option<&Arc<TableDef>> {
+        self.tables.get(q)
     }
 
     pub fn table_by_oid(&self, oid: Oid) -> Option<&Arc<TableDef>> {
         self.tables.values().find(|t| t.oid == oid)
     }
 
-    pub fn view(&self, name: &str) -> Option<&Arc<ViewDef>> {
-        self.views.get(name)
+    pub fn view(&self, schema: &str, name: &str) -> Option<&Arc<ViewDef>> {
+        self.views.get(&QualName::new(schema, name))
     }
 
-    pub fn sequence(&self, name: &str) -> Option<&Arc<SequenceDef>> {
-        self.sequences.get(name)
+    pub fn sequence(&self, schema: &str, name: &str) -> Option<&Arc<SequenceDef>> {
+        self.sequences.get(&QualName::new(schema, name))
     }
 
     pub fn tables(&self) -> impl Iterator<Item = &Arc<TableDef>> {
@@ -374,21 +751,27 @@ impl Catalog {
         self.sequences.values()
     }
 
-    /// Looks up any relation (table, view, sequence or index) by name; they share one
+    /// Sequences OWNED BY a column of `table`.
+    pub fn owned_sequences<'a>(&'a self, table: &'a TableDef) -> impl Iterator<Item = &'a Arc<SequenceDef>> {
+        self.sequences.values().filter(move |s| s.schema == table.schema && s.owned_by.as_ref().is_some_and(|(t, _)| *t == table.name))
+    }
+
+    /// Looks up any relation (table, view, sequence or index) in a schema; they share one
     /// namespace in Postgres (`pg_class`).
-    pub fn relation(&self, name: &str) -> Option<Relation> {
-        if let Some(t) = self.tables.get(name) {
+    pub fn relation(&self, schema: &str, name: &str) -> Option<Relation> {
+        let key = QualName::new(schema, name);
+        if let Some(t) = self.tables.get(&key) {
             return Some(Relation::Table(Arc::clone(t)));
         }
-        if let Some(v) = self.views.get(name) {
+        if let Some(v) = self.views.get(&key) {
             return Some(Relation::View(Arc::clone(v)));
         }
-        if let Some(s) = self.sequences.get(name) {
+        if let Some(s) = self.sequences.get(&key) {
             return Some(Relation::Sequence(Arc::clone(s)));
         }
-        self.tables
-            .values()
-            .find_map(|t| t.indexes.iter().find(|i| i.name == name).map(|i| Relation::Index { table: t.name.clone(), index: i.clone() }))
+        self.tables.values().filter(|t| t.schema == schema).find_map(|t| {
+            t.indexes.iter().find(|i| i.name == name).map(|i| Relation::Index { table: t.qualified(), index: Box::new(i.clone()) })
+        })
     }
 
     /// Sets (or with `None` removes) the comment on an object.
@@ -424,22 +807,22 @@ impl Catalog {
             .or_else(|| self.sequences.values().find(|s| s.oid == oid).map(|s| Relation::Sequence(Arc::clone(s))))
             .or_else(|| {
                 self.tables.values().find_map(|t| {
-                    t.indexes.iter().find(|i| i.oid == oid).map(|i| Relation::Index { table: t.name.clone(), index: i.clone() })
+                    t.indexes.iter().find(|i| i.oid == oid).map(|i| Relation::Index { table: t.qualified(), index: Box::new(i.clone()) })
                 })
             })
     }
 
-    fn ensure_free(&self, name: &str) -> SqlResult<()> {
+    fn ensure_free(&self, schema: &str, name: &str) -> SqlResult<()> {
         // A composite type has a pg_class entry, so it takes a relation name too.
-        let composite = self.types.get(name).is_some_and(|t| matches!(t.kind, TypeDefKind::Composite { .. }));
-        if self.relation(name).is_some() || composite {
+        let composite = self.types.get(&QualName::new(schema, name)).is_some_and(|t| matches!(t.kind, TypeDefKind::Composite { .. }));
+        if self.relation(schema, name).is_some() || composite {
             return Err(SqlError::new(code::DUPLICATE_TABLE, format!("relation \"{name}\" already exists")));
         }
         Ok(())
     }
 
-    pub fn type_by_name(&self, name: &str) -> Option<&Arc<TypeDef>> {
-        self.types.get(name)
+    pub fn type_by_name(&self, schema: &str, name: &str) -> Option<&Arc<TypeDef>> {
+        self.types.get(&QualName::new(schema, name))
     }
 
     pub fn type_by_oid(&self, oid: Oid) -> Option<&Arc<TypeDef>> {
@@ -451,11 +834,12 @@ impl Catalog {
     }
 
     /// Types share `pg_type`'s namespace with the row types of tables and views.
-    fn ensure_type_name_free(&self, name: &str) -> SqlResult<()> {
-        let taken = self.types.contains_key(name)
-            || self.tables.contains_key(name)
-            || self.views.contains_key(name)
-            || self.types.values().any(|t| format!("_{}", t.name) == name);
+    fn ensure_type_name_free(&self, schema: &str, name: &str) -> SqlResult<()> {
+        let key = QualName::new(schema, name);
+        let taken = self.types.contains_key(&key)
+            || self.tables.contains_key(&key)
+            || self.views.contains_key(&key)
+            || self.types.values().any(|t| t.schema == schema && format!("_{}", t.name) == name);
         if taken {
             return Err(SqlError::new(code::DUPLICATE_OBJECT, format!("type \"{name}\" already exists")));
         }
@@ -463,24 +847,24 @@ impl Catalog {
     }
 
     pub fn create_type(&mut self, def: TypeDef) -> SqlResult<()> {
-        self.ensure_type_name_free(&def.name)?;
-        self.types.insert(def.name.clone(), Arc::new(def));
+        self.ensure_type_name_free(&def.schema, &def.name)?;
+        self.types.insert(QualName::new(&def.schema, &def.name), Arc::new(def));
         Ok(())
     }
 
     /// Replaces a type definition (ALTER TYPE / ALTER DOMAIN); the name may change.
-    pub fn replace_type(&mut self, old_name: &str, def: TypeDef) {
-        self.types.remove(old_name);
-        self.types.insert(def.name.clone(), Arc::new(def));
+    pub fn replace_type(&mut self, old: &QualName, def: TypeDef) {
+        self.types.remove(old);
+        self.types.insert(QualName::new(&def.schema, &def.name), Arc::new(def));
     }
 
-    pub fn drop_type(&mut self, name: &str) -> Option<Arc<TypeDef>> {
+    pub fn drop_type(&mut self, name: &QualName) -> Option<Arc<TypeDef>> {
         self.types.remove(name)
     }
 
     /// Fails like Postgres when a new relation's row type would collide with a type.
-    fn ensure_rowtype_free(&self, name: &str) -> SqlResult<()> {
-        if self.types.contains_key(name) {
+    fn ensure_rowtype_free(&self, schema: &str, name: &str) -> SqlResult<()> {
+        if self.types.contains_key(&QualName::new(schema, name)) {
             return Err(SqlError::new(code::DUPLICATE_OBJECT, format!("type \"{name}\" already exists")).with_hint(
                 "A relation has an associated type of the same name, so you must use a name that doesn't conflict with any existing type.",
             ));
@@ -489,62 +873,78 @@ impl Catalog {
     }
 
     pub fn create_table(&mut self, def: TableDef) -> SqlResult<()> {
-        self.ensure_free(&def.name)?;
-        self.ensure_rowtype_free(&def.name)?;
+        self.ensure_free(&def.schema, &def.name)?;
+        self.ensure_rowtype_free(&def.schema, &def.name)?;
         for idx in &def.indexes {
-            self.ensure_free(&idx.name)?;
+            self.ensure_free(&def.schema, &idx.name)?;
         }
-        self.tables.insert(def.name.clone(), Arc::new(def));
+        self.tables.insert(def.qualified(), Arc::new(def));
         Ok(())
     }
 
     /// Replaces an existing table definition (ALTER TABLE). The name may change (RENAME).
-    pub fn replace_table(&mut self, old_name: &str, def: TableDef) {
-        self.tables.remove(old_name);
-        self.tables.insert(def.name.clone(), Arc::new(def));
+    pub fn replace_table(&mut self, old: &QualName, def: TableDef) {
+        self.tables.remove(old);
+        self.tables.insert(def.qualified(), Arc::new(def));
     }
 
-    pub fn drop_table(&mut self, name: &str) -> Option<Arc<TableDef>> {
+    pub fn drop_table(&mut self, name: &QualName) -> Option<Arc<TableDef>> {
         let dropped = self.tables.remove(name)?;
         // Sequences owned by the table's columns go with it.
-        self.sequences.retain(|_, s| s.owned_by.as_ref().is_none_or(|(t, _)| t != name));
+        self.sequences.retain(|_, s| s.schema != name.schema || s.owned_by.as_ref().is_none_or(|(t, _)| *t != name.name));
         Some(dropped)
     }
 
     pub fn create_view(&mut self, def: ViewDef, or_replace: bool) -> SqlResult<()> {
-        if or_replace && self.views.contains_key(&def.name) {
-            self.views.insert(def.name.clone(), Arc::new(def));
+        let key = QualName::new(&def.schema, &def.name);
+        if or_replace && self.views.contains_key(&key) {
+            self.views.insert(key, Arc::new(def));
             return Ok(());
         }
-        self.ensure_free(&def.name)?;
-        self.ensure_rowtype_free(&def.name)?;
-        self.views.insert(def.name.clone(), Arc::new(def));
+        self.ensure_free(&def.schema, &def.name)?;
+        self.ensure_rowtype_free(&def.schema, &def.name)?;
+        self.views.insert(key, Arc::new(def));
         Ok(())
     }
 
-    pub fn drop_view(&mut self, name: &str) -> Option<Arc<ViewDef>> {
+    pub fn drop_view(&mut self, name: &QualName) -> Option<Arc<ViewDef>> {
         self.views.remove(name)
     }
 
     pub fn create_sequence(&mut self, def: SequenceDef) -> SqlResult<()> {
-        self.ensure_free(&def.name)?;
-        self.sequences.insert(def.name.clone(), Arc::new(def));
+        self.ensure_free(&def.schema, &def.name)?;
+        self.sequences.insert(QualName::new(&def.schema, &def.name), Arc::new(def));
         Ok(())
     }
 
-    pub fn drop_sequence(&mut self, name: &str) -> Option<Arc<SequenceDef>> {
+    /// Replaces a sequence definition (ALTER SEQUENCE, OWNED BY); the name may change.
+    pub fn replace_sequence(&mut self, old: &QualName, def: SequenceDef) {
+        self.sequences.remove(old);
+        self.sequences.insert(QualName::new(&def.schema, &def.name), Arc::new(def));
+    }
+
+    pub fn drop_sequence(&mut self, name: &QualName) -> Option<Arc<SequenceDef>> {
         self.sequences.remove(name)
     }
 
-    /// Picks an unused relation name the way Postgres' `ChooseRelationName` does:
+    /// Picks an unused relation name in `schema` the way Postgres' `ChooseRelationName` does:
     /// `base`, then `base1`, `base2`, ...
-    pub fn choose_name(&self, base: &str, taken: &[String]) -> String {
-        let free = |n: &str| self.relation(n).is_none() && !taken.iter().any(|t| t == n);
+    pub fn choose_name(&self, schema: &str, base: &str, taken: &[String]) -> String {
+        let free = |n: &str| self.relation(schema, n).is_none() && !taken.iter().any(|t| t == n);
         if free(base) {
             return base.to_owned();
         }
         (1..).map(|i| format!("{base}{i}")).find(|n| free(n)).unwrap_or_else(|| base.to_owned())
     }
+}
+
+pub fn undefined_schema(name: &str) -> SqlError {
+    SqlError::new(code::INVALID_SCHEMA_NAME, format!("schema \"{name}\" does not exist"))
+}
+
+fn system_catalog_denied(object: &str) -> SqlError {
+    SqlError::new(code::INSUFFICIENT_PRIVILEGE, format!("permission denied to create \"pg_catalog.{object}\""))
+        .with_detail("System catalog modifications are currently disallowed.")
 }
 
 /// Postgres' default constraint/index name: `table_col1_col2_suffix`, truncated to 63 bytes.
@@ -576,7 +976,14 @@ mod tests {
     use super::*;
 
     fn table(name: &str) -> TableDef {
-        TableDef { oid: 0, name: name.into(), columns: vec![ColumnDef::new("id", Type::Int4)], constraints: vec![], indexes: vec![] }
+        TableDef {
+            oid: 0,
+            schema: PUBLIC_SCHEMA.into(),
+            name: name.into(),
+            columns: vec![ColumnDef::new("id", Type::Int4)],
+            constraints: vec![],
+            indexes: vec![],
+        }
     }
 
     #[test]
@@ -586,7 +993,7 @@ mod tests {
         let err = cat.create_table(table("users")).expect_err("dup");
         assert_eq!(err.code, "42P07");
         assert_eq!(err.message, "relation \"users\" already exists");
-        assert!(matches!(cat.relation("users"), Some(Relation::Table(_))));
+        assert!(matches!(cat.relation("public", "users"), Some(Relation::Table(_))));
     }
 
     #[test]
@@ -600,6 +1007,6 @@ mod tests {
     fn choose_name_avoids_collisions() {
         let mut cat = Catalog::new();
         cat.create_table(table("t_pkey")).expect("create");
-        assert_eq!(cat.choose_name("t_pkey", &[]), "t_pkey1");
+        assert_eq!(cat.choose_name("public", "t_pkey", &[]), "t_pkey1");
     }
 }

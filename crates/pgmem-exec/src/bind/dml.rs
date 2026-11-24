@@ -105,8 +105,8 @@ pub fn physical_scope(table: &TableDef, qualifier: &str) -> Scope {
 }
 
 fn lookup_table(b: &Binder, name: &ir::ObjectName) -> SqlResult<Arc<TableDef>> {
-    let base = b.catalog.normalize(name)?;
-    match b.catalog.relation(base) {
+    let base = name.base();
+    match b.catalog.find_relation(name)? {
         Some(pgmem_catalog::Relation::Table(t)) => Ok(t),
         Some(pgmem_catalog::Relation::View(_)) => Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("cannot modify view \"{base}\""))
             .with_detail("Views that do not select from a single table or view are not automatically updatable.")),

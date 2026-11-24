@@ -32,11 +32,75 @@ pub struct Context {
     pub types: Arc<Registry>,
     /// `bytea_output = escape` (the default is hex).
     pub bytea_escape: bool,
+    pub search_path: SearchPath,
+}
+
+/// The session's `search_path` setting, as the catalog resolves names with it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchPath {
+    /// The setting's entries, unquoted (`"$user"` stays `$user`).
+    pub entries: Vec<String>,
+    /// The session user (`$user`).
+    pub user: String,
+    /// The session's temporary schema (`pg_temp_N`), once it has one.
+    pub temp_schema: Option<String>,
+}
+
+impl Default for SearchPath {
+    fn default() -> SearchPath {
+        SearchPath { entries: vec!["$user".into(), "public".into()], user: String::new(), temp_schema: None }
+    }
+}
+
+impl SearchPath {
+    /// Parses a `search_path` value: comma-separated identifiers, double quotes preserving
+    /// case, unquoted names folded to lower case.
+    pub fn parse(setting: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut cur = String::new();
+        let mut quoted = false;
+        let mut was_quoted = false;
+        let mut chars = setting.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' if quoted && chars.peek() == Some(&'"') => {
+                    cur.push('"');
+                    chars.next();
+                }
+                '"' => {
+                    quoted = !quoted;
+                    was_quoted = true;
+                }
+                ',' if !quoted => {
+                    push_entry(&mut out, &cur, was_quoted);
+                    cur.clear();
+                    was_quoted = false;
+                }
+                c if !quoted && c.is_whitespace() => {}
+                c => cur.push(if quoted { c } else { c.to_ascii_lowercase() }),
+            }
+        }
+        push_entry(&mut out, &cur, was_quoted);
+        out
+    }
+}
+
+fn push_entry(out: &mut Vec<String>, name: &str, quoted: bool) {
+    if !name.is_empty() || quoted {
+        out.push(name.to_owned());
+    }
 }
 
 impl Default for Context {
     fn default() -> Context {
-        Context { zone: Zone::utc(), date_order: DateOrder::Mdy, now: 0, types: Arc::default(), bytea_escape: false }
+        Context {
+            zone: Zone::utc(),
+            date_order: DateOrder::Mdy,
+            now: 0,
+            types: Arc::default(),
+            bytea_escape: false,
+            search_path: SearchPath::default(),
+        }
     }
 }
 
@@ -55,6 +119,20 @@ pub fn with_zone<R>(f: impl FnOnce(&Zone) -> R) -> R {
         Some(ctx) => f(&ctx.zone),
         None => f(&Zone::utc()),
     })
+}
+
+/// The search path in effect on this thread.
+pub fn search_path() -> SearchPath {
+    CURRENT.with(|c| c.borrow().as_ref().map(|ctx| ctx.search_path.clone()).unwrap_or_default())
+}
+
+/// Runs `f` with the search path replaced by `entries` (resolving a stored view's names as
+/// at its creation).
+pub fn with_search_path<R>(entries: &[String], f: impl FnOnce() -> R) -> R {
+    let mut ctx = current();
+    ctx.search_path.entries = entries.to_vec();
+    let _g = enter(ctx);
+    f()
 }
 
 /// Whether `bytea_output` is `escape` on this thread.

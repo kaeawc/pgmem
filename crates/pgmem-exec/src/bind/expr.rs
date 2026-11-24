@@ -594,7 +594,8 @@ impl Binder<'_> {
         let (qualifier, name) = match parts {
             [n] => (None, n.as_str()),
             [q, n] => (Some(q.as_str()), n.as_str()),
-            [s, q, n] if s == "public" || s == "pg_catalog" || s == "information_schema" => (Some(q.as_str()), n.as_str()),
+            // `schema.table.column`: the table is matched by its name in FROM.
+            [_, q, n] => (Some(q.as_str()), n.as_str()),
             _ => return Err(SqlError::syntax(format!("improper qualified name (too many dotted names): {}", parts.join(".")))),
         };
         if name == "*" {

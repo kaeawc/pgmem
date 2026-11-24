@@ -107,6 +107,11 @@ impl<'a> Model<'a> {
         self.catalog.sequences().map(AsRef::as_ref).collect()
     }
 
+    /// The namespace OID of a schema name.
+    pub fn namespace(&self, schema: &str) -> u32 {
+        self.catalog.namespace_oid(schema).unwrap_or(pgmem_catalog::PUBLIC_NAMESPACE_OID)
+    }
+
     /// Every index with its table.
     pub fn indexes(&self) -> Vec<(&'a TableDef, &'a IndexDef)> {
         self.catalog.tables().flat_map(|t| t.indexes.iter().map(move |i| (t.as_ref(), i))).collect()
@@ -248,7 +253,7 @@ impl<'a> Model<'a> {
             ConstraintKind::ForeignKey { columns, ref_table, ref_columns, on_delete, on_update } => {
                 con.conkey = attnums(columns);
                 con.confkey = attnums(ref_columns);
-                if let Some(rt) = self.catalog.table(ref_table) {
+                if let Some(rt) = self.catalog.table_q(ref_table) {
                     con.confrelid = rt.oid;
                     con.conindid = rt
                         .indexes

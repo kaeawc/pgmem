@@ -207,16 +207,20 @@ fn regproc(name: &str) -> Value {
     if name == "-" { Value::Reg(RegKind::Proc, 0, "-".into()) } else { Value::Reg(RegKind::Proc, 0, name.to_owned()) }
 }
 
-fn pg_namespace(_: &EvalCtx) -> SqlResult<Vec<Row>> {
+fn pg_namespace(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let m = snapshot(ctx);
+    let mut all: Vec<(String, u32, u32)> = vec![
+        ("pg_toast".into(), 99, SUPERUSER_OID),
+        ("pg_catalog".into(), PG_CATALOG_NAMESPACE_OID, SUPERUSER_OID),
+        ("information_schema".into(), INFORMATION_SCHEMA_NAMESPACE_OID, SUPERUSER_OID),
+    ];
+    for sc in m.catalog.schemas() {
+        let owner = if sc.oid == PUBLIC_NAMESPACE_OID { PG_DATABASE_OWNER_OID } else { SUPERUSER_OID };
+        all.push((sc.name.clone(), sc.oid, owner));
+    }
+    all.sort_by_key(|(_, o, _)| *o);
     Ok(rows_of(PG_NAMESPACE, |s| {
-        [("pg_toast", 99, SUPERUSER_OID), ("pg_catalog", PG_CATALOG_NAMESPACE_OID, SUPERUSER_OID)]
-            .into_iter()
-            .chain([
-                ("public", PUBLIC_NAMESPACE_OID, PG_DATABASE_OWNER_OID),
-                ("information_schema", INFORMATION_SCHEMA_NAMESPACE_OID, SUPERUSER_OID),
-            ])
-            .map(|(n, o, owner)| s.row(vec![("oid", oid(o)), ("nspname", name(n)), ("nspowner", oid(owner))]))
-            .collect()
+        all.iter().map(|(n, o, owner)| s.row(vec![("oid", oid(*o)), ("nspname", name(n)), ("nspowner", oid(*owner))])).collect()
     }))
 }
 
@@ -238,7 +242,7 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             &s,
             t.oid,
             &t.name,
-            PUBLIC_NAMESPACE_OID,
+            m.namespace(&t.schema),
             'r',
             t.columns.len(),
             vec![
@@ -249,27 +253,28 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("relchecks", int2(checks)),
                 ("relhastriggers", boolean(triggers.contains(&t.oid))),
                 ("relreplident", ch('d')),
+                ("relpersistence", ch(if t.schema.starts_with("pg_temp_") { 't' } else { 'p' })),
             ],
         ));
     }
     for v in m.views() {
-        rows.push(class_row(&s, v.oid, &v.name, PUBLIC_NAMESPACE_OID, 'v', v.columns.len(), vec![("reltype", oid(rowtype_oid(v.oid)))]));
+        rows.push(class_row(&s, v.oid, &v.name, m.namespace(&v.schema), 'v', v.columns.len(), vec![("reltype", oid(rowtype_oid(v.oid)))]));
     }
     for seq in m.sequences() {
-        rows.push(class_row(&s, seq.oid, &seq.name, PUBLIC_NAMESPACE_OID, 'S', 3, vec![("relfilenode", oid(seq.oid))]));
+        rows.push(class_row(&s, seq.oid, &seq.name, m.namespace(&seq.schema), 'S', 3, vec![("relfilenode", oid(seq.oid))]));
     }
     for t in m.catalog.types() {
         if let pgmem_catalog::TypeDefKind::Composite { fields, relid } = &t.kind {
-            rows.push(class_row(&s, *relid, &t.name, PUBLIC_NAMESPACE_OID, 'c', fields.len(), vec![("reltype", oid(t.oid))]));
+            rows.push(class_row(&s, *relid, &t.name, m.namespace(&t.schema), 'c', fields.len(), vec![("reltype", oid(t.oid))]));
         }
     }
-    for (_, idx) in m.indexes() {
+    for (t, idx) in m.indexes() {
         let natts = idx.columns.len() + idx.exprs.len();
         rows.push(class_row(
             &s,
             idx.oid,
             &idx.name,
-            PUBLIC_NAMESPACE_OID,
+            m.namespace(&t.schema),
             'i',
             natts,
             vec![("relam", oid(403)), ("relfilenode", oid(idx.oid))],
@@ -411,13 +416,17 @@ fn pg_type(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         })
         .collect();
     // Every table and view has a composite row type of the same name.
-    let rels: Vec<(u32, &str)> =
-        m.tables().into_iter().map(|t| (t.oid, t.name.as_str())).chain(m.views().into_iter().map(|v| (v.oid, v.name.as_str()))).collect();
-    for (relid, relname) in rels {
+    let rels: Vec<(u32, &str, &str)> = m
+        .tables()
+        .into_iter()
+        .map(|t| (t.oid, t.name.as_str(), t.schema.as_str()))
+        .chain(m.views().into_iter().map(|v| (v.oid, v.name.as_str(), v.schema.as_str())))
+        .collect();
+    for (relid, relname, schema) in rels {
         rows.push(s.row(vec![
             ("oid", oid(rowtype_oid(relid))),
             ("typname", name(relname)),
-            ("typnamespace", oid(PUBLIC_NAMESPACE_OID)),
+            ("typnamespace", oid(m.namespace(schema))),
             ("typlen", Value::Int2(-1)),
             ("typbyval", boolean(false)),
             ("typtype", ch('c')),
@@ -447,7 +456,7 @@ fn user_type_rows(s: &Spec, catalog: &pgmem_catalog::Catalog, t: &pgmem_catalog:
     use pgmem_catalog::TypeDefKind;
     let common = |vals: &mut Vec<(&'static str, Value)>| {
         vals.extend([
-            ("typnamespace", oid(PUBLIC_NAMESPACE_OID)),
+            ("typnamespace", oid(catalog.namespace_oid(&t.schema).unwrap_or(PUBLIC_NAMESPACE_OID))),
             ("typdelim", ch(',')),
             ("typmodin", regproc("-")),
             ("typmodout", regproc("-")),
@@ -500,7 +509,14 @@ fn user_type_rows(s: &Spec, catalog: &pgmem_catalog::Catalog, t: &pgmem_catalog:
             let b = builtin_type(base.base().oid());
             let fname = |i: usize, fallback: &str| b.as_ref().map_or_else(|| fallback.to_owned(), |b| b.field(i).to_owned());
             let default_text = default.as_ref().and_then(|d| {
-                let empty = pgmem_catalog::TableDef { oid: 0, name: String::new(), columns: vec![], constraints: vec![], indexes: vec![] };
+                let empty = pgmem_catalog::TableDef {
+                    oid: 0,
+                    schema: String::new(),
+                    name: String::new(),
+                    columns: vec![],
+                    constraints: vec![],
+                    indexes: vec![],
+                };
                 let mut col = pgmem_catalog::ColumnDef::new("value", base.clone());
                 col.typmod = *typmod;
                 col.default = Some(d.clone());
@@ -935,7 +951,7 @@ fn pg_depend(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     // Sequences owned by columns: 'a' (serial) or 'i' (identity).
     for seq in m.sequences() {
         let Some((tname, cname)) = &seq.owned_by else { continue };
-        let Some(t) = m.catalog.table(tname) else { continue };
+        let Some(t) = m.catalog.table(&seq.schema, tname) else { continue };
         let Some(attnum) = t.column_index(cname).map(|i| i + 1) else { continue };
         let identity = t.columns.get(attnum - 1).is_some_and(|c| c.identity.is_some());
         rows.push(s.row(vec![
@@ -990,7 +1006,7 @@ fn pg_tables(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         .into_iter()
         .map(|t| {
             s.row(vec![
-                ("schemaname", name("public")),
+                ("schemaname", name(&t.schema)),
                 ("tablename", name(&t.name)),
                 ("tableowner", name(&ctx.env.user)),
                 ("hasindexes", boolean(!t.indexes.is_empty())),
@@ -1007,7 +1023,7 @@ fn pg_views(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         .into_iter()
         .map(|v| {
             s.row(vec![
-                ("schemaname", name("public")),
+                ("schemaname", name(&v.schema)),
                 ("viewname", name(&v.name)),
                 ("viewowner", name(&ctx.env.user)),
                 ("definition", txt(crate::deparse::deparse_view(m.catalog, v).unwrap_or_default())),
@@ -1023,7 +1039,7 @@ fn pg_indexes(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         .into_iter()
         .map(|(t, idx)| {
             s.row(vec![
-                ("schemaname", name("public")),
+                ("schemaname", name(&t.schema)),
                 ("tablename", name(&t.name)),
                 ("indexname", name(&idx.name)),
                 ("indexdef", txt(model::index_def(&m, t, idx))),
@@ -1041,7 +1057,7 @@ fn pg_sequences(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             let ty = model::sequence_type(seq);
             let last = ctx.txn.database().sequence_last_value(seq).map_or(Value::Null, Value::Int8);
             s.row(vec![
-                ("schemaname", name("public")),
+                ("schemaname", name(&seq.schema)),
                 ("sequencename", name(&seq.name)),
                 ("sequenceowner", name(&ctx.env.user)),
                 ("data_type", Value::Reg(RegKind::Type, ty.oid(), ty.name())),

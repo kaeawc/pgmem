@@ -143,7 +143,7 @@ fn key_equal(a: &[Value], b: &[Value]) -> bool {
 fn check_foreign_keys(table: &TableDef, rows: &[&Row], txn: &Txn, own_final: Option<&[(RowId, Row)]>) -> SqlResult<()> {
     for con in &table.constraints {
         let ConstraintKind::ForeignKey { columns, ref_table, ref_columns, .. } = &con.kind else { continue };
-        let parent = txn.catalog().table(ref_table).cloned().ok_or_else(|| SqlError::undefined_table(ref_table))?;
+        let parent = txn.catalog().table_q(ref_table).cloned().ok_or_else(|| SqlError::undefined_table(&ref_table.name))?;
         let parent_rows: Vec<Row> = if parent.oid == table.oid {
             own_final.map_or_else(
                 || txn.scan(parent.oid).into_iter().map(|(_, r)| r).collect(),
@@ -196,7 +196,7 @@ fn referential_actions(txn: &mut Txn, table: &TableDef, removed: &[Row], is_dele
     for child in children {
         for con in &child.constraints {
             let ConstraintKind::ForeignKey { columns, ref_table, ref_columns, on_delete, on_update } = &con.kind else { continue };
-            if ref_table != &table.name {
+            if *ref_table != table.qualified() {
                 continue;
             }
             let action = if is_delete { *on_delete } else { *on_update };

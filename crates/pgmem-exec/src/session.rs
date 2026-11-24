@@ -201,6 +201,9 @@ pub struct Session {
     pub backend_pid: i32,
     txid_counter: i64,
     default_isolation: Isolation,
+    /// The session's temporary schema (`pg_temp_<pid>`), created with its first temporary
+    /// object and dropped with the session.
+    pub temp_schema: Option<String>,
 }
 
 impl Session {
@@ -223,6 +226,7 @@ impl Session {
             backend_pid,
             txid_counter: 1000,
             default_isolation: Isolation::ReadCommitted,
+            temp_schema: Some(format!("pg_temp_{backend_pid}")),
         }
     }
 
@@ -300,7 +304,12 @@ impl Session {
             None => crate::usertypes::registry(&self.db.current().catalog),
         };
         let bytea_escape = self.settings.get("bytea_output").is_some_and(|v| v.eq_ignore_ascii_case("escape"));
-        Context { zone, date_order, now: self.clock.now_micros(), types, bytea_escape }
+        let search_path = pgmem_types::context::SearchPath {
+            entries: pgmem_types::context::SearchPath::parse(self.settings.get("search_path").map_or("", String::as_str)),
+            user: self.user.clone(),
+            temp_schema: self.temp_schema.clone(),
+        };
+        Context { zone, date_order, now: self.clock.now_micros(), types, bytea_escape, search_path }
     }
 
     /// Analyzes a statement without running it: parameter types and result columns.
@@ -394,8 +403,35 @@ impl Session {
     fn run_in_txn(&mut self, stmt: &Statement, param_types: &[Type], params: &[Value]) -> SqlResult<QueryResult> {
         let env = self.env();
         let state = StatementState::default();
+        let temp_schema = self.temp_schema.clone();
+        let user = self.user.clone();
         let txn = self.txn.as_mut().ok_or_else(|| SqlError::internal("no transaction"))?;
         txn.begin_statement();
+        // Temporary objects live in the session's pg_temp_N schema, created on first use.
+        let temp_stmt;
+        let stmt = match (stmt, &temp_schema) {
+            (Statement::CreateTable(ct), Some(temp)) if ct.temporary => {
+                if let [schema, _] = ct.name.0.as_slice()
+                    && schema != "pg_temp"
+                    && schema != temp
+                {
+                    return Err(SqlError::new(code::INVALID_TABLE_DEFINITION, "cannot create temporary relation in non-temporary schema"));
+                }
+                ensure_temp_schema(txn, temp, &user);
+                let mut ct = (**ct).clone();
+                ct.name = ir::ObjectName(vec![temp.clone(), ct.name.base().to_owned()]);
+                temp_stmt = Statement::CreateTable(Box::new(ct));
+                &temp_stmt
+            }
+            (Statement::CreateSchema(cs), _) => return create_schema_with_elements(cs, txn, &user, &env, &state),
+            (Statement::AlterSchema { name, rename_to }, _) => {
+                return match rename_to {
+                    Some(new) => crate::ddl::alter_schema(name, new, txn),
+                    None => Ok(QueryResult { tag: "ALTER SCHEMA".into(), ..Default::default() }),
+                };
+            }
+            _ => stmt,
+        };
         let catalog = Arc::new(txn.catalog().clone());
         let binder = Binder::new(&catalog, param_types);
         let top = Level::new(Scope::default());
@@ -437,6 +473,20 @@ impl Session {
             self.lastval = Some(*v);
         }
         Ok(result)
+    }
+
+    /// Drops the session's temporary objects (at disconnect).
+    pub fn drop_temp_objects(&mut self) {
+        let Some(temp) = self.temp_schema.clone() else { return };
+        if self.db.current().catalog.schema(&temp).is_none() {
+            return;
+        }
+        self.txn = None;
+        let mut txn = self.db.begin(Isolation::ReadCommitted);
+        txn.begin_statement();
+        crate::ddl::drop_schema_contents(&mut txn, &temp);
+        txn.catalog_mut().drop_schema(&temp);
+        let _ = txn.commit();
     }
 
     fn transaction(&mut self, t: &TransactionStmt) -> SqlResult<QueryResult> {
@@ -666,7 +716,8 @@ impl Session {
 
     /// Rows of a table, for the `seed` test helper's validation.
     pub fn table_exists(&self, name: &str) -> bool {
-        matches!(self.db.current().catalog.relation(name), Some(Relation::Table(_)))
+        let (schema, table) = name.split_once('.').unwrap_or((pgmem_catalog::PUBLIC_SCHEMA, name));
+        matches!(self.db.current().catalog.relation(schema, table), Some(Relation::Table(_)))
     }
 }
 
@@ -743,3 +794,43 @@ fn dml_result(tag: String, cols: Vec<OutCol>, r: crate::dml::DmlResult) -> Query
 
 #[allow(dead_code)]
 fn unused(_: ConstraintKind) {}
+
+fn ensure_temp_schema(txn: &mut Txn, temp: &str, user: &str) {
+    if txn.catalog().schema(temp).is_none() {
+        let cat = txn.catalog_mut();
+        let oid = cat.alloc_oid();
+        let _ = cat.create_schema(pgmem_catalog::SchemaDef { oid, name: temp.to_owned(), owner: user.to_owned() });
+    }
+}
+
+/// `CREATE SCHEMA s CREATE TABLE ... CREATE VIEW ...`: the elements are created with the new
+/// schema as the only search path entry, as Postgres does.
+fn create_schema_with_elements(
+    cs: &ir::CreateSchema,
+    txn: &mut Txn,
+    user: &str,
+    env: &SessionEnv,
+    state: &StatementState,
+) -> SqlResult<QueryResult> {
+    let result = crate::ddl::create_schema(cs, txn, user)?;
+    let Some(schema) = cs.name.clone().or_else(|| cs.authorization.clone()) else { return Ok(result) };
+    if !result.notices.is_empty() {
+        return Ok(result);
+    }
+    let mut ctx = pgmem_types::context::current();
+    ctx.search_path.entries = vec![schema];
+    let _g = pgmem_types::context::enter(ctx);
+    for element in &cs.elements {
+        let catalog = Arc::new(txn.catalog().clone());
+        let binder = Binder::new(&catalog, &[]);
+        crate::ddl::execute_ddl(element, txn, &binder, env, state)?;
+    }
+    Ok(result)
+}
+
+impl Drop for Session {
+    /// A session's temporary objects disappear when it ends.
+    fn drop(&mut self) {
+        self.drop_temp_objects();
+    }
+}

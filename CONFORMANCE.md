@@ -7,13 +7,13 @@ PostgreSQL 18; CI re-verifies every record against PostgreSQL and runs it agains
 A record passes when pgmem returns the same column names, column types and text values, or
 the same SQLSTATE and error message.
 
-pgmem passes **2429 / 3309 records (73.4%)**.
+pgmem passes **2467 / 3309 records (74.6%)**.
 
 | Area | Records | Pass | Rate |
 |---|---:|---:|---:|
-| catalog | 226 | 174 | 77.0% |
+| catalog | 226 | 187 | 82.7% |
 | constraints | 171 | 101 | 59.1% |
-| ddl | 386 | 206 | 53.4% |
+| ddl | 386 | 231 | 59.8% |
 | dml | 282 | 215 | 76.2% |
 | functions | 445 | 307 | 69.0% |
 | queries | 440 | 404 | 91.8% |
@@ -26,27 +26,27 @@ pgmem passes **2429 / 3309 records (73.4%)**.
 
 | File | Records | Pass | Rate |
 |---|---:|---:|---:|
-| catalog/comments.slt | 32 | 28 | 87.5% |
-| catalog/information_schema.slt | 38 | 26 | 68.4% |
+| catalog/comments.slt | 32 | 29 | 90.6% |
+| catalog/information_schema.slt | 38 | 34 | 89.5% |
 | catalog/orm_reflection.slt | 35 | 29 | 82.9% |
 | catalog/pg_catalog.slt | 51 | 41 | 80.4% |
 | catalog/psql_describe.slt | 22 | 15 | 68.2% |
-| catalog/regtypes.slt | 33 | 24 | 72.7% |
+| catalog/regtypes.slt | 33 | 28 | 84.8% |
 | catalog/settings.slt | 15 | 11 | 73.3% |
 | constraints/check_notnull.slt | 35 | 27 | 77.1% |
 | constraints/deferrable.slt | 38 | 14 | 36.8% |
 | constraints/exclude.slt | 20 | 0 | 0.0% |
 | constraints/foreign_keys.slt | 46 | 31 | 67.4% |
 | constraints/keys_unique.slt | 32 | 29 | 90.6% |
-| ddl/alter_table.slt | 46 | 36 | 78.3% |
-| ddl/create_table.slt | 40 | 23 | 57.5% |
+| ddl/alter_table.slt | 46 | 38 | 82.6% |
+| ddl/create_table.slt | 40 | 24 | 60.0% |
 | ddl/drop.slt | 36 | 16 | 44.4% |
 | ddl/generated.slt | 23 | 9 | 39.1% |
 | ddl/identity.slt | 38 | 26 | 68.4% |
 | ddl/indexes.slt | 33 | 26 | 78.8% |
-| ddl/migrations.slt | 58 | 19 | 32.8% |
-| ddl/schema.slt | 31 | 15 | 48.4% |
-| ddl/sequences.slt | 34 | 19 | 55.9% |
+| ddl/migrations.slt | 58 | 23 | 39.7% |
+| ddl/schema.slt | 31 | 31 | 100.0% |
+| ddl/sequences.slt | 34 | 21 | 61.8% |
 | ddl/truncate_comment.slt | 14 | 12 | 85.7% |
 | ddl/views.slt | 33 | 5 | 15.2% |
 | dml/delete.slt | 32 | 27 | 84.4% |

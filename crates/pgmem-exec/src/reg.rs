@@ -56,6 +56,12 @@ pub fn parse_qualified(s: &str) -> SqlResult<Vec<String>> {
     }
 }
 
+/// Resolves a relation named in a string (`'app."My T"'`) through the search path.
+pub fn relation_from_text(s: &str, catalog: &Catalog) -> SqlResult<Option<pgmem_catalog::Relation>> {
+    let parts = parse_qualified(s)?;
+    catalog.lookup_relation(&pgmem_ir::ObjectName(parts))
+}
+
 fn namespace_name(oid: u32) -> Option<&'static str> {
     NAMESPACES.iter().find(|(_, o)| *o == oid).map(|(n, _)| *n)
 }
@@ -68,10 +74,10 @@ pub fn reg_name(kind: RegKind, oid: u32, catalog: &Catalog) -> String {
     let name = match kind {
         RegKind::Class => catalog
             .relation_by_oid(oid)
-            .map(|r| quote_ident(r.name()))
+            .map(|r| class_display(catalog, &r))
             .or_else(|| crate::catalog_views::system_relation_by_oid(oid).map(system_display)),
         RegKind::Type => Type::from_oid(oid).map(|t| t.name()),
-        RegKind::Namespace => namespace_name(oid).map(quote_ident),
+        RegKind::Namespace => namespace_name(oid).map(quote_ident).or_else(|| catalog.schema_by_oid(oid).map(|sc| quote_ident(&sc.name))),
         RegKind::Proc => None,
     };
     name.unwrap_or_else(|| oid.to_string())
@@ -89,25 +95,18 @@ fn lookup_class(s: &str, catalog: &Catalog) -> SqlResult<Value> {
     if let Some(d) = system {
         return Ok(Value::Reg(RegKind::Class, d.oid, system_display(d)));
     }
-    let name = match parts.as_slice() {
-        [n] => n,
-        [schema, n] if schema == "public" => n,
-        [schema, _] if namespace_name_oid(schema).is_none() => {
-            return Err(SqlError::new(code::INVALID_SCHEMA_NAME, format!("schema \"{schema}\" does not exist")));
-        }
-        _ => return Err(missing()),
-    };
-    let rel = catalog.relation(name).ok_or_else(missing)?;
-    Ok(Value::Reg(RegKind::Class, rel.oid(), quote_ident(rel.name())))
+    let rel = catalog.find_relation(&pgmem_ir::ObjectName(parts))?.ok_or_else(missing)?;
+    Ok(Value::Reg(RegKind::Class, rel.oid(), class_display(catalog, &rel)))
+}
+
+/// `regclassout`: the name, schema-qualified when the search path doesn't find it by name.
+fn class_display(catalog: &Catalog, rel: &pgmem_catalog::Relation) -> String {
+    crate::deparse::relation_name(catalog, rel.schema(), rel.name())
 }
 
 /// How a system relation prints as regclass: unqualified when on the search path.
 fn system_display(d: &crate::catalog_views::Def) -> String {
     if d.schema == "pg_catalog" { d.name.to_owned() } else { format!("{}.{}", d.schema, d.name) }
-}
-
-fn namespace_name_oid(name: &str) -> Option<u32> {
-    NAMESPACES.iter().find(|(n, _)| *n == name).map(|(_, o)| *o)
 }
 
 /// `regtypein`: a type name as `format_type` or SQL writes it (`integer`, `int4`,
@@ -134,12 +133,7 @@ fn lookup_type(s: &str, catalog: &Catalog) -> SqlResult<Value> {
                 written = base.trim_end();
             }
             let parts = parse_qualified(written)?;
-            let user = match parts.as_slice() {
-                [n] => Some(n),
-                [schema, n] if schema == "public" => Some(n),
-                _ => None,
-            };
-            user.and_then(|n| crate::usertypes::lookup_type(catalog, n)).ok_or_else(missing)?
+            crate::usertypes::lookup_type(catalog, &pgmem_ir::ObjectName(parts))?.ok_or_else(missing)?
         }
     };
     for _ in 0..dims {
@@ -148,13 +142,12 @@ fn lookup_type(s: &str, catalog: &Catalog) -> SqlResult<Value> {
     Ok(Value::Reg(RegKind::Type, ty.oid(), ty.name()))
 }
 
-fn lookup_namespace(s: &str) -> SqlResult<Value> {
+fn lookup_namespace(s: &str, catalog: &Catalog) -> SqlResult<Value> {
     let parts = parse_qualified(s)?;
     let [name] = parts.as_slice() else {
         return Err(SqlError::new(code::INVALID_NAME, "invalid name syntax"));
     };
-    let oid =
-        namespace_name_oid(name).ok_or_else(|| SqlError::new(code::INVALID_SCHEMA_NAME, format!("schema \"{name}\" does not exist")))?;
+    let oid = catalog.namespace_oid(name).ok_or_else(|| pgmem_catalog::undefined_schema(name))?;
     Ok(Value::Reg(RegKind::Namespace, oid, quote_ident(name)))
 }
 
@@ -180,7 +173,7 @@ pub fn to_reg(v: Value, kind: RegKind, catalog: &Catalog) -> SqlResult<Value> {
             match kind {
                 RegKind::Class => lookup_class(&s, catalog),
                 RegKind::Type => lookup_type(&s, catalog),
-                RegKind::Namespace => lookup_namespace(&s),
+                RegKind::Namespace => lookup_namespace(&s, catalog),
                 RegKind::Proc => {
                     let parts = parse_qualified(&s)?;
                     let name = parts.last().cloned().unwrap_or_default();
