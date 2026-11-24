@@ -129,6 +129,20 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
             }
             _ => Err(err()),
         },
+        _ => resolve_more(name, args),
+    }
+}
+
+fn resolve_more(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
+    let err = || no_function(name, args);
+    let n = args.len();
+    let text_fn = |f: crate::plan::Func, arity: usize, ret: Type| -> SqlResult<Option<Resolved>> {
+        if n != arity || !args.iter().all(|t| super::implicit_ok(t, &Type::Text) || *t == Type::Unknown) {
+            return Err(err());
+        }
+        resolved(f, texts(arity), ret)
+    };
+    match name {
         "format" if n >= 1 => {
             let mut targets: Vec<Type> = args.iter().map(|t| if *t == Type::Unknown { Type::Text } else { t.clone() }).collect();
             targets[0] = Type::Text;

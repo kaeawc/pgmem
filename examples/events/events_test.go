@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kaeawc/pgmem-go/examples/events/db"
-	"github.com/kaeawc/pgmem-go/postgres"
+	postgres "github.com/kaeawc/pgmem-go/examples/internal/pgmemtest"
 )
 
 func setup(t *testing.T) (*db.Queries, context.Context, func()) {

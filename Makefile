@@ -1,5 +1,5 @@
-# Rust (the default) — plain cargo underneath. Go targets remain until the Go code is removed.
-.PHONY: check test lint fmt deny parity fidelity ci build serve go-build go-test go-vet
+# Plain cargo underneath; `examples` runs the Go pgx suites against the release binary.
+.PHONY: check test lint fmt deny parity fidelity examples ci build serve
 
 check:            ## type-check everything (no codegen, no link)
 	cargo check --all-targets
@@ -31,11 +31,5 @@ build:
 serve:            ## run a standalone server on port 5432
 	cargo run --release -p pgmem -- --port 5432
 
-go-build:
-	go build ./...
-
-go-test:
-	go test ./... -count=1
-
-go-vet:
-	go vet ./...
+examples: build    ## Go sqlc + pgx example suites against target/release/pgmem
+	cd examples && go vet ./... && go test -count=1 ./...

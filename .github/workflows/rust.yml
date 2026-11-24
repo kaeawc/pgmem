@@ -32,7 +32,8 @@ jobs:
       - run: rustup show active-toolchain || rustup toolchain install
       - run: cargo fmt --all --check
 
-  lint:
+  # Named after the check branch protection requires (formerly golangci-lint).
+  static-analysis:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -46,6 +47,49 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --locked --workspace --all-targets --profile ci -- -D warnings
+
+  # Function complexity (clippy::cognitive_complexity, threshold in clippy.toml); the Rust
+  # counterpart of the gocyclo check branch protection requires.
+  complexity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: lint
+          cache-on-failure: true
+          save-if: false
+      - run: cargo clippy --locked --workspace --lib --bins --profile ci -- -A clippy::all -D clippy::cognitive_complexity
+
+  # Go's pgx driver running the sqlc example suites against the Rust server binary.
+  pgx-examples:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: release
+          cache-on-failure: true
+          save-if: false
+      - run: cargo build --locked --release -p pgmem
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: examples/go.mod
+          cache-dependency-path: examples/go.sum
+      - run: go vet ./...
+        working-directory: examples
+      - run: go test -count=1 ./...
+        working-directory: examples
+        env:
+          PGMEM_BIN: ${{ github.workspace }}/target/release/pgmem
 
   # Dependency policy (deny.toml): one version per crate, RustSec advisories, licenses, sources.
   deny:
