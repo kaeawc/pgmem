@@ -534,18 +534,18 @@ postgres/parse	subquery_test.go	TestParse_InSubquery	crates/pgmem-parse::parse_i
 postgres/parse	subquery_test.go	TestParse_NotIn	crates/pgmem-parse::parse_not_in	ported	
 postgres/parse	subquery_test.go	TestParse_ScalarSubqueryInSelectList	crates/pgmem-parse::parse_scalar_subquery_in_select_list	ported	
 postgres/parse	update_test.go	TestParse_Update	crates/pgmem-parse::parse_update	ported	
-storage	conflict_test.go	TestCommit_ConflictDetected_AcrossDelete	crates/pgmem-storage::commit_conflict_detected_across_delete	pending	Go aborted an insert that raced a delete of a different row in the same table; Postgres commits both. Deleting the same row twice still conflicts (40001).
-storage	conflict_test.go	TestCommit_Conflict_TwoConcurrentWrites	crates/pgmem-storage::commit_conflict_two_concurrent_writes	pending	Go aborted the second of two transactions inserting different rows into one table (table-level conflict check); Postgres commits both. Conflicts are now row-level (same-row update conflict covered by commit_conflict_same_row_update).
-storage	conflict_test.go	TestCommit_NoConflict_DisjointTables	crates/pgmem-storage::commit_no_conflict_disjoint_tables	pending	
-storage	conflict_test.go	TestCommit_NoConflict_OneSideReadOnly	crates/pgmem-storage::commit_no_conflict_one_side_read_only	pending	
-storage	savepoint_test.go	TestSavepoint_NestedRollbackTo	crates/pgmem-storage::savepoint_nested_rollback_to	pending	
-storage	savepoint_test.go	TestSavepoint_ReleasePops	crates/pgmem-storage::savepoint_release_pops	pending	
-storage	savepoint_test.go	TestSavepoint_RollbackUndoesOnlyPostSavepointWork	crates/pgmem-storage::savepoint_rollback_undoes_only_post_savepoint_work	pending	
-storage	savepoint_test.go	TestSavepoint_UnknownNameErrors	crates/pgmem-storage::savepoint_unknown_name_errors	pending	
-storage	storage_test.go	TestTxn_RollbackDiscards	crates/pgmem-storage::txn_rollback_discards	pending	
-storage	storage_test.go	TestTxn_RollbackIsIdempotent	crates/pgmem-storage::txn_rollback_is_idempotent	pending	
-storage	storage_test.go	TestTxn_SnapshotIsolation	crates/pgmem-storage::txn_snapshot_isolation	pending	
-storage	storage_test.go	TestTxn_WritesNotVisibleUntilCommit	crates/pgmem-storage::txn_writes_not_visible_until_commit	pending	
+storage	conflict_test.go	TestCommit_ConflictDetected_AcrossDelete	crates/pgmem-storage::commit_conflict_detected_across_delete	deviation	Go aborted an insert that raced a delete of a different row in the same table; Postgres commits both. Deleting the same row twice still conflicts (40001).
+storage	conflict_test.go	TestCommit_Conflict_TwoConcurrentWrites	crates/pgmem-storage::commit_conflict_two_concurrent_writes	deviation	Go aborted the second of two transactions inserting different rows into one table (table-level conflict check); Postgres commits both. Conflicts are now row-level (same-row update conflict covered by commit_conflict_same_row_update).
+storage	conflict_test.go	TestCommit_NoConflict_DisjointTables	crates/pgmem-storage::commit_no_conflict_disjoint_tables	ported	
+storage	conflict_test.go	TestCommit_NoConflict_OneSideReadOnly	crates/pgmem-storage::commit_no_conflict_one_side_read_only	ported	
+storage	savepoint_test.go	TestSavepoint_NestedRollbackTo	crates/pgmem-storage::savepoint_nested_rollback_to	ported	
+storage	savepoint_test.go	TestSavepoint_ReleasePops	crates/pgmem-storage::savepoint_release_pops	ported	
+storage	savepoint_test.go	TestSavepoint_RollbackUndoesOnlyPostSavepointWork	crates/pgmem-storage::savepoint_rollback_undoes_only_post_savepoint_work	ported	
+storage	savepoint_test.go	TestSavepoint_UnknownNameErrors	crates/pgmem-storage::savepoint_unknown_name_errors	ported	
+storage	storage_test.go	TestTxn_RollbackDiscards	crates/pgmem-storage::txn_rollback_discards	ported	
+storage	storage_test.go	TestTxn_RollbackIsIdempotent	crates/pgmem-storage::txn_rollback_is_idempotent	ported	
+storage	storage_test.go	TestTxn_SnapshotIsolation	crates/pgmem-storage::txn_snapshot_isolation	ported	
+storage	storage_test.go	TestTxn_WritesNotVisibleUntilCommit	crates/pgmem-storage::txn_writes_not_visible_until_commit	ported	
 types	bytea_test.go	TestBytea_BinaryRoundTrip	crates/pgmem-types::bytea_binary_round_trip	ported	
 types	bytea_test.go	TestBytea_LookupByOIDAndName	crates/pgmem-types::bytea_lookup_by_oid_and_name	ported	
 types	bytea_test.go	TestBytea_RejectsLegacyEscapeFormat	crates/pgmem-types::bytea_rejects_legacy_escape_format	deviation	Go rejected non-hex bytea text input; Postgres accepts the escape format (plain characters stand for themselves) and rejects only malformed escapes.

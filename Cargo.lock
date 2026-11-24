@@ -83,6 +83,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pgmem-catalog"
+version = "0.1.0"
+dependencies = [
+ "pgmem-ir",
+ "pgmem-types",
+]
+
+[[package]]
 name = "pgmem-ir"
 version = "0.1.0"
 
@@ -93,6 +101,14 @@ dependencies = [
  "pgmem-ir",
  "pgmem-types",
  "sqlparser",
+]
+
+[[package]]
+name = "pgmem-storage"
+version = "0.1.0"
+dependencies = [
+ "pgmem-catalog",
+ "pgmem-types",
 ]
 
 [[package]]
