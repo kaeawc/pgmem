@@ -279,8 +279,28 @@ impl Session {
         }
     }
 
+    /// The input/output context of this session's settings (`TimeZone`, `DateStyle` order).
+    pub fn format_context(&self) -> pgmem_types::context::Context {
+        use pgmem_types::context::{Context, DateOrder};
+        let zone = self
+            .settings
+            .get("timezone")
+            .and_then(|z| pgmem_types::zone::Zone::from_setting(z))
+            .unwrap_or_else(pgmem_types::zone::Zone::utc);
+        let style = self.settings.get("datestyle").map(|s| s.to_ascii_uppercase()).unwrap_or_default();
+        let date_order = if style.contains("DMY") || style.contains("EURO") {
+            DateOrder::Dmy
+        } else if style.contains("YMD") {
+            DateOrder::Ymd
+        } else {
+            DateOrder::Mdy
+        };
+        Context { zone, date_order, now: self.clock.now_micros() }
+    }
+
     /// Analyzes a statement without running it: parameter types and result columns.
     pub fn describe(&self, stmt: &Statement, declared: &[Type]) -> SqlResult<Description> {
+        let _ctx = pgmem_types::context::enter(self.format_context());
         let catalog = self.catalog_snapshot();
         let binder = Binder::new(&catalog, declared);
         let top = Level::new(Scope::default());
@@ -320,6 +340,7 @@ impl Session {
 
     /// Executes one statement with bound parameter values.
     pub fn execute(&mut self, stmt: &Statement, param_types: &[Type], params: &[Value]) -> SqlResult<QueryResult> {
+        let _ctx = pgmem_types::context::enter(self.format_context());
         if let Statement::Transaction(t) = stmt {
             return self.transaction(t);
         }
@@ -549,12 +570,7 @@ impl Session {
             value.join(", ")
         };
         let joined = match name.as_str() {
-            "timezone" => {
-                if !matches!(joined.to_ascii_uppercase().as_str(), "UTC" | "ETC/UTC" | "GMT" | "Z" | "UCT" | "+00" | "0" | "+00:00") {
-                    return Err(SqlError::feature_not_supported(format!("time zone \"{joined}\" is not supported by pgmem; only UTC is")));
-                }
-                "UTC".to_owned()
-            }
+            "timezone" => timezone_setting(&joined)?,
             "client_encoding"
                 if !joined.eq_ignore_ascii_case("utf8")
                     && !joined.eq_ignore_ascii_case("utf-8")
@@ -647,6 +663,36 @@ impl Session {
     pub fn table_exists(&self, name: &str) -> bool {
         matches!(self.db.current().catalog.relation(name), Some(Relation::Table(_)))
     }
+}
+
+/// The value `TimeZone` takes from `SET TIME ZONE ...`: an IANA name (canonical spelling), a
+/// POSIX-style spec, a number of hours east, an `INTERVAL '...' HOUR TO MINUTE`, or LOCAL /
+/// DEFAULT.
+fn timezone_setting(value: &str) -> SqlResult<String> {
+    use pgmem_types::zone::Zone;
+    let invalid = || SqlError::new(code::INVALID_PARAMETER_VALUE, format!("invalid value for parameter \"TimeZone\": \"{value}\""));
+    let v = value.trim();
+    if v.eq_ignore_ascii_case("local") || v.eq_ignore_ascii_case("default") {
+        return Ok("UTC".to_owned());
+    }
+    if v.len() > 9 && v[..9].eq_ignore_ascii_case("interval ") {
+        let literal = v[9..].split('\'').nth(1).ok_or_else(invalid)?;
+        let iv = pgmem_types::datetime::parse_interval(literal).map_err(|_| invalid())?;
+        if iv.months != 0 || iv.days != 0 {
+            return Err(SqlError::new(
+                code::INVALID_PARAMETER_VALUE,
+                String::from("invalid interval value for time zone: day not allowed"),
+            ));
+        }
+        let secs = i32::try_from(iv.micros / 1_000_000).map_err(|_| invalid())?;
+        return Ok(Zone::fixed(secs).name);
+    }
+    if let Ok(hours) = v.parse::<f64>() {
+        #[allow(clippy::cast_possible_truncation)]
+        let secs = (hours * 3600.0).round() as i32;
+        return Ok(Zone::fixed(secs).name);
+    }
+    Zone::from_setting(v).map(|z| z.name).ok_or_else(invalid)
 }
 
 /// The setting a `SHOW` name refers to (`SHOW TIME ZONE` is `timezone`).

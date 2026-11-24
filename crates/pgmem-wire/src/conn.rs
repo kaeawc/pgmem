@@ -184,6 +184,8 @@ impl Conn {
     }
 
     fn data_row(&mut self, cols: &[OutCol], row: &[Value], formats: &[i16]) -> SqlResult<()> {
+        // Output depends on the session's TimeZone and DateStyle.
+        let _ctx = pgmem_types::context::enter(self.session.format_context());
         let mut values = Vec::with_capacity(row.len());
         for (i, v) in row.iter().enumerate() {
             if v.is_null() {
@@ -281,6 +283,7 @@ impl Conn {
     }
 
     fn bind(&mut self, body: &[u8]) -> SqlResult<()> {
+        let _ctx = pgmem_types::context::enter(self.session.format_context());
         let mut r = Reader::new(body);
         let portal = r.cstr()?;
         let stmt_name = r.cstr()?;

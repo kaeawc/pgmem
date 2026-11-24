@@ -134,7 +134,7 @@ pub fn resolve_srf(name: &str, args: &[Type]) -> SqlResult<Option<SrfResolution>
         }
         "generate_series" => {
             let t = match args {
-                [a, b] | [a, b, _] if args.len() <= 3 => {
+                [a, b] | [a, b, _] | [a, b, _, _] => {
                     let base = super::common_type(a, b).ok_or_else(|| no_function(name, args))?;
                     match base {
                         Type::Int2 | Type::Int4 | Type::Unknown => Type::Int4,
@@ -148,8 +148,11 @@ pub fn resolve_srf(name: &str, args: &[Type]) -> SqlResult<Option<SrfResolution>
                 }
                 _ => return Err(no_function(name, args)),
             };
+            if args.len() == 4 && t != Type::Timestamptz {
+                return Err(no_function(name, args));
+            }
             let mut targets = vec![t.clone(), t.clone()];
-            if args.len() == 3 {
+            if args.len() >= 3 {
                 let step = match t {
                     Type::Int8 => {
                         if args[2] == Type::Int8 {
@@ -170,6 +173,9 @@ pub fn resolve_srf(name: &str, args: &[Type]) -> SqlResult<Option<SrfResolution>
                     _ => Type::Interval,
                 };
                 targets.push(step);
+                if args.len() == 4 {
+                    targets.push(Type::Text);
+                }
             } else if matches!(t, Type::Timestamptz | Type::Timestamp) {
                 return Err(no_function(name, args));
             }
@@ -208,7 +214,21 @@ fn generate_series(a: &[Value], _: &EvalCtx) -> SqlResult<Vec<Row>> {
             let mut cur = start;
             while (up && cur <= stop) || (!up && cur >= stop) {
                 out.push(vec![if tz { Value::Timestamptz(cur) } else { Value::Timestamp(cur) }]);
-                cur = add_interval(cur, step)?;
+                cur = match a.get(3) {
+                    // The 4-argument form steps in the given zone's local time (Postgres 16).
+                    Some(z) => {
+                        let zone = pgmem_types::zone::Zone::from_spec(z.as_str().unwrap_or("")).ok_or_else(|| {
+                            SqlError::new(
+                                code::INVALID_PARAMETER_VALUE,
+                                format!("time zone \"{}\" not recognized", z.as_str().unwrap_or("")),
+                            )
+                        })?;
+                        let _ctx = pgmem_types::context::enter(pgmem_types::context::Context { zone, ..pgmem_types::context::current() });
+                        super::datetime::tstz_add_interval(cur, step)?
+                    }
+                    None if tz => super::datetime::tstz_add_interval(cur, step)?,
+                    None => add_interval(cur, step)?,
+                };
                 if out.len() > 10_000_000 {
                     return Err(SqlError::new("54000", "generate_series produced too many rows"));
                 }

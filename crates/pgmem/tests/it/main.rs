@@ -114,6 +114,7 @@ mod system_catalogs;
 mod table_alias;
 mod table_fk;
 mod text_numeric_funcs;
+mod time_zones;
 mod timestamptz;
 mod transactions;
 mod trim_length;

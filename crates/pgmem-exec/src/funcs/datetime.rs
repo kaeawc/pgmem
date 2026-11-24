@@ -8,6 +8,7 @@ use pgmem_types::datetime::{
     self as dt, Interval, TS_INFINITY, TS_NEG_INFINITY, USECS_PER_DAY, USECS_PER_HOUR, USECS_PER_MINUTE, USECS_PER_SEC, add_interval,
     sub_timestamps,
 };
+use pgmem_types::zone::{self, Zone};
 use pgmem_types::{Numeric, SqlError, SqlResult, Type, Value, code};
 
 fn is_ts(t: &Type) -> bool {
@@ -24,7 +25,7 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
         "localtimestamp" if n == 0 => resolved(
             lenient("localtimestamp", |a, c| {
                 now_fn(a, c).map(|v| match v {
-                    Value::Timestamptz(t) => Value::Timestamp(t),
+                    Value::Timestamptz(t) => Value::Timestamp(zone::to_local(t)),
                     o => o,
                 })
             }),
@@ -34,7 +35,7 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
         "current_date" if n == 0 => resolved(
             lenient("current_date", |a, c| {
                 now_fn(a, c).map(|v| match v {
-                    Value::Timestamptz(t) => Value::Date(micros_to_date(t)),
+                    Value::Timestamptz(t) => Value::Date(micros_to_date(zone::to_local(t))),
                     o => o,
                 })
             }),
@@ -44,7 +45,7 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
         "current_time" if n == 0 => resolved(
             lenient("current_time", |a, c| {
                 now_fn(a, c).map(|v| match v {
-                    Value::Timestamptz(t) => Value::TimeTz(t.rem_euclid(USECS_PER_DAY), 0),
+                    Value::Timestamptz(t) => Value::TimeTz(zone::to_local(t).rem_euclid(USECS_PER_DAY), zone::session_offset(t)),
                     o => o,
                 })
             }),
@@ -54,7 +55,7 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
         "localtime" if n == 0 => resolved(
             lenient("localtime", |a, c| {
                 now_fn(a, c).map(|v| match v {
-                    Value::Timestamptz(t) => Value::Time(t.rem_euclid(USECS_PER_DAY)),
+                    Value::Timestamptz(t) => Value::Time(zone::to_local(t).rem_euclid(USECS_PER_DAY)),
                     o => o,
                 })
             }),
@@ -72,6 +73,13 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
             } else {
                 resolved(strict("date_part", date_part_fn), vec![Type::Text, src], Type::Float8)
             }
+        }
+        "date_bin" if n == 3 => {
+            let src = match (&args[1], &args[2]) {
+                (Type::Timestamp, _) | (_, Type::Timestamp) => Type::Timestamp,
+                _ => Type::Timestamptz,
+            };
+            resolved(strict("date_bin", date_bin_fn), vec![Type::Interval, src.clone(), src.clone()], src)
         }
         "date_trunc" if n == 2 || n == 3 => {
             let src = match &args[1] {
@@ -171,66 +179,74 @@ fn resolve_constructors(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>
     }
 }
 
-/// `expr AT TIME ZONE zone` (also `timezone(zone, expr)`).
-pub fn resolve_at_time_zone(src: &Type, _zone: &Type) -> SqlResult<Resolved> {
+/// `expr AT TIME ZONE zone` (also `timezone(zone, expr)`). The zone is a name, an
+/// abbreviation or a POSIX-style offset (text), or an interval (an offset east of UTC).
+pub fn resolve_at_time_zone(src: &Type, zone_ty: &Type) -> SqlResult<Resolved> {
+    let zt = if *zone_ty == Type::Interval { Type::Interval } else { Type::Text };
     match src {
         Type::Timestamptz | Type::Unknown => {
-            Ok(Resolved { func: strict("timezone", tz_from_timestamptz), args: vec![Type::Text, Type::Timestamptz], ret: Type::Timestamp })
+            Ok(Resolved { func: strict("timezone", tz_from_timestamptz), args: vec![zt, Type::Timestamptz], ret: Type::Timestamp })
         }
         Type::Timestamp | Type::Date => {
-            Ok(Resolved { func: strict("timezone", tz_from_timestamp), args: vec![Type::Text, Type::Timestamp], ret: Type::Timestamptz })
+            Ok(Resolved { func: strict("timezone", tz_from_timestamp), args: vec![zt, Type::Timestamp], ret: Type::Timestamptz })
         }
-        other => Err(no_function("timezone", &[Type::Text, other.clone()])),
+        Type::TimeTz | Type::Time => {
+            Ok(Resolved { func: strict("timezone", tz_of_timetz), args: vec![zt, Type::TimeTz], ret: Type::TimeTz })
+        }
+        other => Err(no_function("timezone", &[zone_ty.clone(), other.clone()])),
     }
 }
 
-/// Offset east of UTC (seconds) for a zone name: `UTC`, `Z`, `GMT`, fixed offsets like
-/// `+05:30` / `-08`, and POSIX-style `UTC+3` (which Postgres treats as 3 hours *west*).
-fn zone_offset(zone: &str) -> SqlResult<i64> {
-    let z = zone.trim();
-    let upper = z.to_ascii_uppercase();
-    if matches!(upper.as_str(), "UTC" | "Z" | "GMT" | "ETC/UTC" | "UCT" | "ZULU" | "UNIVERSAL") {
-        return Ok(0);
+/// The zone an `AT TIME ZONE` / `timezone()` argument names.
+fn zone_arg(v: &Value) -> SqlResult<Zone> {
+    match v {
+        Value::Interval(i) => {
+            if i.months != 0 || i.days != 0 {
+                let text = dt::format_interval(i);
+                return Err(SqlError::new(
+                    code::INVALID_PARAMETER_VALUE,
+                    format!("interval time zone \"{text}\" must not include months or days"),
+                ));
+            }
+            Ok(Zone::fixed(i32::try_from(i.micros / USECS_PER_SEC).map_err(|_| SqlError::out_of_range("interval"))?))
+        }
+        other => {
+            let name = other.as_str().unwrap_or("");
+            Zone::from_spec(name).ok_or_else(|| bad_zone(name))
+        }
     }
-    let parse_hm = |s: &str| -> Option<i64> {
-        let (sign, body) = match s.as_bytes().first()? {
-            b'+' => (1, &s[1..]),
-            b'-' => (-1, &s[1..]),
-            _ => (1, s),
-        };
-        let (h, m) = body.split_once(':').unwrap_or((body, "0"));
-        Some(sign * (h.parse::<i64>().ok()? * 3600 + m.parse::<i64>().ok()? * 60))
-    };
-    if let Some(rest) = upper.strip_prefix("UTC").or_else(|| upper.strip_prefix("GMT")) {
-        // POSIX convention: positive means west of Greenwich.
-        return parse_hm(rest).map(|o| -o).ok_or_else(|| bad_zone(zone));
-    }
-    if z.starts_with(['+', '-']) {
-        // ISO-8601 convention for explicit offsets: positive means east.
-        return parse_hm(z).ok_or_else(|| bad_zone(zone));
-    }
-    Err(bad_zone(zone))
 }
 
 fn bad_zone(zone: &str) -> SqlError {
     SqlError::new(code::INVALID_PARAMETER_VALUE, format!("time zone \"{zone}\" not recognized"))
-        .with_hint("pgmem supports UTC and fixed-offset time zones only.")
 }
 
 fn tz_from_timestamptz(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
-    let off = zone_offset(a[0].as_str().unwrap_or(""))?;
+    let z = zone_arg(&a[0])?;
     match &a[1] {
-        Value::Timestamptz(t) => Ok(Value::Timestamp(t + off * USECS_PER_SEC)),
+        Value::Timestamptz(t) if *t == TS_INFINITY || *t == TS_NEG_INFINITY => Ok(Value::Timestamp(*t)),
+        Value::Timestamptz(t) => Ok(Value::Timestamp(z.local_of_utc(*t))),
         other => Err(SqlError::internal(format!("timezone() of {}", other.kind()))),
     }
 }
 
 fn tz_from_timestamp(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
-    let off = zone_offset(a[0].as_str().unwrap_or(""))?;
+    let z = zone_arg(&a[0])?;
     match &a[1] {
-        Value::Timestamp(t) => Ok(Value::Timestamptz(t - off * USECS_PER_SEC)),
+        Value::Timestamp(t) if *t == TS_INFINITY || *t == TS_NEG_INFINITY => Ok(Value::Timestamptz(*t)),
+        Value::Timestamp(t) => Ok(Value::Timestamptz(z.utc_of_local(*t))),
         other => Err(SqlError::internal(format!("timezone() of {}", other.kind()))),
     }
+}
+
+/// `timetz AT TIME ZONE zone`: the same instant with the zone's offset (its current offset for
+/// a named zone, as Postgres uses the statement time).
+fn tz_of_timetz(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
+    let z = zone_arg(&a[0])?;
+    let Value::TimeTz(t, off) = &a[1] else { return Err(SqlError::internal("timezone() of non-timetz")) };
+    let new_off = z.offset_at(ctx.env.txn_start);
+    let utc = t - i64::from(*off) * USECS_PER_SEC;
+    Ok(Value::TimeTz((utc + i64::from(new_off) * USECS_PER_SEC).rem_euclid(USECS_PER_DAY), new_off))
 }
 
 fn now_fn(_: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
@@ -288,9 +304,11 @@ fn extract_numeric(field: &str, v: &Value) -> SqlResult<Numeric> {
             _ => return Err(unit_not_supported(f, "time without time zone")),
         });
     }
-    let micros = ts_micros(v).ok_or_else(|| SqlError::internal("extract from non-datetime"))?;
+    let utc = ts_micros(v).ok_or_else(|| SqlError::internal("extract from non-datetime"))?;
     let is_date = matches!(v, Value::Date(_));
     let is_tz = matches!(v, Value::Timestamptz(_));
+    // Fields of a timestamptz are those of its local time in the session zone.
+    let micros = if is_tz { zone::to_local(utc) } else { utc };
     if micros == TS_INFINITY || micros == TS_NEG_INFINITY {
         return Err(SqlError::feature_not_supported("extract from infinite timestamps is not supported by pgmem"));
     }
@@ -329,10 +347,17 @@ fn extract_numeric(field: &str, v: &Value) -> SqlResult<Numeric> {
             }
         }
         "epoch" => {
-            let unix = micros + dt::PG_EPOCH_UNIX_SECS * USECS_PER_SEC;
+            let unix = utc + dt::PG_EPOCH_UNIX_SECS * USECS_PER_SEC;
             if is_date { Numeric::from_i64(unix / USECS_PER_SEC) } else { micros_numeric(unix, 6) }
         }
-        "timezone" | "timezone_hour" | "timezone_minute" if is_tz => Numeric::from_i64(0),
+        "timezone" | "timezone_hour" | "timezone_minute" if is_tz => {
+            let off = i64::from(zone::session_offset(utc));
+            Numeric::from_i64(match f {
+                "timezone" => off,
+                "timezone_hour" => off / 3600,
+                _ => (off % 3600) / 60,
+            })
+        }
         _ => {
             return Err(unit_not_supported(
                 f,
@@ -458,11 +483,14 @@ fn date_trunc_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     if micros == TS_INFINITY || micros == TS_NEG_INFINITY {
         return Ok(a[1].clone());
     }
-    let off = match a.get(2) {
-        Some(z) => zone_offset(z.as_str().unwrap_or(""))? * USECS_PER_SEC,
-        None => 0,
+    // A timestamptz is truncated in its local time (the session zone or the given one).
+    let zone = match (a.get(2), &a[1]) {
+        (Some(z), _) => Some(zone_arg(z)?),
+        (None, Value::Timestamptz(_)) => Some(pgmem_types::context::current().zone),
+        _ => None,
     };
-    let d = tm(micros + off)?;
+    let local = zone.as_ref().map_or(micros, |z| z.local_of_utc(micros));
+    let d = tm(local)?;
     let day_start = |year: i32, month: u32, day: u32| Tm { year, month, day, hour: 0, minute: 0, second: 0, micros: 0 };
     let truncated: Tm = match field.as_str() {
         "microseconds" => d,
@@ -483,17 +511,40 @@ fn date_trunc_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
         "century" => day_start((d.year - 1).div_euclid(100) * 100 + 1, 1, 1),
         "millennium" => day_start((d.year - 1).div_euclid(1000) * 1000 + 1, 1, 1),
         other => {
-            return Err(SqlError::new(
-                code::INVALID_PARAMETER_VALUE,
-                format!("unit \"{other}\" not recognized for type timestamp with time zone"),
-            ));
+            let ty = if matches!(a[1], Value::Timestamp(_)) { "timestamp without time zone" } else { "timestamp with time zone" };
+            return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, format!("unit \"{other}\" not recognized for type {ty}")));
         }
     };
-    let t = dt::from_tm(&truncated)? - off;
+    let t = dt::from_tm(&truncated)?;
+    let t = zone.as_ref().map_or(t, |z| z.utc_of_local(t));
     Ok(match &a[1] {
         Value::Timestamp(_) => Value::Timestamp(t),
         _ => Value::Timestamptz(t),
     })
+}
+
+/// `date_bin(stride, source, origin)`: the start of the stride-sized bin containing `source`,
+/// counting from `origin` (Postgres 14+).
+fn date_bin_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let stride = iv(&a[0]);
+    if stride.months != 0 {
+        return Err(SqlError::feature_not_supported("timestamps cannot be binned into intervals containing months or years"));
+    }
+    let stride_us = i64::from(stride.days) * USECS_PER_DAY + stride.micros;
+    if stride_us <= 0 {
+        return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, "stride must be greater than zero"));
+    }
+    let (Some(src), Some(origin)) = (ts_micros(&a[1]), ts_micros(&a[2])) else { return Err(SqlError::internal("date_bin arguments")) };
+    if [src, origin].iter().any(|t| *t == TS_INFINITY || *t == TS_NEG_INFINITY) {
+        return Err(SqlError::feature_not_supported("timestamps cannot be binned into infinite intervals"));
+    }
+    let diff = src - origin;
+    let mut delta = diff - diff % stride_us;
+    if diff < 0 && diff % stride_us != 0 {
+        delta -= stride_us;
+    }
+    let out = origin + delta;
+    Ok(if matches!(a[1], Value::Timestamp(_)) { Value::Timestamp(out) } else { Value::Timestamptz(out) })
 }
 
 fn days_in(y: i32, m: u32) -> i64 {
@@ -557,8 +608,16 @@ fn age(t1: i64, t2: i64) -> SqlResult<Interval> {
     })
 }
 
+/// Wall-clock microseconds of a timestamp-ish value (timestamptz in the session zone).
+fn local_micros(v: &Value) -> Option<i64> {
+    match v {
+        Value::Timestamptz(t) => Some(zone::to_local(*t)),
+        other => ts_micros(other),
+    }
+}
+
 fn age2_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
-    let (Some(x), Some(y)) = (ts_micros(&a[0]), ts_micros(&a[1])) else { return Err(SqlError::internal("age of non-timestamp")) };
+    let (Some(x), Some(y)) = (local_micros(&a[0]), local_micros(&a[1])) else { return Err(SqlError::internal("age of non-timestamp")) };
     Ok(Value::Interval(age(x, y)?))
 }
 
@@ -567,8 +626,8 @@ fn age1_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
     if a[0].is_null() {
         return Ok(Value::Null);
     }
-    let today = date_to_micros(micros_to_date(ctx.env.txn_start));
-    let x = ts_micros(&a[0]).ok_or_else(|| SqlError::internal("age of non-timestamp"))?;
+    let today = date_to_micros(micros_to_date(zone::to_local(ctx.env.txn_start)));
+    let x = local_micros(&a[0]).ok_or_else(|| SqlError::internal("age of non-timestamp"))?;
     Ok(Value::Interval(age(today, x)?))
 }
 
@@ -614,11 +673,24 @@ fn make_timestamp_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
 }
 
 fn make_timestamptz_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
-    let off = match a.get(6) {
-        Some(z) => zone_offset(z.as_str().unwrap_or(""))?,
-        None => 0,
-    };
-    Ok(Value::Timestamptz(make_ts(a)? - off * USECS_PER_SEC))
+    let local = make_ts(a)?;
+    Ok(Value::Timestamptz(match a.get(6) {
+        // make_timestamptz reads a numeric zone the ISO way (`+02` is east of UTC).
+        Some(Value::Text(z)) if z.trim_start().starts_with(['+', '-']) => {
+            let east = pgmem_types::zone::Zone::from_spec(&format!("UTC{}", flip_sign(z.trim()))).ok_or_else(|| bad_zone(z))?;
+            east.utc_of_local(local)
+        }
+        Some(z) => zone_arg(z)?.utc_of_local(local),
+        None => zone::from_local(local),
+    }))
+}
+
+/// `+02:00` → `-02:00`: turns an ISO offset into the POSIX spelling of the same zone.
+fn flip_sign(z: &str) -> String {
+    match z.strip_prefix('+') {
+        Some(rest) => format!("-{rest}"),
+        None => format!("+{}", z.trim_start_matches('-')),
+    }
 }
 
 fn make_interval_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
@@ -695,6 +767,12 @@ fn cased(name: &str, pattern: &str) -> String {
 
 /// `to_char(timestamp, template)` (UTC session).
 fn format_template(t: &Tm, fmt: &str) -> String {
+    format_template_tz(t, fmt, None)
+}
+
+/// `to_char` of broken-down time `t`; `tz` is the (offset east, abbreviation) for a
+/// timestamptz, whose TZ / TZH / TZM / OF patterns print it.
+fn format_template_tz(t: &Tm, fmt: &str, tz: Option<(i32, String)>) -> String {
     let mut out = String::new();
     let mut rest = fmt;
     while !rest.is_empty() {
@@ -808,10 +886,16 @@ fn format_template(t: &Tm, fmt: &str) -> String {
                 let r = if fill { format!("{r:<4}") } else { r.to_owned() };
                 (if upper { r } else { r.to_lowercase() }, None)
             }
-            "TZ" => ((if upper { "UTC" } else { "utc" }).to_owned(), None),
-            "TZH" => ("+00".to_owned(), None),
-            "TZM" => ("00".to_owned(), None),
-            "OF" => ("+00".to_owned(), None),
+            "TZ" => {
+                let abbrev = tz.as_ref().map(|(_, a)| a.clone()).unwrap_or_default();
+                (if upper { abbrev } else { abbrev.to_lowercase() }, None)
+            }
+            "TZH" => {
+                let off = tz.as_ref().map_or(0, |(o, _)| *o);
+                (format!("{}{:02}", if off < 0 { '-' } else { '+' }, off.unsigned_abs() / 3600), None)
+            }
+            "TZM" => (format!("{:02}", tz.as_ref().map_or(0, |(o, _)| o.unsigned_abs() % 3600 / 60)), None),
+            "OF" => (pgmem_types::zone::format_offset(tz.as_ref().map_or(0, |(o, _)| *o)), None),
             _ => (pat.to_string(), None),
         };
         let piece = match pat.as_bytes()[0] {
@@ -830,7 +914,11 @@ fn format_template(t: &Tm, fmt: &str) -> String {
 fn to_char_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     let fmt = a[1].as_str().unwrap_or("");
     match &a[0] {
-        Value::Timestamptz(t) | Value::Timestamp(t) => Ok(Value::Text(format_template(&tm(*t)?, fmt))),
+        Value::Timestamp(t) => Ok(Value::Text(format_template(&tm(*t)?, fmt))),
+        Value::Timestamptz(t) => {
+            let info = pgmem_types::context::with_zone(|z| (z.offset_at(*t), z.abbrev_at(*t)));
+            Ok(Value::Text(format_template_tz(&tm(zone::to_local(*t))?, fmt, Some(info))))
+        }
         Value::Interval(i) => {
             // Postgres formats intervals field-wise; hours may exceed 24.
             let base = Tm {
@@ -917,7 +1005,8 @@ fn parse_template(src: &str, fmt: &str) -> SqlResult<Tm> {
 
 fn to_timestamp_fmt_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     let t = parse_template(a[0].as_str().unwrap_or(""), a[1].as_str().unwrap_or(""))?;
-    Ok(Value::Timestamptz(dt::from_tm(&t)?))
+    // Fields without a zone in the template are local time in the session zone.
+    Ok(Value::Timestamptz(zone::from_local(dt::from_tm(&t)?)))
 }
 
 fn to_date_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
@@ -964,12 +1053,26 @@ fn ts_plus_interval(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
         _ => return Err(SqlError::internal("timestamp + interval")),
     };
     Ok(match ts {
-        Value::Timestamptz(t) => Value::Timestamptz(add_interval(*t, &i)?),
+        Value::Timestamptz(t) => Value::Timestamptz(tstz_add_interval(*t, &i)?),
         Value::Timestamp(t) => Value::Timestamp(add_interval(*t, &i)?),
         Value::Date(d) => Value::Timestamp(add_interval(date_to_micros(*d), &i)?),
         Value::Time(t) => Value::Time((t + i.micros).rem_euclid(USECS_PER_DAY)),
         other => return Err(SqlError::internal(format!("{} + interval", other.kind()))),
     })
+}
+
+/// `timestamptz + interval`: months and days move the local (session zone) wall-clock time,
+/// the time part is absolute, as in Postgres' `timestamptz_pl_interval`.
+pub fn tstz_add_interval(t: i64, i: &Interval) -> SqlResult<i64> {
+    if t == TS_INFINITY || t == TS_NEG_INFINITY {
+        return Ok(t);
+    }
+    let mut out = t;
+    if i.months != 0 || i.days != 0 {
+        let local = add_interval(zone::to_local(t), &Interval { months: i.months, days: i.days, micros: 0 })?;
+        out = zone::from_local(local);
+    }
+    out.checked_add(i.micros).ok_or_else(|| SqlError::new(code::DATETIME_FIELD_OVERFLOW, "timestamp out of range"))
 }
 
 fn ts_minus_interval(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
@@ -1126,9 +1229,12 @@ mod tests {
 
     #[test]
     fn zones() {
-        assert_eq!(zone_offset("UTC").ok(), Some(0));
-        assert_eq!(zone_offset("+05:30").ok(), Some(19800));
-        assert_eq!(zone_offset("UTC+3").ok(), Some(-10800));
-        assert!(zone_offset("America/New_York").is_err());
+        let off = |s: &str| zone_arg(&Value::Text(s.into())).map(|z| z.offset_at(0)).ok();
+        assert_eq!(off("UTC"), Some(0));
+        // POSIX convention: a bare positive offset is west of Greenwich.
+        assert_eq!(off("+05:30"), Some(-19800));
+        assert_eq!(off("UTC+3"), Some(-10800));
+        assert_eq!(off("EST"), Some(-18000));
+        assert!(off("Nowhere/Land").is_none());
     }
 }

@@ -4,6 +4,7 @@
 
 pub mod binary;
 pub mod calendar;
+pub mod context;
 pub mod datetime;
 pub mod error;
 #[cfg(test)]
@@ -12,6 +13,7 @@ pub mod json;
 pub mod numeric;
 pub mod text;
 mod value;
+pub mod zone;
 
 pub use datetime::Interval;
 pub use error::{ErrorFields, SqlError, SqlResult, code};

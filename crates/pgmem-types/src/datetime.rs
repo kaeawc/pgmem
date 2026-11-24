@@ -37,17 +37,30 @@ pub fn from_tm(tm: &Tm) -> SqlResult<i64> {
     Ok(t)
 }
 
-/// Formats a timestamptz the way Postgres does with `DateStyle = ISO` and `TimeZone = UTC`:
-/// `2024-07-15 12:00:00+00`, with the fraction trimmed of trailing zeros.
+/// Formats a timestamptz the way Postgres does with `DateStyle = ISO`, in the session's time
+/// zone: `2024-07-15 08:00:00-04`, with the fraction trimmed of trailing zeros and the offset
+/// minutes / seconds shown only when nonzero.
 pub fn format_timestamptz(micros: i64) -> String {
-    let Some(tm) = to_tm(micros) else {
+    if micros == TS_INFINITY || micros == TS_NEG_INFINITY {
         return if micros == TS_NEG_INFINITY { "-infinity".into() } else { "infinity".into() };
-    };
+    }
+    let (local, offset) = crate::context::with_zone(|z| (z.local_of_utc(micros), z.offset_at(micros)));
+    let mut out = format_local(local);
+    let suffix = crate::zone::format_offset(offset);
+    match out.strip_suffix(" BC") {
+        Some(base) => out = format!("{base}{suffix} BC"),
+        None => out.push_str(&suffix),
+    }
+    out
+}
+
+/// `YYYY-MM-DD HH:MM:SS[.ffffff][ BC]` of a local (zone-less) timestamp.
+fn format_local(micros: i64) -> String {
+    let tm = Tm::from_micros(micros);
     let mut out = String::with_capacity(32);
     let (y, bc) = if tm.year <= 0 { (1 - tm.year, true) } else { (tm.year, false) };
     let _ = write!(out, "{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, tm.month, tm.day, tm.hour, tm.minute, tm.second);
     push_fraction(&mut out, i64::from(tm.micros));
-    out.push_str("+00");
     if bc {
         out.push_str(" BC");
     }
@@ -237,11 +250,10 @@ pub fn parse_date(input: &str) -> SqlResult<i32> {
 
 /// `timestamp without time zone` output: `2024-07-15 12:00:00[.ffffff]`.
 pub fn format_timestamp(micros: i64) -> String {
-    let s = format_timestamptz(micros);
-    match s.strip_suffix("+00") {
-        Some(base) => base.to_owned(),
-        None => s.replacen("+00 BC", " BC", 1),
+    if micros == TS_INFINITY || micros == TS_NEG_INFINITY {
+        return if micros == TS_NEG_INFINITY { "-infinity".into() } else { "infinity".into() };
     }
+    format_local(micros)
 }
 
 /// `timestamp` input: like timestamptz, but an explicit zone is ignored.

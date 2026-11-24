@@ -1,7 +1,7 @@
 //! Casts and coercion rules (`pg_cast`).
 
 use pgmem_types::datetime::{DATE_INFINITY, DATE_NEG_INFINITY, TS_INFINITY, TS_NEG_INFINITY, USECS_PER_DAY};
-use pgmem_types::{Numeric, SqlError, SqlResult, Type, Value, code, text};
+use pgmem_types::{Numeric, SqlError, SqlResult, Type, Value, code, text, zone};
 
 pub fn date_to_micros(d: i32) -> i64 {
     match d {
@@ -193,12 +193,15 @@ fn convert(v: Value, to: &Type) -> SqlResult<Value> {
         (V::Numeric(n), Type::Float4) => V::Float4(n.to_f64() as f32),
         (V::Bool(b), Type::Int4) => V::Int4(i32::from(b)),
         (V::Date(d), Type::Timestamp) => V::Timestamp(date_to_micros(d)),
-        (V::Date(d), Type::Timestamptz) => V::Timestamptz(date_to_micros(d)),
-        (V::Timestamp(t), Type::Timestamptz) => V::Timestamptz(t),
-        (V::Timestamptz(t), Type::Timestamp) => V::Timestamp(t),
-        (V::Timestamp(t) | V::Timestamptz(t), Type::Date) => V::Date(micros_to_date(t)),
-        (V::Timestamp(t) | V::Timestamptz(t), Type::Time) => V::Time(t.rem_euclid(USECS_PER_DAY)),
-        (V::Timestamptz(t), Type::TimeTz) => V::TimeTz(t.rem_euclid(USECS_PER_DAY), 0),
+        // timestamptz ↔ local types go through the session time zone.
+        (V::Date(d), Type::Timestamptz) => V::Timestamptz(zone::from_local(date_to_micros(d))),
+        (V::Timestamp(t), Type::Timestamptz) => V::Timestamptz(zone::from_local(t)),
+        (V::Timestamptz(t), Type::Timestamp) => V::Timestamp(zone::to_local(t)),
+        (V::Timestamp(t), Type::Date) => V::Date(micros_to_date(t)),
+        (V::Timestamptz(t), Type::Date) => V::Date(micros_to_date(zone::to_local(t))),
+        (V::Timestamp(t), Type::Time) => V::Time(t.rem_euclid(USECS_PER_DAY)),
+        (V::Timestamptz(t), Type::Time) => V::Time(zone::to_local(t).rem_euclid(USECS_PER_DAY)),
+        (V::Timestamptz(t), Type::TimeTz) => V::TimeTz(zone::to_local(t).rem_euclid(USECS_PER_DAY), zone::session_offset(t)),
         (V::Time(t), Type::TimeTz) => V::TimeTz(t, 0),
         (V::TimeTz(t, _), Type::Time) => V::Time(t),
         (V::Time(t), Type::Interval) => V::Interval(pgmem_types::Interval::from_micros(t)),
