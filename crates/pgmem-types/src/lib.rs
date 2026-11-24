@@ -44,7 +44,42 @@ pub enum Type {
     Timestamptz,
     Interval,
     Jsonb,
+    /// `character varying`: text with an optional length limit (the typmod).
+    Varchar,
+    /// `character` (`bpchar`): blank-padded to its length; trailing spaces are insignificant.
+    Bpchar,
+    /// `name`: identifiers, at most 63 bytes.
+    Name,
+    /// The single-byte internal type `"char"` (catalog columns such as `relkind`).
+    Char,
+    /// `json`: validated text, kept exactly as written.
+    Json,
+    Oid,
+    /// The OID alias types (`regclass`, `regtype`, ...): an OID that prints as an object name.
+    Reg(RegKind),
+    /// The result type of functions called for their side effect; prints as an empty string.
+    Void,
     Array(Box<Type>),
+}
+
+/// The `reg*` OID alias types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RegKind {
+    Class,
+    Type,
+    Proc,
+    Namespace,
+}
+
+impl RegKind {
+    pub fn typname(self) -> &'static str {
+        match self {
+            RegKind::Class => "regclass",
+            RegKind::Type => "regtype",
+            RegKind::Proc => "regproc",
+            RegKind::Namespace => "regnamespace",
+        }
+    }
 }
 
 impl Type {
@@ -73,6 +108,17 @@ impl Type {
             Type::TimeTz => 1266,
             Type::Uuid => 2950,
             Type::Jsonb => 3802,
+            Type::Varchar => 1043,
+            Type::Bpchar => 1042,
+            Type::Name => 19,
+            Type::Char => 18,
+            Type::Json => 114,
+            Type::Oid => 26,
+            Type::Reg(RegKind::Class) => 2205,
+            Type::Reg(RegKind::Type) => 2206,
+            Type::Reg(RegKind::Proc) => 24,
+            Type::Reg(RegKind::Namespace) => 4089,
+            Type::Void => 2278,
             Type::Array(elem) => match elem.as_ref() {
                 Type::Bool => 1000,
                 Type::Bytea => 1001,
@@ -91,6 +137,16 @@ impl Type {
                 Type::Interval => 1187,
                 Type::Uuid => 2951,
                 Type::Jsonb => 3807,
+                Type::Varchar => 1015,
+                Type::Bpchar => 1014,
+                Type::Name => 1003,
+                Type::Char => 1002,
+                Type::Json => 199,
+                Type::Oid => 1028,
+                Type::Reg(RegKind::Class) => 2210,
+                Type::Reg(RegKind::Type) => 2211,
+                Type::Reg(RegKind::Proc) => 1008,
+                Type::Reg(RegKind::Namespace) => 4090,
                 _ => 0,
             },
         }
@@ -105,8 +161,17 @@ impl Type {
             21 => Some(Type::Int2),
             23 => Some(Type::Int4),
             25 => Some(Type::Text),
-            // varchar and bpchar are carried as text until they get their own types.
-            1042 | 1043 => Some(Type::Text),
+            1043 => Some(Type::Varchar),
+            1042 => Some(Type::Bpchar),
+            19 => Some(Type::Name),
+            18 => Some(Type::Char),
+            114 => Some(Type::Json),
+            26 => Some(Type::Oid),
+            2205 => Some(Type::Reg(RegKind::Class)),
+            2206 => Some(Type::Reg(RegKind::Type)),
+            24 => Some(Type::Reg(RegKind::Proc)),
+            4089 => Some(Type::Reg(RegKind::Namespace)),
+            2278 => Some(Type::Void),
             700 => Some(Type::Float4),
             701 => Some(Type::Float8),
             1700 => Some(Type::Numeric),
@@ -129,7 +194,17 @@ impl Type {
             1001 => Type::Bytea,
             1005 => Type::Int2,
             1007 => Type::Int4,
-            1009 | 1014 | 1015 => Type::Text,
+            1009 => Type::Text,
+            1015 => Type::Varchar,
+            1014 => Type::Bpchar,
+            1003 => Type::Name,
+            1002 => Type::Char,
+            199 => Type::Json,
+            1028 => Type::Oid,
+            2210 => Type::Reg(RegKind::Class),
+            2211 => Type::Reg(RegKind::Type),
+            1008 => Type::Reg(RegKind::Proc),
+            4090 => Type::Reg(RegKind::Namespace),
             1016 => Type::Int8,
             1021 => Type::Float4,
             1022 => Type::Float8,
@@ -150,14 +225,16 @@ impl Type {
     /// `typlen` as reported in `RowDescription`: the fixed width, or -1 for varlena types.
     pub fn size(&self) -> i16 {
         match self {
-            Type::Bool => 1,
+            Type::Bool | Type::Char => 1,
             Type::Int2 => 2,
-            Type::Int4 | Type::Float4 | Type::Date => 4,
+            Type::Name => 64,
+            Type::Int4 | Type::Float4 | Type::Date | Type::Oid | Type::Reg(_) => 4,
             Type::Int8 | Type::Float8 | Type::Timestamptz | Type::Timestamp | Type::Time => 8,
             Type::TimeTz => 12,
             Type::Interval | Type::Uuid => 16,
             Type::Unknown => -2,
-            Type::Numeric | Type::Text | Type::Bytea | Type::Jsonb | Type::Array(_) => -1,
+            Type::Void => 4,
+            Type::Numeric | Type::Text | Type::Bytea | Type::Jsonb | Type::Array(_) | Type::Varchar | Type::Bpchar | Type::Json => -1,
         }
     }
 
@@ -189,6 +266,14 @@ impl Type {
             Type::Timestamptz => "timestamp with time zone",
             Type::Interval => "interval",
             Type::Jsonb => "jsonb",
+            Type::Varchar => "character varying",
+            Type::Bpchar => "character",
+            Type::Name => "name",
+            Type::Char => "\"char\"",
+            Type::Json => "json",
+            Type::Oid => "oid",
+            Type::Reg(k) => k.typname(),
+            Type::Void => "void",
             Type::Array(_) => "array",
         }
     }
@@ -214,6 +299,14 @@ impl Type {
             Type::Timestamptz => "timestamptz".into(),
             Type::Interval => "interval".into(),
             Type::Jsonb => "jsonb".into(),
+            Type::Varchar => "varchar".into(),
+            Type::Bpchar => "bpchar".into(),
+            Type::Name => "name".into(),
+            Type::Char => "char".into(),
+            Type::Json => "json".into(),
+            Type::Oid => "oid".into(),
+            Type::Reg(k) => k.typname().into(),
+            Type::Void => "void".into(),
             Type::Array(elem) => format!("_{}", elem.typname()),
         }
     }
@@ -230,7 +323,18 @@ impl Type {
             "float4" | "real" => Type::Float4,
             "float8" | "double precision" | "float" => Type::Float8,
             "numeric" | "decimal" => Type::Numeric,
-            "text" | "varchar" | "character varying" | "char" | "character" | "bpchar" | "name" | "citext" => Type::Text,
+            "text" | "citext" => Type::Text,
+            "varchar" | "character varying" => Type::Varchar,
+            "char" | "character" | "bpchar" => Type::Bpchar,
+            "name" => Type::Name,
+            "\"char\"" => Type::Char,
+            "json" => Type::Json,
+            "oid" => Type::Oid,
+            "regclass" => Type::Reg(RegKind::Class),
+            "regtype" => Type::Reg(RegKind::Type),
+            "regproc" => Type::Reg(RegKind::Proc),
+            "regnamespace" => Type::Reg(RegKind::Namespace),
+            "void" => Type::Void,
             "bytea" => Type::Bytea,
             "uuid" => Type::Uuid,
             "timestamptz" | "timestamp with time zone" => Type::Timestamptz,
@@ -239,7 +343,7 @@ impl Type {
             "time" | "time without time zone" => Type::Time,
             "timetz" | "time with time zone" => Type::TimeTz,
             "interval" => Type::Interval,
-            "jsonb" | "json" => Type::Jsonb,
+            "jsonb" => Type::Jsonb,
             "unknown" => Type::Unknown,
             _ => return None,
         };
@@ -252,6 +356,18 @@ impl Type {
 
     pub fn is_float(&self) -> bool {
         matches!(self, Type::Float4 | Type::Float8)
+    }
+
+    /// The string-category types that convert to `text` implicitly (`varchar`, `bpchar`,
+    /// `name`, `"char"`) and `text` itself.
+    pub fn is_string(&self) -> bool {
+        matches!(self, Type::Text | Type::Varchar | Type::Bpchar | Type::Name | Type::Char)
+    }
+
+    /// The type a function or operator lookup sees: string types resolve through `text`, as
+    /// Postgres' implicit casts make them do.
+    pub fn lookup_type(&self) -> Type {
+        if self.is_string() { Type::Text } else { self.clone() }
     }
 
     pub fn is_numeric(&self) -> bool {
@@ -270,7 +386,11 @@ impl Type {
         match self {
             Type::Bool => 'B',
             Type::Int2 | Type::Int4 | Type::Int8 | Type::Float4 | Type::Float8 | Type::Numeric => 'N',
-            Type::Text => 'S',
+            Type::Text | Type::Varchar | Type::Bpchar | Type::Name => 'S',
+            Type::Char => 'Z',
+            Type::Void => 'P',
+            Type::Oid | Type::Reg(_) => 'N',
+            Type::Json => 'U',
             Type::Timestamptz | Type::Timestamp | Type::Date | Type::Time | Type::TimeTz => 'D',
             Type::Interval => 'T',
             Type::Array(_) => 'A',
@@ -351,6 +471,15 @@ mod tests {
             Type::Timestamptz,
             Type::Interval,
             Type::Jsonb,
+            Type::Varchar,
+            Type::Bpchar,
+            Type::Name,
+            Type::Char,
+            Type::Json,
+            Type::Oid,
+            Type::Reg(RegKind::Class),
+            Type::Reg(RegKind::Type),
+            Type::array_of(Type::Varchar),
             Type::array_of(Type::Int4),
             Type::array_of(Type::Text),
             Type::array_of(Type::Int8),
@@ -363,7 +492,8 @@ mod tests {
     fn sql_names() {
         assert_eq!(Type::from_sql_name("INTEGER"), Some(Type::Int4));
         assert_eq!(Type::from_sql_name("double precision"), Some(Type::Float8));
-        assert_eq!(Type::from_sql_name("varchar"), Some(Type::Text));
+        assert_eq!(Type::from_sql_name("varchar"), Some(Type::Varchar));
+        assert_eq!(Type::from_sql_name("\"char\""), Some(Type::Char));
         assert_eq!(Type::from_sql_name("nope"), None);
     }
 }

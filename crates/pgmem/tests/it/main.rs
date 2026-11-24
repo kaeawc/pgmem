@@ -106,6 +106,7 @@ mod server;
 mod setnow;
 mod smoke;
 mod string_agg;
+mod string_and_oid_types;
 mod string_funcs_more;
 mod strings;
 mod subquery;

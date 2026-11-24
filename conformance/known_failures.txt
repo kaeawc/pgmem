@@ -54,7 +54,6 @@ catalog/orm_reflection.slt:7898ca550364be75  # CREATE TABLE users (
 catalog/orm_reflection.slt:81fb736508cd14d2  # CREATE UNIQUE INDEX index_users_on_login ON users (login)
 catalog/orm_reflection.slt:37c73cba0a515edf  # CREATE TABLE posts (
 catalog/orm_reflection.slt:4ad96db3261016a6  # SELECT c.relname FROM pg_class c LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
-catalog/orm_reflection.slt:a65eb7364378138a  # SELECT current_schemas(false), current_schemas(true)
 catalog/orm_reflection.slt:600696c0b1650efa  # SELECT a.attname, format_type(a.atttypid, a.atttypmod),
 catalog/orm_reflection.slt:dd8b06fac31bd173  # SELECT a.attname
 catalog/orm_reflection.slt:bcc557f2e5d684e7  # SELECT distinct i.relname, d.indisunique, d.indkey, pg_get_indexdef(d.indexrelid)
@@ -66,8 +65,6 @@ catalog/orm_reflection.slt:8a89934c4b7330b3  # SELECT c.relname,
 catalog/orm_reflection.slt:38ea5be4a2fa20e2  # SELECT s.relname, a.attname
 catalog/orm_reflection.slt:2916f4229838f4e3  # SELECT c.conname,
 catalog/orm_reflection.slt:63a6c813bc48d939  # SELECT indexname, array_agg(attname ORDER BY arridx), indisunique, indisprimary, amname
-catalog/orm_reflection.slt:836be4cb2b71057b  # SELECT current_schema()
-catalog/orm_reflection.slt:73b61b7d063fbb54  # SHOW transaction isolation level
 catalog/orm_reflection.slt:753e09c1dd03054c  # SELECT pg_catalog.pg_class.relname
 catalog/orm_reflection.slt:8bdfbfd4b3d018be  # SELECT pg_catalog.format_type(pg_catalog.pg_type.oid, NULL) AS name,
 catalog/orm_reflection.slt:aaa470f8f0c4afdd  # SELECT oid.namespace, info.table_name, info.column_name,
@@ -141,19 +138,12 @@ catalog/psql_describe.slt:c63e61ef119ac639  # SELECT n.nspname as "Schema",
 catalog/psql_describe.slt:b4a232974cda9996  # SELECT pg_catalog.pg_get_viewdef('big_orders'::regclass, true)
 catalog/psql_describe.slt:2a06f0edb35004e2  # SELECT n.nspname as "Schema", c.relname as "Name"
 catalog/regtypes.slt:209fce473162f6bf  # CREATE TABLE other.thing (x int)
-catalog/regtypes.slt:33c7fd943c1e593a  # SELECT 't'::regclass::text
-catalog/regtypes.slt:733c58d3be057f1b  # SELECT 'public.t'::regclass::text
 catalog/regtypes.slt:14048f7f9e264ca2  # SELECT 'other.thing'::regclass::text
-catalog/regtypes.slt:f5eab2314b95f1c3  # SELECT '"Mixed Case"'::regclass::text
-catalog/regtypes.slt:f05a24c23bcfdfc4  # SELECT 'missing_table'::regclass
 catalog/regtypes.slt:c2c4c26889599f41  # SELECT to_regclass('t')::text, to_regclass('missing_table')
 catalog/regtypes.slt:04104fd63a6eb57a  # SELECT to_regclass('other.thing') IS NOT NULL, to_regclass('thing') IS NULL
 catalog/regtypes.slt:becbe6e718469440  # SELECT 'pg_class'::regclass::text, 'pg_catalog.pg_type'::regclass::text
 catalog/regtypes.slt:1238c168bb65155b  # SELECT 'other.thing'::regclass::text, 't'::regclass::text
-catalog/regtypes.slt:26265899aba9dae4  # SELECT 'int4'::regtype::text, 'integer'::regtype::text, 'int'::regtype::text
-catalog/regtypes.slt:dd550f02e9c866d5  # SELECT 'varchar'::regtype::text, 'timestamptz'::regtype::text, 'bool'::regtype::text
 catalog/regtypes.slt:a9ad1acbbcdab0ae  # SELECT 'text[]'::regtype::text, '_int4'::regtype::text, 'double precision'::regtype::text
-catalog/regtypes.slt:107f8311c7097f07  # SELECT 'nosuchtype'::regtype
 catalog/regtypes.slt:6bef4f5a061f8a39  # SELECT to_regtype('int8')::text, to_regtype('nosuchtype')
 catalog/regtypes.slt:308ca72692b033f8  # SELECT 't'::regtype::text
 catalog/regtypes.slt:43bb78d7e6cf32ff  # SELECT format_type('int4'::regtype, NULL), format_type('numeric'::regtype, 655366)
@@ -163,7 +153,6 @@ catalog/regtypes.slt:e1b41969bcc4d789  # SELECT 'now'::regproc::text, 'lower(tex
 catalog/regtypes.slt:a46df17aff91d2e0  # SELECT 'public'::regnamespace::text, to_regnamespace('nope')
 catalog/regtypes.slt:4f75d112acc7d9bf  # SELECT to_regproc('upper')::text, to_regprocedure('abs(integer)')::text
 catalog/regtypes.slt:8075e63338d5e5d7  # SELECT 't'::regclass = (SELECT oid FROM pg_class WHERE relname = 't')
-catalog/regtypes.slt:d69b0b63ea3f36ea  # SELECT 'int4'::regtype = 23::oid
 catalog/regtypes.slt:2fc6c49cbe03bde5  # SELECT pg_table_is_visible('t'::regclass), pg_table_is_visible('other.thing'::regclass)
 catalog/regtypes.slt:32ac5458fde7dba3  # SELECT pg_type_is_visible('int4'::regtype)
 catalog/settings.slt:aaf9dcf5e023a4c1  # SELECT name, setting, vartype FROM pg_settings
@@ -254,7 +243,6 @@ constraints/keys_unique.slt:f45a27899f67be03  # SELECT conname, contype, condefe
 ddl/alter_table.slt:865bfd9e3ad08df4  # SELECT column_name FROM information_schema.columns WHERE table_name = 't' ORDER BY ordinal_position
 ddl/alter_table.slt:eb1b6865c69d611a  # SELECT column_name, is_nullable, column_default FROM information_schema.columns WHERE table_name = 't' ORDER BY ordinal_position
 ddl/alter_table.slt:2a30c0766251ab31  # ALTER TABLE ty ALTER COLUMN b TYPE int
-ddl/alter_table.slt:90a0690343e1517e  # SELECT a, b, c FROM ty ORDER BY a
 ddl/alter_table.slt:14f1fb886b075259  # SELECT column_name, data_type, numeric_precision, numeric_scale, character_maximum_length FROM information_schema.columns WHERE table_name = 'ty' ORDER BY ordinal_position
 ddl/alter_table.slt:61b6a2d21fbb710f  # CREATE SCHEMA other; ALTER TABLE ty2 SET SCHEMA other
 ddl/alter_table.slt:5cb4ed4d412a21a8  # SELECT count(*) FROM other.ty2
@@ -286,7 +274,6 @@ ddl/create_table.slt:c3219dc7b95d6dc1  # SELECT * FROM tmp1
 ddl/create_table.slt:f00debd5b36659ce  # SELECT relname, relpersistence FROM pg_class WHERE relname IN ('tmp1', 'unl', 'src') ORDER BY relname
 ddl/create_table.slt:d5c9cceca396a9e8  # SELECT (SELECT count(*) FROM src), (SELECT count(*) FROM public.src)
 ddl/create_table.slt:094e9270eb3d0521  # SELECT count(*) FROM src
-ddl/create_table.slt:8a633002197e589c  # SELECT v, c, length(c), n FROM lens
 ddl/drop.slt:4e010ef3b228f453  # SELECT (SELECT count(*) FROM pg_constraint WHERE conrelid = 'child'::regclass AND contype = 'f'), (SELECT count(*) FROM pg_views WHERE viewname = 'parent_v')
 ddl/drop.slt:66a0712b7d0a934c  # DROP VIEW v1
 ddl/drop.slt:b70ebd911aa82dbe  # DROP VIEW v1 CASCADE
@@ -351,11 +338,8 @@ ddl/migrations.slt:ca2612da7cd63470  # INSERT INTO "Post" ("authorId", "title") 
 ddl/migrations.slt:cc42d88ccc52170c  # CREATE TYPE "Role" AS ENUM ('USER', 'ADMIN'); ALTER TABLE "User" ADD COLUMN "role" "Role" NOT NULL DEFAULT 'USER'
 ddl/migrations.slt:b9dc0e67412cf851  # ALTER TYPE "Role" ADD VALUE 'OWNER'; INSERT INTO "User" ("email") VALUES ('a@x.com')
 ddl/migrations.slt:75cb2a4fd1604905  # SELECT "email", "role", enum_range(NULL::"Role") FROM "User"
-ddl/migrations.slt:d620ef09de1fbcc5  # SELECT pg_advisory_lock(1), pg_try_advisory_lock(1)
 ddl/migrations.slt:6bcf744ad9557798  # SELECT pg_try_advisory_lock(1)
 ddl/migrations.slt:70c4511f72841147  # SELECT pg_advisory_unlock(1), pg_advisory_unlock(1), pg_advisory_unlock(1)
-ddl/migrations.slt:19343a098580c085  # SELECT pg_try_advisory_lock(1), pg_advisory_unlock_all()
-ddl/migrations.slt:65d716d9c06ba3c3  # SELECT pg_advisory_lock(3, 4), pg_advisory_unlock(3, 4), pg_advisory_lock(12345::bigint), pg_advisory_unlock(12345::bigint)
 ddl/migrations.slt:6bd6804ad95baaaa  # SELECT pg_try_advisory_lock(7)
 ddl/migrations.slt:f0d2ff0d744be15f  # BEGIN; LOCK TABLE schema_migrations IN ACCESS EXCLUSIVE MODE; COMMIT
 ddl/migrations.slt:d2566517e7c545a5  # LOCK TABLE schema_migrations
@@ -391,11 +375,9 @@ ddl/migrations.slt:a0eb907c4dff4669#2  # DROP TRIGGER docs_audit ON docs
 ddl/migrations.slt:38985e8ae60ca77c  # SELECT trigger_name, event_manipulation, action_timing FROM information_schema.triggers WHERE event_object_table = 'docs' ORDER BY trigger_name, event_manipulation
 ddl/schema.slt:3a44e498f82cb981#2  # CREATE SCHEMA app
 ddl/schema.slt:26a033cadd26bdf1  # CREATE SCHEMA IF NOT EXISTS app; CREATE TABLE app.items (id int, name text); INSERT INTO app.items VALUES (1, 'in app')
-ddl/schema.slt:78264e30f825559c  # SELECT current_schema(), current_setting('search_path')
 ddl/schema.slt:96047c285dfcdcdb  # SELECT current_schema(), (SELECT name FROM items)
 ddl/schema.slt:4ad88b4c300d2346  # SELECT table_schema FROM information_schema.tables WHERE table_name = 'created_in_app'
 ddl/schema.slt:a99381411f7cbc66  # SELECT name FROM items
-ddl/schema.slt:836be4cb2b71057b  # SELECT current_schema()
 ddl/schema.slt:a99381411f7cbc66#3  # SELECT name FROM items
 ddl/schema.slt:c3c2a749b0f1afed  # CREATE SCHEMA "My Schema"; CREATE TABLE "My Schema".t (a int); INSERT INTO "My Schema".t VALUES (1)
 ddl/schema.slt:bb102635a950a305  # SELECT a FROM "My Schema".t
@@ -462,8 +444,6 @@ dml/delete.slt:e1f0d2dfc7388255  # DELETE FROM book WHERE CURRENT OF cur RETURNI
 dml/delete.slt:78d6d6702d113074  # DELETE FROM book b WHERE book.id = 1
 dml/delete.slt:cc7500f6d2aed8f0  # DELETE FROM book RETURNING id
 dml/insert.slt:36a5e8593aabee81  # INSERT INTO items (name, name) VALUES ('a', 'b')
-dml/insert.slt:82d05fe84669fa82  # INSERT INTO coerce VALUES ('42', 7, 'abc', 1.005, 'yes', '{"a": [1, 2]}') RETURNING *
-dml/insert.slt:a57d26721a6a0a86  # INSERT INTO coerce (v) VALUES ('abcdef'::varchar(3)), ('ab   ') RETURNING v, length(v)
 dml/merge.slt:630021a9c37cd711  # MERGE INTO stock s USING delivery d ON s.sku = d.sku WHEN MATCHED THEN UPDATE SET qty = s.qty + d.qty WHEN NOT MATCHED THEN INSERT (sku, qty) VALUES (d.sku, d.qty)
 dml/merge.slt:e66d964e089cfa94  # SELECT sku, qty, note FROM stock ORDER BY sku
 dml/merge.slt:73a8656845b599be  # MERGE INTO stock s USING (VALUES ('a', 1), ('c', 0), ('d', 3), ('f', 0)) AS v(sku, qty) ON s.sku = v.sku WHEN MATCHED AND s.qty + v.qty <= 0 THEN DELETE WHEN MATCHED AND v.qty = 1 THEN UPDATE SET note = 'one' WHEN MATCHED THEN UPDATE SET qty = s.qty + v.qty WHEN NOT MATCHED AND v.qty = 0 THEN DO NOTHING WHEN NOT MATCHED THEN INSERT VALUES (v.sku, v.qty)
@@ -488,15 +468,9 @@ dml/on_conflict.slt:8af6d1dd260c17ba  # INSERT INTO kv (k, v) VALUES ('f2', 0) O
 dml/on_conflict.slt:c7d8af710482c7dd  # SELECT k, v, hits FROM kv ORDER BY k
 dml/on_conflict.slt:53c877beeb621e44  # INSERT INTO users (email) VALUES ('y@example.com') ON CONFLICT (email) DO NOTHING
 dml/on_conflict.slt:8ce9ce1dd7ed5cb8  # INSERT INTO accounts VALUES (2, 'ALICE@example.COM') ON CONFLICT (lower(email)) DO UPDATE SET email = EXCLUDED.email RETURNING id, email
-dml/orm_patterns.slt:b2ec05ae7225493d  # INSERT INTO "product" ("sku", "name", "price") VALUES ('A1', 'Alpha', 9.5) RETURNING "product"."id", "product"."sku", "product"."created_at"
-dml/orm_patterns.slt:c25add04265821b1  # INSERT INTO product (sku, name, price) SELECT * FROM unnest(ARRAY['A1', 'B2', 'C3']::varchar[], ARRAY['Alpha2', 'Beta', 'Gamma'], ARRAY[10, 20, 30]::numeric[]) ON CONFLICT (sku) DO UPDATE SET name = EXCLUDED.name, price = EXCLUDED.price, version = product.version + 1 RETURNING sku, name, price, version
-dml/orm_patterns.slt:6b1421f33f8c13ec  # INSERT INTO product (sku, name) SELECT p0, p1 FROM (VALUES ('E5', 'Eps', 0), ('F6', 'Phi', 1), ('G7', 'Gam', 2)) AS imp_sen(p0, p1, sen_counter) ORDER BY sen_counter RETURNING sku, name
 dml/orm_patterns.slt:c6825b22183268e8  # INSERT INTO product (sku, name, price) VALUES ('H8'::varchar, 'Eta'::text, '12.345'::numeric) ON CONFLICT (sku) DO UPDATE SET price = EXCLUDED.price RETURNING id > 0 AS has_id, price, (xmax = 0) AS inserted
 dml/orm_patterns.slt:df1c5a2fc0c36afe  # INSERT INTO product (sku, name, price) VALUES ('H8'::varchar, 'Eta'::text, '13'::numeric) ON CONFLICT (sku) DO UPDATE SET price = EXCLUDED.price RETURNING price, (xmax = 0) AS inserted
-dml/orm_patterns.slt:d2b47e48c86021ab  # UPDATE product AS p SET price = v.price, name = v.name FROM (VALUES ('A1', 11.00, 'Alpha3'), ('C3', 31.00, 'Gamma2')) AS v(sku, price, name) WHERE p.sku = v.sku RETURNING p.sku, p.price, p.name
 dml/orm_patterns.slt:63925db1c9f27f54  # SELECT sku FROM product WHERE deleted_at IS NULL ORDER BY sku
-dml/orm_patterns.slt:8c135a1c6a1b04a4  # DELETE FROM product WHERE id = ANY(SELECT id FROM product WHERE deleted_at IS NOT NULL) RETURNING sku
-dml/orm_patterns.slt:ec648c1cc59a317e  # DELETE FROM product WHERE sku IN ('G7', 'nope') RETURNING sku
 dml/orm_patterns.slt:93413b6eeb285830  # DELETE FROM events WHERE ctid IN (SELECT ctid FROM events WHERE kind = 'odd' ORDER BY id LIMIT 2) RETURNING id
 dml/orm_patterns.slt:c7bec65a73bf3c3c  # DELETE FROM events WHERE ctid = ANY(ARRAY(SELECT ctid FROM events ORDER BY id DESC LIMIT 2)) RETURNING id
 dml/orm_patterns.slt:1988239bfb76dcc0  # UPDATE events SET processed = true LIMIT 1
@@ -558,17 +532,9 @@ functions/arrays.slt:0e8d79333f230b3a  # SELECT array_agg(ARRAY[x, x * 10]) FROM
 functions/arrays.slt:f00b8e9669c80d9e  # SELECT '{1,2,3}'::int[], '{{1,2},{3,4}}'::int[], '{"a b",NULL,"","c\"d"}'::text[], ARRAY['a,b', 'c']
 functions/arrays.slt:039ba7655f903c8a  # SELECT '{{1,2},{3}}'::int[]
 functions/arrays.slt:0d879a51b5704d4a  # SELECT ARRAY[[1, 2], [3]]
-functions/arrays.slt:41f545b3ad424eb4  # SELECT ARRAY[1, 2.5], pg_typeof(ARRAY[1, 2.5]), ARRAY[1::smallint, 2::bigint], pg_typeof(ARRAY['a', 'b'])
 functions/arrays.slt:df7c4c7fcd5c823b  # UPDATE t SET tags[3] = 'z' WHERE id = 1
 functions/arrays.slt:c2fe718cdc0a43c9  # SELECT id, tags FROM t ORDER BY id
 functions/arrays.slt:9a9006940458022b  # SELECT id, tags FROM t WHERE tags && ARRAY['z', 'c'] ORDER BY id
-functions/conditional_misc.slt:5bedf0defc2d0749  # SELECT coalesce(NULL, 2, 3), coalesce(NULL::int, NULL), coalesce('a', 'b'), pg_typeof(coalesce(1, 2.5))
-functions/conditional_misc.slt:82bef98fde40a6c3  # SELECT coalesce(1, '2'), pg_typeof(coalesce(NULL, 'x'))
-functions/conditional_misc.slt:84366e6aabba6c98  # SELECT greatest(1, 2.5, 3::bigint), pg_typeof(greatest(1, 2.5)), least('b', 'a', NULL), pg_typeof(least(1::smallint, 2))
-functions/conditional_misc.slt:c23d228d5c601cde  # SELECT greatest(date '2024-01-01', timestamp '2023-06-01 12:00'), pg_typeof(greatest(date '2024-01-01', timestamp '2023-06-01'))
-functions/conditional_misc.slt:77b9f7ec31a9f623  # SELECT CASE WHEN true THEN 1 ELSE 2.5 END, pg_typeof(CASE WHEN true THEN 1 ELSE 2.5 END)
-functions/conditional_misc.slt:549d59ce980a2006  # SELECT CASE WHEN true THEN 1 ELSE '2' END, pg_typeof(CASE WHEN true THEN 'a' ELSE NULL END)
-functions/conditional_misc.slt:d85de8902169b045  # SELECT CASE WHEN true THEN 1 ELSE true END
 functions/conditional_misc.slt:0279d94087ccfd1f  # SELECT generate_series(1.5, 3.0, 0.5)
 functions/conditional_misc.slt:979c86d38764c5b0  # SELECT generate_series(1::bigint, 3::bigint), pg_typeof(generate_series(1::bigint, 1))
 functions/conditional_misc.slt:8330a6241dbe7de0  # SELECT * FROM generate_series(timestamptz '2024-03-09', timestamptz '2024-03-12', interval '1 day', 'America/New_York')
@@ -576,10 +542,8 @@ functions/conditional_misc.slt:85ec463ae213a964  # SELECT generate_subscripts(AR
 functions/conditional_misc.slt:7e28717042d08aa6  # SELECT generate_subscripts('[3:5]={x,y,z}'::text[], 1), generate_subscripts(ARRAY[1, 2], 1, true)
 functions/conditional_misc.slt:cc51e3db8447f1f2  # SELECT generate_subscripts(ARRAY[[1, 2, 3], [4, 5, 6]], 2)
 functions/conditional_misc.slt:798d7c4d5544036e  # SELECT num_nulls(1, NULL, 2, NULL), num_nonnulls(1, NULL, 2, NULL), num_nulls(VARIADIC ARRAY[NULL, 1])
-functions/conditional_misc.slt:ec7f339c4c52e450  # SELECT pg_typeof(1), pg_typeof(1.5), pg_typeof('a'), pg_typeof('a'::text), pg_typeof(NULL), pg_typeof(1::int8), pg_typeof(true)
 functions/conditional_misc.slt:f1ab761e0adcfb37  # SELECT pg_typeof(ARRAY[1]), pg_typeof('{}'::jsonb), pg_typeof(date '2024-01-01' - 1), pg_typeof(interval '1 day'), pg_typeof(ROW(1, 2))
 functions/conditional_misc.slt:e7844523f793ccce  # SELECT pg_typeof(1)::text = 'integer', format_type('int4'::regtype, NULL), format_type('varchar'::regtype, 14)
-functions/conditional_misc.slt:553bdb7cf20b578e  # SELECT current_schema, current_schema(), current_schemas(false)
 functions/conditional_misc.slt:e2078d87afc205fd  # SELECT set_config('application_name', 'conf', false), current_setting('application_name')
 functions/conditional_misc.slt:3ea2063f8247bffe  # SELECT set_config('my.custom', 'v1', false), current_setting('my.custom')
 functions/conditional_misc.slt:38d2a338c483f4bb  # SELECT pg_column_size(1::int4), pg_column_size(1::int8), pg_column_size('abc'::text)
@@ -588,11 +552,8 @@ functions/conditional_misc.slt:263f43f0a1e43316  # SELECT to_regclass('no_such_t
 functions/conditional_misc.slt:b5355bcb6afee2be  # SELECT pg_get_viewdef('pg_roles'::regclass) IS NOT NULL
 functions/conditional_misc.slt:14bbaf437abd0a9c  # SELECT uuid_extract_version('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11')
 functions/conditional_misc.slt:f9afb9740dc2477b  # SELECT 1 IS DISTINCT FROM NULL, NULL IS NOT DISTINCT FROM NULL, 2 BETWEEN 1 AND 3, 2 BETWEEN SYMMETRIC 3 AND 1
-functions/datetime.slt:1af48898afa97628  # SELECT date_part('year', timestamp '2024-03-15 14:30:45.123456'), date_part('epoch', timestamp '2024-03-15 14:30:45.123456'), pg_typeof(date_part('day', timestamp '2024-03-15 14:30:45.123456')), pg_typeof(extract(day FROM timestamp '2024-03-15 14:30:45.123456'))
-functions/datetime.slt:e4cd1b45bc96fb1f  # SELECT date_trunc('day', timestamptz '2024-03-15 14:30:45.123456+00'), pg_typeof(date_trunc('day', timestamptz '2024-03-15 14:30:45.123456+00'))
 functions/datetime.slt:f3fc0dfd9fbc8199  # SELECT date_trunc('day', timestamptz '2024-03-15 02:30+00', 'America/New_York')
 functions/datetime.slt:3faacd492aca4642  # SELECT date_trunc('month', timestamptz '2024-03-01 03:00+00', 'Asia/Tokyo')
-functions/datetime.slt:89d3ba25d5558cb7  # SELECT date_trunc('day', date '2024-03-15'), pg_typeof(date_trunc('day', date '2024-03-15'))
 functions/datetime.slt:37d2fd921bbf7884  # SELECT date_trunc('fortnight', timestamp '2024-01-01')
 functions/datetime.slt:70deb1e1fbfbacbc  # SELECT make_timestamptz(2024, 3, 15, 14, 30, 0, 'America/New_York'), make_timestamptz(2024, 7, 1, 0, 0, 0, '+02')
 functions/datetime.slt:d4ebc931d41119e7  # SELECT make_interval(days => 10), make_interval(1, 2, 3, 4, 5, 6, 7.5), make_interval(hours => -3, mins => 30)
@@ -617,7 +578,6 @@ functions/datetime.slt:36334faa88b1322d  # SET TIME ZONE 'America/New_York'
 functions/datetime.slt:ecd4c250da5de147  # SELECT timestamptz '2024-03-15 12:00+00', timestamptz '2024-12-15 12:00+00', timestamp '2024-03-15 12:00'::timestamptz
 functions/datetime.slt:a5cf8c5a48a4b5cb  # SELECT date_trunc('day', timestamptz '2024-03-10 12:00+00'), extract(hour FROM timestamptz '2024-03-15 12:00+00'), to_char(timestamptz '2024-03-15 12:00+00', 'HH24 TZ OF')
 functions/datetime.slt:932a6ee49c28fd13  # SELECT timestamptz '2024-03-09 12:00' + interval '1 day', timestamptz '2024-03-09 12:00' + interval '24 hours'
-functions/datetime.slt:5cf44221cf2e7647  # SELECT date '2024-03-15' + 10, date '2024-03-15' - 10, date '2024-03-15' - date '2024-01-01', pg_typeof(date '2024-03-15' - date '2024-01-01')
 functions/datetime.slt:698ce51c507f358f  # SELECT (date '2024-03-15', date '2024-03-20') OVERLAPS (date '2024-03-18', date '2024-03-25')
 functions/datetime.slt:2a522709b877315c  # SELECT isfinite(date '2024-03-15'), isfinite(date 'infinity'), isfinite(timestamp '-infinity'), isfinite(interval '1 day'), isfinite(interval 'infinity')
 functions/datetime.slt:c8a8a8133848aab0  # SELECT date 'infinity' > date '9999-12-31', timestamp 'infinity' - interval '1 day', 'infinity'::timestamp - timestamp '2024-01-01'
@@ -650,9 +610,7 @@ functions/json.slt:970dc0a22ced8931  # SELECT JSON_ARRAYAGG(x ORDER BY x), JSON_
 functions/json.slt:aa22be4add9abc3f  # SELECT jsonb_agg_strict(x) FROM (VALUES (1), (NULL), (2)) v(x)
 functions/json.slt:873d5757ef6c6029  # SELECT * FROM json_array_elements('[true, [1]]')
 functions/json.slt:3eae9ee4c9dcba70  # SELECT * FROM jsonb_array_elements('{"a": 1}')
-functions/json.slt:dc95c4aa1398d4f1  # SELECT '{"b": 1, "a": 2, "a": 3}'::jsonb, '{"b": 1, "a": 2, "a": 3}'::json
 functions/json.slt:7729d972e024d34a  # SELECT '  [1,2,   3]  '::jsonb, '1.000'::jsonb, '1e3'::jsonb, '"\u00e9"'::jsonb
-functions/json.slt:73d56dcad847b81c  # SELECT ('{"n": 42}'::jsonb -> 'n')::int, ('{"n": "42"}'::jsonb ->> 'n')::int, ('true'::jsonb)::boolean, ('3.5'::jsonb)::numeric
 functions/json.slt:dcac2c81b250ea67  # SELECT jsonb_path_query('{"a": [1, 2, 3, 4]}', '$.a[*] ? (@ > 2)')
 functions/json.slt:8557137f3ffc64f0  # SELECT jsonb_path_query_array('{"a": [1, 2, 3]}', '$.a[*] ? (@ > 1)'), jsonb_path_query_first('{"a": [1, 2]}', '$.a[last]')
 functions/json.slt:6079885350741731  # SELECT jsonb_path_exists('{"a": [1, 2]}', '$.a[*] ? (@ == 2)'), jsonb_path_match('{"a": 1}', '$.a == 1')
@@ -694,9 +652,6 @@ functions/math.slt:21f429259be593eb  # SELECT sinh(0), cosh(0), tanh(0), asinh(0
 functions/math.slt:0d140fb1b4e5079b  # SELECT asin(2)
 functions/math.slt:e41b18d7aaeb63df  # SELECT scale(8.4100), min_scale(8.4100), trim_scale(8.4100), trim_scale(0.000)
 functions/math.slt:a94a625fe944d825  # SELECT '1e20'::float8, 1e20::numeric, 'NaN'::float8, '-Infinity'::numeric
-functions/math.slt:5643b13678535faf  # SELECT pg_typeof(1 + 1::bigint), pg_typeof(1 + 1.5), pg_typeof(1 + 1.5::float4), pg_typeof(1::smallint + 1::smallint), pg_typeof(1.5::float4 * 2::numeric)
-functions/math.slt:6a2a1b77a285b769  # SELECT pg_typeof(abs(1::smallint)), pg_typeof(round(1::int)), pg_typeof(ceil(1::int)), pg_typeof(sqrt(4)), pg_typeof(power(2, 2))
-functions/math.slt:b8656d2d182640e3  # SELECT pg_typeof(sum(x)), pg_typeof(avg(x)), pg_typeof(sum(x::bigint)), pg_typeof(sum(x::float4)) FROM (VALUES (1)) v(x)
 functions/math.slt:68aaac9d073579aa  # SELECT stddev(x::float8), variance(x::float8) FROM (VALUES (1), (2), (4)) v(x)
 functions/math.slt:0c5656e9c0365953  # SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x), percentile_disc(0.5) WITHIN GROUP (ORDER BY x), mode() WITHIN GROUP (ORDER BY x) FROM (VALUES (1), (2), (2), (4)) v(x)
 functions/math.slt:7b31b6be7369ea32  # SELECT corr(x, y), covar_pop(x, y), regr_slope(y, x), regr_intercept(y, x) FROM (VALUES (1, 2), (2, 4), (3, 7)) v(x, y)
@@ -714,8 +669,6 @@ functions/regex.slt:202e8e0eb1f13101  # SELECT regexp_instr('number of your row'
 functions/regex.slt:b089208102bf21f8  # SELECT regexp_instr('abcabc', 'b', 1, 2, 1)
 functions/regex.slt:9aced8efa38908fb  # SELECT regexp_substr('number of your row', '\w+', 1, 3), regexp_substr('ABCDEFGHI', '(c..)(...)', 1, 1, 'i', 2)
 functions/regex.slt:83387139cab442bd  # SELECT regexp_substr('abc', 'z')
-functions/string.slt:a8620c1ffe827ffb  # SELECT length('ab  '::char(4)), octet_length('ab'::char(4))
-functions/string.slt:abf04c9df658cbd0  # SELECT substr('alphabet', 3), substr('alphabet', 3, 2), substr('alphabet', 0, 3), substr('alphabet', -2, 5)
 functions/string.slt:f7d9059a7f60f495  # SELECT substring('Thomas' similar '%#"o_a#"_' escape '#')
 functions/string.slt:8ac96a95931c442e  # SELECT substring('Thomas' from '%#"o_a#"_' for '#')
 functions/string.slt:38a8c2f4669da602  # SELECT concat(VARIADIC ARRAY['a', 'b', 'c'])
@@ -727,7 +680,6 @@ functions/string.slt:e7555f8736a74454  # SELECT * FROM string_to_table('a|b|c', 
 functions/string.slt:4341115994d86985  # SELECT regexp_split_to_table('the quick  brown', '\s+')
 functions/string.slt:97bfb0ab0d0dfc6c  # SELECT unistr('d\0061t\+000061')
 functions/string.slt:8294a3308df63767  # SELECT normalize('abc'), 'abc' IS NFC NORMALIZED
-queries/aggregates.slt:71b92c483a15de2c  # SELECT pg_typeof(sum(1::int2)), pg_typeof(sum(1::int4)), pg_typeof(sum(1::int8)), pg_typeof(avg(1::int4)), pg_typeof(avg(1::float4)), pg_typeof(count(*))
 queries/aggregates.slt:4d64654c5d976799  # SELECT array_agg(x) FROM (VALUES (ARRAY[1,2]), (ARRAY[3,4])) v(x)
 queries/aggregates.slt:b7e41ff7491c8753  # SELECT round(corr(qty, f)::numeric, 6), round(regr_slope(f, qty)::numeric, 6), covar_pop(qty, f) FROM sales
 queries/aggregates.slt:15a7ae832eb4c0ba  # SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY qty), percentile_disc(0.5) WITHIN GROUP (ORDER BY qty) FROM sales
@@ -762,8 +714,6 @@ queries/errors.slt:a0da9c112c9f3832  # SELECT t1.id FROM t1 AS x
 queries/errors.slt:e723dcfbb127d429  # SELECT ARRAY[1] || 'x'::text || ARRAY[true]
 queries/errors.slt:c4277c86a2f2cda8  # SELECT 'unterminated
 queries/errors.slt:4b70024dc0080b6e  # SELECT * FROM t1 ORDER
-queries/errors.slt:6bbed7d89bb8ce6e  # SELECT CASE WHEN true THEN 1 ELSE 'x'::text END
-queries/errors.slt:566161723c36d17c  # SELECT pg_typeof(NULL)
 queries/joins.slt:aa4b8aef269da8b3  # SELECT * FROM l FULL JOIN r USING (k) ORDER BY k NULLS LAST, v, w
 queries/joins.slt:76ee6e52a1f9acd0  # SELECT k, l.k, r.k FROM l FULL JOIN r USING (k) ORDER BY 1 NULLS LAST, v, w
 queries/joins.slt:5499243ccf62d919  # SELECT * FROM l JOIN r USING (k) AS j ORDER BY j.k, v
@@ -774,10 +724,8 @@ queries/joins.slt:0000c1b795109963  # SELECT * FROM l JOIN r
 queries/ordering_limits.slt:27cdd0d26a7cf581  # SELECT id, val FROM p ORDER BY val FETCH FIRST 2 ROWS WITH TIES
 queries/ordering_limits.slt:0c18a84fec2a4377  # SELECT id, val FROM p ORDER BY val DESC NULLS LAST FETCH FIRST 3 ROWS WITH TIES
 queries/ordering_limits.slt:ee80b36ca42351ae  # SELECT id FROM p FETCH FIRST 2 ROWS WITH TIES
-queries/select_basics.slt:3366cfb2d6269bb8  # SELECT 1, 2.5, 'x', true, NULL
 queries/select_basics.slt:d2c68f2996508997  # SELECT CAST('12' AS int), '12'::int, int '5', CASE WHEN true THEN 1 END, ARRAY[1,2], ROW(1, 'a')
 queries/select_basics.slt:757fd12582e1c7ca  # TABLE items ORDER BY id LIMIT 2
-queries/select_basics.slt:53b3b71c976cb4b1  # SELECT pg_typeof(1), pg_typeof(1.0), pg_typeof('a'), pg_typeof(1::bigint + 1), pg_typeof(1::smallint + 1::smallint), pg_typeof(1 + 1.5)
 queries/set_operations.slt:e3f012e19e9c9c62  # SELECT x FROM a UNION SELECT x FROM b ORDER BY x + 1
 queries/set_operations.slt:6680237cbd789fd6  # SELECT NULL UNION SELECT 1
 queries/set_operations.slt:b3057f154d1ffcef  # SELECT 1 UNION SELECT '2' ORDER BY 1
@@ -788,7 +736,6 @@ queries/where_operators.slt:3ae4ae7bfffbfc40  # SELECT 'b' LIKE ANY (ARRAY['a%',
 queries/where_operators.slt:a2fcc075a17be2ed  # SELECT id FROM t WHERE a BETWEEN SYMMETRIC 20 AND 10 ORDER BY id
 queries/where_operators.slt:89e87a552f981c56  # SELECT NULL IS DISTINCT FROM NULL, 1 IS DISTINCT FROM NULL, 1 IS NOT DISTINCT FROM 1, ROW(1, NULL) IS DISTINCT FROM ROW(1, NULL)
 queries/where_operators.slt:ea43531f0ab247ea  # SELECT ROW(1, 2) < ROW(1, 3), (1, 2) = (1, 2), (1, NULL) = (1, 2), (2, NULL) > (1, 5)
-queries/windows.slt:89c8e7cab6d2003b  # SELECT pg_typeof(row_number() OVER ()), pg_typeof(rank() OVER ()), pg_typeof(percent_rank() OVER ()), pg_typeof(ntile(2) OVER ())
 queries/windows.slt:8e6a7feca8367b46  # SELECT id, pts, sum(pts) OVER (ORDER BY pts RANGE BETWEEN 5 PRECEDING AND 5 FOLLOWING) FROM scores WHERE pts IS NOT NULL ORDER BY id
 queries/windows.slt:992690e3a8e0ab60  # SELECT d, count(*) OVER (ORDER BY d RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW) FROM (VALUES (DATE '2024-01-01'), (DATE '2024-01-02'), (DATE '2024-01-04'), (DATE '2024-01-05')) v(d) ORDER BY d
 queries/windows.slt:6060d6e030ce44c4  # SELECT id, sum(pts) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW) FROM scores ORDER BY id
@@ -945,7 +892,6 @@ session/roles.slt:c212a265a798fcdf#2  # DROP ROLE conf_sess_writer
 session/roles.slt:4704b79a683ed8c5  # DROP ROLE conf_sess_login
 session/roles.slt:dfbf7fb3babe5bd0#2  # DROP ROLE IF EXISTS conf_sess_login
 session/roles.slt:9a277d44a75e313f  # SELECT count(*) FROM pg_roles WHERE rolname LIKE 'conf\_sess\_%'
-session/set_show.slt:836be4cb2b71057b  # SELECT current_schema()
 session/set_show.slt:36334faa88b1322d  # SET TIME ZONE 'America/New_York'
 session/set_show.slt:d4465dc31f6c35fd  # SHOW timezone
 session/set_show.slt:76b878d021197b41  # SELECT '2024-06-01 12:00:00+00'::timestamptz, '2024-01-15 12:00:00+00'::timestamptz
@@ -1002,11 +948,9 @@ session/utility.slt:2586f0a05003d3f8  # LOCK TABLE t IN ACCESS EXCLUSIVE MODE NO
 session/utility.slt:0542bffb220ca192  # SELECT pg_is_in_recovery()
 session/utility.slt:b7e15c6991381607  # SELECT pg_postmaster_start_time() <= now()
 session/utility.slt:06e318235c054d2d  # SELECT inet_server_port() IS NULL OR inet_server_port() > 0
-session/utility.slt:553ea579f32a1f83  # SELECT pg_sleep(0)
 session/utility.slt:ae4ba31d14184857  # SELECT pg_cancel_backend(0)
 session/utility.slt:4e8706ed275dc53c  # SELECT has_table_privilege('t', 'SELECT'), has_schema_privilege('public', 'USAGE')
 session/utility.slt:793af84f25eaa034  # SELECT pg_relation_size('t') >= 0, pg_total_relation_size('t') >= 0
-session/utility.slt:487b7db6f290c8e7  # SELECT pg_advisory_lock(1), pg_try_advisory_lock(2), pg_advisory_unlock(1), pg_advisory_unlock_all()
 session/utility.slt:14a255b6d915c7e9  # DO $$ BEGIN PERFORM 1; END $$
 session/utility.slt:6ef5fcb4d663b855  # DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'u') THEN CREATE TABLE u (x int); END IF; END $$
 session/utility.slt:7e9fe260f01363ab  # SELECT to_regclass('u') IS NOT NULL
@@ -1017,7 +961,6 @@ transactions/advisory.slt:dd1e62f9f9bb71f5  # SELECT pg_try_advisory_lock(2002)
 transactions/advisory.slt:61d56bab2ed9da7c  # SELECT pg_try_advisory_xact_lock(3003)
 transactions/advisory.slt:6821e30587545c19  # SELECT pg_try_advisory_lock(4004)
 transactions/advisory.slt:a3c114a06f767e47  # SELECT pg_try_advisory_lock(1, 2), pg_try_advisory_lock(2, 1)
-transactions/advisory.slt:b938513ed00bab39  # SELECT pg_advisory_lock(5005)
 transactions/advisory.slt:1ff926831b7b0233  # SELECT locktype, classid, objid, objsubid, mode, granted FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid() ORDER BY objsubid, classid, objid
 transactions/advisory.slt:970c22b75fc0f4a7  # SELECT pg_try_advisory_xact_lock(hashtext('migrations'))
 transactions/advisory.slt:6f415f8f9ceee827  # SELECT pg_try_advisory_xact_lock(hashtext('migrations'))
@@ -1101,7 +1044,6 @@ transactions/settings.slt:3763afe376d4ae6c  # SET LOCAL TIME ZONE 'America/New_Y
 transactions/settings.slt:728ff67f7f7ffc95  # SELECT '2024-06-01 12:00:00+00'::timestamptz AS ts
 transactions/settings.slt:881d1a37758faef2  # SET LOCAL no_such_setting = 1
 transactions/settings.slt:ff6207f64133e1f3  # SET work_mem = 'lots'
-types/arrays.slt:911e7d1f191a0333  # SELECT pg_typeof(ARRAY[1, 2]), pg_typeof(ARRAY[1.5, 2]), pg_typeof(ARRAY['a']), pg_typeof('{}'::text[])
 types/arrays.slt:69f9c8b1b5c9e429  # SELECT ARRAY[[1, 2], [3, 4]], '{{a,b},{c,d}}'::text[], array_dims(ARRAY[[1, 2, 3], [4, 5, 6]]), array_ndims(ARRAY[[1]])
 types/arrays.slt:0d879a51b5704d4a  # SELECT ARRAY[[1, 2], [3]]
 types/arrays.slt:59695c5e88ee43b9  # SELECT '[0:2]={a,b,c}'::text[], ('[0:2]={a,b,c}'::text[])[0], array_lower('[0:2]={a,b,c}'::text[], 1)
@@ -1118,30 +1060,13 @@ types/arrays.slt:ca763a6e633b027e  # SELECT id, tags, m, ts FROM arr ORDER BY id
 types/arrays.slt:8b4c9d180777546c  # SELECT id FROM arr WHERE 'a' = ANY(tags) OR tags @> '{gap}' ORDER BY id
 types/arrays.slt:8d8de383c5346b66  # UPDATE arr SET m[1:1][1:2] = '{{9,9}}' WHERE id = 1
 types/arrays.slt:915ea4381cece615  # SELECT m FROM arr WHERE id = 1
-types/arrays.slt:b8d880ae1e7886b6  # SELECT '{1,2}'::int[]::text[], ARRAY['1', '2']::int[], ARRAY[1.6, 2.4]::int[]
-types/boolean.slt:665a3590efe8c868  # SELECT 1::bool, 0::bool, 5::bool, true::int, false::int
-types/boolean.slt:da76e2313ec795aa  # SELECT true::text, false::varchar, true::text || '!'
 types/bytea.slt:f485638a5edfc8fb  # SELECT '\9'::bytea
 types/bytea.slt:c01011e00ca8cb80  # SELECT 'abc'::bytea, '\x00ff0a'::bytea, 'a\\b'::bytea
 types/bytea.slt:6f3a18b57c6449ac  # SELECT get_byte('\x0102'::bytea, 1), set_byte('\x0102'::bytea, 0, 255), substring('\x01020304'::bytea from 2 for 2)
 types/bytea.slt:69a7d572fc8f51a6  # SELECT convert_to('héllo', 'UTF8'), convert_from('\x68c3a96c6c6f'::bytea, 'UTF8')
-types/bytea.slt:6c9fbbd2e672004e  # SELECT '\xcafe'::bytea::text
-types/casts.slt:513141b497379a0d  # SELECT '42'::int, CAST('42' AS integer), int4 '42', integer '42', '42'::int4::text
-types/casts.slt:6a12058c1fff3a97  # SELECT pg_typeof('x'), pg_typeof('x'::unknown::text), pg_typeof(NULL), pg_typeof(CAST(NULL AS int))
-types/casts.slt:0b7fcf142f14f05c  # SELECT 1.9::int, -1.9::int, '1.9'::numeric::int, 1::numeric(3,1), 3.7::float8::numeric(3,0)
-types/casts.slt:29d77ecf6425b6cf  # SELECT 10::text, 10.50::text, 1e3::float8::text, true::text, 'abc'::varchar(2)
-types/casts.slt:8b2e766bb95c5970  # SELECT '  12  '::int, '-007'::int, '1e3'::float8, '0x1F'::int, '0o17'::int, '0b101'::int
 types/casts.slt:58960dc407f61ee5  # SELECT 'x'::inet
-types/casts.slt:4f7e9dfc8e652d65  # SELECT i, n, t, d, b, f, v FROM c ORDER BY i
-types/casts.slt:48c2f3c0cbaaf0d7  # SELECT length(123::text), round(2::int), abs('-3'::int), substr('hello', 2::int8::int)
-types/casts.slt:dc2c83b7855f6251  # SELECT pg_typeof(CASE WHEN true THEN 1 ELSE 2.5 END), pg_typeof(COALESCE(1, 2::int8)), pg_typeof(COALESCE(NULL, 'x'))
-types/casts.slt:6bbed7d89bb8ce6e  # SELECT CASE WHEN true THEN 1 ELSE 'x'::text END
-types/casts.slt:0f6c8cd31c1ffc8c  # SELECT x, pg_typeof(x) FROM (SELECT 1 AS x UNION ALL SELECT 2.5) s ORDER BY x
-types/casts.slt:d1729e43728eaa8e  # SELECT x, pg_typeof(x) FROM (SELECT 'a' AS x UNION SELECT 'b') s ORDER BY x
 types/casts.slt:aa0e6d00a2e1688f  # SELECT '192.168.0.1/24'::inet, '10.0.0.0/8'::cidr, '08:00:2b:01:02:03'::macaddr, '$1,234.50'::money
-types/casts.slt:7bfa225201bf6c53  # SELECT 'public.c'::regclass::text, 'int4'::regtype, 'pg_catalog.initcap'::regproc::text
 types/casts.slt:562a638a088bc3c9  # SELECT 'pg_catalog.lower'::regproc
-types/casts.slt:1f4e535bfbb06f8d  # SELECT 'nosuchtable'::regclass
 types/casts.slt:89f7abced0625365  # SELECT to_char(1234.5, 'FM9,999.00'), to_number('1,234.50', '9G999D99'), to_char(-0.5, '0.0')
 types/casts.slt:f8b08fc4c17fd1b3  # SELECT B'1010', B'1010'::bit(6), 'x0F'::bit(8), 5::bit(4), B'1010'::bit(4)::int
 types/casts.slt:93c53cd1f7e466c8  # SELECT B'102'
@@ -1152,8 +1077,6 @@ types/datetime.slt:c6235d0ed2a8e75e  # SELECT '1/2/2024'::date
 types/datetime.slt:35542fdf9623f1af  # SELECT '2023-02-29'::date
 types/datetime.slt:18f2f7a69e129dfc  # SELECT '2024-13-01'::date
 types/datetime.slt:ac7b58a6734eaac1  # SELECT '4714-11-23 BC'::date
-types/datetime.slt:4df39759462a3a99  # SELECT '2024-01-31'::date + interval '1 month', pg_typeof('2024-01-31'::date + interval '1 month')
-types/datetime.slt:762ae6e9fb01fbc1  # SELECT '2024-01-01'::date + time '12:30', pg_typeof('2024-01-01'::date + time '12:30')
 types/datetime.slt:a5d7e38c2f25da9b  # SELECT '13:45:30'::time, '1:45 PM'::time, '23:59:59.999999'::time, '24:00:00'::time
 types/datetime.slt:5756f1b61ea0fa24  # SELECT '12:34:56.789'::time(1), '12:34:56.789'::time(0)
 types/datetime.slt:577b06d9381a2871  # SELECT '25:00:00'::time
@@ -1168,13 +1091,11 @@ types/datetime.slt:1ac3e7a3f5e46302  # SELECT timestamp '2024-06-15 12:00:00' AT
 types/datetime.slt:3bec26f49463d29a  # SELECT '2024-06-15 25:00:00'::timestamp
 types/datetime.slt:a23a4d339e32b4b6  # SELECT interval '25 hours', justify_hours(interval '25 hours'), justify_days(interval '35 days'), justify_interval(interval '1 mon -1 hour')
 types/datetime.slt:e6c892a0418f0b69  # SELECT 'infinity'::interval, '-infinity'::interval, 'infinity'::timestamp - '2024-01-01'::timestamp
-types/datetime.slt:4b769dc9f3680f7e  # SELECT pg_typeof(extract(year FROM date '2024-06-15')), pg_typeof(date_part('year', date '2024-06-15'))
 types/datetime.slt:50f0c63d0bff7635  # SELECT date_trunc('day', timestamptz '2024-06-15 13:45:30+00', 'Asia/Tokyo')
 types/datetime.slt:06ff5e5c264ab748  # SELECT make_date(2024, 2, 29), make_time(13, 45, 30.5), make_timestamp(2024, 6, 15, 13, 45, 30), make_interval(days => 10, hours => 2)
 types/datetime.slt:c278ab0040c2def6  # SELECT (date '2024-01-01', date '2024-02-01') OVERLAPS (date '2024-01-15', date '2024-03-01'), date '2024-01-01' = timestamp '2024-01-01 00:00', timestamp '2024-01-01' < timestamptz '2024-01-01 00:00:01+00'
 types/datetime.slt:3873b9f28787e416  # SELECT id, d, ts, tstz, dur FROM events ORDER BY id
 types/datetime.slt:284343f0f263b083  # SELECT id, ts + dur, tstz::date, d::timestamp FROM events ORDER BY id
-types/datetime.slt:a9e4fe0fe10282ea  # SELECT timestamp '2024-06-15 13:45:30'::date, timestamp '2024-06-15 13:45:30'::time, timestamptz '2024-06-15 23:30:00-05'::date, '2024-06-15'::date::timestamptz
 types/enums_domains.slt:98ceafb2f0429aee  # CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')
 types/enums_domains.slt:b2a53b020399d171  # CREATE TABLE person (name text, current_mood mood)
 types/enums_domains.slt:6e90db4dc5ef61c8  # INSERT INTO person VALUES ('a', 'happy'), ('b', 'sad'), ('c', 'ok'), ('d', NULL)
@@ -1233,48 +1154,26 @@ types/enums_domains.slt:20d1a46f867c4ae1  # INSERT INTO booking VALUES (1, '[202
 types/enums_domains.slt:2d88abba11666041  # INSERT INTO booking VALUES (1, '[2024-01-01 11:00, 2024-01-01 13:00)')
 types/enums_domains.slt:5f4686a99eb6a2f4  # INSERT INTO booking VALUES (1, '[2024-01-01 12:00, 2024-01-01 13:00)')
 types/enums_domains.slt:e1c54ea571fc5d65  # SELECT during FROM booking ORDER BY during
-types/float.slt:4be4acd567fca9d7  # SELECT pg_typeof(1.5::real), pg_typeof(1.5::double precision), pg_typeof(1::float4 + 1::float8)
 types/float.slt:d2772b3073db11b7  # SELECT '1e40'::float4
 types/float.slt:4c216033d573aba4  # SELECT '1e-400'::float8
-types/float.slt:ecd6c6aa0cf8604e  # SELECT 0.5::float8::int4, 1.5::float8::int4, 2.5::float8::int4, (-0.5)::float8::int4
 types/float.slt:9aa79556638a4d7b  # SELECT sqrt(2::float8), power(2::float8, 10), cbrt(27::float8), round(2.5::float8), round(3.5::float8)
-types/integers.slt:95e9775fd682848c  # SELECT pg_typeof(1), pg_typeof(2147483648), pg_typeof(9223372036854775808)
-types/integers.slt:31eb873d92aed0ca  # SELECT pg_typeof(1::int2 + 1::int2), pg_typeof(1::int2 + 1::int4), pg_typeof(1::int4 + 1::int8)
-types/integers.slt:a051e8342ff8c09b  # SELECT 2.5::int4, 3.5::int4, (-2.5)::int4, 2.5::float8::int4, 3.5::float8::int4
 types/integers.slt:484cf9191a185dc5  # SELECT abs(-5), gcd(12, 18), lcm(4, 6), factorial(5)
-types/integers.slt:c79be9c862dc70f1  # SELECT pg_typeof(sum(i)), pg_typeof(sum(b)), pg_typeof(avg(i)), pg_typeof(sum(s)) FROM ints
-types/json.slt:4f0eab0f416741e5  # SELECT '{"b": 1,  "a": [1, 2], "a": 3}'::json, '{"b": 1,  "a": [1, 2], "a": 3}'::jsonb
 types/json.slt:c6f229bf61f9e632  # SELECT '{"z":1,"aa":2,"b":3}'::jsonb, '[1, 2.50, 1e2, -0]'::jsonb
-types/json.slt:a0916a18a0b40106  # SELECT '"é"'::jsonb, '"é"'::json, '"tab\tx"'::jsonb
 types/json.slt:dc1e2a2617316fac  # SELECT '"\u0000"'::jsonb
 types/json.slt:194b66a4dd62f489  # SELECT pg_typeof('{"a":1}'::jsonb -> 'a'), pg_typeof('{"a":1}'::jsonb ->> 'a'), pg_typeof('{"a":1}'::json -> 'a')
 types/json.slt:8c0274b815e97c0b  # SELECT jsonb_set('{"a":{"b":1}}', '{a,b}', '2'), jsonb_set('{"a":1}', '{c}', '"new"'), jsonb_insert('[1,3]', '{1}', '2')
-types/json.slt:b06843d65ce79334  # SELECT '{"a":1}'::json = '{"a":1}'::json
 types/json.slt:396b43bed0bf8ac5  # SELECT to_jsonb('text'::text), to_json(1.5), to_jsonb(ARRAY[1,2]), to_jsonb(NULL::text), json_build_object('a', 1, 'b', NULL), jsonb_build_array(1, 'x', true)
 types/json.slt:4d8743f778340d09  # SELECT row_to_json(r) FROM (SELECT 1 AS id, 'x' AS name, NULL::int AS n) r
 types/json.slt:5e5615648e12b751  # SELECT to_jsonb(timestamptz '2024-06-15 12:00:00+00'), to_json(date '2024-06-15'), to_jsonb('NaN'::float8), to_jsonb('Infinity'::numeric)
 types/json.slt:8d377b866ff69f2f  # SELECT jsonb_agg(x ORDER BY x), json_agg(x), jsonb_object_agg(x::text, x * 2) FROM (VALUES (2), (1)) v(x)
-types/json.slt:2d23c11b81b9a23d  # SELECT ('{"n": 42}'::jsonb -> 'n')::int, ('{"n": 1.5}'::jsonb -> 'n')::numeric, ('true'::jsonb)::bool, '{"a":1}'::jsonb::text, '{"a":1}'::json::jsonb
-types/json.slt:b14fce0ac6895673  # SELECT id, j, jb FROM docs ORDER BY id
 types/json.slt:128be0cea38e7be8  # SELECT jsonb_path_query_array('{"a":[1,2,3,4]}', '$.a[*] ? (@ > 2)'), jsonb_path_exists('{"a":1}', '$.a'), '{"a":[1,2]}'::jsonb @? '$.a[*] ? (@ == 2)'
 types/json.slt:939280a255ec728c  # SELECT '{"a":1}' IS JSON, '[1' IS JSON, '[1]' IS JSON ARRAY, JSON_OBJECT('a': 1), JSON_ARRAY(1, 'x')
 types/json.slt:fad4bf4cfc02fa5f  # SELECT JSON_VALUE('{"a":"x"}'::jsonb, '$.a'), JSON_QUERY('{"a":[1,2]}'::jsonb, '$.a'), JSON_EXISTS('{"a":1}'::jsonb, '$.b')
-types/numeric.slt:1ed19dc33c870331  # SELECT pg_typeof(1.5), 1.50, 0.1 + 0.2
 types/numeric.slt:9a99dcefe6092b79  # SELECT 12345::numeric(5,-2), 0.0123::numeric(3,4)
 types/numeric.slt:82042fbd5a2c9fbd  # SELECT 'NaN'::numeric, 'nan'::numeric, 'Infinity'::numeric, '-inf'::numeric
 types/numeric.slt:74025e9d2efedb5b  # SELECT 'NaN'::numeric = 'NaN'::numeric, 'NaN'::numeric > 1e100, 'Infinity'::numeric > 1e100
 types/numeric.slt:fb6e18404f8d0858  # SELECT 'NaN'::numeric(5,2), 'Infinity'::numeric::float8
 types/numeric.slt:8d6445f724d6d58e  # SELECT 'Infinity'::numeric(5,2)
 types/numeric.slt:5b51b8ac7b24374c  # SELECT scale(1.230), min_scale(1.230), trim_scale(1.230)
-types/numeric.slt:fd5b378d71a8ebcd  # SELECT 0.1::float8::numeric, 1.23456789012345678::float8, (1::numeric / 3)::float8
-types/text.slt:1ba91f31759cae36  # INSERT INTO s (id, c) VALUES (2, 'abcdef')
-types/text.slt:8d5095f73b2df347  # SELECT 'abcdef'::varchar(3), 'abcdef'::char(3), CAST('hello world' AS varchar(5))
-types/text.slt:e6a97169b4743da5  # SELECT id, v, c, t, length(v), length(c), octet_length(c) FROM s ORDER BY id
-types/text.slt:ed693cfa01b9e734  # SELECT 'ab'::char(4) = 'ab  '::char(4), 'ab'::char(4) || '|', ('ab'::char(4))::text || '|'
-types/text.slt:7fecbbeca26eee11  # SELECT 'a'::char, pg_typeof('a'::char), 'abc'::"char"
-types/text.slt:97fe6c4b1e770b16  # SELECT substring('hello' from 2 for 3), substr('hello', 2), left('hello', 2), right('hello', 2)
-types/text.slt:0de37106c1b170c7  # SELECT pg_typeof('a'::varchar || 'b'::varchar), pg_typeof(upper('a'::varchar(3)))
-types/text.slt:43c982bc7fb992f4  # SELECT length(repeat('x', 100)::name)
 types/uuid.slt:f38a4e7a5aceef04  # SELECT length(gen_random_uuid()::text), uuid_extract_version(gen_random_uuid()), uuid_extract_version(uuidv7())
 types/uuid.slt:4488970e481e500d  # SELECT uuid_extract_timestamp('019366f7-2a0e-7c4a-9c6a-3a5f1d2b4c6e'::uuid)
-types/uuid.slt:86954bf6621377bb  # SELECT '11111111-1111-1111-1111-111111111111'::uuid::text, pg_typeof('11111111-1111-1111-1111-111111111111'::uuid::text)

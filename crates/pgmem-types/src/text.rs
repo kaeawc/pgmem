@@ -32,6 +32,8 @@ pub fn encode(v: &Value, ty: &Type) -> SqlResult<String> {
         (Value::TimeTz(t, z), _) => format_timetz(*t, *z),
         (Value::Interval(iv), _) => format_interval(iv),
         (Value::Jsonb(j), _) => j.to_string(),
+        (Value::Oid(o), _) => o.to_string(),
+        (Value::Reg(_, _, name), _) => name.clone(),
         (Value::Array(items), ty) => {
             let elem_ty = ty.element().cloned().unwrap_or_else(|| v.natural_type().element().cloned().unwrap_or(Type::Text));
             format_array(items, &elem_ty)?
@@ -42,7 +44,27 @@ pub fn encode(v: &Value, ty: &Type) -> SqlResult<String> {
 /// Parses Postgres text input for `ty`.
 pub fn decode(s: &str, ty: &Type) -> SqlResult<Value> {
     match ty {
-        Type::Unknown | Type::Text => Ok(Value::Text(s.to_owned())),
+        Type::Unknown | Type::Text | Type::Varchar | Type::Bpchar => Ok(Value::Text(s.to_owned())),
+        Type::Void => Ok(Value::Text(String::new())),
+        Type::Name => Ok(Value::Text(truncate_name(s))),
+        // "char" keeps the first byte (an ASCII character for every catalog use).
+        Type::Char => Ok(Value::Text(s.chars().next().map(String::from).unwrap_or_default())),
+        Type::Json => {
+            Jsonb::parse(s)?;
+            Ok(Value::Text(s.to_owned()))
+        }
+        Type::Oid => parse_oid(s).map(Value::Oid),
+        // reg* input needs the catalog; the executor resolves names (see pgmem-exec `reg`).
+        Type::Reg(_) => parse_oid(s).map(|o| {
+            Value::Reg(
+                match ty {
+                    Type::Reg(k) => *k,
+                    _ => crate::RegKind::Class,
+                },
+                o,
+                o.to_string(),
+            )
+        }),
         Type::Bool => parse_bool(s).map(Value::Bool),
         Type::Int2 => parse_int(s, "smallint").and_then(|n| i16::try_from(n).map_err(|_| out_of_range(s, "smallint"))).map(Value::Int2),
         Type::Int4 => parse_int(s, "integer").and_then(|n| i32::try_from(n).map_err(|_| out_of_range(s, "integer"))).map(Value::Int4),
@@ -61,6 +83,25 @@ pub fn decode(s: &str, ty: &Type) -> SqlResult<Value> {
         Type::Jsonb => Jsonb::parse(s).map(Value::Jsonb),
         Type::Array(elem) => parse_array(s, elem).map(Value::Array),
     }
+}
+
+/// `name` input: at most 63 bytes, cut at a character boundary.
+pub fn truncate_name(s: &str) -> String {
+    let mut end = s.len().min(63);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_owned()
+}
+
+/// `oidin`: an unsigned 32-bit integer; negative input wraps, as in Postgres.
+pub fn parse_oid(s: &str) -> SqlResult<u32> {
+    let n = parse_int(s, "oid")?;
+    if !(-2_147_483_648..=4_294_967_295).contains(&n) {
+        return Err(out_of_range(s, "oid"));
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Ok(n as u32)
 }
 
 fn out_of_range(s: &str, ty: &str) -> SqlError {
@@ -83,6 +124,22 @@ pub fn parse_bool(s: &str) -> SqlResult<bool> {
 pub fn parse_int(s: &str, ty: &str) -> SqlResult<i64> {
     let t = s.trim();
     let digits = t.strip_prefix(['+', '-']).unwrap_or(t);
+    // Non-decimal integer input (Postgres 16): 0x1F, 0o17, 0b101.
+    let radix = match digits.get(..2).map(str::to_ascii_lowercase).as_deref() {
+        Some("0x") => 16,
+        Some("0o") => 8,
+        Some("0b") => 2,
+        _ => 10,
+    };
+    if radix != 10 {
+        let body = digits[2..].replace('_', "");
+        if body.is_empty() || !body.chars().all(|c| c.is_digit(radix)) {
+            return Err(SqlError::invalid_text(ty, s));
+        }
+        let n = i128::from_str_radix(&body, radix).map_err(|_| out_of_range(s, ty))?;
+        let n = if t.starts_with('-') { -n } else { n };
+        return i64::try_from(n).map_err(|_| out_of_range(s, ty));
+    }
     let digits = digits.replace('_', "");
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return Err(SqlError::invalid_text(ty, s));

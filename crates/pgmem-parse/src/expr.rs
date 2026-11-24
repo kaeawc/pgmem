@@ -88,7 +88,7 @@ pub(crate) fn lower_expr(e: sq::Expr) -> SqlResult<Expr> {
             // POSITION(sub IN str) is position(str, sub) in Postgres' catalog.
             Expr::Function(Box::new(FunctionCall::new("position", vec![lower_expr(*r#in)?, lower_expr(*expr)?])))
         }
-        E::Substring { expr, substring_from, substring_for, .. } => {
+        E::Substring { expr, substring_from, substring_for, shorthand, .. } => {
             let mut args = vec![lower_expr(*expr)?];
             match (substring_from, substring_for) {
                 (Some(from), Some(len)) => {
@@ -102,7 +102,7 @@ pub(crate) fn lower_expr(e: sq::Expr) -> SqlResult<Expr> {
                 }
                 (None, None) => {}
             }
-            Expr::Function(Box::new(FunctionCall::new("substring", args)))
+            Expr::Function(Box::new(FunctionCall::new(if shorthand { "substr" } else { "substring" }, args)))
         }
         E::Trim { trim_where, trim_what, expr, trim_characters } => {
             let name = match trim_where {
@@ -482,7 +482,11 @@ pub(crate) fn lower_type(dt: &sq::DataType) -> SqlResult<TypeName> {
         D::Varchar(l) | D::CharacterVarying(l) | D::CharVarying(l) | D::Nvarchar(l) => {
             TypeName { modifiers: char_len(l), ..simple("varchar") }
         }
-        D::Char(l) | D::Character(l) => TypeName { modifiers: char_len(l), ..simple("bpchar") },
+        // A bare `char` / `character` is `character(1)`.
+        D::Char(l) | D::Character(l) => {
+            let modifiers = if l.is_none() { vec![1] } else { char_len(l) };
+            TypeName { modifiers, ..simple("bpchar") }
+        }
         D::Bool | D::Boolean => simple("bool"),
         D::Real | D::Float4 => simple("float4"),
         D::DoublePrecision | D::Float8 | D::Double(_) | D::Float64 => simple("float8"),
@@ -505,6 +509,12 @@ pub(crate) fn lower_type(dt: &sq::DataType) -> SqlResult<TypeName> {
         D::Regclass => simple("regclass"),
         D::Bit(_) => simple("bit"),
         D::BitVarying(_) | D::VarBit(_) => simple("varbit"),
+        // The quoted name `"char"` is the internal single-byte type, not character(1).
+        D::Custom(name, _)
+            if name.0.len() == 1 && name.0[0].as_ident().is_some_and(|i| i.quote_style == Some('"') && i.value == "char") =>
+        {
+            simple("\"char\"")
+        }
         D::Custom(name, mods) => {
             let n = object_name(name)?;
             TypeName {

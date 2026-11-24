@@ -290,7 +290,7 @@ impl Session {
             Statement::Insert(i) => returning(bind::bind_insert(&binder, i, &ctx)?.returning_cols),
             Statement::Update(u) => returning(bind::bind_update(&binder, u, &ctx)?.returning_cols),
             Statement::Delete(d) => returning(bind::bind_delete(&binder, d, &ctx)?.returning_cols),
-            Statement::Show { name } => Some(vec![OutCol::new(setting_display_name(name), Type::Text)]),
+            Statement::Show { name } => Some(vec![OutCol::new(setting_display_name(&show_key(name)), Type::Text)]),
             _ => None,
         };
         let params = binder.params.borrow().clone();
@@ -628,12 +628,7 @@ impl Session {
     }
 
     fn show(&self, name: &str) -> SqlResult<QueryResult> {
-        let key = name.to_ascii_lowercase();
-        let key = match key.as_str() {
-            "time zone" => "timezone".to_owned(),
-            "transaction isolation level" => "transaction_isolation".to_owned(),
-            _ => key,
-        };
+        let key = show_key(name);
         let value = self
             .settings
             .get(&key)
@@ -651,6 +646,16 @@ impl Session {
     /// Rows of a table, for the `seed` test helper's validation.
     pub fn table_exists(&self, name: &str) -> bool {
         matches!(self.db.current().catalog.relation(name), Some(Relation::Table(_)))
+    }
+}
+
+/// The setting a `SHOW` name refers to (`SHOW TIME ZONE` is `timezone`).
+fn show_key(name: &str) -> String {
+    let key = name.to_ascii_lowercase();
+    match key.as_str() {
+        "time zone" => "timezone".to_owned(),
+        "transaction isolation level" => "transaction_isolation".to_owned(),
+        _ => key,
     }
 }
 

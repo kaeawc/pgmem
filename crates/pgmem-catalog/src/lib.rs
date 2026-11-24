@@ -194,6 +194,24 @@ pub enum Relation {
 }
 
 impl Relation {
+    pub fn oid(&self) -> Oid {
+        match self {
+            Relation::Table(t) => t.oid,
+            Relation::View(v) => v.oid,
+            Relation::Sequence(s) => s.oid,
+            Relation::Index { index, .. } => index.oid,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Relation::Table(t) => &t.name,
+            Relation::View(v) => &v.name,
+            Relation::Sequence(s) => &s.name,
+            Relation::Index { index, .. } => &index.name,
+        }
+    }
+
     pub fn kind_name(&self) -> &'static str {
         match self {
             Relation::Table(_) => "table",
@@ -280,6 +298,18 @@ impl Catalog {
         self.tables
             .values()
             .find_map(|t| t.indexes.iter().find(|i| i.name == name).map(|i| Relation::Index { table: t.name.clone(), index: i.clone() }))
+    }
+
+    /// The relation (table, view, sequence or index) with this OID.
+    pub fn relation_by_oid(&self, oid: Oid) -> Option<Relation> {
+        let t = self.tables.values().find(|t| t.oid == oid).map(|t| Relation::Table(Arc::clone(t)));
+        t.or_else(|| self.views.values().find(|v| v.oid == oid).map(|v| Relation::View(Arc::clone(v))))
+            .or_else(|| self.sequences.values().find(|s| s.oid == oid).map(|s| Relation::Sequence(Arc::clone(s))))
+            .or_else(|| {
+                self.tables.values().find_map(|t| {
+                    t.indexes.iter().find(|i| i.oid == oid).map(|i| Relation::Index { table: t.name.clone(), index: i.clone() })
+                })
+            })
     }
 
     fn ensure_free(&self, name: &str) -> SqlResult<()> {

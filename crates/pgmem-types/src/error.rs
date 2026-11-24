@@ -172,6 +172,7 @@ pub mod code {
     pub const INVALID_RECURSION: &str = "42P19";
     pub const INVALID_FOREIGN_KEY: &str = "42830";
     pub const INVALID_NAME: &str = "42602";
+    pub const INVALID_SCHEMA_NAME: &str = "3F000";
     pub const NAME_TOO_LONG: &str = "42622";
     pub const RESERVED_NAME: &str = "42939";
     pub const DATATYPE_MISMATCH: &str = "42804";
