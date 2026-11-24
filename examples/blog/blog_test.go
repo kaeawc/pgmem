@@ -13,7 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kaeawc/pgmem-go/examples/blog/db"
-	"github.com/kaeawc/pgmem-go/postgres"
+	postgres "github.com/kaeawc/pgmem-go/examples/internal/pgmemtest"
 )
 
 // setup spins up pgmem-go, applies schema.sql, and returns a sqlc

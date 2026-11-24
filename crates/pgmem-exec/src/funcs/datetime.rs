@@ -98,6 +98,14 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
             }
             _ => Err(err()),
         },
+        _ => resolve_constructors(name, args),
+    }
+}
+
+fn resolve_constructors(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
+    let err = || no_function(name, args);
+    let n = args.len();
+    match name {
         "make_date" if n == 3 => resolved(strict("make_date", make_date_fn), vec![Type::Int4; 3], Type::Date),
         "make_time" if n == 3 => resolved(strict("make_time", make_time_fn), vec![Type::Int4, Type::Int4, Type::Float8], Type::Time),
         "make_timestamp" if n == 6 => resolved(

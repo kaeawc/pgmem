@@ -73,6 +73,8 @@ def load():
 
 def generate():
     old = load()
+    if not old:
+        sys.exit("no manifest to update")
     lines = [HEADER]
     for pkg, f, test in go_tests():
         prev = old.get((pkg, f, test))
@@ -105,9 +107,10 @@ def rust_test_exists(location):
 
 def check():
     rows = load()
-    current = set(go_tests())
-    if current and set(rows) != current:
-        missing = current - set(rows)
+    # The Go implementation has been removed; the manifest is now the record. Any Go test still
+    # in the tree (the pgx examples) must be listed.
+    missing = set(go_tests()) - set(rows)
+    if missing:
         print(f"manifest out of date ({len(missing)} Go tests not listed); run: scripts/parity.py generate")
         return 1
     tally = {}

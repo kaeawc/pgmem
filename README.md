@@ -8,9 +8,10 @@ boots in milliseconds, lives in memory, and disappears when dropped. Its goal is
 real PostgreSQL wherever a test can observe the difference: result types and formats, SQLSTATE
 error codes and messages, transaction semantics, constraint enforcement.
 
-> This repository started as **pgmem-go** (Go). It now holds the Rust rewrite; the Go code stays
-> until the Rust version reached parity with its whole test suite (it has: see
-> [PARITY.md](PARITY.md)) and is then removed. The repository name is unchanged.
+> This repository started as **pgmem-go** (Go). It now holds the Rust rewrite, which ports every
+> pgmem-go test ([PARITY.md](PARITY.md)); the Go implementation has been removed. The Go
+> [`examples/`](examples/) remain as sqlc + pgx suites running against the Rust server. The
+> repository name is unchanged.
 
 ## Use it from Rust tests
 
@@ -30,6 +31,7 @@ rows)` loads rows without SQL.
 
 ```bash
 cargo run --release -p pgmem -- --port 5432     # prints the DSN, serves until interrupted
+                                                # --port 0 picks a free port; --now pins now()
 psql "postgres://pgmem@127.0.0.1:5432/pgmem?sslmode=disable"
 ```
 

@@ -1,9 +1,9 @@
-# pgmem-go examples
+# pgmem examples
 
 Each subdirectory is a self-contained sqlc + pgx project that runs its
-test suite against an embedded pgmem-go server. Together they exercise
-the SQL dialect surface pgmem-go needs to cover for typical sqlc
-workloads.
+test suite against a pgmem server (the Rust `pgmem` binary). Together they
+exercise the SQL dialect surface pgmem needs to cover for typical sqlc
+workloads, through Go's pgx driver.
 
 ## Layout
 
@@ -23,8 +23,8 @@ Each project owns:
 - `queries.sql` — sqlc-annotated query definitions
 - `sqlc.yaml` — sqlc generator config (Postgres dialect, `pgx/v5` driver)
 - `db/` — generated Go code (committed so `go test` works without sqlc)
-- `*_test.go` — exercises every generated query against a pgmem-go
-  server started in-process
+- `*_test.go` — exercises every generated query against a pgmem server
+  started per test
 
 ## Per-project surface
 
@@ -68,13 +68,16 @@ Each project owns:
 ## Running
 
 ```
-cd examples/blog
+cargo build --release -p pgmem   # from the repository root
+cd examples
 go test ./...
 ```
 
-Each project starts its own pgmem-go server in-process via
-`postgres.Start(t)`, applies `schema.sql`, then runs the
-sqlc-generated queries. No external Postgres required.
+Each test starts its own `pgmem` process via `pgmemtest.Start(t)`
+(`internal/pgmemtest`), applies `schema.sql`, then runs the
+sqlc-generated queries. The binary is `$PGMEM_BIN` if set, else the
+nearest `target/release/pgmem` above the working directory, else `pgmem`
+on `PATH`. No external Postgres required.
 
 ## Regenerating sqlc code
 

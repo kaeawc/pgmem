@@ -91,6 +91,7 @@ ordering, the part of the protocol drivers are most sensitive to.
 
 Every integration test is written against a real client and runs twice in CI: against pgmem and
 against PostgreSQL 18 (`PGMEM_TEST_DSN`). An assertion that doesn't hold on real Postgres is a
-broken test. The pgmem-go suite was ported this way ([PARITY.md](PARITY.md)); Phase 2 adds a
+broken test. The pgmem-go suite was ported this way ([PARITY.md](PARITY.md)), and its sqlc + pgx
+examples run against the `pgmem` binary in CI. Phase 2 adds a
 sqllogictest conformance corpus whose expected results are recorded from PostgreSQL
 ([PROGRESS.md](PROGRESS.md)).

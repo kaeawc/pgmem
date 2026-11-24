@@ -3,9 +3,9 @@
 An in-memory, Postgres-wire-compatible database for tests, written in Rust. **Fidelity over
 performance**: when pgmem and real PostgreSQL disagree, pgmem is wrong.
 
-This repository is a Rust rewrite of pgmem-go. The Go implementation (`catalog/`, `exec/`, `ir/`,
-`postgres/`, `storage/`, `types/`, `go.mod`) is kept until its removal PR; don't change it. The Go
-`examples/` stay as a pgx client-compatibility check.
+This repository is a Rust rewrite of pgmem-go (the Go implementation was removed once every Go
+test had a Rust port; see PARITY.md). `examples/` is a Go module of sqlc + pgx suites that run
+against the Rust `pgmem` binary as a client-compatibility check (CI job `pgx-examples`).
 
 ## Working rules
 
@@ -33,6 +33,7 @@ cargo lint                          # clippy --all-targets -D warnings
 cargo fmt --all
 cargo deny check
 python3 scripts/parity.py check
+(cd examples && go test ./...)       # pgx suites against target/release/pgmem
 PGMEM_TEST_DSN="host=127.0.0.1 port=5432 user=postgres" cargo nextest run -p pgmem --test it
 ```
 
@@ -52,3 +53,4 @@ After any change: `cargo c && cargo lint && cargo t`.
   builtins (`funcs/`), `Session` (transaction state machine, settings).
 - `crates/pgmem-wire` — protocol v3 server (startup, simple and extended query).
 - `crates/pgmem` — public `Server` API, the `pgmem` binary, integration tests.
+- `examples/` — Go sqlc + pgx projects; `examples/internal/pgmemtest` starts the Rust binary.

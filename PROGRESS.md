@@ -10,6 +10,7 @@ and what comes next. Updated with every PR.
 | pgmem-go parity | **564 / 564** Go tests ported | `scripts/parity.py check` ([PARITY.md](PARITY.md)) |
 | Integration suite on pgmem | **517 / 517** pass | `cargo nextest run -p pgmem --test it` |
 | Integration suite on real PostgreSQL 18 | **517 / 517** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
+| Go pgx example suites (sqlc) against the Rust binary | **27 / 27** pass | `make examples` (CI `pgx-examples`) |
 | SQL conformance corpus | not yet measured | Phase 2: sqllogictest corpus recorded from real PostgreSQL |
 
 ### Conformance history
@@ -17,13 +18,14 @@ and what comes next. Updated with every PR.
 | Date | PR | Parity | Conformance corpus |
 |---|---|---|---|
 | 2026-11-24 | #103 foundation: types, IR, parser | 37/564 | — |
-| 2026-11-24 | catalog and storage | 49/564 | — |
-| 2026-11-24 | executor | 49/564 | — |
-| 2026-11-24 | wire protocol, server, core + example tests | 189/564 | — |
-| 2026-11-24 | transactions, constraints, DDL tests | 268/564 | — |
-| 2026-11-24 | query shape tests (joins, subqueries, CTEs, aggregates, windows) | 364/564 | — |
-| 2026-11-24 | types and expression tests | 466/564 | — |
-| 2026-11-24 | builtin function tests | 564/564 | — |
+| 2026-11-24 | #104 catalog and storage | 49/564 | — |
+| 2026-11-24 | #105 executor | 49/564 | — |
+| 2026-11-24 | #106 wire protocol, server, core + example tests | 189/564 | — |
+| 2026-11-24 | #107 transactions, constraints, DDL tests | 268/564 | — |
+| 2026-11-24 | #108 query shape tests (joins, subqueries, CTEs, aggregates, windows) | 364/564 | — |
+| 2026-11-24 | #109 types and expression tests | 466/564 | — |
+| 2026-11-24 | #110 builtin function tests | 564/564 | — |
+| 2026-11-24 | #111 remove the Go implementation; pgx examples run against Rust | 564/564 | — |
 
 ## Supported
 
@@ -75,12 +77,9 @@ and what comes next. Updated with every PR.
 
 ## Next
 
-1. Port the remaining pgmem-go tests by area (transactions/constraints/DDL, query shapes,
-   types/expressions, builtin functions), then remove the Go implementation, keeping `examples/`
-   as a pgx compatibility check against the Rust server binary.
-2. Conformance harness: sqllogictest corpus by area (wire, types, DDL, constraints, transactions,
+1. Conformance harness: sqllogictest corpus by area (wire, types, DDL, constraints, transactions,
    joins, aggregates, windows, CTEs, catalog, error codes), expected results recorded from and
    re-verified against PostgreSQL 18 in CI; track the pass rate here.
-3. Client matrix in CI: psql, tokio-postgres, sqlx, Go pgx, JDBC.
-4. Hill-climb, highest value first: `pg_catalog`/`information_schema` for driver and ORM
+2. Client matrix in CI: psql, tokio-postgres, sqlx and JDBC (Go pgx is covered by `examples/`).
+3. Hill-climb, highest value first: `pg_catalog`/`information_schema` for driver and ORM
    introspection, named time zones, COPY, LISTEN/NOTIFY.
