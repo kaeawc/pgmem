@@ -4,6 +4,7 @@
 //! implementation, the types each argument must be coerced to, and the result type.
 
 pub mod array;
+pub mod catalog;
 pub mod datetime;
 pub mod json;
 pub mod math;
@@ -77,6 +78,9 @@ pub fn resolve_function(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>
         return Ok(Some(r));
     }
     if let Some(r) = array::resolve(name, args)? {
+        return Ok(Some(r));
+    }
+    if let Some(r) = catalog::resolve(name, args)? {
         return Ok(Some(r));
     }
     misc::resolve(name, args)

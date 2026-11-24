@@ -21,5 +21,8 @@ getrandom = { workspace = true }
 md-5 = { workspace = true }
 sha2 = { workspace = true }
 
+[dev-dependencies]
+pgmem-parse = { workspace = true }
+
 [lints]
 workspace = true

@@ -29,6 +29,25 @@ impl OutCol {
 pub type ScalarFn = fn(&[Value], &EvalCtx) -> SqlResult<Value>;
 /// A set-returning function implementation producing whole rows.
 pub type SrfFn = fn(&[Value], &EvalCtx) -> SqlResult<Vec<Row>>;
+/// Produces the rows of a virtual catalog relation from the running transaction's catalog
+/// and the session.
+pub type VirtualRowsFn = fn(&EvalCtx) -> SqlResult<Vec<Row>>;
+
+/// A virtual relation's row source (compared by function address, like [`Srf`]).
+#[derive(Clone, Copy)]
+pub struct VirtualRows(pub VirtualRowsFn);
+
+impl PartialEq for VirtualRows {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::fn_addr_eq(self.0, other.0)
+    }
+}
+
+impl fmt::Debug for VirtualRows {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("VirtualRows")
+    }
+}
 
 /// A function pointer with a name, compared by name (pointer identity is not stable).
 #[derive(Clone, Copy)]
@@ -401,6 +420,10 @@ pub enum Rel {
     /// Literal rows (also the single empty row of a FROM-less SELECT).
     Values {
         rows: Vec<Vec<Expr>>,
+    },
+    /// A `pg_catalog` / `information_schema` relation, computed when the statement runs.
+    Virtual {
+        rows: VirtualRows,
     },
     /// A table's live columns: physical slot of each output column, and the value rows
     /// shorter than the slot read back as.

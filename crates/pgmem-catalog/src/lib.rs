@@ -228,6 +228,8 @@ pub struct Catalog {
     tables: BTreeMap<String, Arc<TableDef>>,
     views: BTreeMap<String, Arc<ViewDef>>,
     sequences: BTreeMap<String, Arc<SequenceDef>>,
+    /// `COMMENT ON` text by (classoid, objoid, objsubid), as in `pg_description`.
+    comments: BTreeMap<(Oid, Oid, i32), String>,
     next_oid: Oid,
 }
 
@@ -298,6 +300,32 @@ impl Catalog {
         self.tables
             .values()
             .find_map(|t| t.indexes.iter().find(|i| i.name == name).map(|i| Relation::Index { table: t.name.clone(), index: i.clone() }))
+    }
+
+    /// Sets (or with `None` removes) the comment on an object.
+    pub fn set_comment(&mut self, classoid: Oid, objoid: Oid, subid: i32, text: Option<String>) {
+        match text {
+            Some(t) => {
+                self.comments.insert((classoid, objoid, subid), t);
+            }
+            None => {
+                self.comments.remove(&(classoid, objoid, subid));
+            }
+        }
+    }
+
+    /// Comments on objects that still exist: `(classoid, objoid, objsubid) → text`.
+    pub fn comments(&self) -> impl Iterator<Item = (&(Oid, Oid, i32), &String)> {
+        self.comments.iter()
+    }
+
+    pub fn comment(&self, classoid: Oid, objoid: Oid, subid: i32) -> Option<&str> {
+        self.comments.get(&(classoid, objoid, subid)).map(String::as_str)
+    }
+
+    /// Drops the comments on an object and its columns (when the object is dropped).
+    pub fn drop_comments(&mut self, objoid: Oid) {
+        self.comments.retain(|(_, o, _), _| *o != objoid);
     }
 
     /// The relation (table, view, sequence or index) with this OID.

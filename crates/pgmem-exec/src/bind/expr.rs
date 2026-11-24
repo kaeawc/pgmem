@@ -423,8 +423,11 @@ impl Binder<'_> {
             }
             ir::Expr::Subscript { expr, index } => {
                 let (arr, t) = self.bind_expr(expr, ctx)?;
+                // int2vector / oidvector subscripts start at 0.
+                let zero_based = matches!(t, Type::Int2Vector | Type::OidVector);
                 let elem = match &t {
                     Type::Array(e) => (**e).clone(),
+                    Type::Int2Vector | Type::OidVector => t.element().cloned().unwrap_or(Type::Int2),
                     other => {
                         return Err(SqlError::datatype_mismatch(format!(
                             "cannot subscript type {} because it does not support subscripting",
@@ -434,7 +437,11 @@ impl Binder<'_> {
                 };
                 let int_expr = |e: &ir::Expr| -> SqlResult<Expr> {
                     let (x, xt) = self.bind_expr(e, ctx)?;
-                    coerce(self, x, &xt, &Type::Int4, CoercionContext::Assignment)
+                    let x = coerce(self, x, &xt, &Type::Int4, CoercionContext::Assignment)?;
+                    if zero_based {
+                        return Ok(self.apply_binary("+", x, Type::Int4, Expr::Const(Value::Int4(1)), Type::Int4)?.0);
+                    }
+                    Ok(x)
                 };
                 Ok(match index {
                     ir::Subscript::Index(i) => {
@@ -635,6 +642,14 @@ impl Binder<'_> {
         match right {
             ir::AnyAllRight::Array(arr) => {
                 let (a, at) = self.bind_expr(arr, ctx)?;
+                // `x = ANY(int2vector)` treats the vector as its element array.
+                let (a, at) = match at {
+                    Type::Int2Vector | Type::OidVector => {
+                        let arr_t = Type::array_of(at.element().cloned().unwrap_or(Type::Int2));
+                        (a, arr_t)
+                    }
+                    other => (a, other),
+                };
                 let elem = match &at {
                     Type::Array(e) => (**e).clone(),
                     Type::Unknown => {

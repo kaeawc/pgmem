@@ -717,14 +717,11 @@ impl Binder<'_> {
 
     fn bind_virtual(&self, schema: &str, name: &str, qualifier: &str, alias: Option<&ir::TableAlias>) -> SqlResult<(Rel, Scope)> {
         let view = crate::catalog_views::lookup(schema, name).ok_or_else(|| SqlError::undefined_table(&format!("{schema}.{name}")))?;
-        let rows = (view.rows)(self.catalog);
-        let mut cols: Vec<ScopeCol> =
-            view.columns.iter().map(|(n, t)| ScopeCol::new(Some(qualifier.to_owned()), (*n).to_owned(), t.clone())).collect();
+        let mut cols: Vec<ScopeCol> = view.columns.into_iter().map(|(n, t)| ScopeCol::new(Some(qualifier.to_owned()), n, t)).collect();
         if let Some(a) = alias {
             apply_column_aliases(&mut cols, &a.columns, &a.name)?;
         }
-        let rows = rows.into_iter().map(|r| r.into_iter().map(Expr::Const).collect()).collect();
-        Ok((Rel::Values { rows }, Scope::from_cols(cols)))
+        Ok((Rel::Virtual { rows: crate::plan::VirtualRows(view.rows) }, Scope::from_cols(cols)))
     }
 }
 

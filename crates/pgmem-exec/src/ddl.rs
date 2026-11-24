@@ -19,8 +19,81 @@ fn notice(t: &str, msg: String) -> QueryResult {
     QueryResult { tag: t.to_owned(), notices: vec![Notice { severity: "NOTICE", code: "00000", message: msg }], ..Default::default() }
 }
 
+/// The `pg_description` key a `COMMENT ON` refers to, or None for object kinds pgmem keeps no
+/// catalog entry for.
+fn comment_target(
+    catalog: &pgmem_catalog::Catalog,
+    target: &ir::CommentTarget,
+    name: &ir::ObjectName,
+) -> SqlResult<Option<(u32, u32, i32)>> {
+    use crate::catalog_views::{CLASS_CLASS_OID, NAMESPACE_CLASS_OID};
+    use ir::CommentTarget as T;
+    let relation = |n: &ir::ObjectName| -> SqlResult<Relation> {
+        let base = catalog.normalize(n)?;
+        catalog.relation(base).ok_or_else(|| SqlError::undefined_table(base))
+    };
+    let not_a = |r: &Relation, what: &str| SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{}\" is not {what}", r.name()));
+    Ok(Some(match target {
+        T::Table | T::View | T::MaterializedView | T::Sequence | T::Index => {
+            let r = relation(name)?;
+            let ok = matches!(
+                (target, &r),
+                (T::Table, Relation::Table(_))
+                    | (T::View, Relation::View(_))
+                    | (T::Sequence, Relation::Sequence(_))
+                    | (T::Index, Relation::Index { .. })
+            );
+            if !ok {
+                return Err(not_a(
+                    &r,
+                    match target {
+                        T::Table => "a table",
+                        T::View => "a view",
+                        T::MaterializedView => "a materialized view",
+                        T::Sequence => "a sequence",
+                        _ => "an index",
+                    },
+                ));
+            }
+            (CLASS_CLASS_OID, r.oid(), 0)
+        }
+        T::Column => {
+            let (table, column) = match name.0.split_last() {
+                Some((c, t)) if !t.is_empty() => (ir::ObjectName(t.to_vec()), c.clone()),
+                _ => return Err(SqlError::syntax("column name must be qualified")),
+            };
+            let r = relation(&table)?;
+            let attnum = match &r {
+                Relation::Table(t) => t.column_index(&column).map(|i| i + 1),
+                Relation::View(v) => v.columns.iter().position(|c| *c == column).map(|i| i + 1),
+                _ => None,
+            }
+            .ok_or_else(|| SqlError::undefined_column(&format!("\"{column}\" of relation \"{}\"", r.name())))?;
+            (CLASS_CLASS_OID, r.oid(), i32::try_from(attnum).unwrap_or(i32::MAX))
+        }
+        T::Schema => {
+            // pgmem models only the builtin schemas; comments on others (which CREATE SCHEMA
+            // accepted) are accepted without effect.
+            let schema = crate::funcs::string::quote_ident(name.base());
+            match crate::reg::to_reg(Value::Text(schema), pgmem_types::RegKind::Namespace, catalog) {
+                Ok(Value::Reg(_, o, _)) => (NAMESPACE_CLASS_OID, o, 0),
+                _ => return Ok(None),
+            }
+        }
+        T::Other => return Ok(None),
+    }))
+}
+
 pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &SessionEnv, state: &StatementState) -> SqlResult<QueryResult> {
     match stmt {
+        Statement::Comment { target, name, text } => {
+            if let Some((classoid, objoid, subid)) = comment_target(txn.catalog(), target, name)? {
+                // An empty comment removes it, as in Postgres.
+                let text = text.clone().filter(|t| !t.is_empty());
+                txn.catalog_mut().set_comment(classoid, objoid, subid, text);
+            }
+            Ok(tag("COMMENT"))
+        }
         Statement::CreateTable(ct) => {
             let Some(CreateTablePlan { mut table, sequences }) = bind::bind_create_table(binder, ct)? else {
                 let name = binder.catalog.normalize(&ct.name)?;

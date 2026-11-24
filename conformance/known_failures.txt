@@ -1,45 +1,19 @@
 # Corpus records pgmem fails today, by key (file:hash of the SQL); the first line of the SQL
 # follows for reading. Regenerate with `cargo run -p pgmem-conformance -- --update`.
-catalog/comments.slt:55d9c251c303e415  # SELECT obj_description('notes'::regclass, 'pg_class')
-catalog/comments.slt:9293f762f7a42fcd  # SELECT obj_description('notes'::regclass)
-catalog/comments.slt:af4260586f047108  # SELECT col_description('notes'::regclass, 2), col_description('notes'::regclass, 1)
-catalog/comments.slt:e29e5a034b0845e8  # SELECT a.attname, col_description(a.attrelid, a.attnum)
-catalog/comments.slt:d38e470a91e59e8a  # SELECT d.objsubid, d.description
-catalog/comments.slt:55d9c251c303e415#2  # SELECT obj_description('notes'::regclass, 'pg_class')
-catalog/comments.slt:0b1c01742fd3a374  # SELECT col_description('notes'::regclass, 2)
-catalog/comments.slt:55d9c251c303e415#3  # SELECT obj_description('notes'::regclass, 'pg_class')
 catalog/comments.slt:c0292f8e8802feb1  # SELECT obj_description('docs'::regnamespace, 'pg_namespace')
-catalog/comments.slt:32db119f01eaeda5  # SELECT obj_description('note_ids'::regclass, 'pg_class')
 catalog/comments.slt:7479e02d259b1af5  # CREATE TYPE level AS ENUM ('low', 'high')
 catalog/comments.slt:0b79ed662e717ac8  # SELECT obj_description('level'::regtype, 'pg_type')
 catalog/comments.slt:fd85b83918947b92  # SELECT obj_description(oid, 'pg_constraint') FROM pg_constraint WHERE conname = 'notes_pkey'
 catalog/comments.slt:65b6351ec417f350  # CREATE FUNCTION f1() RETURNS int LANGUAGE sql AS 'SELECT 1'
 catalog/comments.slt:e39bb176e5b46bd3  # SELECT obj_description('f1'::regproc, 'pg_proc')
-catalog/comments.slt:af79ea1a419ddb09  # COMMENT ON TABLE nosuch IS 'x'
-catalog/comments.slt:d39629032310475a  # COMMENT ON COLUMN notes.nosuch IS 'x'
-catalog/comments.slt:b20ca80e127e4bf8  # SELECT count(*) FROM pg_description d JOIN pg_class c ON c.oid = d.objoid WHERE c.relname = 'notes'
 catalog/information_schema.slt:d343ab8810b44fbc  # CREATE TABLE app.reviews (
 catalog/information_schema.slt:a945dd8bde301b09  # SELECT schema_name FROM information_schema.schemata
 catalog/information_schema.slt:84330eb3e790c685  # SELECT table_schema, table_name, table_type
-catalog/information_schema.slt:9f36c2d8bac8e7f3  # SELECT table_name FROM information_schema.tables
-catalog/information_schema.slt:8c64adde758fa8dd  # SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'authors')
-catalog/information_schema.slt:a7180864fba26f69  # SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'missing')
-catalog/information_schema.slt:b04f28d15ab25d69  # SELECT column_name, ordinal_position, data_type, is_nullable, column_default
-catalog/information_schema.slt:06b038c26e194ab6  # SELECT column_name, data_type, udt_name, character_maximum_length, numeric_precision, numeric_scale
-catalog/information_schema.slt:97ca1e96a992cf10  # SELECT column_name, is_identity, identity_generation, column_default
-catalog/information_schema.slt:548d4361d535b62a  # SELECT column_name, datetime_precision
 catalog/information_schema.slt:66e636e79f593e82  # SELECT table_name, column_name, data_type
-catalog/information_schema.slt:a586fab244b9d165  # SELECT column_name, data_type
-catalog/information_schema.slt:b6a3bd15afa73d97  # SELECT constraint_name, constraint_type
 catalog/information_schema.slt:00c05c1684d10fee  # SELECT constraint_name, constraint_type, is_deferrable, initially_deferred
-catalog/information_schema.slt:54026ff08a6ebe66  # SELECT count(*) FROM information_schema.table_constraints
 catalog/information_schema.slt:df5e5bc3ea479afe  # SELECT constraint_name, column_name, ordinal_position
-catalog/information_schema.slt:64bf8befe706d678  # SELECT kcu.column_name
 catalog/information_schema.slt:7935bc054dfeb0da  # SELECT constraint_name, unique_constraint_name, match_option, update_rule, delete_rule
 catalog/information_schema.slt:b852cfc0efeccc1d  # SELECT tc.table_schema, tc.table_name, kcu.column_name,
-catalog/information_schema.slt:fecfa13984601cd9  # SELECT table_name, column_name, constraint_name
-catalog/information_schema.slt:4a1f8a8fc5981b46  # SELECT cc.check_clause
-catalog/information_schema.slt:2bc08d380adf6fd6  # SELECT table_name, view_definition, check_option, is_updatable
 catalog/information_schema.slt:5eeda95b92993c1a  # SELECT sequence_name, data_type, numeric_precision, start_value, minimum_value, maximum_value, increment, cycle_option
 catalog/information_schema.slt:bcd84fafea9ffe59  # SELECT c.column_name, e.data_type
 catalog/information_schema.slt:98ceafb2f0429aee  # CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')
@@ -47,19 +21,18 @@ catalog/information_schema.slt:13d4b7368e3031a0  # CREATE TABLE people (id int, 
 catalog/information_schema.slt:2dd3baf0b7106e3a  # SELECT column_name, data_type, udt_schema, udt_name
 catalog/information_schema.slt:dcbc700fd5754b49  # CREATE FUNCTION add_one(x int) RETURNS int LANGUAGE sql AS 'SELECT x + 1'
 catalog/information_schema.slt:7650ba5efab0cdd3  # SELECT routine_name, routine_type, data_type
-catalog/information_schema.slt:c2f997786e30592b  # SELECT column_name, character_maximum_length, is_nullable
-catalog/information_schema.slt:a9fd4bc4a45eb028  # SELECT count(*) FROM information_schema.views WHERE table_schema = 'public'
 catalog/orm_reflection.slt:cfdf95b926386d47  # CREATE TYPE role_kind AS ENUM ('admin', 'member', 'guest')
 catalog/orm_reflection.slt:7898ca550364be75  # CREATE TABLE users (
 catalog/orm_reflection.slt:81fb736508cd14d2  # CREATE UNIQUE INDEX index_users_on_login ON users (login)
 catalog/orm_reflection.slt:37c73cba0a515edf  # CREATE TABLE posts (
+catalog/orm_reflection.slt:b8f92a6a19eda22a  # COMMENT ON TABLE users IS 'app users'
+catalog/orm_reflection.slt:3faba62d6bab065c  # COMMENT ON COLUMN users.login IS 'login name'
 catalog/orm_reflection.slt:4ad96db3261016a6  # SELECT c.relname FROM pg_class c LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
 catalog/orm_reflection.slt:600696c0b1650efa  # SELECT a.attname, format_type(a.atttypid, a.atttypmod),
 catalog/orm_reflection.slt:dd8b06fac31bd173  # SELECT a.attname
 catalog/orm_reflection.slt:bcc557f2e5d684e7  # SELECT distinct i.relname, d.indisunique, d.indkey, pg_get_indexdef(d.indexrelid)
 catalog/orm_reflection.slt:8059498101251258  # SELECT t2.oid::regclass::text AS to_table, a1.attname AS column, a2.attname AS primary_key,
 catalog/orm_reflection.slt:1a804e7e5bd4c7fc  # SELECT pg_catalog.obj_description(c.oid, 'pg_class')
-catalog/orm_reflection.slt:f322999f3d214ed6  # SELECT t.typname, t.typelem <> 0 AS is_array, t.typtype
 catalog/orm_reflection.slt:53f1537836701ced  # SELECT t.typname, t.typtype
 catalog/orm_reflection.slt:8a89934c4b7330b3  # SELECT c.relname,
 catalog/orm_reflection.slt:38ea5be4a2fa20e2  # SELECT s.relname, a.attname
@@ -83,89 +56,43 @@ catalog/pg_catalog.slt:edb62477cca693b6  # CREATE TYPE color AS ENUM ('red', 'gr
 catalog/pg_catalog.slt:9faae7a5378d8a6f  # CREATE TYPE pair AS (a int, b text)
 catalog/pg_catalog.slt:91dc29240d93776f  # CREATE DOMAIN posint AS int CHECK (VALUE > 0)
 catalog/pg_catalog.slt:3ae94af5d92c31f6  # SELECT c.relname, c.relkind
-catalog/pg_catalog.slt:a1be0a0e70531fc5  # SELECT relname, relkind, relpersistence, relhasindex
-catalog/pg_catalog.slt:79449ded5984bcb4  # SELECT nspname FROM pg_namespace
-catalog/pg_catalog.slt:7364e2806fee3984  # SELECT relnatts, relchecks FROM pg_class WHERE relname = 'accounts'
-catalog/pg_catalog.slt:4eb3c82cf3994a75  # SELECT attname, attnum, attnotnull, format_type(atttypid, atttypmod), atthasdef
-catalog/pg_catalog.slt:15c7e863c0610fdf  # SELECT attname, attnum
-catalog/pg_catalog.slt:464267fb3323123f  # SELECT attname, attidentity, attgenerated, attndims
-catalog/pg_catalog.slt:1a84a2efac69778c  # SELECT count(*) FROM pg_attribute WHERE attrelid = 'accounts'::regclass AND attisdropped
-catalog/pg_catalog.slt:2477abf726b99946  # SELECT typname, typlen, typbyval, typtype, typcategory, typdelim
-catalog/pg_catalog.slt:40c5c05f1a2f3797  # SELECT t.typname, e.typname AS elem
 catalog/pg_catalog.slt:e9722139a6e40dea  # SELECT typname, typtype
 catalog/pg_catalog.slt:2ae3830770fb5ff2  # SELECT format_type(typbasetype, typtypmod), typnotnull FROM pg_type WHERE typname = 'posint'
 catalog/pg_catalog.slt:433dc15682cf9d3a  # SELECT enumlabel, enumsortorder FROM pg_enum WHERE enumtypid = 'color'::regtype ORDER BY enumsortorder
 catalog/pg_catalog.slt:814040561f71aefb  # ALTER TYPE color ADD VALUE 'yellow' AFTER 'red'
 catalog/pg_catalog.slt:99ea1be28893206f  # SELECT enumlabel FROM pg_enum WHERE enumtypid = 'color'::regtype ORDER BY enumsortorder
-catalog/pg_catalog.slt:b6b4c1a81f590bdb  # SELECT c.relname, i.indisunique, i.indisprimary, i.indnatts, pg_get_indexdef(i.indexrelid)
-catalog/pg_catalog.slt:b58e9583a49d7191  # SELECT pg_get_indexdef('accounts_lower_email_idx'::regclass)
-catalog/pg_catalog.slt:911478a10f01c6eb  # SELECT pg_get_indexdef('transfers_pair_idx'::regclass, 2, true)
-catalog/pg_catalog.slt:6f67f055d2dd621d  # SELECT conname, contype, pg_get_constraintdef(oid)
-catalog/pg_catalog.slt:4023566fb268f30d  # SELECT conname, confrelid::regclass::text, confupdtype, confdeltype, confmatchtype, pg_get_constraintdef(oid, true)
-catalog/pg_catalog.slt:169d734f692fe079  # SELECT conname, conkey, confkey FROM pg_constraint
-catalog/pg_catalog.slt:b9ba824f9db57721  # SELECT a.attname, pg_get_expr(d.adbin, d.adrelid)
 catalog/pg_catalog.slt:11ba6aa684a25920  # SELECT sequencename, data_type::text, start_value, min_value, max_value, increment_by, cycle, cache_size, last_value
-catalog/pg_catalog.slt:e7e7c3560f308295  # SELECT last_value FROM pg_sequences WHERE sequencename = 'ticket_seq'
-catalog/pg_catalog.slt:af2b800d21a422c5  # SELECT pg_get_serial_sequence('accounts', 'id'), pg_get_serial_sequence('transfers', 'id')
-catalog/pg_catalog.slt:332d536ad35f5f55  # SELECT viewname, definition FROM pg_views WHERE schemaname = 'public'
-catalog/pg_catalog.slt:1735a5fa727ff8c5  # SELECT pg_get_viewdef('rich'::regclass)
 catalog/pg_catalog.slt:41f2057bee0e6dd5  # SELECT pg_get_viewdef('rich'::regclass, true)
 catalog/pg_catalog.slt:eceff294cfbb8e20  # SELECT matviewname, ispopulated FROM pg_matviews WHERE schemaname = 'public'
-catalog/pg_catalog.slt:8a71debe032ec0d2  # SELECT tablename, hasindexes, hasrules, hastriggers, rowsecurity
-catalog/pg_catalog.slt:702fbeb9328941a2  # SELECT tablename, indexname, indexdef
 catalog/pg_catalog.slt:7d01c52404c34822  # CREATE FUNCTION double_it(n int) RETURNS int LANGUAGE sql IMMUTABLE AS $$ SELECT n * 2 $$
 catalog/pg_catalog.slt:8a7afb8930dc40b5  # SELECT proname, pronargs, provolatile, prorettype::regtype::text, pg_get_function_arguments(oid), pg_get_function_result(oid)
-catalog/pg_catalog.slt:bc076c272fece19b  # SELECT s.relname, a.attname, d.deptype
 catalog/pg_catalog.slt:a085ef479946ad0c  # CREATE TABLE events_2024 PARTITION OF events FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
 catalog/pg_catalog.slt:d26d4fea085e04ff  # SELECT c.relname, c.relkind, c.relispartition, pg_get_expr(c.relpartbound, c.oid)
 catalog/pg_catalog.slt:48122fca8c801c55  # SELECT pg_get_partkeydef('events'::regclass)
 catalog/psql_describe.slt:6de89b87b9ef885b  # CREATE TYPE status AS ENUM ('open', 'closed')
-catalog/psql_describe.slt:be2a057bd09a28b2  # SELECT n.nspname, c.relname
 catalog/psql_describe.slt:bbede3599730d5d7  # SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity,
 catalog/psql_describe.slt:0a56de6a8ba8d11b  # SELECT a.attname,
-catalog/psql_describe.slt:653ef7aca752a981  # SELECT c2.relname, i.indisprimary, i.indisunique, i.indisclustered, i.indisvalid,
 catalog/psql_describe.slt:dee11004c6bbafbd  # SELECT r.conname, pg_catalog.pg_get_constraintdef(r.oid, true)
 catalog/psql_describe.slt:17a1b25d4d29cb62  # SELECT true as sametable, conname,
 catalog/psql_describe.slt:55a36843bc50c0ea  # SELECT conname, conrelid::pg_catalog.regclass AS ontable,
 catalog/psql_describe.slt:44733f14a996f863  # SELECT pol.polname FROM pg_catalog.pg_policy pol WHERE pol.polrelid = 'orders'::regclass ORDER BY 1
-catalog/psql_describe.slt:3a41f36c87756156  # SELECT t.tgname FROM pg_catalog.pg_trigger t WHERE t.tgrelid = 'orders'::regclass AND NOT t.tgisinternal ORDER BY 1
-catalog/psql_describe.slt:a17a5c8faee9f218  # SELECT c.oid::pg_catalog.regclass FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i
-catalog/psql_describe.slt:325e79db8be95e92  # SELECT n.nspname as "Schema",
-catalog/psql_describe.slt:49e60d594e3bfa1e  # SELECT n.nspname as "Schema",
-catalog/psql_describe.slt:1831b7ee2fe5cf95  # SELECT n.nspname as "Schema", c.relname as "Name", c2.relname as "Table"
-catalog/psql_describe.slt:ee3f9dc8d20e1705  # SELECT n.nspname AS "Name"
 catalog/psql_describe.slt:c63e61ef119ac639  # SELECT n.nspname as "Schema",
 catalog/psql_describe.slt:b4a232974cda9996  # SELECT pg_catalog.pg_get_viewdef('big_orders'::regclass, true)
-catalog/psql_describe.slt:2a06f0edb35004e2  # SELECT n.nspname as "Schema", c.relname as "Name"
 catalog/regtypes.slt:209fce473162f6bf  # CREATE TABLE other.thing (x int)
 catalog/regtypes.slt:14048f7f9e264ca2  # SELECT 'other.thing'::regclass::text
-catalog/regtypes.slt:c2c4c26889599f41  # SELECT to_regclass('t')::text, to_regclass('missing_table')
 catalog/regtypes.slt:04104fd63a6eb57a  # SELECT to_regclass('other.thing') IS NOT NULL, to_regclass('thing') IS NULL
-catalog/regtypes.slt:becbe6e718469440  # SELECT 'pg_class'::regclass::text, 'pg_catalog.pg_type'::regclass::text
 catalog/regtypes.slt:1238c168bb65155b  # SELECT 'other.thing'::regclass::text, 't'::regclass::text
 catalog/regtypes.slt:a9ad1acbbcdab0ae  # SELECT 'text[]'::regtype::text, '_int4'::regtype::text, 'double precision'::regtype::text
-catalog/regtypes.slt:6bef4f5a061f8a39  # SELECT to_regtype('int8')::text, to_regtype('nosuchtype')
 catalog/regtypes.slt:308ca72692b033f8  # SELECT 't'::regtype::text
-catalog/regtypes.slt:43bb78d7e6cf32ff  # SELECT format_type('int4'::regtype, NULL), format_type('numeric'::regtype, 655366)
-catalog/regtypes.slt:f797f1d353f8e724  # SELECT format_type('varchar'::regtype, 36), format_type('bpchar'::regtype, 14)
 catalog/regtypes.slt:4ceb755fe5cff65e  # SELECT format_type('timestamptz'::regtype, 3), format_type('_text'::regtype, -1)
 catalog/regtypes.slt:e1b41969bcc4d789  # SELECT 'now'::regproc::text, 'lower(text)'::regprocedure::text
-catalog/regtypes.slt:a46df17aff91d2e0  # SELECT 'public'::regnamespace::text, to_regnamespace('nope')
 catalog/regtypes.slt:4f75d112acc7d9bf  # SELECT to_regproc('upper')::text, to_regprocedure('abs(integer)')::text
-catalog/regtypes.slt:8075e63338d5e5d7  # SELECT 't'::regclass = (SELECT oid FROM pg_class WHERE relname = 't')
 catalog/regtypes.slt:2fc6c49cbe03bde5  # SELECT pg_table_is_visible('t'::regclass), pg_table_is_visible('other.thing'::regclass)
-catalog/regtypes.slt:32ac5458fde7dba3  # SELECT pg_type_is_visible('int4'::regtype)
 catalog/settings.slt:aaf9dcf5e023a4c1  # SELECT name, setting, vartype FROM pg_settings
-catalog/settings.slt:65a4bd618f5dfc49  # SELECT name, unit FROM pg_settings WHERE name IN ('statement_timeout', 'lock_timeout') ORDER BY name
-catalog/settings.slt:6a1bd6293a031479  # SELECT name, context FROM pg_settings WHERE name IN ('search_path', 'server_version_num', 'max_connections') ORDER BY name
-catalog/settings.slt:c313343b53c63fe3  # SELECT enumvals FROM pg_settings WHERE name = 'client_min_messages'
-catalog/settings.slt:f1b344a219d25c20  # SELECT setting, source FROM pg_settings WHERE name = 'application_name'
 catalog/settings.slt:b5a44c9e9c412853  # SELECT setting FROM pg_settings WHERE name = 'application_name'
 catalog/settings.slt:83a5425c178e720d  # UPDATE pg_settings SET setting = 'via_update' WHERE name = 'application_name'
 catalog/settings.slt:77a2ba0cde58e2c2  # SHOW application_name
 constraints/check_notnull.slt:b60524f33966de18  # CREATE TABLE bad (a int CHECK (a IN (SELECT 1)))
-constraints/check_notnull.slt:39a7e030354deb9d  # SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'stock'::regclass ORDER BY conname
-constraints/check_notnull.slt:17916be75f3cbe5c  # SELECT constraint_name, check_clause FROM information_schema.check_constraints WHERE constraint_name IN ('qty_nonneg', 'valid_discount', 'ranges_check') ORDER BY constraint_name
 constraints/check_notnull.slt:3b9a4c237ed4e305  # CREATE DOMAIN posint AS int CHECK (VALUE > 0); CREATE DOMAIN email_nn AS text NOT NULL; CREATE TABLE dom (n posint, e email_nn)
 constraints/check_notnull.slt:ca20bb29f62a5a51  # INSERT INTO dom VALUES (0, 'x')
 constraints/check_notnull.slt:29a0728fec7c00b3  # INSERT INTO dom VALUES (1, NULL)
@@ -236,27 +163,18 @@ constraints/foreign_keys.slt:e1774fe300977cfc  # DELETE FROM late_child WHERE pi
 constraints/foreign_keys.slt:2716a595ee382a72  # SELECT conname, convalidated FROM pg_constraint WHERE conname = 'late_fk'
 constraints/foreign_keys.slt:33c1e49d31d0f7a5  # SELECT constraint_name, update_rule, delete_rule, match_option FROM information_schema.referential_constraints WHERE constraint_schema = 'public' ORDER BY constraint_name
 constraints/keys_unique.slt:0308954344c2b403  # UPDATE seqs SET n = n + 1
-constraints/keys_unique.slt:5112e39379545275  # SELECT column_name, is_nullable FROM information_schema.columns WHERE table_name = 'memberships' ORDER BY ordinal_position
-constraints/keys_unique.slt:af9ee064c05473d7  # SELECT constraint_name, constraint_type FROM information_schema.table_constraints WHERE table_name = 'named' AND constraint_type IN ('PRIMARY KEY', 'UNIQUE') ORDER BY constraint_name
 constraints/keys_unique.slt:88876c83c90d08ae  # ALTER TABLE named ADD CONSTRAINT bc_unique UNIQUE (a)
 constraints/keys_unique.slt:f45a27899f67be03  # SELECT conname, contype, condeferrable, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'later'::regclass ORDER BY conname
-ddl/alter_table.slt:865bfd9e3ad08df4  # SELECT column_name FROM information_schema.columns WHERE table_name = 't' ORDER BY ordinal_position
-ddl/alter_table.slt:eb1b6865c69d611a  # SELECT column_name, is_nullable, column_default FROM information_schema.columns WHERE table_name = 't' ORDER BY ordinal_position
 ddl/alter_table.slt:2a30c0766251ab31  # ALTER TABLE ty ALTER COLUMN b TYPE int
-ddl/alter_table.slt:14f1fb886b075259  # SELECT column_name, data_type, numeric_precision, numeric_scale, character_maximum_length FROM information_schema.columns WHERE table_name = 'ty' ORDER BY ordinal_position
 ddl/alter_table.slt:61b6a2d21fbb710f  # CREATE SCHEMA other; ALTER TABLE ty2 SET SCHEMA other
 ddl/alter_table.slt:5cb4ed4d412a21a8  # SELECT count(*) FROM other.ty2
 ddl/alter_table.slt:9b74524baf76d354  # ALTER TABLE t ADD CONSTRAINT score_nonneg CHECK (score >= 0); ALTER TABLE t RENAME CONSTRAINT score_nonneg TO score_positive
 ddl/alter_table.slt:a4b9f6bf5b64c464  # INSERT INTO t (id, name, score) VALUES (6, 'f', -1)
 ddl/alter_table.slt:e64072280b8f5593  # ALTER TABLE t DROP CONSTRAINT score_positive
-ddl/alter_table.slt:19d485b9ce237dd6  # SELECT column_name, is_nullable FROM information_schema.columns WHERE table_name = 't' ORDER BY ordinal_position
-ddl/alter_table.slt:9043a94beb9aa704  # SELECT count(*) FROM pg_indexes WHERE indexname = 't_name_idx'
 ddl/alter_table.slt:ba4ef31783d25d08  # ALTER TABLE t DROP COLUMN x
 ddl/alter_table.slt:7a42530afe8921d2  # ALTER TABLE t ALTER COLUMN x TYPE bigint
 ddl/alter_table.slt:6d0f23952e0e494a  # ALTER TABLE t DROP COLUMN x CASCADE
 ddl/alter_table.slt:09949ffdf5745d33  # SELECT * FROM tv
-ddl/create_table.slt:2a2bb90c78680c81  # SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_name = 'users' ORDER BY ordinal_position
-ddl/create_table.slt:dbd318c758b21efd  # SELECT table_name, column_name FROM information_schema.columns WHERE table_name = 'foldme'
 ddl/create_table.slt:8c071cc6414a59d3  # CREATE TABLE src (id int PRIMARY KEY, name text NOT NULL DEFAULT 'anon', note varchar(20)); INSERT INTO src VALUES (1, 'a', 'x'), (2, 'b', NULL), (3, 'c', 'z'); CREATE TABLE copy_plain (LIKE src)
 ddl/create_table.slt:10db5eb05d4b25c6  # INSERT INTO copy_plain (id) VALUES (1)
 ddl/create_table.slt:61e631d7c2af4d0a  # INSERT INTO copy_plain (id, name) VALUES (1, 'n'), (1, 'dup ok'); CREATE TABLE copy_all (LIKE src INCLUDING ALL, extra int); INSERT INTO copy_all (id) VALUES (1)
@@ -279,7 +197,6 @@ ddl/drop.slt:66a0712b7d0a934c  # DROP VIEW v1
 ddl/drop.slt:b70ebd911aa82dbe  # DROP VIEW v1 CASCADE
 ddl/drop.slt:099bf3fdf57b0a9d  # SELECT * FROM v2
 ddl/drop.slt:809451c722fbbc02  # DROP SEQUENCE s_id_seq
-ddl/drop.slt:43d50b2126a50822  # SELECT count(*) FROM pg_class WHERE relname = 's_id_seq'
 ddl/drop.slt:4b62fa7fe746c4df  # DROP SEQUENCE free_seq
 ddl/drop.slt:aeb97bafdccaabcd  # DROP SEQUENCE free_seq CASCADE
 ddl/drop.slt:12c68d0f99ec1e86  # SELECT column_default FROM information_schema.columns WHERE table_name = 'uses_seq'
@@ -309,9 +226,6 @@ ddl/generated.slt:04d9b26fbb9d0493  # SELECT full_name FROM people WHERE first =
 ddl/generated.slt:a6de8b716c9cde23  # ALTER TABLE people DROP COLUMN first
 ddl/generated.slt:7389449924a8eff1  # ALTER TABLE people DROP COLUMN first CASCADE
 ddl/generated.slt:3f125d067e9c00b3  # SELECT column_name FROM information_schema.columns WHERE table_name = 'people' ORDER BY ordinal_position
-ddl/identity.slt:51b85319eef946ab  # SELECT column_name, data_type, column_default, is_nullable FROM information_schema.columns WHERE table_name = 'ser' ORDER BY ordinal_position
-ddl/identity.slt:48a086fa9c828799  # SELECT pg_get_serial_sequence('ser', 'id'), pg_get_serial_sequence('public.ser', 'big')
-ddl/identity.slt:6877ad33946e4b83  # SELECT setval(pg_get_serial_sequence('ser2', 'id'), (SELECT max(id) FROM ser2))
 ddl/identity.slt:30afe30fcffdf5f8  # SELECT id, v FROM idd ORDER BY v
 ddl/identity.slt:f4c41852b1b34244  # SELECT id FROM idopt ORDER BY id
 ddl/identity.slt:32255d47764f5995  # SELECT table_name, is_identity, identity_generation, identity_start, identity_increment, is_nullable FROM information_schema.columns WHERE table_name IN ('ida', 'idd', 'idopt') AND column_name = 'id' ORDER BY table_name
@@ -324,10 +238,8 @@ ddl/identity.slt:5eeae3f3a1d54d04  # ALTER TABLE idd ALTER COLUMN id DROP IDENTI
 ddl/identity.slt:b3928a96f5b70be3  # INSERT INTO idd (v) VALUES ('noid')
 ddl/identity.slt:e5c4fdadc77719b7  # CREATE TABLE addid (id int NOT NULL, v text); ALTER TABLE addid ALTER COLUMN id ADD GENERATED BY DEFAULT AS IDENTITY; INSERT INTO addid (v) VALUES ('x'); ALTER TABLE addid ADD COLUMN id2 int GENERATED ALWAYS AS IDENTITY
 ddl/identity.slt:cff34436aed6c5a9  # SELECT id, id2, v FROM addid
-ddl/indexes.slt:9e875ec61d297af5  # SELECT indexname FROM pg_indexes WHERE tablename = 'accounts' ORDER BY indexname
 ddl/indexes.slt:3a05b0740db02512  # INSERT INTO nn VALUES (NULL)
 ddl/indexes.slt:6b93f735329c8b49  # INSERT INTO members VALUES (5, 'bob', NULL) ON CONFLICT (username) DO NOTHING
-ddl/indexes.slt:4e15cce8d3d9d84b  # SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'members' ORDER BY indexname
 ddl/indexes.slt:2338be0289d070b4  # CREATE INDEX bad ON accounts USING nosuchmethod (id)
 ddl/indexes.slt:7eba0e995fec370e  # CREATE INDEX CONCURRENTLY accounts_conc2 ON accounts (deleted_at)
 ddl/indexes.slt:4c6e700a408aabc9  # ALTER INDEX accounts_org_idx RENAME TO accounts_org_ix; ALTER INDEX IF EXISTS nosuch RENAME TO other; DROP INDEX accounts_email_hash, accounts_brin
@@ -404,9 +316,6 @@ ddl/sequences.slt:14b63fe6bd155b0c  # SELECT sequence_name, data_type, start_val
 ddl/sequences.slt:7d3d03566d8d9933  # SELECT nextval('owned_seq')
 ddl/sequences.slt:580f8aae54f9e9af  # CREATE SCHEMA sx; CREATE SEQUENCE sx.q
 ddl/sequences.slt:f52aee057bfb3891  # SELECT nextval('sx.q'), nextval('sx.q'::regclass)
-ddl/truncate_comment.slt:d6f9073fd1a7e72f  # SELECT obj_description('parent'::regclass, 'pg_class'), col_description('parent'::regclass, 1)
-ddl/truncate_comment.slt:8f53f404106ba5dd  # SELECT obj_description('parent'::regclass, 'pg_class') IS NULL
-ddl/truncate_comment.slt:af79ea1a419ddb09  # COMMENT ON TABLE nosuch IS 'x'
 ddl/truncate_comment.slt:524dc53c8360ddd6  # CREATE SCHEMA s; COMMENT ON SCHEMA s IS 'a schema'; CREATE INDEX child_pid ON child (pid); COMMENT ON INDEX child_pid IS 'fk index'; COMMENT ON CONSTRAINT child_pid_fkey ON child IS 'fk'; CREATE VIEW pv AS SELECT * FROM parent; COMMENT ON VIEW pv IS 'view'; CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1'; COMMENT ON FUNCTION f() IS 'fn'
 ddl/truncate_comment.slt:dfb1c8121b9e9f5f  # SELECT obj_description('child_pid'::regclass, 'pg_class'), obj_description('pv'::regclass, 'pg_class'), obj_description('f'::regproc, 'pg_proc'), (SELECT obj_description(oid, 'pg_namespace') FROM pg_namespace WHERE nspname = 's')
 ddl/views.slt:f563b8c239029a8f  # CREATE OR REPLACE VIEW paid AS SELECT id, amount FROM orders
@@ -543,12 +452,9 @@ functions/conditional_misc.slt:7e28717042d08aa6  # SELECT generate_subscripts('[
 functions/conditional_misc.slt:cc51e3db8447f1f2  # SELECT generate_subscripts(ARRAY[[1, 2, 3], [4, 5, 6]], 2)
 functions/conditional_misc.slt:798d7c4d5544036e  # SELECT num_nulls(1, NULL, 2, NULL), num_nonnulls(1, NULL, 2, NULL), num_nulls(VARIADIC ARRAY[NULL, 1])
 functions/conditional_misc.slt:f1ab761e0adcfb37  # SELECT pg_typeof(ARRAY[1]), pg_typeof('{}'::jsonb), pg_typeof(date '2024-01-01' - 1), pg_typeof(interval '1 day'), pg_typeof(ROW(1, 2))
-functions/conditional_misc.slt:e7844523f793ccce  # SELECT pg_typeof(1)::text = 'integer', format_type('int4'::regtype, NULL), format_type('varchar'::regtype, 14)
 functions/conditional_misc.slt:e2078d87afc205fd  # SELECT set_config('application_name', 'conf', false), current_setting('application_name')
 functions/conditional_misc.slt:3ea2063f8247bffe  # SELECT set_config('my.custom', 'v1', false), current_setting('my.custom')
 functions/conditional_misc.slt:38d2a338c483f4bb  # SELECT pg_column_size(1::int4), pg_column_size(1::int8), pg_column_size('abc'::text)
-functions/conditional_misc.slt:047c857fa103f676  # SELECT has_table_privilege('pg_class', 'SELECT'), 'pg_class'::regclass, 'int4'::regtype, 'public'::regnamespace
-functions/conditional_misc.slt:263f43f0a1e43316  # SELECT to_regclass('no_such_table'), to_regtype('integer'), to_regtype('nope')
 functions/conditional_misc.slt:b5355bcb6afee2be  # SELECT pg_get_viewdef('pg_roles'::regclass) IS NOT NULL
 functions/conditional_misc.slt:14bbaf437abd0a9c  # SELECT uuid_extract_version('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11')
 functions/conditional_misc.slt:f9afb9740dc2477b  # SELECT 1 IS DISTINCT FROM NULL, NULL IS NOT DISTINCT FROM NULL, 2 BETWEEN 1 AND 3, 2 BETWEEN SYMMETRIC 3 AND 1
@@ -765,7 +671,6 @@ session/config_functions.slt:7788132bd64960a6  # RESET no_such_setting
 session/config_functions.slt:bd8cec3befcf3308#2  # SHOW enable_seqscan
 session/config_functions.slt:bd8cec3befcf3308#3  # SHOW enable_seqscan
 session/config_functions.slt:c9a11cfd3cd0d79d#2  # SHOW work_mem
-session/config_functions.slt:6609d82d75b33444  # SELECT setting, unit FROM pg_settings WHERE name = 'work_mem'
 session/extensions.slt:b917717b7291b646  # CREATE EXTENSION pgcrypto
 session/extensions.slt:e9c0d9706f574f7f  # SELECT encode(digest('abc', 'sha256'), 'hex')
 session/extensions.slt:33efed8b88c60365  # SELECT encode(hmac('data', 'key', 'sha1'), 'hex')
@@ -785,7 +690,6 @@ session/extensions.slt:f75f7c3209c554b5  # SELECT 'a=>1, b=>2'::hstore -> 'b'
 session/extensions.slt:1b73d2d692d4dda0  # SELECT 'a=>1, b=>2'::hstore ? 'a', 'a=>1'::hstore || 'c=>3'::hstore
 session/extensions.slt:0942560e8d35f7b5  # SELECT akeys('x=>1, y=>2'::hstore), hstore('k', 'v')
 session/extensions.slt:a5f6ffc30aa8867f  # SELECT extname FROM pg_extension WHERE extname <> 'plpgsql' ORDER BY extname
-session/extensions.slt:34a523c1ccb4f529  # SELECT name FROM pg_available_extensions WHERE name IN ('pgcrypto', 'uuid-ossp', 'citext', 'pg_trgm', 'hstore') ORDER BY name
 session/extensions.slt:78c914c21f3e5d24  # SELECT installed_version IS NOT NULL FROM pg_available_extensions WHERE name = 'citext'
 session/extensions.slt:6095da0ee328ac66  # SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'btree_gist'
 session/extensions.slt:b5188c728c7d0a7e  # DROP EXTENSION citext
@@ -829,10 +733,8 @@ session/prepare_cursor.slt:2041f3152b1d64b6  # EXECUTE get_item(1)
 session/prepare_cursor.slt:33d5a81f489382ab#2  # DEALLOCATE get_item
 session/prepare_cursor.slt:82ce5be0c5004f64  # DEALLOCATE PREPARE count_items
 session/prepare_cursor.slt:edb4abdce917c3e8  # DEALLOCATE ALL
-session/prepare_cursor.slt:547eb8521ef32fb7  # SELECT count(*) FROM pg_prepared_statements
 session/prepare_cursor.slt:b518637e13ae9826  # PREPARE mine AS SELECT 1
 session/prepare_cursor.slt:7e6c478fe94656d5  # EXECUTE mine
-session/prepare_cursor.slt:547eb8521ef32fb7#2  # SELECT count(*) FROM pg_prepared_statements
 session/prepare_cursor.slt:77a2ba0cde58e2c2  # SHOW application_name
 session/prepare_cursor.slt:fe5e7d646ec8afa9  # SELECT * FROM scratch
 session/prepare_cursor.slt:b78c783660e4d930#2  # DISCARD ALL
@@ -875,7 +777,6 @@ session/roles.slt:639cc2c6696c661a#2  # CREATE ROLE conf_sess_reader
 session/roles.slt:27f2652dab3d2b2a  # SELECT rolname, rolcanlogin, rolsuper, rolinherit, rolconnlimit
 session/roles.slt:e6bf20461eb46734  # ALTER ROLE conf_sess_login WITH NOLOGIN
 session/roles.slt:79c855723fcd5a76  # ALTER ROLE conf_sess_login SET search_path = public
-session/roles.slt:0cc743b55ec2f517  # SELECT pg_has_role('conf_sess_writer', 'conf_sess_reader', 'MEMBER')
 session/roles.slt:509f63c246dffab7  # ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO conf_sess_reader
 session/roles.slt:06ee33c783f99c6c  # SELECT has_table_privilege('conf_sess_reader', 'docs', 'SELECT'), has_table_privilege('conf_sess_reader', 'docs', 'INSERT')
 session/roles.slt:cb18faf25d529273  # SELECT privilege_type FROM information_schema.role_table_grants
@@ -891,7 +792,6 @@ session/roles.slt:c212a265a798fcdf  # DROP ROLE conf_sess_writer
 session/roles.slt:c212a265a798fcdf#2  # DROP ROLE conf_sess_writer
 session/roles.slt:4704b79a683ed8c5  # DROP ROLE conf_sess_login
 session/roles.slt:dfbf7fb3babe5bd0#2  # DROP ROLE IF EXISTS conf_sess_login
-session/roles.slt:9a277d44a75e313f  # SELECT count(*) FROM pg_roles WHERE rolname LIKE 'conf\_sess\_%'
 session/set_show.slt:36334faa88b1322d  # SET TIME ZONE 'America/New_York'
 session/set_show.slt:d4465dc31f6c35fd  # SHOW timezone
 session/set_show.slt:76b878d021197b41  # SELECT '2024-06-01 12:00:00+00'::timestamptz, '2024-01-15 12:00:00+00'::timestamptz
@@ -945,12 +845,6 @@ session/utility.slt:2ee71d3b64c57cf6  # REINDEX TABLE t
 session/utility.slt:efeebe546b210517  # CLUSTER t USING t_pkey
 session/utility.slt:a12925eaf0bc7137  # LOCK TABLE t IN ACCESS SHARE MODE
 session/utility.slt:2586f0a05003d3f8  # LOCK TABLE t IN ACCESS EXCLUSIVE MODE NOWAIT
-session/utility.slt:0542bffb220ca192  # SELECT pg_is_in_recovery()
-session/utility.slt:b7e15c6991381607  # SELECT pg_postmaster_start_time() <= now()
-session/utility.slt:06e318235c054d2d  # SELECT inet_server_port() IS NULL OR inet_server_port() > 0
-session/utility.slt:ae4ba31d14184857  # SELECT pg_cancel_backend(0)
-session/utility.slt:4e8706ed275dc53c  # SELECT has_table_privilege('t', 'SELECT'), has_schema_privilege('public', 'USAGE')
-session/utility.slt:793af84f25eaa034  # SELECT pg_relation_size('t') >= 0, pg_total_relation_size('t') >= 0
 session/utility.slt:14a255b6d915c7e9  # DO $$ BEGIN PERFORM 1; END $$
 session/utility.slt:6ef5fcb4d663b855  # DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'u') THEN CREATE TABLE u (x int); END IF; END $$
 session/utility.slt:7e9fe260f01363ab  # SELECT to_regclass('u') IS NOT NULL

@@ -348,6 +348,8 @@ pub fn resolve_type_name(t: &pgmem_ir::TypeName) -> SqlResult<(Type, i32)> {
             crate::cast::varchar_typmod(*n)
         }
         ("numeric" | "decimal", [p]) => crate::cast::numeric_typmod(*p, 0),
+        // Fractional-second precision: timestamp(3), time(0), ...
+        ("timestamp" | "timestamptz" | "time" | "timetz" | "interval", [p]) => i32::try_from(*p).unwrap_or(-1),
         ("numeric" | "decimal", [p, s]) => {
             if *p < 1 || *p > 1000 {
                 return Err(SqlError::syntax(format!("NUMERIC precision {p} must be between 1 and 1000")));

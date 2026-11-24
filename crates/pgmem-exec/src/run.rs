@@ -13,6 +13,7 @@ use std::rc::Rc;
 pub fn run(rel: &Rel, ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     match rel {
         Rel::Values { rows } => rows.iter().map(|r| r.iter().map(|e| eval(e, &[], ctx)).collect()).collect(),
+        Rel::Virtual { rows } => (rows.0)(ctx),
         Rel::Scan { table, slots, missing } => Ok(ctx
             .txn
             .scan(*table)

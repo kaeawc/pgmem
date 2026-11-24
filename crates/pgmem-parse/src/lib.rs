@@ -232,7 +232,20 @@ fn lower_statement(stmt: sq::Statement) -> SqlResult<Statement> {
             }
             .into(),
         },
-        S::Comment { .. } => Statement::NoOp { tag: "COMMENT".into() },
+        S::Comment { object_type, object_name: target_name, comment, .. } => {
+            use pgmem_ir::CommentTarget as T;
+            let target = match object_type {
+                sq::CommentObject::Table => T::Table,
+                sq::CommentObject::View => T::View,
+                sq::CommentObject::MaterializedView => T::MaterializedView,
+                sq::CommentObject::Sequence => T::Sequence,
+                sq::CommentObject::Index => T::Index,
+                sq::CommentObject::Column => T::Column,
+                sq::CommentObject::Schema => T::Schema,
+                _ => T::Other,
+            };
+            Statement::Comment { target, name: object_name(&target_name)?, text: comment }
+        }
         S::CreateExtension(_) => Statement::NoOp { tag: "CREATE EXTENSION".into() },
         S::DropExtension(_) => Statement::NoOp { tag: "DROP EXTENSION".into() },
         S::CreateSchema { .. } => Statement::NoOp { tag: "CREATE SCHEMA".into() },
