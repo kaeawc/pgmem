@@ -1,0 +1,565 @@
+go_package	go_file	go_test	rust_test	status	notes
+examples/analytics	analytics_test.go	TestExpandIDs	crates/pgmem/tests/it/example_analytics.rs::expand_ids	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now())
+examples/analytics	analytics_test.go	TestPlayersByIDs	crates/pgmem/tests/it/example_analytics.rs::players_by_ids	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now())
+examples/analytics	analytics_test.go	TestRankByScore	crates/pgmem/tests/it/example_analytics.rs::rank_by_score	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now())
+examples/analytics	analytics_test.go	TestScoresArrayPerPlayer	crates/pgmem/tests/it/example_analytics.rs::scores_array_per_player	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now())
+examples/analytics	analytics_test.go	TestTopScoresByRegion	crates/pgmem/tests/it/example_analytics.rs::top_scores_by_region	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now())
+examples/blog	blog_test.go	TestDeleteFKReject	crates/pgmem/tests/it/example_blog.rs::delete_fk_reject	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now()); Go only required an error, asserts SQLSTATE 23503
+examples/blog	blog_test.go	TestPagination	crates/pgmem/tests/it/example_blog.rs::pagination	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now()); LIMIT/OFFSET params bound as i64 (Postgres types them bigint; sqlc says int32)
+examples/blog	blog_test.go	TestPostsAndComments	crates/pgmem/tests/it/example_blog.rs::posts_and_comments	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now()); LIMIT/OFFSET params bound as i64 (Postgres types them bigint; sqlc says int32)
+examples/blog	blog_test.go	TestUserCRUD	crates/pgmem/tests/it/example_blog.rs::user_crud	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now())
+examples/chat	chat_test.go	TestReplyThread	crates/pgmem/tests/it/example_chat.rs::reply_thread	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now())
+examples/chat	chat_test.go	TestRoomFeed_UnionAll	crates/pgmem/tests/it/example_chat.rs::room_feed_union_all	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now()); LIMIT/OFFSET params bound as i64 (Postgres types them bigint; sqlc says int32)
+examples/chat	chat_test.go	TestSubscribe_OnConflictDoNothing	crates/pgmem/tests/it/example_chat.rs::subscribe_on_conflict_do_nothing	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now())
+examples/chat	chat_test.go	TestSubscribedRooms	crates/pgmem/tests/it/example_chat.rs::subscribed_rooms	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now())
+examples/events	events_test.go	TestErrorEvents	crates/pgmem/tests/it/example_events.rs::error_events	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now())
+examples/events	events_test.go	TestEventEpochs	crates/pgmem/tests/it/example_events.rs::event_epochs	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now())
+examples/events	events_test.go	TestEventsByKindField	crates/pgmem/tests/it/example_events.rs::events_by_kind_field	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now()); LIMIT/OFFSET params bound as i64 (Postgres types them bigint; sqlc says int32)
+examples/events	events_test.go	TestEventsByPayloadKey	crates/pgmem/tests/it/example_events.rs::events_by_payload_key	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now())
+examples/events	events_test.go	TestEventsPerHour	crates/pgmem/tests/it/example_events.rs::events_per_hour	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now())
+examples/inventory	inventory_test.go	TestChildCategories	crates/pgmem/tests/it/example_inventory.rs::child_categories	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now())
+examples/inventory	inventory_test.go	TestLowStockReport	crates/pgmem/tests/it/example_inventory.rs::low_stock_report	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now())
+examples/inventory	inventory_test.go	TestLowStockReport_OkBranch	crates/pgmem/tests/it/example_inventory.rs::low_stock_report_ok_branch	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now())
+examples/inventory	inventory_test.go	TestOnHandByProduct	crates/pgmem/tests/it/example_inventory.rs::on_hand_by_product	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now())
+examples/inventory	inventory_test.go	TestWarehouseRollup	crates/pgmem/tests/it/example_inventory.rs::warehouse_rollup	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now())
+examples/todo	todo_test.go	TestItemsDueWithin	crates/pgmem/tests/it/example_todo.rs::items_due_within	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now())
+examples/todo	todo_test.go	TestListCompletion	crates/pgmem/tests/it/example_todo.rs::list_completion	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now())
+examples/todo	todo_test.go	TestSoftDeleteFiltersOut	crates/pgmem/tests/it/example_todo.rs::soft_delete_filters_out	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now())
+examples/todo	todo_test.go	TestUpsertList	crates/pgmem/tests/it/example_todo.rs::upsert_list	pending	SQL copied verbatim from db/queries.sql.go; SetNow omitted (no query reads now())
+exec	delete_test.go	TestDelete_NoMatchLeavesTableIntact	crates/pgmem/tests/it/exec_delete.rs::delete_no_match_leaves_table_intact	pending	Go IR plan translated to the equivalent SQL statement
+exec	delete_test.go	TestDelete_NoWhereDeletesAll	crates/pgmem/tests/it/exec_delete.rs::delete_no_where_deletes_all	pending	Go IR plan translated to the equivalent SQL statement
+exec	delete_test.go	TestDelete_Returning	crates/pgmem/tests/it/exec_delete.rs::delete_returning	pending	Go IR plan translated to the equivalent SQL statement
+exec	delete_test.go	TestDelete_WhereMatchOne	crates/pgmem/tests/it/exec_delete.rs::delete_where_match_one	pending	Go IR plan translated to the equivalent SQL statement
+exec	funcs_substring_test.go	TestSubstring_NegativeLength_RejectsAtExec	crates/pgmem/tests/it/exec_funcs_substring.rs::substring_negative_length_rejects_at_exec	pending	Go IR plan translated to the equivalent SQL statement
+exec	funcs_test.go	TestGenRandomUUID_ProducesV4	crates/pgmem/tests/it/exec_funcs.rs::gen_random_uuid_produces_v4	pending	Go IR plan translated to the equivalent SQL statement
+exec	funcs_test.go	TestGenRandomUUID_TwoCallsDiffer	crates/pgmem/tests/it/exec_funcs.rs::gen_random_uuid_two_calls_differ	pending	Go IR plan translated to the equivalent SQL statement
+exec	funcs_test.go	TestUUIDColumn_RoundTripThroughInsert	crates/pgmem/tests/it/exec_funcs.rs::uuid_column_round_trip_through_insert	pending	Go IR plan translated to the equivalent SQL statement
+exec	funcs_test.go	TestUnknownFunctionErrors	crates/pgmem/tests/it/exec_funcs.rs::unknown_function_errors	pending	Go only required an error at Build time; asserts Postgres SQLSTATE 42883 (undefined_function)
+exec	insert_check_test.go	TestInsert_CheckEvaluatesAgainstOtherColumn	crates/pgmem/tests/it/exec_insert_check.rs::insert_check_evaluates_against_other_column	pending	Go IR plan translated to the equivalent SQL statement
+exec	insert_check_test.go	TestInsert_CheckNullEvaluatesAsPass	crates/pgmem/tests/it/exec_insert_check.rs::insert_check_null_evaluates_as_pass	pending	Go IR plan translated to the equivalent SQL statement
+exec	insert_check_test.go	TestInsert_CheckPasses_AdmitsGoodRow	crates/pgmem/tests/it/exec_insert_check.rs::insert_check_passes_admits_good_row	pending	Go IR plan translated to the equivalent SQL statement
+exec	insert_check_test.go	TestInsert_CheckViolation_RejectsBadRow	crates/pgmem/tests/it/exec_insert_check.rs::insert_check_violation_rejects_bad_row	pending	Go IR plan translated to the equivalent SQL statement
+exec	insert_notnull_test.go	TestInsert_MultiRow_NotNullValidatedBeforeAnyInsert	crates/pgmem/tests/it/exec_insert_notnull.rs::insert_multi_row_not_null_validated_before_any_insert	pending	Go IR plan translated to the equivalent SQL statement
+exec	insert_notnull_test.go	TestInsert_NotNullViolation_ReturnsSQLState	crates/pgmem/tests/it/exec_insert_notnull.rs::insert_not_null_violation_returns_sql_state	pending	Go IR plan translated to the equivalent SQL statement
+exec	insert_notnull_test.go	TestInsert_NotNull_AllowsNullableColumn	crates/pgmem/tests/it/exec_insert_notnull.rs::insert_not_null_allows_nullable_column	pending	Go IR plan translated to the equivalent SQL statement
+exec	insert_returning_test.go	TestInsert_Returning_EmitsProjectedRows	crates/pgmem/tests/it/exec_insert_returning.rs::insert_returning_emits_projected_rows	pending	Go IR plan translated to the equivalent SQL statement
+exec	insert_returning_test.go	TestInsert_Returning_EmptyOnFailure	crates/pgmem/tests/it/exec_insert_returning.rs::insert_returning_empty_on_failure	pending	Go IR plan translated to the equivalent SQL statement
+exec	insert_returning_test.go	TestInsert_Returning_PartialColumns	crates/pgmem/tests/it/exec_insert_returning.rs::insert_returning_partial_columns	pending	Go IR plan translated to the equivalent SQL statement
+exec	insert_serial_test.go	TestBigSerial_ReturnsInt64	crates/pgmem/tests/it/exec_insert_serial.rs::big_serial_returns_int64	pending	Go IR plan translated to the equivalent SQL statement
+exec	insert_serial_test.go	TestSerial_AssignsSequentialIDs	crates/pgmem/tests/it/exec_insert_serial.rs::serial_assigns_sequential_ids	pending	Go IR plan translated to the equivalent SQL statement
+exec	insert_serial_test.go	TestSerial_ExplicitValueOverridesCounter	crates/pgmem/tests/it/exec_insert_serial.rs::serial_explicit_value_overrides_counter	pending	Go IR plan translated to the equivalent SQL statement
+exec	insert_serial_test.go	TestSerial_RollbackLeavesGapInCounter	crates/pgmem/tests/it/exec_insert_serial.rs::serial_rollback_leaves_gap_in_counter	pending	Go IR plan translated to the equivalent SQL statement
+exec	insert_unique_test.go	TestInsert_PrimaryKey_IsNotNullAndUnique	crates/pgmem/tests/it/exec_insert_unique.rs::insert_primary_key_is_not_null_and_unique	pending	Go IR plan translated to the equivalent SQL statement
+exec	insert_unique_test.go	TestInsert_UniqueAllowsMultipleNulls	crates/pgmem/tests/it/exec_insert_unique.rs::insert_unique_allows_multiple_nulls	pending	Go IR plan translated to the equivalent SQL statement
+exec	insert_unique_test.go	TestInsert_UniqueViolation_AgainstExistingRow	crates/pgmem/tests/it/exec_insert_unique.rs::insert_unique_violation_against_existing_row	pending	Go IR plan translated to the equivalent SQL statement
+exec	insert_unique_test.go	TestInsert_UniqueViolation_WithinSameStatement	crates/pgmem/tests/it/exec_insert_unique.rs::insert_unique_violation_within_same_statement	pending	Go IR plan translated to the equivalent SQL statement
+exec	join_left_cross_test.go	TestCrossJoin_Cartesian	crates/pgmem/tests/it/exec_join_left_cross.rs::cross_join_cartesian	pending	Go IR plan translated to the equivalent SQL statement
+exec	join_left_cross_test.go	TestLeftJoin_PadsUnmatched	crates/pgmem/tests/it/exec_join_left_cross.rs::left_join_pads_unmatched	pending	Go IR plan translated to the equivalent SQL statement
+exec	join_test.go	TestInnerJoin_AmbiguousUnqualifiedRefIsRejected	crates/pgmem/tests/it/exec_join.rs::inner_join_ambiguous_unqualified_ref_is_rejected	pending	Go IR plan translated to the equivalent SQL statement; asserts SQLSTATE 42702
+exec	join_test.go	TestInnerJoin_NestedLoop	crates/pgmem/tests/it/exec_join.rs::inner_join_nested_loop	pending	Go IR plan translated to the equivalent SQL statement
+exec	join_test.go	TestInnerJoin_NoMatchEmits	crates/pgmem/tests/it/exec_join.rs::inner_join_no_match_emits	pending	Go IR plan translated to the equivalent SQL statement
+exec	join_test.go	TestInnerJoin_QualifierResolvesUnambiguously	crates/pgmem/tests/it/exec_join.rs::inner_join_qualifier_resolves_unambiguously	pending	Go IR plan translated to the equivalent SQL statement
+exec	update_test.go	TestUpdate_AssignmentsSeeOriginal	crates/pgmem/tests/it/exec_update.rs::update_assignments_see_original	pending	Go IR plan translated to the equivalent SQL statement
+exec	update_test.go	TestUpdate_CheckViolation	crates/pgmem/tests/it/exec_update.rs::update_check_violation	pending	Go IR plan translated to the equivalent SQL statement
+exec	update_test.go	TestUpdate_NoMatchLeavesIntact	crates/pgmem/tests/it/exec_update.rs::update_no_match_leaves_intact	pending	Go IR plan translated to the equivalent SQL statement
+exec	update_test.go	TestUpdate_NotNullViolation	crates/pgmem/tests/it/exec_update.rs::update_not_null_violation	pending	Go IR plan translated to the equivalent SQL statement
+exec	update_test.go	TestUpdate_Returning	crates/pgmem/tests/it/exec_update.rs::update_returning	pending	Go IR plan translated to the equivalent SQL statement
+exec	update_test.go	TestUpdate_UniqueViolation	crates/pgmem/tests/it/exec_update.rs::update_unique_violation	pending	Go IR plan translated to the equivalent SQL statement
+exec	update_test.go	TestUpdate_WhereMatchesOne	crates/pgmem/tests/it/exec_update.rs::update_where_matches_one	pending	Go IR plan translated to the equivalent SQL statement
+postgres	agg_distinct_test.go	TestAggDistinct_Count	crates/pgmem/tests/it/agg_distinct.rs::agg_distinct_count	pending	
+postgres	agg_distinct_test.go	TestAggDistinct_CountVsTotal	crates/pgmem/tests/it/agg_distinct.rs::agg_distinct_count_vs_total	pending	
+postgres	agg_distinct_test.go	TestAggDistinct_Grouped	crates/pgmem/tests/it/agg_distinct.rs::agg_distinct_grouped	pending	
+postgres	agg_distinct_test.go	TestAggDistinct_Sum	crates/pgmem/tests/it/agg_distinct.rs::agg_distinct_sum	pending	
+postgres	agg_filter_test.go	TestAggFilter_CountWhereActive	crates/pgmem/tests/it/agg_filter.rs::agg_filter_count_where_active	pending	
+postgres	agg_filter_test.go	TestAggFilter_NullFilterSkips	crates/pgmem/tests/it/agg_filter.rs::agg_filter_null_filter_skips	pending	
+postgres	agg_filter_test.go	TestAggFilter_SumPositive	crates/pgmem/tests/it/agg_filter.rs::agg_filter_sum_positive	pending	
+postgres	agg_filter_test.go	TestAggFilter_WithDistinct	crates/pgmem/tests/it/agg_filter.rs::agg_filter_with_distinct	pending	
+postgres	aggregates_test.go	TestAggregate_CountColumn	crates/pgmem/tests/it/aggregates.rs::aggregate_count_column	pending	
+postgres	aggregates_test.go	TestAggregate_CountStar	crates/pgmem/tests/it/aggregates.rs::aggregate_count_star	pending	
+postgres	aggregates_test.go	TestAggregate_MaxOnText	crates/pgmem/tests/it/aggregates.rs::aggregate_max_on_text	pending	
+postgres	aggregates_test.go	TestAggregate_MixedRequiresGroupBy	crates/pgmem/tests/it/aggregates.rs::aggregate_mixed_requires_group_by	pending	asserts 42803 and message
+postgres	aggregates_test.go	TestAggregate_OnEmptyTable	crates/pgmem/tests/it/aggregates.rs::aggregate_on_empty_table	pending	Postgres types: sum int8, min/max int4, avg numeric (all NULL)
+postgres	aggregates_test.go	TestAggregate_SumMinMaxAvg	crates/pgmem/tests/it/aggregates.rs::aggregate_sum_min_max_avg	pending	Postgres types: sum(int4)=int8, min/max(int4)=int4, avg(int4)=numeric 20.0000000000000000 (Go scanned all into int64)
+postgres	aggregates_test.go	TestAggregate_WithWhere	crates/pgmem/tests/it/aggregates.rs::aggregate_with_where	pending	
+postgres	alter_column_notnull_test.go	TestAlterColumn_DropNotNull	crates/pgmem/tests/it/alter_column_notnull.rs::alter_column_drop_not_null	pending	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_column_notnull_test.go	TestAlterColumn_MissingColumn	crates/pgmem/tests/it/alter_column_notnull.rs::alter_column_missing_column	pending	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_column_notnull_test.go	TestAlterColumn_SetNotNull_Existing	crates/pgmem/tests/it/alter_column_notnull.rs::alter_column_set_not_null_existing	pending	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_column_notnull_test.go	TestAlterColumn_SetNotNull_NoNulls	crates/pgmem/tests/it/alter_column_notnull.rs::alter_column_set_not_null_no_nulls	pending	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_column_notnull_test.go	TestAlterColumn_SetNotNull_OptionalColumnKeyword	crates/pgmem/tests/it/alter_column_notnull.rs::alter_column_set_not_null_optional_column_keyword	pending	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_table_test.go	TestAlterTable_AddColumnDuplicate	crates/pgmem/tests/it/alter_table.rs::alter_table_add_column_duplicate	pending	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_table_test.go	TestAlterTable_AddColumnIfNotExists	crates/pgmem/tests/it/alter_table.rs::alter_table_add_column_if_not_exists	pending	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_table_test.go	TestAlterTable_AddColumnNotNullOnEmpty	crates/pgmem/tests/it/alter_table.rs::alter_table_add_column_not_null_on_empty	pending	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_table_test.go	TestAlterTable_AddColumnNotNullOnNonEmpty	crates/pgmem/tests/it/alter_table.rs::alter_table_add_column_not_null_on_non_empty	pending	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_table_test.go	TestAlterTable_AddColumnNullable	crates/pgmem/tests/it/alter_table.rs::alter_table_add_column_nullable	pending	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_table_test.go	TestAlterTable_DropColumn	crates/pgmem/tests/it/alter_table.rs::alter_table_drop_column	pending	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_table_test.go	TestAlterTable_DropColumnCascade	crates/pgmem/tests/it/alter_table.rs::alter_table_drop_column_cascade	pending	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_table_test.go	TestAlterTable_DropColumnIfExistsMissing	crates/pgmem/tests/it/alter_table.rs::alter_table_drop_column_if_exists_missing	pending	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_table_test.go	TestAlterTable_MissingTable	crates/pgmem/tests/it/alter_table.rs::alter_table_missing_table	pending	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_table_test.go	TestAlterTable_RenameColumn	crates/pgmem/tests/it/alter_table.rs::alter_table_rename_column	pending	error cases additionally assert the real Postgres SQLSTATE.
+postgres	alter_table_test.go	TestAlterTable_RenameColumnConflict	crates/pgmem/tests/it/alter_table.rs::alter_table_rename_column_conflict	pending	error cases additionally assert the real Postgres SQLSTATE.
+postgres	arithmetic_test.go	TestArithmetic_BasicOps	crates/pgmem/tests/it/arithmetic.rs::arithmetic_basic_ops	pending	
+postgres	arithmetic_test.go	TestArithmetic_BigintWidens	crates/pgmem/tests/it/arithmetic.rs::arithmetic_bigint_widens	pending	
+postgres	arithmetic_test.go	TestArithmetic_DivisionByZero	crates/pgmem/tests/it/arithmetic.rs::arithmetic_division_by_zero	pending	
+postgres	arithmetic_test.go	TestArithmetic_Update_IncrementCounter	crates/pgmem/tests/it/arithmetic.rs::arithmetic_update_increment_counter	pending	
+postgres	array_agg_unnest_test.go	TestArrayAggThenUnnest	crates/pgmem/tests/it/array_agg_unnest.rs::array_agg_then_unnest	pending	count(*) is int8 (Go scanned into int32)
+postgres	array_agg_unnest_test.go	TestArrayAgg_Int	crates/pgmem/tests/it/array_agg_unnest.rs::array_agg_int	pending	order-independent compare of array elements
+postgres	array_agg_unnest_test.go	TestArrayAgg_Text	crates/pgmem/tests/it/array_agg_unnest.rs::array_agg_text	pending	
+postgres	array_agg_unnest_test.go	TestUnnest_Int	crates/pgmem/tests/it/array_agg_unnest.rs::unnest_int	pending	
+postgres	array_agg_unnest_test.go	TestUnnest_Text	crates/pgmem/tests/it/array_agg_unnest.rs::unnest_text	pending	
+postgres	array_string_funcs_test.go	TestArrayLength_Empty	crates/pgmem/tests/it/array_string_funcs.rs::array_length_empty	pending	
+postgres	array_string_funcs_test.go	TestArrayLength_NonEmpty	crates/pgmem/tests/it/array_string_funcs.rs::array_length_non_empty	pending	
+postgres	array_string_funcs_test.go	TestArrayToString_IntArray	crates/pgmem/tests/it/array_string_funcs.rs::array_to_string_int_array	pending	
+postgres	array_string_funcs_test.go	TestArrayToString_PlainSep	crates/pgmem/tests/it/array_string_funcs.rs::array_to_string_plain_sep	pending	
+postgres	array_string_funcs_test.go	TestCardinality	crates/pgmem/tests/it/array_string_funcs.rs::cardinality	pending	
+postgres	array_string_funcs_test.go	TestRepeat	crates/pgmem/tests/it/array_string_funcs.rs::repeat	pending	
+postgres	array_string_funcs_test.go	TestReverse	crates/pgmem/tests/it/array_string_funcs.rs::reverse	pending	
+postgres	array_string_funcs_test.go	TestSplitPart_Negative	crates/pgmem/tests/it/array_string_funcs.rs::split_part_negative	pending	
+postgres	array_string_funcs_test.go	TestSplitPart_OutOfRange	crates/pgmem/tests/it/array_string_funcs.rs::split_part_out_of_range	pending	
+postgres	array_string_funcs_test.go	TestSplitPart_Positive	crates/pgmem/tests/it/array_string_funcs.rs::split_part_positive	pending	
+postgres	array_string_funcs_test.go	TestStringToArray_Basic	crates/pgmem/tests/it/array_string_funcs.rs::string_to_array_basic	pending	
+postgres	array_test.go	TestArray_AnyBigint	crates/pgmem/tests/it/array.rs::array_any_bigint	pending	
+postgres	array_test.go	TestArray_AnyText	crates/pgmem/tests/it/array.rs::array_any_text	pending	
+postgres	array_test.go	TestArray_BigintLiteral	crates/pgmem/tests/it/array.rs::array_bigint_literal	pending	
+postgres	array_test.go	TestArray_EmptyArrayMatchesNothing	crates/pgmem/tests/it/array.rs::array_empty_array_matches_nothing	pending	
+postgres	between_test.go	TestBetween_Combined	crates/pgmem/tests/it/between.rs::between_combined	pending	
+postgres	between_test.go	TestBetween_Inclusive	crates/pgmem/tests/it/between.rs::between_inclusive	pending	
+postgres	between_test.go	TestBetween_Params	crates/pgmem/tests/it/between.rs::between_params	pending	
+postgres	between_test.go	TestNotBetween	crates/pgmem/tests/it/between.rs::not_between	pending	
+postgres	bool_agg_test.go	TestBoolAgg_AllNullsIsNull	crates/pgmem/tests/it/bool_agg.rs::bool_agg_all_nulls_is_null	pending	
+postgres	bool_agg_test.go	TestBoolAnd_AllTrue	crates/pgmem/tests/it/bool_agg.rs::bool_and_all_true	pending	
+postgres	bool_agg_test.go	TestBoolAnd_OneFalse	crates/pgmem/tests/it/bool_agg.rs::bool_and_one_false	pending	
+postgres	bool_agg_test.go	TestBoolOr_AnyTrue	crates/pgmem/tests/it/bool_agg.rs::bool_or_any_true	pending	
+postgres	bool_agg_test.go	TestEvery_SynonymForBoolAnd	crates/pgmem/tests/it/bool_agg.rs::every_synonym_for_bool_and	pending	
+postgres	bytea_test.go	TestBytea_RoundTrip	crates/pgmem/tests/it/bytea.rs::bytea_round_trip	pending	
+postgres	bytea_test.go	TestBytea_UniqueConstraint	crates/pgmem/tests/it/bytea.rs::bytea_unique_constraint	pending	
+postgres	case_test.go	TestCase_NoElseDefaultsNull	crates/pgmem/tests/it/case.rs::case_no_else_defaults_null	pending	
+postgres	case_test.go	TestCase_NullOperand	crates/pgmem/tests/it/case.rs::case_null_operand	pending	
+postgres	case_test.go	TestCase_Searched	crates/pgmem/tests/it/case.rs::case_searched	pending	
+postgres	case_test.go	TestCase_Simple	crates/pgmem/tests/it/case.rs::case_simple	pending	
+postgres	cast_test.go	TestCast_BadIntText	crates/pgmem/tests/it/cast.rs::cast_bad_int_text	pending	asserts the precise SQLSTATE 22P02 and message (Go only required a PgError)
+postgres	cast_test.go	TestCast_Chains	crates/pgmem/tests/it/cast.rs::cast_chains	pending	
+postgres	cast_test.go	TestCast_Int4ToInt8	crates/pgmem/tests/it/cast.rs::cast_int4_to_int8	pending	
+postgres	cast_test.go	TestCast_IntToText	crates/pgmem/tests/it/cast.rs::cast_int_to_text	pending	
+postgres	cast_test.go	TestCast_NullPropagates	crates/pgmem/tests/it/cast.rs::cast_null_propagates	pending	
+postgres	cast_test.go	TestCast_TextToInt	crates/pgmem/tests/it/cast.rs::cast_text_to_int	pending	
+postgres	cast_test.go	TestCast_TimestamptzText	crates/pgmem/tests/it/cast.rs::cast_timestamptz_text	pending	pinned now() check is pgmem-only; timestamptz::text format also checked on real Postgres with a literal
+postgres	check_test.go	TestCheckViolation_OverWire	crates/pgmem/tests/it/check.rs::check_violation_over_wire	pending	
+postgres	coalesce_nullif_test.go	TestCoalesce_AllNull	crates/pgmem/tests/it/coalesce_nullif.rs::coalesce_all_null	pending	
+postgres	coalesce_nullif_test.go	TestCoalesce_FirstNonNull	crates/pgmem/tests/it/coalesce_nullif.rs::coalesce_first_non_null	pending	
+postgres	coalesce_nullif_test.go	TestCoalesce_OnColumn	crates/pgmem/tests/it/coalesce_nullif.rs::coalesce_on_column	pending	
+postgres	coalesce_nullif_test.go	TestNullif_DifferentReturnsFirst	crates/pgmem/tests/it/coalesce_nullif.rs::nullif_different_returns_first	pending	
+postgres	coalesce_nullif_test.go	TestNullif_EqualsReturnsNull	crates/pgmem/tests/it/coalesce_nullif.rs::nullif_equals_returns_null	pending	
+postgres	column_default_test.go	TestColumnDefault_AlterAddColumnWithDefault	crates/pgmem/tests/it/column_default.rs::column_default_alter_add_column_with_default	pending	pgmem-go left existing rows NULL after ADD COLUMN ... DEFAULT; Postgres backfills them, asserted row 1 = 'new'
+postgres	column_default_test.go	TestColumnDefault_DefaultValuesUsesDefaults	crates/pgmem/tests/it/column_default.rs::column_default_default_values_uses_defaults	pending	also checks serial id == 1
+postgres	column_default_test.go	TestColumnDefault_ExplicitNullKeepsNull	crates/pgmem/tests/it/column_default.rs::column_default_explicit_null_keeps_null	pending	
+postgres	column_default_test.go	TestColumnDefault_ExplicitValueWins	crates/pgmem/tests/it/column_default.rs::column_default_explicit_value_wins	pending	
+postgres	column_default_test.go	TestColumnDefault_LiteralFillsOmittedColumn	crates/pgmem/tests/it/column_default.rs::column_default_literal_fills_omitted_column	pending	
+postgres	column_default_test.go	TestColumnDefault_NowFillsTimestamp	crates/pgmem/tests/it/column_default.rs::column_default_now_fills_timestamp	pending	
+postgres	concat_test.go	TestConcatWs_Basic	crates/pgmem/tests/it/concat.rs::concat_ws_basic	pending	
+postgres	concat_test.go	TestConcatWs_NullSepIsNull	crates/pgmem/tests/it/concat.rs::concat_ws_null_sep_is_null	pending	
+postgres	concat_test.go	TestConcatWs_NullsSkippedNoLeadingSep	crates/pgmem/tests/it/concat.rs::concat_ws_nulls_skipped_no_leading_sep	pending	
+postgres	concat_test.go	TestConcat_Basic	crates/pgmem/tests/it/concat.rs::concat_basic	pending	
+postgres	concat_test.go	TestConcat_MixedTypes	crates/pgmem/tests/it/concat.rs::concat_mixed_types	pending	
+postgres	concat_test.go	TestConcat_NullsSkipped	crates/pgmem/tests/it/concat.rs::concat_nulls_skipped	pending	
+postgres	correlated_test.go	TestCorrelatedExists_FiltersByOuterRow	crates/pgmem/tests/it/correlated.rs::correlated_exists_filters_by_outer_row	pending	
+postgres	correlated_test.go	TestCorrelatedExists_NotExists	crates/pgmem/tests/it/correlated.rs::correlated_exists_not_exists	pending	
+postgres	correlated_test.go	TestCorrelatedScalarSubquery	crates/pgmem/tests/it/correlated.rs::correlated_scalar_subquery	pending	
+postgres	correlated_test.go	TestCorrelatedScalarSubquery_NULLOnEmpty	crates/pgmem/tests/it/correlated.rs::correlated_scalar_subquery_null_on_empty	pending	
+postgres	correlated_test.go	TestUncorrelatedExists_StillFastPath	crates/pgmem/tests/it/correlated.rs::uncorrelated_exists_still_fast_path	pending	
+postgres	cte_test.go	TestCTE_AggregateFromCTE	crates/pgmem/tests/it/cte.rs::cte_aggregate_from_cte	pending	
+postgres	cte_test.go	TestCTE_Multiple	crates/pgmem/tests/it/cte.rs::cte_multiple	pending	
+postgres	cte_test.go	TestCTE_ReferencedTwice	crates/pgmem/tests/it/cte.rs::cte_referenced_twice	pending	
+postgres	cte_test.go	TestCTE_Simple	crates/pgmem/tests/it/cte.rs::cte_simple	pending	
+postgres	current_setting_test.go	TestCurrentSetting_Known	crates/pgmem/tests/it/current_setting.rs::current_setting_known	pending	server_version asserted to start with "18." (Go: "16.0"); search_path asserted "\"$user\", public" (Go: "public"); timezone accepts "UTC" or "Etc/UTC" (server-config dependent).
+postgres	current_setting_test.go	TestCurrentSetting_MissingOK	crates/pgmem/tests/it/current_setting.rs::current_setting_missing_ok	pending	
+postgres	current_setting_test.go	TestCurrentSetting_UnknownErrors	crates/pgmem/tests/it/current_setting.rs::current_setting_unknown_errors	pending	
+postgres	current_setting_test.go	TestVersion	crates/pgmem/tests/it/current_setting.rs::version	pending	"pgmem" substring only asserted when running on pgmem (real Postgres build string lacks it).
+postgres	current_timestamp_test.go	TestCurrentDate_TruncatedToMidnight	crates/pgmem/tests/it/current_timestamp.rs::current_date_truncated_to_midnight	pending	current_date is type date in Postgres (NaiveDate), not a timestamptz at midnight; pinned-clock check pgmem-only, wall-clock check on real Postgres
+postgres	current_timestamp_test.go	TestCurrentTime_DateAtEpoch	crates/pgmem/tests/it/current_timestamp.rs::current_time_date_at_epoch	pending	current_time is timetz in Postgres (text "12:30:45+00"), not a timestamptz on 1970-01-01; pinned-clock check pgmem-only
+postgres	current_timestamp_test.go	TestCurrentTimestamp_AsDefault	crates/pgmem/tests/it/current_timestamp.rs::current_timestamp_as_default	pending	pinned-clock check pgmem-only; real Postgres checks value is near the wall clock
+postgres	current_timestamp_test.go	TestCurrentTimestamp_NoParens	crates/pgmem/tests/it/current_timestamp.rs::current_timestamp_no_parens	pending	pinned-clock check pgmem-only; real Postgres checks value is near the wall clock
+postgres	date_trunc_test.go	TestDateTrunc_Day	crates/pgmem/tests/it/date_trunc.rs::date_trunc_day	pending	
+postgres	date_trunc_test.go	TestDateTrunc_Hour	crates/pgmem/tests/it/date_trunc.rs::date_trunc_hour	pending	
+postgres	date_trunc_test.go	TestDateTrunc_Month	crates/pgmem/tests/it/date_trunc.rs::date_trunc_month	pending	
+postgres	date_trunc_test.go	TestDateTrunc_NullPropagates	crates/pgmem/tests/it/date_trunc.rs::date_trunc_null_propagates	pending	
+postgres	date_trunc_test.go	TestDateTrunc_Week_AnchorsToMonday	crates/pgmem/tests/it/date_trunc.rs::date_trunc_week_anchors_to_monday	pending	
+postgres	datetime_funcs_test.go	TestAge_OneArg	crates/pgmem/tests/it/datetime_funcs.rs::age_one_arg	pending	Go expected current_date + age(t) = t; in Postgres age(past t) is positive, so current_date - age(t) = t (asserted, plus age > 0); result is timestamp not timestamptz
+postgres	datetime_funcs_test.go	TestAge_TwoArgs	crates/pgmem/tests/it/datetime_funcs.rs::age_two_args	pending	result is timestamp (NaiveDateTime) not timestamptz; additionally asserts the interval itself = 1 day
+postgres	datetime_funcs_test.go	TestMakeDate	crates/pgmem/tests/it/datetime_funcs.rs::make_date	pending	make_date returns date (NaiveDate), pgmem-go approximated with timestamptz
+postgres	datetime_funcs_test.go	TestMakeTime	crates/pgmem/tests/it/datetime_funcs.rs::make_time	pending	make_time returns time (NaiveTime), pgmem-go approximated with timestamptz
+postgres	datetime_funcs_test.go	TestMakeTimestamp	crates/pgmem/tests/it/datetime_funcs.rs::make_timestamp	pending	make_timestamp returns timestamp (NaiveDateTime), pgmem-go approximated with timestamptz
+postgres	datetime_funcs_test.go	TestMakeTimestamp_BadArity	crates/pgmem/tests/it/datetime_funcs.rs::make_timestamp_bad_arity	pending	asserts SQLSTATE 42883 (Go only checked for an error)
+postgres	datetime_funcs_test.go	TestToTimestamp_UnixSeconds	crates/pgmem/tests/it/datetime_funcs.rs::to_timestamp_unix_seconds	pending	
+postgres	delete_test.go	TestDelete_OverWire	crates/pgmem/tests/it/delete.rs::delete_over_wire	pending	
+postgres	delete_test.go	TestDelete_Returning_OverWire	crates/pgmem/tests/it/delete.rs::delete_returning_over_wire	pending	
+postgres	derived_table_test.go	TestDerivedTable_AS	crates/pgmem/tests/it/derived_table.rs::derived_table_as	pending	
+postgres	derived_table_test.go	TestDerivedTable_AggregateOverSubquery	crates/pgmem/tests/it/derived_table.rs::derived_table_aggregate_over_subquery	pending	sum(bigint) is numeric in Postgres; read as text 85
+postgres	derived_table_test.go	TestDerivedTable_Basic	crates/pgmem/tests/it/derived_table.rs::derived_table_basic	pending	
+postgres	derived_table_test.go	TestDerivedTable_RequiresAlias	crates/pgmem/tests/it/derived_table.rs::derived_table_requires_alias	pending	pgmem-go rejected a derived table without alias; PostgreSQL 16+ accepts it (query succeeds, 4 rows)
+postgres	distinct_on_test.go	TestDistinctOn_KeepsFirstSeen	crates/pgmem/tests/it/distinct_on.rs::distinct_on_keeps_first_seen	pending	
+postgres	distinct_on_test.go	TestDistinctOn_LatestPerUser	crates/pgmem/tests/it/distinct_on.rs::distinct_on_latest_per_user	pending	
+postgres	distinct_on_test.go	TestDistinct_PlainStillWorks	crates/pgmem/tests/it/distinct_on.rs::distinct_plain_still_works	pending	
+postgres	distinct_test.go	TestDistinct_ComposesWithOrder	crates/pgmem/tests/it/distinct.rs::distinct_composes_with_order	pending	
+postgres	distinct_test.go	TestDistinct_MultiColumn	crates/pgmem/tests/it/distinct.rs::distinct_multi_column	pending	
+postgres	distinct_test.go	TestDistinct_OnEmpty	crates/pgmem/tests/it/distinct.rs::distinct_on_empty	pending	
+postgres	distinct_test.go	TestDistinct_SingleColumn	crates/pgmem/tests/it/distinct.rs::distinct_single_column	pending	
+postgres	drop_table_test.go	TestDropTable_IfExists	crates/pgmem/tests/it/drop_table.rs::drop_table_if_exists	pending	
+postgres	drop_table_test.go	TestDropTable_MissingErrors	crates/pgmem/tests/it/drop_table.rs::drop_table_missing_errors	pending	also asserts message
+postgres	drop_table_test.go	TestDropTable_RecreateWorks	crates/pgmem/tests/it/drop_table.rs::drop_table_recreate_works	pending	
+postgres	drop_table_test.go	TestDropTable_RemovesTable	crates/pgmem/tests/it/drop_table.rs::drop_table_removes_table	pending	tightened: asserts 42P01
+postgres	exists_test.go	TestExists_AsFilter	crates/pgmem/tests/it/exists.rs::exists_as_filter	pending	
+postgres	exists_test.go	TestExists_False	crates/pgmem/tests/it/exists.rs::exists_false	pending	
+postgres	exists_test.go	TestExists_True	crates/pgmem/tests/it/exists.rs::exists_true	pending	
+postgres	exists_test.go	TestNotExists	crates/pgmem/tests/it/exists.rs::not_exists	pending	
+postgres	extract_test.go	TestDatePart_FunctionForm	crates/pgmem/tests/it/extract.rs::date_part_function_form	pending	date_part returns float8
+postgres	extract_test.go	TestExtract_Epoch	crates/pgmem/tests/it/extract.rs::extract_epoch	pending	extract returns numeric '1704067200.000000'; read via Text
+postgres	extract_test.go	TestExtract_HourMinuteSecond	crates/pgmem/tests/it/extract.rs::extract_hour_minute_second	pending	extract returns numeric; second is '30.000000'; read via Text
+postgres	extract_test.go	TestExtract_NullPropagates	crates/pgmem/tests/it/extract.rs::extract_null_propagates	pending	
+postgres	extract_test.go	TestExtract_UnknownFieldErrors	crates/pgmem/tests/it/extract.rs::extract_unknown_field_errors	pending	asserts SQLSTATE 22023 and Postgres message (Go only checked for an error)
+postgres	extract_test.go	TestExtract_YearMonthDay	crates/pgmem/tests/it/extract.rs::extract_year_month_day	pending	extract returns numeric; read via Text
+postgres	float_test.go	TestFloat_Arithmetic	crates/pgmem/tests/it/float.rs::float_arithmetic	pending	SELECT 0.1 + 0.2 is numeric in Postgres (exactly 0.3, read as Text), not float8 ~0.3 as in pgmem-go
+postgres	float_test.go	TestFloat_Comparison	crates/pgmem/tests/it/float.rs::float_comparison	pending	
+postgres	float_test.go	TestFloat_DivByZero	crates/pgmem/tests/it/float.rs::float_div_by_zero	pending	asserts SQLSTATE 22012 (Go only required an error)
+postgres	float_test.go	TestFloat_DoublePrecisionAlias	crates/pgmem/tests/it/float.rs::float_double_precision_alias	pending	
+postgres	float_test.go	TestFloat_IntPlusFloat	crates/pgmem/tests/it/float.rs::float_int_plus_float	pending	SELECT 1 + 0.5 is numeric in Postgres (read as Text "1.5"), not float8
+postgres	float_test.go	TestFloat_Roundtrip	crates/pgmem/tests/it/float.rs::float_roundtrip	pending	
+postgres	foreign_key_cascade_test.go	TestFK_DefaultIsRestrict	crates/pgmem/tests/it/foreign_key_cascade.rs::fk_default_is_restrict	pending	
+postgres	foreign_key_cascade_test.go	TestFK_OnDeleteCascade	crates/pgmem/tests/it/foreign_key_cascade.rs::fk_on_delete_cascade	pending	
+postgres	foreign_key_cascade_test.go	TestFK_OnDeleteCascade_Recursive	crates/pgmem/tests/it/foreign_key_cascade.rs::fk_on_delete_cascade_recursive	pending	
+postgres	foreign_key_cascade_test.go	TestFK_OnDeleteSetNull	crates/pgmem/tests/it/foreign_key_cascade.rs::fk_on_delete_set_null	pending	
+postgres	foreign_key_cascade_test.go	TestFK_OnDeleteSetNull_OnlyAffectsMatching	crates/pgmem/tests/it/foreign_key_cascade.rs::fk_on_delete_set_null_only_affects_matching	pending	
+postgres	foreign_key_test.go	TestFK_Delete_ParentWithChildren_Restricts	crates/pgmem/tests/it/foreign_key.rs::fk_delete_parent_with_children_restricts	pending	
+postgres	foreign_key_test.go	TestFK_Delete_ParentWithoutChildren_OK	crates/pgmem/tests/it/foreign_key.rs::fk_delete_parent_without_children_ok	pending	
+postgres	foreign_key_test.go	TestFK_Insert_AcceptsExistingParent	crates/pgmem/tests/it/foreign_key.rs::fk_insert_accepts_existing_parent	pending	
+postgres	foreign_key_test.go	TestFK_Insert_RejectsMissingParent	crates/pgmem/tests/it/foreign_key.rs::fk_insert_rejects_missing_parent	pending	
+postgres	foreign_key_test.go	TestFK_NullValueAllowed	crates/pgmem/tests/it/foreign_key.rs::fk_null_value_allowed	pending	
+postgres	foreign_key_test.go	TestFK_Update_RejectsMissingParent	crates/pgmem/tests/it/foreign_key.rs::fk_update_rejects_missing_parent	pending	
+postgres	foreign_key_test.go	TestFK_VisibleWithinTransaction	crates/pgmem/tests/it/foreign_key.rs::fk_visible_within_transaction	pending	
+postgres	generate_series_test.go	TestGenerateSeries_Alias	crates/pgmem/tests/it/generate_series.rs::generate_series_alias	pending	pgmem-go kept column name generate_series under alias gs; Postgres names the column gs, so gs.generate_series is 42703 (asserted) and gs.gs is used
+postgres	generate_series_test.go	TestGenerateSeries_Basic	crates/pgmem/tests/it/generate_series.rs::generate_series_basic	pending	generate_series(int4) yields int4 (Go scanned into int64)
+postgres	generate_series_test.go	TestGenerateSeries_Bigint	crates/pgmem/tests/it/generate_series.rs::generate_series_bigint	pending	
+postgres	generate_series_test.go	TestGenerateSeries_Empty	crates/pgmem/tests/it/generate_series.rs::generate_series_empty	pending	generate_series(int4) yields int4 (Go scanned into int64)
+postgres	generate_series_test.go	TestGenerateSeries_Joined	crates/pgmem/tests/it/generate_series.rs::generate_series_joined	pending	join column gs.generate_series does not exist in Postgres (42703 asserted); join ported as ON gs.gs = t.id
+postgres	generate_series_test.go	TestGenerateSeries_NegativeStep	crates/pgmem/tests/it/generate_series.rs::generate_series_negative_step	pending	generate_series(int4) yields int4 (Go scanned into int64)
+postgres	generate_series_test.go	TestGenerateSeries_Step	crates/pgmem/tests/it/generate_series.rs::generate_series_step	pending	generate_series(int4) yields int4 (Go scanned into int64)
+postgres	generate_series_test.go	TestGenerateSeries_ZeroStep	crates/pgmem/tests/it/generate_series.rs::generate_series_zero_step	pending	asserts 22023 and message
+postgres	generated_columns_test.go	TestGenerated_AcceptsDefaultMarker	crates/pgmem/tests/it/generated_columns.rs::generated_accepts_default_marker	pending	
+postgres	generated_columns_test.go	TestGenerated_ComputedOnInsert	crates/pgmem/tests/it/generated_columns.rs::generated_computed_on_insert	pending	
+postgres	generated_columns_test.go	TestGenerated_RecomputedOnUpdate	crates/pgmem/tests/it/generated_columns.rs::generated_recomputed_on_update	pending	
+postgres	generated_columns_test.go	TestGenerated_RejectsExplicitInsert	crates/pgmem/tests/it/generated_columns.rs::generated_rejects_explicit_insert	pending	tightened: asserts 428C9 and message
+postgres	generated_columns_test.go	TestGenerated_RejectsExplicitUpdate	crates/pgmem/tests/it/generated_columns.rs::generated_rejects_explicit_update	pending	tightened: asserts 428C9 and message
+postgres	generated_columns_test.go	TestGenerated_TextConcat	crates/pgmem/tests/it/generated_columns.rs::generated_text_concat	pending	
+postgres	group_by_test.go	TestGroupBy_CountAndOrder	crates/pgmem/tests/it/group_by.rs::group_by_count_and_order	pending	
+postgres	group_by_test.go	TestGroupBy_HavingFilter	crates/pgmem/tests/it/group_by.rs::group_by_having_filter	pending	
+postgres	group_by_test.go	TestGroupBy_RejectsBareColumnNotInGroupBy	crates/pgmem/tests/it/group_by.rs::group_by_rejects_bare_column_not_in_group_by	pending	asserts 42803 and message
+postgres	group_by_test.go	TestGroupBy_SumPerRegion	crates/pgmem/tests/it/group_by.rs::group_by_sum_per_region	pending	
+postgres	index_noop_test.go	TestCreateIndex_AllOptions	crates/pgmem/tests/it/index_noop.rs::create_index_all_options	pending	
+postgres	index_noop_test.go	TestCreateIndex_Plain	crates/pgmem/tests/it/index_noop.rs::create_index_plain	pending	
+postgres	index_noop_test.go	TestDropIndex	crates/pgmem/tests/it/index_noop.rs::drop_index	pending	
+postgres	insert_default_marker_test.go	TestInsertDefault_AutoColumn	crates/pgmem/tests/it/insert_default_marker.rs::insert_default_auto_column	pending	tightened: id == 1 (Go: >= 1)
+postgres	insert_default_marker_test.go	TestInsertDefault_MultiRow	crates/pgmem/tests/it/insert_default_marker.rs::insert_default_multi_row	pending	
+postgres	insert_default_marker_test.go	TestInsertDefault_NoColumnDefaultLeavesNull	crates/pgmem/tests/it/insert_default_marker.rs::insert_default_no_column_default_leaves_null	pending	
+postgres	insert_default_marker_test.go	TestInsertDefault_PicksUpColumnDefault	crates/pgmem/tests/it/insert_default_marker.rs::insert_default_picks_up_column_default	pending	
+postgres	insert_default_values_test.go	TestInsertDefaultValues_AutoFilled	crates/pgmem/tests/it/insert_default_values.rs::insert_default_values_auto_filled	pending	
+postgres	insert_default_values_test.go	TestInsertDefaultValues_NotNullStillEnforced	crates/pgmem/tests/it/insert_default_values.rs::insert_default_values_not_null_still_enforced	pending	tightened: asserts 23502
+postgres	insert_default_values_test.go	TestInsertDefaultValues_Returning	crates/pgmem/tests/it/insert_default_values.rs::insert_default_values_returning	pending	tightened: id == 1 (Go: >= 1)
+postgres	insert_returning_test.go	TestInsertReturning_MultiRow	crates/pgmem/tests/it/insert_returning.rs::insert_returning_multi_row	pending	
+postgres	insert_returning_test.go	TestInsertReturning_OverWire	crates/pgmem/tests/it/insert_returning.rs::insert_returning_over_wire	pending	
+postgres	insert_select_test.go	TestInsertSelect_Basic	crates/pgmem/tests/it/insert_select.rs::insert_select_basic	pending	
+postgres	insert_select_test.go	TestInsertSelect_ColumnMismatchErrors	crates/pgmem/tests/it/insert_select.rs::insert_select_column_mismatch_errors	pending	tightened: asserts 42601 and message (Go only required an error)
+postgres	insert_select_test.go	TestInsertSelect_Returning	crates/pgmem/tests/it/insert_select.rs::insert_select_returning	pending	
+postgres	insert_select_test.go	TestInsertSelect_WithWhere	crates/pgmem/tests/it/insert_select.rs::insert_select_with_where	pending	
+postgres	interval_codec_test.go	TestIntervalCodec_AgeRoundTrip	crates/pgmem/tests/it/interval_codec.rs::interval_codec_age_round_trip	pending	asserts interval components (0 months, 1 day, 0 us) as well as the 24h Go-duration view
+postgres	interval_codec_test.go	TestIntervalCodec_Literal	crates/pgmem/tests/it/interval_codec.rs::interval_codec_literal	pending	
+postgres	interval_codec_test.go	TestIntervalCodec_Negative	crates/pgmem/tests/it/interval_codec.rs::interval_codec_negative	pending	asserts interval components (-1 day) as well as the -24h Go-duration view
+postgres	interval_codec_test.go	TestIntervalCodec_SubSecond	crates/pgmem/tests/it/interval_codec.rs::interval_codec_sub_second	pending	
+postgres	interval_test.go	TestInterval_AddToTimestamp	crates/pgmem/tests/it/interval.rs::interval_add_to_timestamp	pending	now() pinned on pgmem; on real Postgres the pinned instant is substituted as a timestamptz literal
+postgres	interval_test.go	TestInterval_AsFilter	crates/pgmem/tests/it/interval.rs::interval_as_filter	pending	now() pinned on pgmem; on real Postgres the pinned instant is substituted as a timestamptz literal
+postgres	interval_test.go	TestInterval_MultiUnit	crates/pgmem/tests/it/interval.rs::interval_multi_unit	pending	now() pinned on pgmem; on real Postgres the pinned instant is substituted as a timestamptz literal
+postgres	interval_test.go	TestInterval_SubtractFromTimestamp	crates/pgmem/tests/it/interval.rs::interval_subtract_from_timestamp	pending	now() pinned on pgmem; on real Postgres the pinned instant is substituted as a timestamptz literal
+postgres	is_distinct_test.go	TestIsDistinct_FilterIncludesNulls	crates/pgmem/tests/it/is_distinct.rs::is_distinct_filter_includes_nulls	pending	
+postgres	is_distinct_test.go	TestIsDistinct_Truth	crates/pgmem/tests/it/is_distinct.rs::is_distinct_truth	pending	
+postgres	is_distinct_test.go	TestIsNotDistinct_NullSafeEquality	crates/pgmem/tests/it/is_distinct.rs::is_not_distinct_null_safe_equality	pending	
+postgres	is_null_test.go	TestIsNotNull_Filters	crates/pgmem/tests/it/is_null.rs::is_not_null_filters	pending	
+postgres	is_null_test.go	TestIsNull_DistinctFromEquals	crates/pgmem/tests/it/is_null.rs::is_null_distinct_from_equals	pending	
+postgres	is_null_test.go	TestIsNull_Filters	crates/pgmem/tests/it/is_null.rs::is_null_filters	pending	
+postgres	join_left_cross_test.go	TestCrossJoin_OverWire	crates/pgmem/tests/it/join_left_cross.rs::cross_join_over_wire	pending	
+postgres	join_left_cross_test.go	TestLeftJoin_OverWire	crates/pgmem/tests/it/join_left_cross.rs::left_join_over_wire	pending	
+postgres	join_test.go	TestInnerJoin_OverWire	crates/pgmem/tests/it/join.rs::inner_join_over_wire	pending	
+postgres	join_test.go	TestInnerJoin_WithWhereAndOrder	crates/pgmem/tests/it/join.rs::inner_join_with_where_and_order	pending	
+postgres	jsonb_arrow_test.go	TestJSONArrow_ArrayIndex	crates/pgmem/tests/it/jsonb_arrow.rs::json_arrow_array_index	pending	
+postgres	jsonb_arrow_test.go	TestJSONArrow_FilterByText	crates/pgmem/tests/it/jsonb_arrow.rs::json_arrow_filter_by_text	pending	
+postgres	jsonb_arrow_test.go	TestJSONArrow_JSONKey	crates/pgmem/tests/it/jsonb_arrow.rs::json_arrow_json_key	pending	Postgres returns canonical jsonb text ["a", "b", "c"] (with spaces), not the raw input bytes
+postgres	jsonb_arrow_test.go	TestJSONArrow_MissingKeyIsNull	crates/pgmem/tests/it/jsonb_arrow.rs::json_arrow_missing_key_is_null	pending	
+postgres	jsonb_arrow_test.go	TestJSONArrow_OutOfRangeIsNull	crates/pgmem/tests/it/jsonb_arrow.rs::json_arrow_out_of_range_is_null	pending	
+postgres	jsonb_arrow_test.go	TestJSONArrow_TextKey	crates/pgmem/tests/it/jsonb_arrow.rs::json_arrow_text_key	pending	
+postgres	jsonb_construction_test.go	TestJSONBArrayLength	crates/pgmem/tests/it/jsonb_construction.rs::jsonb_array_length	pending	
+postgres	jsonb_construction_test.go	TestJSONBArrayLength_NonArrayErrors	crates/pgmem/tests/it/jsonb_construction.rs::jsonb_array_length_non_array_errors	pending	asserts SQLSTATE 22023 and message (Go only required an error)
+postgres	jsonb_construction_test.go	TestJSONBBuildArray_Mixed	crates/pgmem/tests/it/jsonb_construction.rs::jsonb_build_array_mixed	pending	Postgres canonical jsonb text [1, "two", true, null] (spaced), not compact
+postgres	jsonb_construction_test.go	TestJSONBBuildObject_Mixed	crates/pgmem/tests/it/jsonb_construction.rs::jsonb_build_object_mixed	pending	Postgres jsonb canonical text {"age": 30, "name": "alice", "active": true} (keys sorted by length, spaced), not insertion order/compact
+postgres	jsonb_construction_test.go	TestJSONBBuildObject_NestedJSONB	crates/pgmem/tests/it/jsonb_construction.rs::jsonb_build_object_nested_jsonb	pending	Postgres canonical jsonb text {"inner": {"x": 1}} (spaced), not compact
+postgres	jsonb_construction_test.go	TestJSONBBuildObject_NullKeyFails	crates/pgmem/tests/it/jsonb_construction.rs::jsonb_build_object_null_key_fails	pending	asserts SQLSTATE 22023 and message (Go only required an error)
+postgres	jsonb_construction_test.go	TestJSONBBuildObject_OddArgsFails	crates/pgmem/tests/it/jsonb_construction.rs::jsonb_build_object_odd_args_fails	pending	asserts SQLSTATE 22023 and message (Go only required an error)
+postgres	jsonb_construction_test.go	TestJSONBTypeof	crates/pgmem/tests/it/jsonb_construction.rs::jsonb_typeof	pending	
+postgres	jsonb_construction_test.go	TestToJSONB_Number	crates/pgmem/tests/it/jsonb_construction.rs::to_jsonb_number	pending	
+postgres	jsonb_construction_test.go	TestToJSONB_String	crates/pgmem/tests/it/jsonb_construction.rs::to_jsonb_string	pending	to_jsonb('hello') fails in Postgres with 42804 (unknown-typed literal); asserts that plus to_jsonb('hello'::text) = "hello"
+postgres	jsonb_contains_test.go	TestJSONContained_Reverse	crates/pgmem/tests/it/jsonb_contains.rs::json_contained_reverse	pending	
+postgres	jsonb_contains_test.go	TestJSONContains_ArrayElementMatch	crates/pgmem/tests/it/jsonb_contains.rs::json_contains_array_element_match	pending	
+postgres	jsonb_contains_test.go	TestJSONContains_Negative	crates/pgmem/tests/it/jsonb_contains.rs::json_contains_negative	pending	
+postgres	jsonb_contains_test.go	TestJSONContains_Nested	crates/pgmem/tests/it/jsonb_contains.rs::json_contains_nested	pending	
+postgres	jsonb_contains_test.go	TestJSONContains_ObjectKeyMatch	crates/pgmem/tests/it/jsonb_contains.rs::json_contains_object_key_match	pending	
+postgres	jsonb_keyexists_test.go	TestJSONKeyExists_ArrayElement	crates/pgmem/tests/it/jsonb_keyexists.rs::json_key_exists_array_element	pending	
+postgres	jsonb_keyexists_test.go	TestJSONKeyExists_NestedKeyNotChecked	crates/pgmem/tests/it/jsonb_keyexists.rs::json_key_exists_nested_key_not_checked	pending	
+postgres	jsonb_keyexists_test.go	TestJSONKeyExists_NotPresent	crates/pgmem/tests/it/jsonb_keyexists.rs::json_key_exists_not_present	pending	
+postgres	jsonb_keyexists_test.go	TestJSONKeyExists_Object	crates/pgmem/tests/it/jsonb_keyexists.rs::json_key_exists_object	pending	
+postgres	jsonb_test.go	TestJSONB_AcceptsScalarAndArray	crates/pgmem/tests/it/jsonb.rs::jsonb_accepts_scalar_and_array	pending	
+postgres	jsonb_test.go	TestJSONB_RoundTrip	crates/pgmem/tests/it/jsonb.rs::jsonb_round_trip	pending	
+postgres	jsonb_test.go	TestJSONB_UniqueConstraint	crates/pgmem/tests/it/jsonb.rs::jsonb_unique_constraint	pending	
+postgres	lateral_test.go	TestLateral_CrossJoinLateralAllPosts	crates/pgmem/tests/it/lateral.rs::lateral_cross_join_lateral_all_posts	pending	
+postgres	lateral_test.go	TestLateral_TopPostPerAuthor	crates/pgmem/tests/it/lateral.rs::lateral_top_post_per_author	pending	
+postgres	like_test.go	TestILike_CaseInsensitive	crates/pgmem/tests/it/like.rs::i_like_case_insensitive	pending	
+postgres	like_test.go	TestLike_EscapedPercent	crates/pgmem/tests/it/like.rs::like_escaped_percent	pending	
+postgres	like_test.go	TestLike_NotLike	crates/pgmem/tests/it/like.rs::like_not_like	pending	
+postgres	like_test.go	TestLike_ParamPattern	crates/pgmem/tests/it/like.rs::like_param_pattern	pending	
+postgres	like_test.go	TestLike_Prefix	crates/pgmem/tests/it/like.rs::like_prefix	pending	
+postgres	like_test.go	TestLike_Underscore	crates/pgmem/tests/it/like.rs::like_underscore	pending	
+postgres	limit_all_test.go	TestLimitAll	crates/pgmem/tests/it/limit_all.rs::limit_all	pending	
+postgres	limit_all_test.go	TestOffsetWithRowSingularNoiseWord	crates/pgmem/tests/it/limit_all.rs::offset_with_row_singular_noise_word	pending	
+postgres	limit_all_test.go	TestOffsetWithRowsNoiseWord	crates/pgmem/tests/it/limit_all.rs::offset_with_rows_noise_word	pending	
+postgres	locking_test.go	TestLocking_ForKeyShareOf	crates/pgmem/tests/it/locking.rs::locking_for_key_share_of	pending	
+postgres	locking_test.go	TestLocking_ForNoKeyUpdate	crates/pgmem/tests/it/locking.rs::locking_for_no_key_update	pending	
+postgres	locking_test.go	TestLocking_ForShare	crates/pgmem/tests/it/locking.rs::locking_for_share	pending	
+postgres	locking_test.go	TestLocking_ForUpdate	crates/pgmem/tests/it/locking.rs::locking_for_update	pending	
+postgres	locking_test.go	TestLocking_ForUpdateSkipLocked	crates/pgmem/tests/it/locking.rs::locking_for_update_skip_locked	pending	
+postgres	m2_test.go	TestM2_CreateInsertSelect	crates/pgmem/tests/it/m2.rs::m2_create_insert_select	pending	
+postgres	m2_test.go	TestM2_OrderAscWithOffset	crates/pgmem/tests/it/m2.rs::m2_order_asc_with_offset	pending	
+postgres	math_funcs_test.go	TestAbs	crates/pgmem/tests/it/math_funcs.rs::abs	pending	
+postgres	math_funcs_test.go	TestGreatestLeast	crates/pgmem/tests/it/math_funcs.rs::greatest_least	pending	
+postgres	math_funcs_test.go	TestGreatest_AllNullsIsNull	crates/pgmem/tests/it/math_funcs.rs::greatest_all_nulls_is_null	pending	
+postgres	math_funcs_test.go	TestGreatest_NullsSkipped	crates/pgmem/tests/it/math_funcs.rs::greatest_nulls_skipped	pending	
+postgres	math_funcs_test.go	TestMod_DivByZero	crates/pgmem/tests/it/math_funcs.rs::mod_div_by_zero	pending	
+postgres	math_funcs_test.go	TestMod_PG	crates/pgmem/tests/it/math_funcs.rs::mod_pg	pending	
+postgres	math_text_funcs_test.go	TestCeil	crates/pgmem/tests/it/math_text_funcs.rs::ceil	pending	ceil(numeric) returns numeric; read via Text (pgx scanned into float64)
+postgres	math_text_funcs_test.go	TestFloor	crates/pgmem/tests/it/math_text_funcs.rs::floor	pending	floor(numeric) returns numeric; read via Text (pgx scanned into float64)
+postgres	math_text_funcs_test.go	TestLpad_CustomFill	crates/pgmem/tests/it/math_text_funcs.rs::lpad_custom_fill	pending	
+postgres	math_text_funcs_test.go	TestLpad_Default	crates/pgmem/tests/it/math_text_funcs.rs::lpad_default	pending	
+postgres	math_text_funcs_test.go	TestLpad_Truncates	crates/pgmem/tests/it/math_text_funcs.rs::lpad_truncates	pending	
+postgres	math_text_funcs_test.go	TestPi	crates/pgmem/tests/it/math_text_funcs.rs::pi	pending	
+postgres	math_text_funcs_test.go	TestPower	crates/pgmem/tests/it/math_text_funcs.rs::power	pending	
+postgres	math_text_funcs_test.go	TestRandom	crates/pgmem/tests/it/math_text_funcs.rs::random	pending	
+postgres	math_text_funcs_test.go	TestRound_Default	crates/pgmem/tests/it/math_text_funcs.rs::round_default	pending	round(numeric) returns numeric; read via Text (pgx scanned into float64)
+postgres	math_text_funcs_test.go	TestRound_Scale	crates/pgmem/tests/it/math_text_funcs.rs::round_scale	pending	round(numeric,int) returns numeric '3.14'; read via Text
+postgres	math_text_funcs_test.go	TestRpad	crates/pgmem/tests/it/math_text_funcs.rs::rpad	pending	
+postgres	math_text_funcs_test.go	TestSign	crates/pgmem/tests/it/math_text_funcs.rs::sign	pending	
+postgres	math_text_funcs_test.go	TestSqrt	crates/pgmem/tests/it/math_text_funcs.rs::sqrt	pending	
+postgres	migration_noops_test.go	TestMigrationNoop_AnalyzeVacuum	crates/pgmem/tests/it/migration_noops.rs::migration_noop_analyze_vacuum	pending	
+postgres	migration_noops_test.go	TestMigrationNoop_CommentOn	crates/pgmem/tests/it/migration_noops.rs::migration_noop_comment_on	pending	COMMENT ON EXTENSION "uuid-ossp" fails (42704) on Postgres unless the extension exists; test creates it first.
+postgres	migration_noops_test.go	TestMigrationNoop_CreateDropSchema	crates/pgmem/tests/it/migration_noops.rs::migration_noop_create_drop_schema	pending	
+postgres	migration_noops_test.go	TestMigrationNoop_CreateExtension	crates/pgmem/tests/it/migration_noops.rs::migration_noop_create_extension	pending	
+postgres	migration_noops_test.go	TestMigrationNoop_DiscardAll	crates/pgmem/tests/it/migration_noops.rs::migration_noop_discard_all	pending	
+postgres	migration_noops_test.go	TestMigrationNoop_DropExtension	crates/pgmem/tests/it/migration_noops.rs::migration_noop_drop_extension	pending	
+postgres	migration_noops_test.go	TestMigrationNoop_Reset	crates/pgmem/tests/it/migration_noops.rs::migration_noop_reset	pending	
+postgres	named_constraints_test.go	TestNamedConstraint_ColumnLevelCheck	crates/pgmem/tests/it/named_constraints.rs::named_constraint_column_level_check	pending	tightened: asserts 23514 and message
+postgres	named_constraints_test.go	TestNamedConstraint_ColumnLevelPK	crates/pgmem/tests/it/named_constraints.rs::named_constraint_column_level_pk	pending	tightened: asserts 23505 and constraint name in message
+postgres	named_constraints_test.go	TestNamedConstraint_NameRoundTripsInError	crates/pgmem/tests/it/named_constraints.rs::named_constraint_name_round_trips_in_error	pending	also asserts ErrorResponse constraint field
+postgres	named_constraints_test.go	TestNamedConstraint_TableLevelCheck	crates/pgmem/tests/it/named_constraints.rs::named_constraint_table_level_check	pending	tightened: asserts 23514 and message
+postgres	named_constraints_test.go	TestNamedConstraint_TableLevelCheckNoName	crates/pgmem/tests/it/named_constraints.rs::named_constraint_table_level_check_no_name	pending	tightened: asserts 23514 and Postgres' generated name t_qty_check
+postgres	named_constraints_test.go	TestNamedConstraint_TableLevelPKKeepsUnique	crates/pgmem/tests/it/named_constraints.rs::named_constraint_table_level_pk_keeps_unique	pending	added: duplicate composite key rejected with 23505 (Postgres enforces composite PK; Go only checked syntax)
+postgres	named_stmt_test.go	TestNamedStatementCache_BindResolvesByName	crates/pgmem/tests/it/named_stmt.rs::named_statement_cache_bind_resolves_by_name	pending	pgx statement cache emulated with explicitly prepared (named) statements
+postgres	notnull_test.go	TestNotNullViolation_OverWire	crates/pgmem/tests/it/notnull.rs::not_null_violation_over_wire	pending	
+postgres	nulls_order_test.go	TestNullsOrder_AscDefault	crates/pgmem/tests/it/nulls_order.rs::nulls_order_asc_default	pending	
+postgres	nulls_order_test.go	TestNullsOrder_AscNullsFirst	crates/pgmem/tests/it/nulls_order.rs::nulls_order_asc_nulls_first	pending	
+postgres	nulls_order_test.go	TestNullsOrder_DescDefault	crates/pgmem/tests/it/nulls_order.rs::nulls_order_desc_default	pending	
+postgres	nulls_order_test.go	TestNullsOrder_DescNullsLast	crates/pgmem/tests/it/nulls_order.rs::nulls_order_desc_nulls_last	pending	
+postgres	on_conflict_test.go	TestOnConflict_DoNothing_InsertsNew	crates/pgmem/tests/it/on_conflict.rs::on_conflict_do_nothing_inserts_new	pending	
+postgres	on_conflict_test.go	TestOnConflict_DoNothing_MixedBatch	crates/pgmem/tests/it/on_conflict.rs::on_conflict_do_nothing_mixed_batch	pending	
+postgres	on_conflict_test.go	TestOnConflict_DoNothing_Skips	crates/pgmem/tests/it/on_conflict.rs::on_conflict_do_nothing_skips	pending	
+postgres	on_conflict_test.go	TestOnConflict_DoUpdate_Excluded	crates/pgmem/tests/it/on_conflict.rs::on_conflict_do_update_excluded	pending	
+postgres	on_conflict_test.go	TestOnConflict_DoUpdate_NewRowStillInserts	crates/pgmem/tests/it/on_conflict.rs::on_conflict_do_update_new_row_still_inserts	pending	
+postgres	on_conflict_test.go	TestOnConflict_DoUpdate_ReferencesExisting	crates/pgmem/tests/it/on_conflict.rs::on_conflict_do_update_references_existing	pending	unqualified `name` in DO UPDATE SET expression is ambiguous in Postgres (42702); asserts that error, then the t.name-qualified upsert yields "alice / bob".
+postgres	on_conflict_test.go	TestOnConflict_DoUpdate_Returning	crates/pgmem/tests/it/on_conflict.rs::on_conflict_do_update_returning	pending	
+postgres	on_conflict_test.go	TestOnConflict_Returning_OnlyForActualInserts	crates/pgmem/tests/it/on_conflict.rs::on_conflict_returning_only_for_actual_inserts	pending	
+postgres	position_test.go	TestPosition_Found	crates/pgmem/tests/it/position.rs::position_found	pending	
+postgres	position_test.go	TestPosition_NotFound	crates/pgmem/tests/it/position.rs::position_not_found	pending	
+postgres	position_test.go	TestPosition_NullPropagates	crates/pgmem/tests/it/position.rs::position_null_propagates	pending	
+postgres	position_test.go	TestPosition_Unicode	crates/pgmem/tests/it/position.rs::position_unicode	pending	
+postgres	qualified_star_test.go	TestQualifiedStar_AllFromOneSide	crates/pgmem/tests/it/qualified_star.rs::qualified_star_all_from_one_side	pending	
+postgres	qualified_star_test.go	TestQualifiedStar_BothSides	crates/pgmem/tests/it/qualified_star.rs::qualified_star_both_sides	pending	
+postgres	qualified_star_test.go	TestQualifiedStar_MixedWithExpr	crates/pgmem/tests/it/qualified_star.rs::qualified_star_mixed_with_expr	pending	
+postgres	recursive_cte_test.go	TestRecursiveCTE_CountToTen	crates/pgmem/tests/it/recursive_cte.rs::recursive_cte_count_to_ten	pending	
+postgres	recursive_cte_test.go	TestRecursiveCTE_HierarchyWalk	crates/pgmem/tests/it/recursive_cte.rs::recursive_cte_hierarchy_walk	pending	
+postgres	recursive_cte_test.go	TestRecursiveCTE_OuterReferencesAreFine	crates/pgmem/tests/it/recursive_cte.rs::recursive_cte_outer_references_are_fine	pending	
+postgres	recursive_cte_test.go	TestRecursiveCTE_UnionDedups	crates/pgmem/tests/it/recursive_cte.rs::recursive_cte_union_dedups	pending	
+postgres	regex_test.go	TestRegex_AnchoredPattern	crates/pgmem/tests/it/regex.rs::regex_anchored_pattern	pending	
+postgres	regex_test.go	TestRegex_CaseInsensitive	crates/pgmem/tests/it/regex.rs::regex_case_insensitive	pending	
+postgres	regex_test.go	TestRegex_CaseSensitive	crates/pgmem/tests/it/regex.rs::regex_case_sensitive	pending	
+postgres	regex_test.go	TestRegex_NotMatch	crates/pgmem/tests/it/regex.rs::regex_not_match	pending	
+postgres	regex_test.go	TestRegex_NotMatchCaseInsensitive	crates/pgmem/tests/it/regex.rs::regex_not_match_case_insensitive	pending	
+postgres	regexp_funcs_test.go	TestRegexpMatch_Groups	crates/pgmem/tests/it/regexp_funcs.rs::regexp_match_groups	pending	
+postgres	regexp_funcs_test.go	TestRegexpMatch_NoGroupReturnsWholeMatch	crates/pgmem/tests/it/regexp_funcs.rs::regexp_match_no_group_returns_whole_match	pending	
+postgres	regexp_funcs_test.go	TestRegexpMatch_NoMatchReturnsNull	crates/pgmem/tests/it/regexp_funcs.rs::regexp_match_no_match_returns_null	pending	
+postgres	regexp_funcs_test.go	TestRegexpReplace_BackReference	crates/pgmem/tests/it/regexp_funcs.rs::regexp_replace_back_reference	pending	Go expected replacement '$2 $1' to expand back references; in Postgres it is literal ('$2 $1'); back references are \2 \1 (also asserted)
+postgres	regexp_funcs_test.go	TestRegexpReplace_BadPattern	crates/pgmem/tests/it/regexp_funcs.rs::regexp_replace_bad_pattern	pending	asserts SQLSTATE 2201B (Go only checked for an error)
+postgres	regexp_funcs_test.go	TestRegexpReplace_CaseInsensitive	crates/pgmem/tests/it/regexp_funcs.rs::regexp_replace_case_insensitive	pending	
+postgres	regexp_funcs_test.go	TestRegexpReplace_FirstMatchByDefault	crates/pgmem/tests/it/regexp_funcs.rs::regexp_replace_first_match_by_default	pending	
+postgres	regexp_funcs_test.go	TestRegexpReplace_GlobalFlag	crates/pgmem/tests/it/regexp_funcs.rs::regexp_replace_global_flag	pending	
+postgres	regexp_funcs_test.go	TestRegexpSplitToArray	crates/pgmem/tests/it/regexp_funcs.rs::regexp_split_to_array	pending	
+postgres	returning_star_test.go	TestReturningStar_Delete	crates/pgmem/tests/it/returning_star.rs::returning_star_delete	pending	
+postgres	returning_star_test.go	TestReturningStar_Insert	crates/pgmem/tests/it/returning_star.rs::returning_star_insert	pending	
+postgres	returning_star_test.go	TestReturningStar_MixedWithExpr	crates/pgmem/tests/it/returning_star.rs::returning_star_mixed_with_expr	pending	
+postgres	returning_star_test.go	TestReturningStar_Update	crates/pgmem/tests/it/returning_star.rs::returning_star_update	pending	
+postgres	savepoint_test.go	TestSavepoint_OutsideTxIsRejected	crates/pgmem/tests/it/savepoint.rs::savepoint_outside_tx_is_rejected	pending	
+postgres	savepoint_test.go	TestSavepoint_ReleaseDoesNotUndoWork	crates/pgmem/tests/it/savepoint.rs::savepoint_release_does_not_undo_work	pending	
+postgres	savepoint_test.go	TestSavepoint_RollbackToRecoversFromPoisonedBlock	crates/pgmem/tests/it/savepoint.rs::savepoint_rollback_to_recovers_from_poisoned_block	pending	
+postgres	savepoint_test.go	TestSavepoint_UnknownNameRejects	crates/pgmem/tests/it/savepoint.rs::savepoint_unknown_name_rejects	pending	
+postgres	select_star_test.go	TestSelectStar_AllColumns	crates/pgmem/tests/it/select_star.rs::select_star_all_columns	pending	
+postgres	select_star_test.go	TestSelectStar_ColumnNames	crates/pgmem/tests/it/select_star.rs::select_star_column_names	pending	
+postgres	select_star_test.go	TestSelectStar_Join	crates/pgmem/tests/it/select_star.rs::select_star_join	pending	asserts exact left-then-right column order (Go compared sorted names)
+postgres	serial_test.go	TestBigSerial_OverWire	crates/pgmem/tests/it/serial.rs::big_serial_over_wire	pending	
+postgres	serial_test.go	TestSerial_OverWire	crates/pgmem/tests/it/serial.rs::serial_over_wire	pending	
+postgres	serialization_test.go	TestSerialization_ConcurrentWritesOneFails	crates/pgmem/tests/it/serialization.rs::serialization_concurrent_writes_one_fails	pending	pgmem-go failed the second COMMIT with 40001 (per-table conflict detection); real Postgres READ COMMITTED commits both inserts of different rows, asserted ids [1 2]. Same-row UPDATE race not tested (blocks on real Postgres).
+postgres	serialization_test.go	TestSerialization_DisjointWritesNoConflict	crates/pgmem/tests/it/serialization.rs::serialization_disjoint_writes_no_conflict	pending	
+postgres	server_test.go	TestGetUsers_SqlcStyle	crates/pgmem/tests/it/server.rs::get_users_sqlc_style	pending	users table created explicitly; seeded via server.seed on pgmem, SQL INSERT on real Postgres
+postgres	server_test.go	TestSelect1_Pgx	crates/pgmem/tests/it/server.rs::select1_pgx	pending	
+postgres	server_test.go	TestSelect1_Pgxpool	crates/pgmem/tests/it/server.rs::select1_pgxpool	pending	
+postgres	server_test.go	TestSimpleQueryProtocol	crates/pgmem/tests/it/server.rs::simple_query_protocol	pending	simple protocol via text_value
+postgres	setnow_test.go	TestSetNow_PinsClockForBuiltins	crates/pgmem/tests/it/setnow.rs::set_now_pins_clock_for_builtins	pending	pgmem-only API; skipped on real Postgres.
+postgres	setnow_test.go	TestSetNow_TwoServersIndependent	crates/pgmem/tests/it/setnow.rs::set_now_two_servers_independent	pending	pgmem-only API; skipped on real Postgres.
+postgres	setnow_test.go	TestSetNow_ZeroTimeRevertsToWallClock	crates/pgmem/tests/it/setnow.rs::set_now_zero_time_reverts_to_wall_clock	pending	pgmem-only API; skipped on real Postgres.
+postgres	string_agg_test.go	TestStringAgg_AllNullsIsNull	crates/pgmem/tests/it/string_agg.rs::string_agg_all_nulls_is_null	pending	
+postgres	string_agg_test.go	TestStringAgg_Grouped	crates/pgmem/tests/it/string_agg.rs::string_agg_grouped	pending	order-independent compare
+postgres	string_agg_test.go	TestStringAgg_Scalar	crates/pgmem/tests/it/string_agg.rs::string_agg_scalar	pending	order-independent compare
+postgres	string_funcs_more_test.go	TestReplace	crates/pgmem/tests/it/string_funcs_more.rs::replace	pending	
+postgres	string_funcs_more_test.go	TestStringFunctions_NullArgsReturnNull	crates/pgmem/tests/it/string_funcs_more.rs::string_functions_null_args_return_null	pending	also checks trim(NULL::text) which Go replaced by trim(NULL) for lack of cast support
+postgres	string_funcs_more_test.go	TestStrpos	crates/pgmem/tests/it/string_funcs_more.rs::strpos	pending	
+postgres	string_funcs_more_test.go	TestSubstring_TwoAndThreeArg	crates/pgmem/tests/it/string_funcs_more.rs::substring_two_and_three_arg	pending	
+postgres	string_funcs_more_test.go	TestTrim	crates/pgmem/tests/it/string_funcs_more.rs::trim	pending	Go expected trim(e'\t\nmixed\r\n')='mixed'; Postgres trim() strips only spaces by default, so the string is unchanged
+postgres	strings_test.go	TestStringConcat_BasicAndImplicitCast	crates/pgmem/tests/it/strings.rs::string_concat_basic_and_implicit_cast	pending	
+postgres	strings_test.go	TestStringConcat_NullPropagates	crates/pgmem/tests/it/strings.rs::string_concat_null_propagates	pending	
+postgres	strings_test.go	TestStringConcat_OnColumns	crates/pgmem/tests/it/strings.rs::string_concat_on_columns	pending	
+postgres	strings_test.go	TestStringFunctions_LowerUpperLength	crates/pgmem/tests/it/strings.rs::string_functions_lower_upper_length	pending	
+postgres	strings_test.go	TestStringFunctions_NullIsNull	crates/pgmem/tests/it/strings.rs::string_functions_null_is_null	pending	
+postgres	subquery_test.go	TestInList_OverWire	crates/pgmem/tests/it/subquery.rs::in_list_over_wire	pending	
+postgres	subquery_test.go	TestInSubquery_OverWire	crates/pgmem/tests/it/subquery.rs::in_subquery_over_wire	pending	
+postgres	subquery_test.go	TestInSubquery_WithParameter	crates/pgmem/tests/it/subquery.rs::in_subquery_with_parameter	pending	
+postgres	subquery_test.go	TestNotInSubquery_OverWire	crates/pgmem/tests/it/subquery.rs::not_in_subquery_over_wire	pending	
+postgres	subquery_test.go	TestScalarSubquery_EmptyReturnsNull	crates/pgmem/tests/it/subquery.rs::scalar_subquery_empty_returns_null	pending	
+postgres	subquery_test.go	TestScalarSubquery_MultipleRowsErrors	crates/pgmem/tests/it/subquery.rs::scalar_subquery_multiple_rows_errors	pending	
+postgres	subquery_test.go	TestScalarSubquery_OverWire	crates/pgmem/tests/it/subquery.rs::scalar_subquery_over_wire	pending	
+postgres	table_alias_test.go	TestTableAlias_AS	crates/pgmem/tests/it/table_alias.rs::table_alias_as	pending	
+postgres	table_alias_test.go	TestTableAlias_Implicit	crates/pgmem/tests/it/table_alias.rs::table_alias_implicit	pending	
+postgres	table_alias_test.go	TestTableAlias_Join	crates/pgmem/tests/it/table_alias.rs::table_alias_join	pending	
+postgres	table_fk_test.go	TestTableFK_Basic	crates/pgmem/tests/it/table_fk.rs::table_fk_basic	pending	error cases additionally assert the real Postgres SQLSTATE.
+postgres	table_fk_test.go	TestTableFK_MultiColumnRejected	crates/pgmem/tests/it/table_fk.rs::table_fk_multi_column_rejected	pending	Go only required an error; asserts Postgres code 42830 (duplicate referenced columns).
+postgres	table_fk_test.go	TestTableFK_Named	crates/pgmem/tests/it/table_fk.rs::table_fk_named	pending	additionally asserts SQLSTATE 23503 and constraint name posts_author_fk.
+postgres	table_fk_test.go	TestTableFK_OnDeleteCascade	crates/pgmem/tests/it/table_fk.rs::table_fk_on_delete_cascade	pending	
+postgres	table_fk_test.go	TestTableFK_UnknownColumn	crates/pgmem/tests/it/table_fk.rs::table_fk_unknown_column	pending	error cases additionally assert the real Postgres SQLSTATE.
+postgres	text_numeric_funcs_test.go	TestAscii	crates/pgmem/tests/it/text_numeric_funcs.rs::ascii	pending	
+postgres	text_numeric_funcs_test.go	TestAscii_Empty	crates/pgmem/tests/it/text_numeric_funcs.rs::ascii_empty	pending	
+postgres	text_numeric_funcs_test.go	TestChr	crates/pgmem/tests/it/text_numeric_funcs.rs::chr	pending	
+postgres	text_numeric_funcs_test.go	TestChr_RejectsZero	crates/pgmem/tests/it/text_numeric_funcs.rs::chr_rejects_zero	pending	asserts SQLSTATE 54000 (Go only checked for an error)
+postgres	text_numeric_funcs_test.go	TestFormat_IdentifierAndLiteral	crates/pgmem/tests/it/text_numeric_funcs.rs::format_identifier_and_literal	pending	
+postgres	text_numeric_funcs_test.go	TestFormat_NullLAsNULL	crates/pgmem/tests/it/text_numeric_funcs.rs::format_null_las_null	pending	
+postgres	text_numeric_funcs_test.go	TestFormat_NullSAsEmpty	crates/pgmem/tests/it/text_numeric_funcs.rs::format_null_sas_empty	pending	
+postgres	text_numeric_funcs_test.go	TestFormat_PercentLiteral	crates/pgmem/tests/it/text_numeric_funcs.rs::format_percent_literal	pending	
+postgres	text_numeric_funcs_test.go	TestFormat_PlainString	crates/pgmem/tests/it/text_numeric_funcs.rs::format_plain_string	pending	
+postgres	text_numeric_funcs_test.go	TestMD5	crates/pgmem/tests/it/text_numeric_funcs.rs::md5	pending	
+postgres	text_numeric_funcs_test.go	TestSHA256_Bytea	crates/pgmem/tests/it/text_numeric_funcs.rs::sha256_bytea	pending	
+postgres	text_numeric_funcs_test.go	TestSHA512_Bytea	crates/pgmem/tests/it/text_numeric_funcs.rs::sha512_bytea	pending	
+postgres	text_numeric_funcs_test.go	TestToHex	crates/pgmem/tests/it/text_numeric_funcs.rs::to_hex	pending	
+postgres	timestamptz_test.go	TestTimestamptz_AcceptsExplicitValue	crates/pgmem/tests/it/timestamptz.rs::timestamptz_accepts_explicit_value	pending	
+postgres	timestamptz_test.go	TestTimestamptz_NowRoundTrip	crates/pgmem/tests/it/timestamptz.rs::timestamptz_now_round_trip	pending	
+postgres	timestamptz_test.go	TestTimestamptz_OrderByWorks	crates/pgmem/tests/it/timestamptz.rs::timestamptz_order_by_works	pending	
+postgres	transactions_test.go	TestTxn_AbortedStatePoisonsBlock	crates/pgmem/tests/it/transactions.rs::txn_aborted_state_poisons_block	pending	
+postgres	transactions_test.go	TestTxn_CommitAfterErrorActsAsRollback	crates/pgmem/tests/it/transactions.rs::txn_commit_after_error_acts_as_rollback	pending	CommandComplete tag checked via a minimal raw-protocol connection (postgres crate does not expose tags).
+postgres	transactions_test.go	TestTxn_CommitPersistsInsert	crates/pgmem/tests/it/transactions.rs::txn_commit_persists_insert	pending	
+postgres	transactions_test.go	TestTxn_ImplicitAutocommit	crates/pgmem/tests/it/transactions.rs::txn_implicit_autocommit	pending	
+postgres	transactions_test.go	TestTxn_RollbackUndoesInsert	crates/pgmem/tests/it/transactions.rs::txn_rollback_undoes_insert	pending	
+postgres	trim_length_test.go	TestBtrim_Cutset	crates/pgmem/tests/it/trim_length.rs::btrim_cutset	pending	
+postgres	trim_length_test.go	TestCharLength	crates/pgmem/tests/it/trim_length.rs::char_length	pending	
+postgres	trim_length_test.go	TestLtrim_Cutset	crates/pgmem/tests/it/trim_length.rs::ltrim_cutset	pending	
+postgres	trim_length_test.go	TestLtrim_Default	crates/pgmem/tests/it/trim_length.rs::ltrim_default	pending	
+postgres	trim_length_test.go	TestOctetLength_Bytea	crates/pgmem/tests/it/trim_length.rs::octet_length_bytea	pending	
+postgres	trim_length_test.go	TestOctetLength_Text	crates/pgmem/tests/it/trim_length.rs::octet_length_text	pending	
+postgres	trim_length_test.go	TestRtrim_Default	crates/pgmem/tests/it/trim_length.rs::rtrim_default	pending	
+postgres	trim_length_test.go	TestTrim_NullPropagates	crates/pgmem/tests/it/trim_length.rs::trim_null_propagates	pending	
+postgres	truncate_test.go	TestTruncate_Multiple	crates/pgmem/tests/it/truncate.rs::truncate_multiple	pending	
+postgres	truncate_test.go	TestTruncate_SingleTable	crates/pgmem/tests/it/truncate.rs::truncate_single_table	pending	
+postgres	truncate_test.go	TestTruncate_TableKeyword	crates/pgmem/tests/it/truncate.rs::truncate_table_keyword	pending	
+postgres	truncate_test.go	TestTruncate_UnknownTable	crates/pgmem/tests/it/truncate.rs::truncate_unknown_table	pending	tightened: asserts 42P01 and message
+postgres	unary_minus_test.go	TestSubstring_NegativeLengthErrors_Literal	crates/pgmem/tests/it/unary_minus.rs::substring_negative_length_errors_literal	pending	
+postgres	unary_minus_test.go	TestUnaryMinus_Literal	crates/pgmem/tests/it/unary_minus.rs::unary_minus_literal	pending	
+postgres	unary_minus_test.go	TestUnaryMinus_OnColumn	crates/pgmem/tests/it/unary_minus.rs::unary_minus_on_column	pending	
+postgres	union_test.go	TestUnionAll_KeepsDuplicates	crates/pgmem/tests/it/union.rs::union_all_keeps_duplicates	pending	order-independent compare
+postgres	union_test.go	TestUnion_Chain	crates/pgmem/tests/it/union.rs::union_chain	pending	order-independent compare
+postgres	union_test.go	TestUnion_ColumnCountMismatch	crates/pgmem/tests/it/union.rs::union_column_count_mismatch	pending	asserts 42601 and message
+postgres	union_test.go	TestUnion_Deduplicates	crates/pgmem/tests/it/union.rs::union_deduplicates	pending	order-independent compare
+postgres	unique_test.go	TestUniqueViolation_OverWire	crates/pgmem/tests/it/unique.rs::unique_violation_over_wire	pending	
+postgres	unique_test.go	TestUniqueViolation_PrimaryKeyAlsoEnforcesNotNull	crates/pgmem/tests/it/unique.rs::unique_violation_primary_key_also_enforces_not_null	pending	
+postgres	update_from_test.go	TestDeleteUsing	crates/pgmem/tests/it/update_from.rs::delete_using	pending	
+postgres	update_from_test.go	TestUpdateFrom_Returning	crates/pgmem/tests/it/update_from.rs::update_from_returning	pending	
+postgres	update_from_test.go	TestUpdateFrom_SimpleJoin	crates/pgmem/tests/it/update_from.rs::update_from_simple_join	pending	
+postgres	update_test.go	TestUpdate_OverWire	crates/pgmem/tests/it/update.rs::update_over_wire	pending	
+postgres	update_test.go	TestUpdate_Returning_OverWire	crates/pgmem/tests/it/update.rs::update_returning_over_wire	pending	
+postgres	update_test.go	TestUpdate_UniqueViolation_OverWire	crates/pgmem/tests/it/update.rs::update_unique_violation_over_wire	pending	
+postgres	uuid_test.go	TestUUID_Column_GenAndRoundTrip	crates/pgmem/tests/it/uuid.rs::uuid_column_gen_and_round_trip	pending	
+postgres	uuid_test.go	TestUUID_GenInSelect	crates/pgmem/tests/it/uuid.rs::uuid_gen_in_select	pending	
+postgres	uuid_test.go	TestUUID_UnknownFunctionErrors	crates/pgmem/tests/it/uuid.rs::uuid_unknown_function_errors	pending	asserts SQLSTATE 42883 and message (Go only required a PgError)
+postgres	view_test.go	TestCreateView_AggregateView	crates/pgmem/tests/it/view.rs::create_view_aggregate_view	pending	
+postgres	view_test.go	TestCreateView_ConflictWithTableName	crates/pgmem/tests/it/view.rs::create_view_conflict_with_table_name	pending	
+postgres	view_test.go	TestCreateView_FilteringView	crates/pgmem/tests/it/view.rs::create_view_filtering_view	pending	
+postgres	view_test.go	TestCreateView_QualifiedReference	crates/pgmem/tests/it/view.rs::create_view_qualified_reference	pending	
+postgres	view_test.go	TestDropView	crates/pgmem/tests/it/view.rs::drop_view	pending	error cases additionally assert the real Postgres SQLSTATE.
+postgres	window_test.go	TestWindow_DenseRank_NoGap	crates/pgmem/tests/it/window.rs::window_dense_rank_no_gap	pending	
+postgres	window_test.go	TestWindow_NoPartition	crates/pgmem/tests/it/window.rs::window_no_partition	pending	
+postgres	window_test.go	TestWindow_Rank_TiesShareRank	crates/pgmem/tests/it/window.rs::window_rank_ties_share_rank	pending	
+postgres	window_test.go	TestWindow_RowNumber_PartitionOrder	crates/pgmem/tests/it/window.rs::window_row_number_partition_order	pending	order-independent compare of the tied ids 1/3 (row_number tie order unspecified in Postgres)
+postgres/parse	arithmetic_test.go	TestParse_Arithmetic_LeftAssociativity	crates/pgmem-parse::parse_arithmetic_left_associativity	ported	
+postgres/parse	arithmetic_test.go	TestParse_Arithmetic_Precedence	crates/pgmem-parse::parse_arithmetic_precedence	ported	
+postgres/parse	check_constraint_test.go	TestParse_CreateTable_CheckConstraint	crates/pgmem-parse::parse_create_table_check_constraint	ported	
+postgres/parse	createtable_constraints_test.go	TestParse_CreateTable_ColumnConstraints	crates/pgmem-parse::parse_create_table_column_constraints	ported	
+postgres/parse	delete_test.go	TestParse_Delete	crates/pgmem-parse::parse_delete	ported	
+postgres/parse	drop_table_test.go	TestParse_DropTable	crates/pgmem-parse::parse_drop_table	ported	
+postgres/parse	foreign_key_cascade_test.go	TestParse_OnDeleteAction	crates/pgmem-parse::parse_on_delete_action	ported	
+postgres/parse	foreign_key_test.go	TestParse_References_AttachesColumnRefSpec	crates/pgmem-parse::parse_references_attaches_column_ref_spec	ported	
+postgres/parse	insert_returning_test.go	TestParse_Insert_Returning	crates/pgmem-parse::parse_insert_returning	ported	
+postgres/parse	join_left_cross_test.go	TestParse_CrossJoin_RejectsOn	crates/pgmem-parse::parse_cross_join_rejects_on	ported	
+postgres/parse	join_left_cross_test.go	TestParse_JoinTypes	crates/pgmem-parse::parse_join_types	ported	
+postgres/parse	join_test.go	TestParse_ChainedJoins	crates/pgmem-parse::parse_chained_joins	ported	
+postgres/parse	join_test.go	TestParse_Join_BuildsLeftDeepTree	crates/pgmem-parse::parse_join_builds_left_deep_tree	ported	
+postgres/parse	join_test.go	TestParse_QualifiedColumnRef	crates/pgmem-parse::parse_qualified_column_ref	ported	
+postgres/parse	serial_test.go	TestParse_Serial_DesugarsToIntPlusAuto	crates/pgmem-parse::parse_serial_desugars_to_int_plus_auto	ported	
+postgres/parse	subquery_test.go	TestParse_InList	crates/pgmem-parse::parse_in_list	ported	
+postgres/parse	subquery_test.go	TestParse_InSubquery	crates/pgmem-parse::parse_in_subquery	ported	
+postgres/parse	subquery_test.go	TestParse_NotIn	crates/pgmem-parse::parse_not_in	ported	
+postgres/parse	subquery_test.go	TestParse_ScalarSubqueryInSelectList	crates/pgmem-parse::parse_scalar_subquery_in_select_list	ported	
+postgres/parse	update_test.go	TestParse_Update	crates/pgmem-parse::parse_update	ported	
+storage	conflict_test.go	TestCommit_ConflictDetected_AcrossDelete	crates/pgmem-storage::commit_conflict_detected_across_delete	pending	Go aborted an insert that raced a delete of a different row in the same table; Postgres commits both. Deleting the same row twice still conflicts (40001).
+storage	conflict_test.go	TestCommit_Conflict_TwoConcurrentWrites	crates/pgmem-storage::commit_conflict_two_concurrent_writes	pending	Go aborted the second of two transactions inserting different rows into one table (table-level conflict check); Postgres commits both. Conflicts are now row-level (same-row update conflict covered by commit_conflict_same_row_update).
+storage	conflict_test.go	TestCommit_NoConflict_DisjointTables	crates/pgmem-storage::commit_no_conflict_disjoint_tables	pending	
+storage	conflict_test.go	TestCommit_NoConflict_OneSideReadOnly	crates/pgmem-storage::commit_no_conflict_one_side_read_only	pending	
+storage	savepoint_test.go	TestSavepoint_NestedRollbackTo	crates/pgmem-storage::savepoint_nested_rollback_to	pending	
+storage	savepoint_test.go	TestSavepoint_ReleasePops	crates/pgmem-storage::savepoint_release_pops	pending	
+storage	savepoint_test.go	TestSavepoint_RollbackUndoesOnlyPostSavepointWork	crates/pgmem-storage::savepoint_rollback_undoes_only_post_savepoint_work	pending	
+storage	savepoint_test.go	TestSavepoint_UnknownNameErrors	crates/pgmem-storage::savepoint_unknown_name_errors	pending	
+storage	storage_test.go	TestTxn_RollbackDiscards	crates/pgmem-storage::txn_rollback_discards	pending	
+storage	storage_test.go	TestTxn_RollbackIsIdempotent	crates/pgmem-storage::txn_rollback_is_idempotent	pending	
+storage	storage_test.go	TestTxn_SnapshotIsolation	crates/pgmem-storage::txn_snapshot_isolation	pending	
+storage	storage_test.go	TestTxn_WritesNotVisibleUntilCommit	crates/pgmem-storage::txn_writes_not_visible_until_commit	pending	
+types	bytea_test.go	TestBytea_BinaryRoundTrip	crates/pgmem-types::bytea_binary_round_trip	ported	
+types	bytea_test.go	TestBytea_LookupByOIDAndName	crates/pgmem-types::bytea_lookup_by_oid_and_name	ported	
+types	bytea_test.go	TestBytea_RejectsLegacyEscapeFormat	crates/pgmem-types::bytea_rejects_legacy_escape_format	deviation	Go rejected non-hex bytea text input; Postgres accepts the escape format (plain characters stand for themselves) and rejects only malformed escapes.
+types	bytea_test.go	TestBytea_TextRoundTrip	crates/pgmem-types::bytea_text_round_trip	ported	
+types	jsonb_test.go	TestJSONB_BinaryRoundTrip	crates/pgmem-types::jsonb_binary_round_trip	deviation	Binary jsonb payload is the Postgres-normalized text, not the raw input.
+types	jsonb_test.go	TestJSONB_LookupByOIDAndName	crates/pgmem-types::jsonb_lookup_by_oid_and_name	ported	
+types	jsonb_test.go	TestJSONB_RejectsBadVersionByte	crates/pgmem-types::jsonb_rejects_bad_version_byte	ported	
+types	jsonb_test.go	TestJSONB_TextRoundTrip	crates/pgmem-types::jsonb_text_round_trip	deviation	Go echoed jsonb input text verbatim; Postgres normalizes jsonb ({"k": "v", "n": 42}).
+types	timestamptz_test.go	TestTimestamptz_BinaryEpoch	crates/pgmem-types::timestamptz_binary_epoch	ported	
+types	timestamptz_test.go	TestTimestamptz_BinaryRoundTrip	crates/pgmem-types::timestamptz_binary_round_trip	ported	
+types	timestamptz_test.go	TestTimestamptz_LookupByOIDAndName	crates/pgmem-types::timestamptz_lookup_by_oid_and_name	ported	
+types	timestamptz_test.go	TestTimestamptz_TextRoundTrip	crates/pgmem-types::timestamptz_text_round_trip	ported	
+types	uuid_test.go	TestUUID_AcceptsBareHexInput	crates/pgmem-types::uuid_accepts_bare_hex_input	ported	
+types	uuid_test.go	TestUUID_BinaryRoundTrip	crates/pgmem-types::uuid_binary_round_trip	ported	
+types	uuid_test.go	TestUUID_LookupByOIDAndName	crates/pgmem-types::uuid_lookup_by_oid_and_name	ported	
+types	uuid_test.go	TestUUID_RejectsBadInput	crates/pgmem-types::uuid_rejects_bad_input	ported	
+types	uuid_test.go	TestUUID_TextEncodeDecodeRoundTrip	crates/pgmem-types::uuid_text_encode_decode_round_trip	ported	

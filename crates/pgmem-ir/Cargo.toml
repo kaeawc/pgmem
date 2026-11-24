@@ -1,0 +1,16 @@
+[package]
+name = "pgmem-ir"
+description = "Dialect-neutral statement tree that pgmem's parsers produce and its binder consumes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+
+[lints]
+workspace = true
