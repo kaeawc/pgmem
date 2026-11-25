@@ -7,7 +7,9 @@ pub mod bind;
 pub mod cast;
 pub mod catalog_views;
 pub mod ddl;
+mod ddl_views;
 pub mod deparse;
+pub mod deps;
 pub mod dml;
 pub mod eval;
 pub mod funcs;
@@ -20,6 +22,7 @@ pub mod settings;
 mod statement;
 pub mod typeddl;
 pub mod usertypes;
+pub mod views;
 pub mod window;
 
 pub use plan::{OutCol, Row};

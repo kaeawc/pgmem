@@ -114,8 +114,16 @@ fn domains(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             _ => type_columns(base, *typmod, &cat),
         };
         let default_text = default.as_ref().and_then(|d| {
-            let empty =
-                TableDef { oid: 0, schema: String::new(), name: String::new(), columns: vec![], constraints: vec![], indexes: vec![] };
+            let empty = TableDef {
+                oid: 0,
+                schema: String::new(),
+                name: String::new(),
+                columns: vec![],
+                constraints: vec![],
+                indexes: vec![],
+                matview: None,
+                unlogged: false,
+            };
             let mut col = pgmem_catalog::ColumnDef::new("value", base.clone());
             col.typmod = *typmod;
             col.default = Some(d.clone());
@@ -191,23 +199,9 @@ fn schemata(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         .collect())
 }
 
-/// A view Postgres considers automatically updatable: one table in FROM, plain column
-/// outputs, no aggregation, DISTINCT, LIMIT or set operation.
-fn view_updatable(v: &ViewDef) -> bool {
-    let q = &v.query;
-    if q.limit.is_some() || q.offset.is_some() || q.with.is_some() {
-        return false;
-    }
-    let pgmem_ir::SetExpr::Select(sel) = &q.body else { return false };
-    sel.from.len() == 1
-        && matches!(sel.from[0], pgmem_ir::TableRef::Table { .. })
-        && sel.group_by.is_empty()
-        && sel.having.is_none()
-        && sel.distinct == pgmem_ir::Distinct::All
-        && sel.projection.iter().all(|p| match p {
-            pgmem_ir::SelectItem::Expr { expr, .. } => matches!(expr, pgmem_ir::Expr::Column(_)),
-            _ => true,
-        })
+/// A view Postgres considers automatically updatable (`crate::views`).
+fn view_updatable(catalog: &pgmem_catalog::Catalog, v: &ViewDef) -> bool {
+    crate::views::resolve(catalog, v).is_ok_and(|r| r.is_ok())
 }
 
 fn tables(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
@@ -225,9 +219,10 @@ fn tables(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let mut rows: Vec<Row> = m
         .tables()
         .into_iter()
+        .filter(|t| t.matview.is_none())
         .map(|t| row(&t.schema, &t.name, if t.schema.starts_with("pg_temp_") { "LOCAL TEMPORARY" } else { "BASE TABLE" }, true))
         .collect();
-    rows.extend(m.views().into_iter().map(|v| row(&v.schema, &v.name, "VIEW", view_updatable(v))));
+    rows.extend(m.views().into_iter().map(|v| row(&v.schema, &v.name, "VIEW", view_updatable(m.catalog, v))));
     Ok(rows)
 }
 
@@ -341,13 +336,13 @@ fn columns(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let m = snapshot(ctx);
     let s = Spec::parse(COLUMNS);
     let mut rows = Vec::new();
-    for t in m.tables() {
+    for t in m.tables().into_iter().filter(|t| t.matview.is_none()) {
         for a in Model::table_atts(t).iter().filter(|a| !a.dropped) {
             rows.push(column_row(ctx, &m, &s, &t.schema, &t.name, Some(t), a, true));
         }
     }
     for v in m.views() {
-        let updatable = view_updatable(v);
+        let updatable = view_updatable(m.catalog, v);
         for a in &m.view_atts(v) {
             rows.push(column_row(ctx, &m, &s, &v.schema, &v.name, None, a, updatable));
         }
@@ -524,7 +519,7 @@ fn views(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     Ok(m.views()
         .into_iter()
         .map(|v| {
-            let updatable = view_updatable(v);
+            let updatable = view_updatable(m.catalog, v);
             s.row(vec![
                 ("table_catalog", catalog_name(ctx)),
                 ("table_schema", name(&v.schema)),

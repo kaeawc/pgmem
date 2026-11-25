@@ -64,6 +64,8 @@ pub struct InsertPlan {
     pub on_conflict: Option<OnConflictPlan>,
     pub returning: Vec<Expr>,
     pub returning_cols: Vec<OutCol>,
+    /// WITH CHECK OPTION of the view written through: (view name, predicate over the row).
+    pub view_checks: Vec<(String, Expr)>,
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +77,7 @@ pub struct UpdatePlan {
     pub filter: Option<Expr>,
     pub returning: Vec<Expr>,
     pub returning_cols: Vec<OutCol>,
+    pub view_checks: Vec<(String, Expr)>,
 }
 
 #[derive(Clone, Debug)]
@@ -112,9 +115,80 @@ pub fn physical_scope(table: &TableDef, qualifier: &str) -> Scope {
     Scope::from_cols(cols)
 }
 
+/// A DML target that is an automatically updatable view: the base table and the view's
+/// restrictions.
+struct ViewTarget {
+    view: String,
+    u: crate::views::Updatable,
+}
+
+/// The view `name` names, when it does: resolved for writing (`verb`: insert / update /
+/// delete), or Postgres' error for a view that is not automatically updatable.
+fn view_target(b: &Binder, name: &ir::ObjectName, verb: &str) -> SqlResult<Option<ViewTarget>> {
+    let Some(pgmem_catalog::Relation::View(v)) = b.catalog.find_relation(name)? else { return Ok(None) };
+    match crate::views::resolve(b.catalog, &v)? {
+        Ok(u) => Ok(Some(ViewTarget { view: v.name.clone(), u })),
+        Err(reason) => {
+            let (what, gerund, cmd) = match verb {
+                "insert" => ("insert into", "inserting into", "INSERT"),
+                "update" => ("update", "updating", "UPDATE"),
+                _ => ("delete from", "deleting from", "DELETE"),
+            };
+            Err(SqlError::new(code::OBJECT_NOT_IN_PREREQUISITE_STATE, format!("cannot {what} view \"{}\"", v.name))
+                .with_detail(reason)
+                .with_hint(format!(
+                    "To enable {gerund} the view, provide an INSTEAD OF {cmd} trigger or an unconditional ON {cmd} DO INSTEAD rule."
+                )))
+        }
+    }
+}
+
+impl ViewTarget {
+    /// The base column a view column writes (Postgres' error for a computed one).
+    fn base_column(&self, column: &str, verb: &str) -> SqlResult<String> {
+        match self.u.columns.iter().find(|(n, _)| n == column) {
+            Some((_, Some(base))) => Ok(base.clone()),
+            Some((_, None)) => Err(SqlError::feature_not_supported(format!("cannot {verb} column \"{column}\" of view \"{}\"", self.view))
+                .with_detail("View columns that are not columns of their base relation are not updatable.")),
+            None => Err(SqlError::undefined_column(&format!("\"{column}\" of relation \"{}\"", self.view))),
+        }
+    }
+
+    /// The view's WHERE clauses (`checks`: its CHECK OPTION predicates instead), bound over
+    /// the base table's physical row.
+    fn bind_predicates(&self, b: &Binder, table: &TableDef, checks: bool) -> SqlResult<Vec<(String, Expr)>> {
+        let items: Vec<(String, ir::Expr, String)> = if checks {
+            self.u.checks.clone()
+        } else {
+            self.u.filters.iter().map(|(e, q)| (self.view.clone(), e.clone(), q.clone())).collect()
+        };
+        items
+            .into_iter()
+            .map(|(view, e, q)| {
+                let level = Level::new(physical_scope(table, &q));
+                Ok((view, b.bind_predicate(&e, "WHERE", &Ctx::new(&level).with_clause(Clause::Where))?))
+            })
+            .collect()
+    }
+}
+
+/// ANDs the view's restrictions into a DML filter.
+fn and_filters(filter: Option<Expr>, extra: Vec<(String, Expr)>) -> Option<Expr> {
+    let mut all: Vec<Expr> = filter.into_iter().collect();
+    all.extend(extra.into_iter().map(|(_, e)| e));
+    match all.len() {
+        0 => None,
+        1 => all.pop(),
+        _ => Some(Expr::And(all)),
+    }
+}
+
 pub(crate) fn lookup_table(b: &Binder, name: &ir::ObjectName) -> SqlResult<Arc<TableDef>> {
     let base = name.base();
     match b.catalog.find_relation(name)? {
+        Some(pgmem_catalog::Relation::Table(t)) if t.matview.is_some() => {
+            Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("cannot change materialized view \"{base}\"")))
+        }
         Some(pgmem_catalog::Relation::Table(t)) => Ok(t),
         Some(pgmem_catalog::Relation::View(_)) => Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("cannot modify view \"{base}\""))
             .with_detail("Views that do not select from a single table or view are not automatically updatable.")),
@@ -330,6 +404,22 @@ fn arbiter_for(b: &Binder, rules: &RowRules, table: &Arc<TableDef>, target: &ir:
 const RETURNING_ALIASES: &str = "__pgmem_returning_aliases";
 
 pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<InsertPlan> {
+    if let Some(vt) = view_target(b, &ins.table, "insert")? {
+        // INSERT through a view: the base table, the view's columns mapped onto it.
+        let mut base = ins.clone();
+        base.table = vt.u.base.clone();
+        base.alias = Some(ins.alias.clone().unwrap_or_else(|| vt.view.clone()));
+        let names: Vec<String> =
+            if ins.columns.is_empty() { vt.u.columns.iter().map(|(n, _)| n.clone()).collect() } else { ins.columns.clone() };
+        let needed = match &ins.source {
+            ir::InsertSource::Values(rows) => rows.first().map_or(names.len(), Vec::len),
+            _ => names.len(),
+        };
+        base.columns = names.iter().take(needed).map(|c| vt.base_column(c, "insert into")).collect::<SqlResult<Vec<_>>>()?;
+        let mut plan = bind_insert(b, &base, outer)?;
+        plan.view_checks.extend(vt.bind_predicates(b, &plan.rules.table, true)?);
+        return Ok(plan);
+    }
     let table = lookup_table(b, &ins.table)?;
     let qualifier = ins.alias.clone().unwrap_or_else(|| table.name.clone());
     let rules = b.bind_row_rules(&table)?;
@@ -440,7 +530,16 @@ pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<Inser
     };
     let returning_level = Level::new(target_scope(&table, &qualifier));
     let (returning, returning_cols) = b.bind_returning(&ins.returning, &Ctx::new(&returning_level), &table)?;
-    Ok(InsertPlan { rules, columns, rows, overriding_system_value: ins.overriding_system_value, on_conflict, returning, returning_cols })
+    Ok(InsertPlan {
+        rules,
+        columns,
+        rows,
+        overriding_system_value: ins.overriding_system_value,
+        on_conflict,
+        returning,
+        returning_cols,
+        view_checks: Vec::new(),
+    })
 }
 
 pub(crate) fn bind_assignments(
@@ -556,6 +655,23 @@ fn bind_field_assignment(
 }
 
 pub fn bind_update(b: &Binder, upd: &ir::Update, outer: &Ctx) -> SqlResult<UpdatePlan> {
+    if let Some(vt) = view_target(b, &upd.table, "update")? {
+        let mut base = upd.clone();
+        base.table = vt.u.base.clone();
+        base.alias = Some(upd.alias.clone().unwrap_or_else(|| vt.view.clone()));
+        for a in &mut base.assignments {
+            for target in &mut a.columns {
+                if let Some(first) = target.first_mut() {
+                    *first = vt.base_column(first, "update")?;
+                }
+            }
+        }
+        let mut plan = bind_update(b, &base, outer)?;
+        let filters = vt.bind_predicates(b, &plan.rules.table, false)?;
+        plan.filter = and_filters(plan.filter.take(), filters);
+        plan.view_checks.extend(vt.bind_predicates(b, &plan.rules.table, true)?);
+        return Ok(plan);
+    }
     let table = lookup_table(b, &upd.table)?;
     let qualifier = upd.alias.clone().unwrap_or_else(|| table.name.clone());
     let rules = b.bind_row_rules(&table)?;
@@ -579,10 +695,19 @@ pub fn bind_update(b: &Binder, upd: &ir::Update, outer: &Ctx) -> SqlResult<Updat
     let assignments = bind_assignments(b, &table, &upd.assignments, &ctx)?;
     let filter = upd.selection.as_ref().map(|s| b.bind_predicate(s, "WHERE", &ctx.with_clause(Clause::Where))).transpose()?;
     let (returning, returning_cols) = b.bind_returning(&upd.returning, &ctx, &table)?;
-    Ok(UpdatePlan { rules, assignments, from, filter, returning, returning_cols })
+    Ok(UpdatePlan { rules, assignments, from, filter, returning, returning_cols, view_checks: Vec::new() })
 }
 
 pub fn bind_delete(b: &Binder, del: &ir::Delete, outer: &Ctx) -> SqlResult<DeletePlan> {
+    if let Some(vt) = view_target(b, &del.table, "delete")? {
+        let mut base = del.clone();
+        base.table = vt.u.base.clone();
+        base.alias = Some(del.alias.clone().unwrap_or_else(|| vt.view.clone()));
+        let mut plan = bind_delete(b, &base, outer)?;
+        let filters = vt.bind_predicates(b, &plan.table, false)?;
+        plan.filter = and_filters(plan.filter.take(), filters);
+        return Ok(plan);
+    }
     let table = lookup_table(b, &del.table)?;
     let qualifier = del.alias.clone().unwrap_or_else(|| table.name.clone());
     let target_scope = target_scope(&table, &qualifier);

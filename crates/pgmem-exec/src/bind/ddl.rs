@@ -52,6 +52,8 @@ fn choose_name(catalog: &Catalog, schema: &str, taken: &[String], base: String) 
 pub struct CreateTablePlan {
     pub table: TableDef,
     pub sequences: Vec<SequenceDef>,
+    /// Column comments copied by `LIKE ... INCLUDING COMMENTS`: (column, text).
+    pub comments: Vec<(String, String)>,
 }
 
 /// Validates an expression stored in the catalog by binding it against the table row.
@@ -89,11 +91,16 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
         }
         return Err(SqlError::new(code::DUPLICATE_TABLE, format!("relation \"{name}\" already exists")));
     }
-    if ct.as_query.is_some() {
-        return Err(super::feature("CREATE TABLE AS"));
-    }
-    let mut table =
-        TableDef { oid: 0, schema: schema.clone(), name: name.clone(), columns: Vec::new(), constraints: Vec::new(), indexes: Vec::new() };
+    let mut table = TableDef {
+        oid: 0,
+        schema: schema.clone(),
+        name: name.clone(),
+        columns: Vec::new(),
+        constraints: Vec::new(),
+        indexes: Vec::new(),
+        matview: None,
+        unlogged: ct.options.unlogged,
+    };
     let mut sequences = Vec::new();
     let mut taken: Vec<String> = vec![name.clone()];
     // Columns.
@@ -178,6 +185,14 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
         }
         table.columns.push(col);
     }
+    let likes = super::like::expand(b, ct, &mut table, &mut sequences, &mut taken)?;
+    if !ct.options.likes.is_empty() {
+        for (i, c) in table.columns.iter().enumerate() {
+            if table.columns[..i].iter().any(|x| x.name == c.name) {
+                return Err(SqlError::new(code::DUPLICATE_COLUMN, format!("column \"{}\" specified more than once", c.name)));
+            }
+        }
+    }
     // Validate expressions now that every column is known.
     for col in &table.columns {
         if let Some(g) = &col.generated {
@@ -220,10 +235,17 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
     for con in &ct.constraints {
         pending.push((con.name.clone(), con.kind.clone(), false, con.timing));
     }
+    for (name, kind, timing) in likes.constraints {
+        pending.push((name, kind, false, timing));
+    }
     for (cname, kind, column_level, timing) in pending {
         add_constraint(b, &mut table, cname, &kind, column_level, &mut taken, timing)?;
     }
-    Ok(Some(CreateTablePlan { table, sequences }))
+    for li in &likes.indexes {
+        let idx = super::like::build_index(b, &table, li, &mut taken)?;
+        table.indexes.push(idx);
+    }
+    Ok(Some(CreateTablePlan { table, sequences, comments: likes.comments }))
 }
 
 fn expr_mentions(e: &ir::Expr, column: &str) -> bool {
@@ -263,6 +285,60 @@ pub fn add_constraint(
         return Err(SqlError::new(code::DUPLICATE_OBJECT, format!("constraint \"{n}\" for relation \"{tname}\" already exists")));
     }
     match kind {
+        ir::TableConstraintKind::UsingIndex { primary, index } => {
+            let pos = table
+                .indexes
+                .iter()
+                .position(|i| &i.name == index)
+                .ok_or_else(|| SqlError::new(code::UNDEFINED_OBJECT, format!("index \"{index}\" does not exist")))?;
+            if table.constraints.iter().any(|c| &c.name == index) {
+                return Err(SqlError::new(
+                    code::OBJECT_NOT_IN_PREREQUISITE_STATE,
+                    format!("index \"{index}\" is already associated with a constraint"),
+                ));
+            }
+            let idx = &table.indexes[pos];
+            let unusable = if !idx.unique {
+                Some(format!("\"{index}\" is not a unique index"))
+            } else if idx.predicate.is_some() {
+                Some(format!("\"{index}\" is a partial index"))
+            } else if !idx.exprs.is_empty() {
+                Some(format!("index \"{index}\" contains expressions"))
+            } else {
+                None
+            };
+            if let Some(msg) = unusable {
+                return Err(SqlError::new(code::WRONG_OBJECT_TYPE, msg)
+                    .with_detail("Cannot create a primary key or unique constraint using such an index."));
+            }
+            if *primary && table.primary_key().is_some() {
+                return Err(SqlError::new(
+                    code::INVALID_TABLE_DEFINITION,
+                    format!("multiple primary keys for table \"{tname}\" are not allowed"),
+                ));
+            }
+            let name = cname.unwrap_or_else(|| index.clone());
+            let columns = idx.columns.clone();
+            let nulls_not_distinct = idx.nulls_not_distinct;
+            if *primary {
+                for &i in &columns {
+                    table.columns[i].not_null = true;
+                }
+            }
+            table.indexes[pos].name.clone_from(&name);
+            table.indexes[pos].primary = *primary;
+            taken.push(name.clone());
+            let ckind =
+                if *primary { ConstraintKind::PrimaryKey { columns } } else { ConstraintKind::Unique { columns, nulls_not_distinct } };
+            table.constraints.push(Constraint {
+                oid: 0,
+                name,
+                kind: ckind,
+                deferrable: timing.deferrable,
+                initially_deferred: timing.initially_deferred,
+                validated: true,
+            });
+        }
         ir::TableConstraintKind::PrimaryKey(cols) | ir::TableConstraintKind::Unique { columns: cols, .. } => {
             let primary = matches!(kind, ir::TableConstraintKind::PrimaryKey(_));
             if primary && table.primary_key().is_some() {
@@ -440,9 +516,6 @@ pub fn bind_create_view(b: &Binder, cv: &ir::CreateView) -> SqlResult<ViewDef> {
     let top = Level::new(Scope::default());
     let ctx = Ctx::new(&top);
     let bound = b.bind_query(&cv.query, &ctx)?;
-    if cv.materialized {
-        return Err(super::feature("materialized views"));
-    }
     let mut columns: Vec<String> = bound.columns.iter().map(|c| c.name.clone()).collect();
     if cv.columns.len() > columns.len() {
         return Err(SqlError::syntax("CREATE VIEW specifies more column names than columns"));
@@ -454,7 +527,7 @@ pub fn bind_create_view(b: &Binder, cv: &ir::CreateView) -> SqlResult<ViewDef> {
         return Err(SqlError::new(code::UNDEFINED_PARAMETER, "there is no parameter $1"));
     }
     let search_path = b.catalog.resolved_search_path();
-    Ok(ViewDef { oid: 0, schema, name, columns, query: (*cv.query).clone(), search_path })
+    Ok(ViewDef { oid: 0, schema, name, columns, query: (*cv.query).clone(), search_path, check_option: cv.check_option })
 }
 
 pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(QualName, IndexDef)>> {
@@ -474,7 +547,7 @@ pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(
             e => {
                 check_expr_binds(b, &table, e, Clause::Other)?;
                 exprs.push(e.clone());
-                names.push("expr".to_owned());
+                names.push(super::like::index_key_name(e));
             }
         }
     }
@@ -485,6 +558,14 @@ pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(
     }
     if let Some(p) = &ci.predicate {
         check_expr_binds(b, &table, p, Clause::Where)?;
+    }
+    if let Some(m) = &ci.method {
+        if !["btree", "hash", "gist", "gin", "spgist", "brin"].contains(&m.as_str()) {
+            return Err(SqlError::new(code::UNDEFINED_OBJECT, format!("access method \"{m}\" does not exist")));
+        }
+        if ci.unique && m != "btree" {
+            return Err(SqlError::feature_not_supported(format!("access method \"{m}\" does not support unique indexes")));
+        }
     }
     let name = match &ci.name {
         Some(n) => {
@@ -510,7 +591,7 @@ pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(
             exprs,
             unique: ci.unique,
             primary: false,
-            nulls_not_distinct: false,
+            nulls_not_distinct: ci.nulls_not_distinct,
             predicate: ci.predicate.clone(),
         },
     )))
@@ -584,6 +665,7 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
                 columns: vec![column.clone()],
                 constraints: vec![],
                 as_query: None,
+                options: ir::CreateTableOptions::default(),
             };
             let probe = bind_create_table(b, &ct)?.ok_or_else(|| SqlError::internal("ALTER TABLE ADD COLUMN analysis"))?;
             let mut col = probe.table.columns.into_iter().next().ok_or_else(|| SqlError::internal("no column"))?;
@@ -664,6 +746,26 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
             def.columns[slot].name = new.clone();
             Ok(AlterOutcome::Replace { def: Box::new(def), rename_from: None, sequences: vec![], validate: Validation::None })
         }
+        ir::AlterTableAction::RenameConstraint { old, new } => {
+            let nn_name =
+                |c: &ColumnDef| c.not_null_name.clone().unwrap_or_else(|| crate::catalog_views::not_null_constraint_name(&tname, &c.name));
+            let exists = |n: &str| def.has_constraint(n) || def.live_columns().any(|(_, c)| c.not_null && nn_name(c) == n);
+            if !exists(old) {
+                return Err(SqlError::new(code::UNDEFINED_OBJECT, format!("constraint \"{old}\" for table \"{tname}\" does not exist")));
+            }
+            if exists(new) {
+                return Err(SqlError::new(code::DUPLICATE_OBJECT, format!("constraint \"{new}\" for relation \"{tname}\" already exists")));
+            }
+            if let Some(c) = def.constraints.iter_mut().find(|c| &c.name == old) {
+                c.name.clone_from(new);
+                if let Some(i) = def.indexes.iter_mut().find(|i| &i.name == old) {
+                    i.name.clone_from(new);
+                }
+            } else if let Some(c) = def.columns.iter_mut().find(|c| !c.dropped && c.not_null && nn_name(c) == *old) {
+                c.not_null_name = Some(new.clone());
+            }
+            Ok(AlterOutcome::Replace { def: Box::new(def), rename_from: None, sequences: vec![], validate: Validation::None })
+        }
         ir::AlterTableAction::RenameTable { new } => {
             if b.catalog.relation(&table.schema, new).is_some() {
                 return Err(SqlError::new(code::DUPLICATE_TABLE, format!("relation \"{new}\" already exists")));
@@ -706,6 +808,11 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
         ir::AlterTableAction::AlterType { column, ty, using } => {
             let slot = def.column_index(column).ok_or_else(|| not_found(column))?;
             let (t, typmod) = resolve_type_name(b.catalog, ty)?;
+            let old = &def.columns[slot].ty;
+            if using.is_none() && matches!(crate::cast::cast_context(old, &t), None | Some(crate::cast::CoercionContext::Explicit)) {
+                return Err(SqlError::datatype_mismatch(format!("column \"{column}\" cannot be cast automatically to type {}", t.name()))
+                    .with_hint(format!("You might need to specify \"USING {column}::{}\".", t.name())));
+            }
             def.columns[slot].ty = t;
             def.columns[slot].typmod = typmod;
             Ok(AlterOutcome::Replace {

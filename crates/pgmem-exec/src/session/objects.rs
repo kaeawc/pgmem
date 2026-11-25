@@ -355,7 +355,10 @@ impl Session {
         let result = if commit {
             // Deferred constraints are checked at commit; a violation rolls everything back.
             match self.check_constraints(&mut txn, pending) {
-                Ok(()) => txn.commit(),
+                Ok(()) => {
+                    self.apply_on_commit(&mut txn);
+                    txn.commit()
+                }
                 Err(e) => {
                     txn.rollback();
                     Err(e)
@@ -382,6 +385,26 @@ impl Session {
             self.pending_notify.clear();
         }
         result
+    }
+
+    /// Temporary tables' ON COMMIT actions, run just before the commit.
+    fn apply_on_commit(&mut self, txn: &mut Txn) {
+        let entries = std::mem::take(&mut self.on_commit);
+        for (oid, action) in entries {
+            let Some(t) = txn.catalog().table_by_oid(oid).cloned() else { continue };
+            match action {
+                pgmem_ir::OnCommit::DeleteRows => {
+                    txn.truncate(oid);
+                    self.on_commit.push((oid, action));
+                }
+                pgmem_ir::OnCommit::Drop => {
+                    let cat = txn.catalog_mut();
+                    cat.drop_comments(oid);
+                    cat.drop_table(&t.qualified());
+                }
+                pgmem_ir::OnCommit::PreserveRows => {}
+            }
+        }
     }
 
     /// Runs deferred constraint checks: (table OID, constraint name) against the table's rows.

@@ -249,6 +249,8 @@ pub struct Session {
     constraint_modes: ConstraintModes,
     /// Deferred constraint checks owed at commit: (table OID, constraint name).
     pending_checks: Vec<(Oid, String)>,
+    /// Temporary tables created `ON COMMIT DELETE ROWS` / `ON COMMIT DROP`.
+    on_commit: Vec<(Oid, ir::OnCommit)>,
 }
 
 /// A savepoint's marks into the transaction's undo and queues.
@@ -291,6 +293,7 @@ impl Session {
             txn_read_only: false,
             constraint_modes: ConstraintModes::default(),
             pending_checks: Vec::new(),
+            on_commit: Vec::new(),
         }
     }
 
@@ -516,6 +519,9 @@ impl Session {
             Statement::Unlisten { channel } => return Ok(self.listen(channel.clone().map(|c| (c, false)))),
             Statement::Notify { channel, payload } => return self.notify(channel, payload.as_deref()),
             Statement::Maintenance { tag, tables, in_block_ok } => return self.maintenance(tag, tables, *in_block_ok),
+            Statement::CreateIndex(ci) if ci.concurrently && self.in_block() => {
+                return Err(SqlError::new(code::ACTIVE_SQL_TRANSACTION, "CREATE INDEX CONCURRENTLY cannot run inside a transaction block"));
+            }
             Statement::Lock { tables, mode, nowait } => return self.lock_tables(tables, *mode, *nowait),
             Statement::SetConstraints { names, deferred } => return self.set_constraints(names, *deferred),
             Statement::Discard(k) if *k != ir::DiscardKind::Temp && *k != ir::DiscardKind::All => return self.discard(*k),
@@ -600,6 +606,12 @@ impl Session {
         let top = Level::new(Scope::default());
         let ctx = Ctx::new(&top);
         let result = crate::statement::exec_statement(stmt, &binder, &ctx, txn, params, &env, &state)?;
+        if let Statement::CreateTable(ct) = stmt
+            && ct.options.on_commit != ir::OnCommit::PreserveRows
+            && let Ok(Some(Relation::Table(t))) = txn.catalog().lookup_relation(&ct.name)
+        {
+            self.on_commit.push((t.oid, ct.options.on_commit));
+        }
         // Sequence values produced by this statement become visible to currval/lastval.
         let produced = state.currval.borrow();
         for (oid, v) in produced.iter() {
@@ -637,7 +649,11 @@ impl Session {
             Statement::Delete(d) if !temp(&d.table) => "DELETE",
             Statement::Merge(m) if !temp(&m.table) => "MERGE",
             Statement::CreateTable(ct) if !ct.temporary => "CREATE TABLE",
+            Statement::CreateView(cv) if cv.materialized => "CREATE MATERIALIZED VIEW",
             Statement::CreateView(_) => "CREATE VIEW",
+            Statement::RefreshMatview { .. } => "REFRESH MATERIALIZED VIEW",
+            Statement::RenameView { .. } => "ALTER VIEW",
+            Statement::RenameIndex { .. } => "ALTER INDEX",
             Statement::CreateIndex(_) => "CREATE INDEX",
             Statement::CreateSequence(_) => "CREATE SEQUENCE",
             Statement::AlterTable(_) => "ALTER TABLE",
@@ -648,6 +664,7 @@ impl Session {
             Statement::Drop(d) => match d.object_type {
                 ir::ObjectType::Table => "DROP TABLE",
                 ir::ObjectType::View => "DROP VIEW",
+                ir::ObjectType::MaterializedView => "DROP MATERIALIZED VIEW",
                 ir::ObjectType::Index => "DROP INDEX",
                 ir::ObjectType::Sequence => "DROP SEQUENCE",
                 ir::ObjectType::Schema => "DROP SCHEMA",
