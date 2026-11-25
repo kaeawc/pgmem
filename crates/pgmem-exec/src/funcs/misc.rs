@@ -539,6 +539,26 @@ fn lastval(_: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
         .ok_or_else(|| SqlError::new(code::OBJECT_NOT_IN_PREREQUISITE_STATE, "lastval is not yet defined in this session"))
 }
 
+fn sequence_by_oid(ctx: &EvalCtx, v: &Value) -> SqlResult<std::sync::Arc<pgmem_catalog::SequenceDef>> {
+    let Value::Oid(oid) = v else { return Err(SqlError::internal("sequence OID expected")) };
+    match ctx.txn.catalog().relation_by_oid(*oid) {
+        Some(pgmem_catalog::Relation::Sequence(s)) => Ok(s),
+        _ => Err(SqlError::internal(format!("could not open sequence {oid}"))),
+    }
+}
+
+/// `SELECT last_value FROM seq`.
+pub fn sequence_last_value(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
+    let seq = sequence_by_oid(ctx, &a[0])?;
+    Ok(Value::Int8(ctx.txn.database().sequence_state(&seq).0))
+}
+
+/// `SELECT is_called FROM seq`.
+pub fn sequence_is_called(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
+    let seq = sequence_by_oid(ctx, &a[0])?;
+    Ok(Value::Bool(ctx.txn.database().sequence_state(&seq).1))
+}
+
 fn setval(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
     let seq = sequence(ctx, &a[0])?;
     let v = a[1].as_i64().unwrap_or(0);

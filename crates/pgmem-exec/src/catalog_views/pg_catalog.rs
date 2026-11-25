@@ -1012,6 +1012,8 @@ fn pg_sequence(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("seqincrement", Value::Int8(seq.increment)),
                 ("seqmax", Value::Int8(seq.max)),
                 ("seqmin", Value::Int8(seq.min)),
+                ("seqcache", Value::Int8(seq.cache)),
+                ("seqcycle", Value::Bool(seq.cycle)),
             ])
         })
         .collect())
@@ -1113,6 +1115,8 @@ fn pg_sequences(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("min_value", Value::Int8(seq.min)),
                 ("max_value", Value::Int8(seq.max)),
                 ("increment_by", Value::Int8(seq.increment)),
+                ("cycle", Value::Bool(seq.cycle)),
+                ("cache_size", Value::Int8(seq.cache)),
                 ("last_value", last),
             ])
         })

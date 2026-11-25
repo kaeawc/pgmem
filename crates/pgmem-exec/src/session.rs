@@ -654,6 +654,7 @@ impl Session {
             Statement::RefreshMatview { .. } => "REFRESH MATERIALIZED VIEW",
             Statement::RenameView { .. } => "ALTER VIEW",
             Statement::RenameIndex { .. } => "ALTER INDEX",
+            Statement::AlterSequence { .. } => "ALTER SEQUENCE",
             Statement::CreateIndex(_) => "CREATE INDEX",
             Statement::CreateSequence(_) => "CREATE SEQUENCE",
             Statement::AlterTable(_) => "ALTER TABLE",

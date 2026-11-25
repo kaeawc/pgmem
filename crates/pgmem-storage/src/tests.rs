@@ -283,8 +283,19 @@ fn updated_rows_move_to_end_of_heap() {
 #[test]
 fn sequences_are_not_transactional() {
     let db = Database::new();
-    let seq =
-        SequenceDef { schema: "public".into(), oid: 1, name: "s".into(), start: 1, increment: 1, min: 1, max: i64::MAX, owned_by: None };
+    let seq = SequenceDef {
+        schema: "public".into(),
+        oid: 1,
+        name: "s".into(),
+        start: 1,
+        increment: 1,
+        min: 1,
+        max: i64::MAX,
+        cycle: false,
+        data_type: pgmem_types::Type::Int8,
+        cache: 1,
+        owned_by: None,
+    };
     assert_eq!(db.nextval(&seq).ok(), Some(1));
     assert_eq!(db.nextval(&seq).ok(), Some(2));
     db.setval(&seq, 10, true).expect("setval");

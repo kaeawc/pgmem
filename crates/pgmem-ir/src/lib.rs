@@ -157,6 +157,13 @@ pub enum Statement {
         materialized: bool,
         if_exists: bool,
     },
+    /// `ALTER SEQUENCE [IF EXISTS] name options | RENAME TO new_name`.
+    AlterSequence {
+        name: ObjectName,
+        if_exists: bool,
+        options: Box<SequenceOptions>,
+        rename_to: Option<String>,
+    },
     /// `ALTER INDEX [IF EXISTS] name RENAME TO new_name`.
     RenameIndex {
         name: ObjectName,
@@ -736,6 +743,8 @@ pub struct Insert {
     pub source: InsertSource,
     /// `OVERRIDING SYSTEM VALUE` lets explicit values into `GENERATED ALWAYS AS IDENTITY`.
     pub overriding_system_value: bool,
+    /// `OVERRIDING USER VALUE`: explicit values for identity columns are ignored.
+    pub overriding_user_value: bool,
     pub on_conflict: Option<OnConflict>,
     pub returning: Vec<SelectItem>,
 }
@@ -940,6 +949,7 @@ pub enum ColumnConstraintKind {
     /// `GENERATED {ALWAYS | BY DEFAULT} AS IDENTITY`.
     Identity {
         always: bool,
+        options: SequenceOptions,
     },
 }
 
@@ -1023,8 +1033,24 @@ pub struct CreateIndex {
 pub struct CreateSequence {
     pub name: ObjectName,
     pub if_not_exists: bool,
-    pub start: Option<i64>,
+    pub options: SequenceOptions,
+}
+
+/// CREATE / ALTER SEQUENCE and identity column options; None where not given.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct SequenceOptions {
+    pub data_type: Option<TypeName>,
     pub increment: Option<i64>,
+    /// `MINVALUE n` / `NO MINVALUE` (Some(None)).
+    pub min: Option<Option<i64>>,
+    pub max: Option<Option<i64>>,
+    pub start: Option<i64>,
+    /// `RESTART [WITH n]` (ALTER only).
+    pub restart: Option<Option<i64>>,
+    pub cache: Option<i64>,
+    pub cycle: Option<bool>,
+    /// `OWNED BY table.column` / `OWNED BY NONE` (Some(None)).
+    pub owned_by: Option<Option<ObjectName>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1055,6 +1081,31 @@ pub enum AlterTableAction {
     RenameConstraint {
         old: String,
         new: String,
+    },
+    /// `ALTER COLUMN c ADD GENERATED {ALWAYS | BY DEFAULT} AS IDENTITY [(options)]`.
+    AddIdentity {
+        column: String,
+        always: bool,
+        options: SequenceOptions,
+    },
+    /// `ALTER COLUMN c {SET GENERATED ... | SET option | RESTART ...} ...`.
+    SetIdentity {
+        column: String,
+        always: Option<bool>,
+        options: SequenceOptions,
+    },
+    DropIdentity {
+        column: String,
+        if_exists: bool,
+    },
+    /// `ALTER COLUMN c SET EXPRESSION AS (expr)`.
+    SetExpression {
+        column: String,
+        expr: Expr,
+    },
+    DropExpression {
+        column: String,
+        if_exists: bool,
     },
     SetNotNull {
         column: String,

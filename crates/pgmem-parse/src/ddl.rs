@@ -94,11 +94,14 @@ fn lower_column_def(c: sq::ColumnDef) -> SqlResult<ColumnDef> {
                 });
                 continue;
             }
-            sq::ColumnOption::Generated { generated_as, generation_expr, .. } => match generation_expr {
+            sq::ColumnOption::Generated { generated_as, generation_expr, sequence_options, .. } => match generation_expr {
                 Some(e) => ColumnConstraintKind::Generated(lower_expr(e)?),
-                None => ColumnConstraintKind::Identity { always: matches!(generated_as, sq::GeneratedAs::Always) },
+                None => ColumnConstraintKind::Identity {
+                    always: matches!(generated_as, sq::GeneratedAs::Always),
+                    options: lower_sequence_options(sequence_options.as_deref().unwrap_or_default())?,
+                },
             },
-            sq::ColumnOption::Identity(_) => ColumnConstraintKind::Identity { always: false },
+            sq::ColumnOption::Identity(_) => ColumnConstraintKind::Identity { always: false, options: Default::default() },
             sq::ColumnOption::Collation(_) | sq::ColumnOption::Comment(_) => continue,
             other => return Err(unsupported(&format!("column option {other}"))),
         };
@@ -274,15 +277,24 @@ fn const_i64(e: &sq::Expr) -> SqlResult<i64> {
 }
 
 pub(crate) fn lower_create_sequence(name: &sq::ObjectName, if_not_exists: bool, opts: &[sq::SequenceOptions]) -> SqlResult<CreateSequence> {
-    let mut seq = CreateSequence { name: object_name(name)?, if_not_exists, start: None, increment: None };
+    Ok(CreateSequence { name: object_name(name)?, if_not_exists, options: lower_sequence_options(opts)? })
+}
+
+pub(crate) fn lower_sequence_options(opts: &[sq::SequenceOptions]) -> SqlResult<pgmem_ir::SequenceOptions> {
+    let mut out = pgmem_ir::SequenceOptions::default();
     for o in opts {
         match o {
-            sq::SequenceOptions::StartWith(e, _) => seq.start = Some(const_i64(e)?),
-            sq::SequenceOptions::IncrementBy(e, _) => seq.increment = Some(const_i64(e)?),
-            _ => {}
+            sq::SequenceOptions::DataType(t) => out.data_type = Some(lower_type(t)?),
+            sq::SequenceOptions::StartWith(e, _) => out.start = Some(const_i64(e)?),
+            sq::SequenceOptions::IncrementBy(e, _) => out.increment = Some(const_i64(e)?),
+            sq::SequenceOptions::MinValue(e) => out.min = Some(e.as_ref().map(const_i64).transpose()?),
+            sq::SequenceOptions::MaxValue(e) => out.max = Some(e.as_ref().map(const_i64).transpose()?),
+            sq::SequenceOptions::Cache(e) => out.cache = Some(const_i64(e)?),
+            sq::SequenceOptions::Cycle(no) => out.cycle = Some(!no),
+            sq::SequenceOptions::OwnedBy(name) => out.owned_by = Some(name.as_ref().map(object_name).transpose()?),
         }
     }
-    Ok(seq)
+    Ok(out)
 }
 
 pub(crate) fn lower_alter_table(at: sq::AlterTable) -> SqlResult<AlterTable> {
@@ -324,6 +336,11 @@ pub(crate) fn lower_alter_table(at: sq::AlterTable) -> SqlResult<AlterTable> {
                     sq::AlterColumnOperation::SetDataType { data_type, using, .. } => {
                         AlterTableAction::AlterType { column, ty: lower_type(&data_type)?, using: using.map(lower_expr).transpose()? }
                     }
+                    sq::AlterColumnOperation::AddGenerated { generated_as, sequence_options } => AlterTableAction::AddIdentity {
+                        column,
+                        always: !matches!(generated_as, Some(sq::GeneratedAs::ByDefault)),
+                        options: lower_sequence_options(sequence_options.as_deref().unwrap_or_default())?,
+                    },
                     _ => return Err(unsupported("this ALTER COLUMN action")),
                 });
             }

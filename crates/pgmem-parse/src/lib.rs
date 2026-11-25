@@ -740,6 +740,19 @@ fn rewrite_unsupported(sql: &str) -> Option<String> {
         } else if word(&tokens[i], "FOR") && at(1, "KEY") && at(2, "SHARE") {
             drop[sig[k + 1]] = true;
             lock_marker(&mut insert_after, &sig, k, KEY_SHARE_MARKER);
+        } else if word(&tokens[i], "GENERATED")
+            && at(1, "ALWAYS")
+            && at(2, "AS")
+            && sig.get(k + 3).is_some_and(|&j| tokens[j] == Token::LParen)
+            && let Some(close) = matching_paren(&tokens, &sig, k + 3)
+        {
+            // `GENERATED ALWAYS AS (expr) [VIRTUAL]` (Postgres 18's default): computed like
+            // STORED, which gives the same values.
+            if sig.get(close + 1).is_some_and(|&j| word(&tokens[j], "VIRTUAL")) {
+                replace[sig[close + 1]] = Some("STORED");
+            } else if !sig.get(close + 1).is_some_and(|&j| word(&tokens[j], "STORED")) {
+                insert_after.insert(sig[close], " STORED".to_owned());
+            }
         } else if word(&tokens[i], "DROP") && at(1, "INDEX") && at(2, "CONCURRENTLY") {
             drop[sig[k + 2]] = true;
         } else if word(&tokens[i], "AT") && at(1, "LOCAL") {

@@ -240,6 +240,34 @@ pub struct SequenceDef {
     /// The table (in the sequence's schema) and column this sequence is OWNED BY (serial /
     /// identity columns).
     pub owned_by: Option<(String, String)>,
+    pub cycle: bool,
+    /// `AS smallint | integer | bigint`.
+    pub data_type: Type,
+    pub cache: i64,
+}
+
+impl SequenceDef {
+    /// A sequence with Postgres' defaults for `data_type` (ascending from 1).
+    pub fn new(schema: impl Into<String>, name: impl Into<String>, data_type: Type) -> SequenceDef {
+        let max = match data_type {
+            Type::Int2 => i64::from(i16::MAX),
+            Type::Int4 => i64::from(i32::MAX),
+            _ => i64::MAX,
+        };
+        SequenceDef {
+            oid: 0,
+            schema: schema.into(),
+            name: name.into(),
+            start: 1,
+            increment: 1,
+            min: 1,
+            max,
+            owned_by: None,
+            cycle: false,
+            data_type,
+            cache: 1,
+        }
+    }
 }
 
 /// A named CHECK constraint of a domain; `expr` refers to the value as `VALUE`.

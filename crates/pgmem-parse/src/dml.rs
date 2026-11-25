@@ -107,6 +107,7 @@ pub(crate) fn lower_insert(i: sq::Insert) -> SqlResult<Insert> {
         columns,
         source,
         overriding_system_value: matches!(i.overriding, Some(sq::InsertOverriding::System)),
+        overriding_user_value: matches!(i.overriding, Some(sq::InsertOverriding::User)),
         on_conflict,
         returning: lower_returning(i.returning)?,
     })
