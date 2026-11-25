@@ -893,7 +893,8 @@ pub struct OnConflict {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConflictTarget {
     None,
-    Columns { columns: Vec<String>, selection: Option<Expr> },
+    /// `(col, ..., (expr), ...) [WHERE predicate]`: plain columns and expression elements.
+    Columns { columns: Vec<String>, exprs: Vec<Expr>, selection: Option<Expr> },
     Constraint(String),
 }
 

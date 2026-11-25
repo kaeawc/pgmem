@@ -71,12 +71,12 @@ fn coerce_inner(b: &Binder, e: Expr, from: &Type, to: &Type, typmod: i32, contex
             b.set_param_type(*i, to);
             return Ok(e);
         }
-        return Ok(Expr::Cast { expr: Box::new(e), to: to.clone(), typmod: -1 });
+        return Ok(Expr::Cast { expr: Box::new(e), to: to.clone(), typmod: -1, explicit: true });
     }
     match (&e, from) {
         (Expr::Param(i), Type::Unknown) => {
             b.set_param_type(*i, to);
-            return Ok(if typmod >= 0 { Expr::Cast { expr: Box::new(e), to: to.clone(), typmod } } else { e });
+            return Ok(if typmod >= 0 { Expr::Cast { expr: Box::new(e), to: to.clone(), typmod, explicit } } else { e });
         }
         (Expr::Const(Value::Text(s)), Type::Unknown) => {
             let v = text::decode(s, to)?;
@@ -91,7 +91,7 @@ fn coerce_inner(b: &Binder, e: Expr, from: &Type, to: &Type, typmod: i32, contex
     if let Expr::Const(v) = &e {
         return Ok(Expr::Const(cast_value_ctx(v.clone(), to, typmod, explicit)?));
     }
-    Ok(Expr::Cast { expr: Box::new(e), to: to.clone(), typmod })
+    Ok(Expr::Cast { expr: Box::new(e), to: to.clone(), typmod, explicit })
 }
 
 impl Binder<'_> {
@@ -126,7 +126,7 @@ impl Binder<'_> {
         let target = Type::Composite(oid);
         let Expr::Row { fields: items, types, .. } = e else {
             // A record computed at run time is converted when the statement runs.
-            return Ok(Expr::Cast { expr: Box::new(e), to: target, typmod: -1 });
+            return Ok(Expr::Cast { expr: Box::new(e), to: target, typmod: -1, explicit: true });
         };
         let cannot = || SqlError::cannot_coerce("record", &target.name());
         if items.len() < fields.len() {
@@ -438,7 +438,7 @@ impl Binder<'_> {
             ir::Expr::TypedString { ty, value } => {
                 let (t, typmod) = resolve_type_name(self.catalog, ty)?;
                 if let Type::Reg(_) = t {
-                    let e = Expr::Cast { expr: Box::new(Expr::Const(Value::Text(value.clone()))), to: t.clone(), typmod: -1 };
+                    let e = Expr::Cast { expr: Box::new(Expr::Const(Value::Text(value.clone()))), to: t.clone(), typmod: -1, explicit: true };
                     return Ok((e, t));
                 }
                 let v = cast_value(text::decode(value, &t)?, &t, typmod)?;
@@ -1682,7 +1682,7 @@ impl Binder<'_> {
             cols.push(if c.ty == common {
                 Expr::Col(i)
             } else {
-                Expr::Cast { expr: Box::new(Expr::Col(i)), to: common.clone(), typmod: -1 }
+                Expr::Cast { expr: Box::new(Expr::Col(i)), to: common.clone(), typmod: -1, explicit: true }
             });
             types.push(common);
         }
@@ -1785,7 +1785,7 @@ fn cast_plan_column(plan: crate::plan::Rel, from: &Type, to: &Type) -> crate::pl
     }
     crate::plan::Rel::Project {
         input: Box::new(plan),
-        exprs: vec![Expr::Cast { expr: Box::new(Expr::Col(0)), to: to.clone(), typmod: -1 }],
+        exprs: vec![Expr::Cast { expr: Box::new(Expr::Col(0)), to: to.clone(), typmod: -1, explicit: true }],
     }
 }
 

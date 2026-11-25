@@ -137,6 +137,9 @@ pub enum Expr {
         expr: Box<Expr>,
         to: Type,
         typmod: i32,
+        /// An explicit cast (truncates to the typmod); otherwise an assignment coercion,
+        /// which rejects a too-long string.
+        explicit: bool,
     },
     And(Vec<Expr>),
     Or(Vec<Expr>),
@@ -342,7 +345,7 @@ impl Expr {
         let node = match self {
             e @ (Expr::Const(_) | Expr::Col(_) | Expr::Outer { .. } | Expr::Param(_) | Expr::AggCall(_) | Expr::WindowCall(_)) => e,
             Expr::Call { func, args } => Expr::Call { func, args: vec(args, f)? },
-            Expr::Cast { expr, to, typmod } => Expr::Cast { expr: boxed(expr, f)?, to, typmod },
+            Expr::Cast { expr, to, typmod, explicit } => Expr::Cast { expr: boxed(expr, f)?, to, typmod, explicit },
             Expr::And(v) => Expr::And(vec(v, f)?),
             Expr::Or(v) => Expr::Or(vec(v, f)?),
             Expr::Not(e) => Expr::Not(boxed(e, f)?),

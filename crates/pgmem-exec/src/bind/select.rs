@@ -1427,7 +1427,7 @@ fn map_children(e: Expr, f: &mut dyn FnMut(Expr) -> SqlResult<Expr>) -> SqlResul
     Ok(match e {
         leaf @ (Expr::Const(_) | Expr::Col(_) | Expr::Outer { .. } | Expr::Param(_) | Expr::AggCall(_) | Expr::WindowCall(_)) => leaf,
         Expr::Call { func, args } => Expr::Call { func, args: args.into_iter().map(&mut *f).collect::<SqlResult<Vec<_>>>()? },
-        Expr::Cast { expr, to, typmod } => Expr::Cast { expr: b(expr, f)?, to, typmod },
+        Expr::Cast { expr, to, typmod, explicit } => Expr::Cast { expr: b(expr, f)?, to, typmod, explicit },
         Expr::And(v) => Expr::And(v.into_iter().map(&mut *f).collect::<SqlResult<Vec<_>>>()?),
         Expr::Or(v) => Expr::Or(v.into_iter().map(&mut *f).collect::<SqlResult<Vec<_>>>()?),
         Expr::Not(x) => Expr::Not(b(x, f)?),
