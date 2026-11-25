@@ -1337,8 +1337,17 @@ pub(crate) fn lower_statement(stmt: sq::Statement) -> SqlResult<Statement> {
             }
             Statement::AlterSchema { name, rename_to }
         }
-        S::CreateExtension(_) => Statement::NoOp { tag: "CREATE EXTENSION".into() },
-        S::DropExtension(_) => Statement::NoOp { tag: "DROP EXTENSION".into() },
+        S::CreateExtension(e) => Statement::CreateExtension {
+            name: ident(&e.name),
+            if_not_exists: e.if_not_exists,
+            schema: e.schema.as_ref().map(ident),
+            version: e.version.as_ref().map(ident),
+        },
+        S::DropExtension(d) => Statement::DropExtension {
+            names: d.names.iter().map(ident).collect(),
+            if_exists: d.if_exists,
+            cascade: matches!(d.cascade_or_restrict, Some(sq::ReferentialAction::Cascade)),
+        },
         S::CreateSchema { schema_name, if_not_exists, .. } => lower_create_schema(schema_name, if_not_exists, Vec::new())?,
         S::Grant(_) | S::GrantRole(_) => Statement::NoOp { tag: "GRANT".into() },
         S::Revoke(_) | S::RevokeRole(_) => Statement::NoOp { tag: "REVOKE".into() },

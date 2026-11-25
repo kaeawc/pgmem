@@ -13,6 +13,7 @@ pub mod deparse;
 pub mod deps;
 pub mod dml;
 pub mod eval;
+mod extensions;
 pub mod funcs;
 pub mod functions;
 pub mod plan;

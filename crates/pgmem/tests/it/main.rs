@@ -59,6 +59,7 @@ mod exec_join;
 mod exec_join_left_cross;
 mod exec_update;
 mod exists;
+mod extensions;
 mod extract;
 mod float;
 mod foreign_key;

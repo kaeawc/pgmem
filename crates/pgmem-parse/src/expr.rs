@@ -356,6 +356,7 @@ pub(crate) fn binary_op_name(op: &sq::BinaryOperator) -> SqlResult<String> {
         B::PGExp => "^".into(),
         B::PGOverlap => "&&".into(),
         B::AndLt => "&<".into(),
+        B::LtDashGt => "<->".into(),
         B::AndGt => "&>".into(),
         B::PGRegexMatch => "~".into(),
         B::PGRegexIMatch => "~*".into(),

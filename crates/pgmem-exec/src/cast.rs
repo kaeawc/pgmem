@@ -52,6 +52,9 @@ pub fn cast_context(from: &Type, to: &Type) -> Option<CoercionContext> {
         // The string types (pg_cast): text, varchar, bpchar and name convert among themselves
         // implicitly; "char" converts to text implicitly and to the others by assignment.
         (Text | Varchar | Bpchar | Name, Text | Varchar | Bpchar | Name) | (Char, Text) => Implicit,
+        // citext converts to text implicitly, and back by assignment.
+        (CiText, Text | Varchar) => Implicit,
+        (CiText, Bpchar) | (Text | Varchar | Bpchar | Name, CiText) => Assignment,
         (Char, Varchar | Bpchar) | (Text | Varchar | Bpchar, Char) => Assignment,
         (Char, Int4) | (Int4, Char) => Explicit,
         (Json, Jsonb) | (Jsonb, Json) => Assignment,
@@ -64,6 +67,8 @@ pub fn cast_context(from: &Type, to: &Type) -> Option<CoercionContext> {
         (_, Text | Varchar | Bpchar | Name) => Assignment,
         (Text | Varchar | Bpchar | Name, _) => Explicit,
         (Array(a), Array(b)) => cast_context(a, b)?,
+        (Int2Vector, Array(b)) => cast_context(&Int2, b)?,
+        (OidVector, Array(b)) => cast_context(&Oid, b)?,
         (Bit, VarBit) | (VarBit, Bit) | (Cidr, Inet) => Implicit,
         (Int4 | Int8, Bit) | (Bit, Int4 | Int8) => Explicit,
         (Int4 | Int8 | Numeric, Money) | (Money, Numeric) | (Inet, Cidr) | (MacAddr, MacAddr8) | (MacAddr8, MacAddr) => Assignment,

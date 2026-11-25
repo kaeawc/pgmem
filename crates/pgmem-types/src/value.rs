@@ -50,6 +50,10 @@ pub enum Value {
     Enum(u32, u32),
     /// A composite value: its type's OID (`record` for anonymous rows) and the fields.
     Record(u32, Vec<Value>),
+    /// `citext`: text compared case-insensitively.
+    CiText(String),
+    /// `hstore`: keys in hstore order (shorter first, then bytewise), unique.
+    HStore(Vec<(String, Option<String>)>),
     /// A bit string, as `0` / `1` characters.
     Bit(String),
     /// `money`, in cents.
@@ -111,7 +115,7 @@ impl Value {
 
     pub fn as_str(&self) -> Option<&str> {
         match self {
-            Value::Text(s) | Value::Json(s) => Some(s),
+            Value::Text(s) | Value::Json(s) | Value::CiText(s) => Some(s),
             _ => None,
         }
     }
@@ -151,6 +155,8 @@ impl Value {
             Value::Record(..) => "record",
             Value::Range(_) => "range",
             Value::Bit(_) => "bit",
+            Value::CiText(_) => "citext",
+            Value::HStore(_) => "hstore",
             Value::Money(_) => "money",
             Value::Inet(..) => "inet",
             Value::MacAddr(_) => "macaddr",
@@ -201,6 +207,10 @@ impl Value {
             Value::Enum(_, label) => GroupKey::Int(i64::from(*label)),
             Value::Range(r) => range_key(r),
             Value::Bit(b) => GroupKey::Text(b.clone()),
+            Value::CiText(s) => GroupKey::Text(s.to_lowercase()),
+            Value::HStore(pairs) => GroupKey::Array(
+                pairs.iter().flat_map(|(k, v)| [GroupKey::Text(k.clone()), v.clone().map_or(GroupKey::Null, GroupKey::Text)]).collect(),
+            ),
             Value::Money(m) => GroupKey::Int(*m),
             Value::Inet(ip, bits) => GroupKey::Text(format!("{ip}/{bits}")),
             Value::MacAddr(b) => GroupKey::Bytes(b.clone()),
@@ -265,6 +275,9 @@ pub fn compare_values(a: &Value, b: &Value) -> SqlResult<Ordering> {
         (Enum(t, x), Enum(u, y)) if t == u => crate::usertype::compare_enum(*t, *x, *y),
         (Range(x), Range(y)) => crate::range::compare(x, y)?,
         (Bit(x), Bit(y)) => x.cmp(y),
+        (CiText(x), CiText(y)) => x.to_lowercase().cmp(&y.to_lowercase()),
+        (CiText(x), Text(y)) | (Text(x), CiText(y)) => x.to_lowercase().cmp(&y.to_lowercase()),
+        (HStore(x), HStore(y)) => x.cmp(y),
         (Money(x), Money(y)) => x.cmp(y),
         (Inet(x, xb), Inet(y, yb)) => crate::netbits::compare_inet((x, *xb), (y, *yb)),
         (MacAddr(x), MacAddr(y)) => x.cmp(y),
@@ -363,6 +376,8 @@ impl Value {
             Value::Record(t, _) => Type::Composite(*t),
             Value::Range(r) => Type::Range(Box::new(r.sub.clone())),
             Value::Bit(_) => Type::VarBit,
+            Value::CiText(_) => Type::CiText,
+            Value::HStore(_) => Type::HStore,
             Value::Money(_) => Type::Money,
             Value::Inet(..) => Type::Inet,
             Value::MacAddr(b) => {

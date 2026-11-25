@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 mod roles;
-pub use roles::{DefaultPrivilege, Grant, GrantObject, RoleDef};
+pub use roles::{DefaultPrivilege, ExtensionDef, Grant, GrantObject, RoleDef};
 
 pub type Oid = u32;
 
@@ -583,6 +583,8 @@ pub struct Catalog {
     default_privileges: Vec<DefaultPrivilege>,
     /// Object owners other than the bootstrap superuser, by OID.
     owners: BTreeMap<Oid, String>,
+    /// Installed extensions (plpgsql is implicit).
+    extensions: BTreeMap<String, ExtensionDef>,
     /// `COMMENT ON` text by (classoid, objoid, objsubid), as in `pg_description`.
     comments: BTreeMap<(Oid, Oid, i32), String>,
     next_oid: Oid,
@@ -619,6 +621,7 @@ impl Catalog {
             grants: Vec::new(),
             default_privileges: Vec::new(),
             owners: BTreeMap::new(),
+            extensions: BTreeMap::new(),
             comments: BTreeMap::new(),
             next_oid: FIRST_USER_OID,
         }
