@@ -309,14 +309,25 @@ fn indexdef_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
 
 fn viewdef_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
     let catalog = ctx.txn.catalog();
+    let pretty = a.get(1).and_then(Value::as_bool) == Some(true);
     let view = match &a[0] {
         Value::Text(s) => match crate::reg::relation_from_text(s, catalog)? {
             Some(pgmem_catalog::Relation::View(v)) => Some(v),
-            _ => return Err(SqlError::undefined_table(s)),
+            _ => {
+                let (schema, name) = s.rsplit_once('.').map_or((None, s.as_str()), |(sc, n)| (Some(sc), n));
+                if let Some(d) = crate::catalog_views::system_relation(schema, name) {
+                    return Ok(crate::catalog_views::system_viewdef(d.oid, pretty).map_or(Value::Null, Value::Text));
+                }
+                return Err(SqlError::undefined_table(s));
+            }
         },
-        other => oid_arg(other).and_then(|o| catalog.views().find(|v| v.oid == o).cloned()),
+        other => match oid_arg(other) {
+            Some(o) if crate::catalog_views::system_relation_by_oid(o).is_some() => {
+                return Ok(crate::catalog_views::system_viewdef(o, pretty).map_or(Value::Null, Value::Text));
+            }
+            o => o.and_then(|o| catalog.views().find(|v| v.oid == o).cloned()),
+        },
     };
-    let pretty = a.get(1).and_then(Value::as_bool) == Some(true);
     Ok(view.map_or(Value::Null, |v| {
         Value::Text(crate::deparse::with_pretty(pretty, || crate::deparse::deparse_view(catalog, &v)).unwrap_or_default())
     }))

@@ -120,6 +120,38 @@ pub fn defs() -> impl Iterator<Item = &'static Def> {
     all_defs()
 }
 
+/// `pg_get_viewdef` of the system views, recorded from Postgres 18: `schema.name`, the
+/// definition, the pretty definition (`\n`, `\t` and `\\` escaped).
+const SYSTEM_VIEWDEFS: &str = include_str!("system_viewdefs.tsv");
+
+fn unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// The definition of a system view (`pg_get_viewdef`), by OID.
+pub fn system_viewdef(oid: u32, pretty: bool) -> Option<String> {
+    let d = system_relation_by_oid(oid).filter(|d| d.kind == 'v')?;
+    let key = format!("{}.{}", d.schema, d.name);
+    let line = SYSTEM_VIEWDEFS.lines().find(|l| l.split('\t').next() == Some(key.as_str()))?;
+    let mut fields = line.split('\t').skip(1);
+    let plain = fields.next()?;
+    Some(unescape(if pretty { fields.next().unwrap_or(plain) } else { plain }))
+}
+
 // Value helpers for row builders.
 
 pub(crate) fn oid(o: u32) -> Value {

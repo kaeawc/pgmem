@@ -67,6 +67,12 @@ const DOMAINS: &str = "domain_catalog:name, domain_schema:name, domain_name:name
     numeric_scale:int4, datetime_precision:int4, interval_type:varchar, interval_precision:int4, domain_default:varchar, \
     udt_catalog:name, udt_schema:name, udt_name:name, scope_catalog:name, scope_schema:name, scope_name:name, \
     maximum_cardinality:int4, dtd_identifier:name";
+const ELEMENT_TYPES: &str = "object_catalog:name, object_schema:name, object_name:name, object_type:varchar, \
+    collection_type_identifier:name, data_type:varchar, character_maximum_length:int4, character_octet_length:int4, \
+    character_set_catalog:name, character_set_schema:name, character_set_name:name, collation_catalog:name, collation_schema:name, \
+    collation_name:name, numeric_precision:int4, numeric_precision_radix:int4, numeric_scale:int4, datetime_precision:int4, \
+    interval_type:varchar, interval_precision:int4, udt_catalog:name, udt_schema:name, udt_name:name, scope_catalog:name, \
+    scope_schema:name, scope_name:name, maximum_cardinality:int4, dtd_identifier:name";
 const DOMAIN_CONSTRAINTS: &str = "constraint_catalog:name, constraint_schema:name, constraint_name:name, domain_catalog:name, \
     domain_schema:name, domain_name:name, is_deferrable:varchar, initially_deferred:varchar";
 
@@ -97,7 +103,60 @@ pub static DEFS: &[Def] = &[
     def!("triggers", 13_117, TRIGGERS, super::routines::is_triggers),
     def!("domains", 13_118, DOMAINS, domains),
     def!("domain_constraints", 13_119, DOMAIN_CONSTRAINTS, domain_constraints),
+    def!("element_types", 13_120, ELEMENT_TYPES, element_types),
 ];
+
+/// `element_types`: the element type of each array-typed column, domain and routine
+/// parameter, keyed like their `dtd_identifier`.
+fn element_types(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let m = snapshot(ctx);
+    let s = Spec::parse(ELEMENT_TYPES);
+    let cat = catalog_name(ctx);
+    let mut objects: Vec<(String, String, &str, usize, Type)> = Vec::new();
+    for t in m.tables().into_iter().filter(|t| t.matview.is_none()) {
+        for a in Model::table_atts(t).iter().filter(|a| !a.dropped) {
+            objects.push((t.schema.clone(), t.name.clone(), "TABLE", a.attnum, a.ty.clone()));
+        }
+    }
+    for v in m.views() {
+        for a in &m.view_atts(v) {
+            objects.push((v.schema.clone(), v.name.clone(), "TABLE", a.attnum, a.ty.clone()));
+        }
+    }
+    for t in m.catalog.types() {
+        if let pgmem_catalog::TypeDefKind::Domain { base, .. } = &t.kind {
+            objects.push((t.schema.clone(), t.name.clone(), "DOMAIN", 1, base.clone()));
+        }
+    }
+    for f in m.catalog.functions() {
+        for (i, a) in f.args.iter().enumerate() {
+            objects.push((f.schema.clone(), format!("{}_{}", f.name, f.oid), "ROUTINE", i + 1, a.ty.clone()));
+        }
+    }
+    let mut rows = Vec::new();
+    for (schema, object, kind, n, ty) in objects {
+        let Type::Array(elem) = &ty else { continue };
+        let user = !matches!(type_schema(elem).as_str(), "pg_catalog");
+        let data_type = if user {
+            "USER-DEFINED".to_owned()
+        } else {
+            crate::funcs::catalog::format_type(elem.oid(), -1, m.catalog).unwrap_or_else(|| elem.name())
+        };
+        rows.push(s.row(vec![
+            ("object_catalog", cat.clone()),
+            ("object_schema", name(&schema)),
+            ("object_name", name(&object)),
+            ("object_type", txt(kind)),
+            ("collection_type_identifier", name(&n.to_string())),
+            ("data_type", txt(data_type)),
+            ("udt_catalog", cat.clone()),
+            ("udt_schema", name(&type_schema(elem))),
+            ("udt_name", name(&elem.typname())),
+            ("dtd_identifier", name(&format!("a{n}"))),
+        ]));
+    }
+    Ok(rows)
+}
 
 fn domains(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let m = snapshot(ctx);

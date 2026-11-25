@@ -47,7 +47,47 @@ fn default_scrollable(q: &ir::Query) -> bool {
     }
 }
 
+/// `pg_settings` (unqualified or in pg_catalog).
+pub(super) fn is_pg_settings(name: &ir::ObjectName) -> bool {
+    matches!(name.0.as_slice(), [n] | [_, n] if n == "pg_settings") && (name.0.len() == 1 || name.0[0] == "pg_catalog")
+}
+
 impl Session {
+    /// `UPDATE pg_settings SET setting = v WHERE ...`: Postgres' rules on the view make it
+    /// `SELECT set_config(name, v, false) FROM pg_settings WHERE ...` (rows whose name the
+    /// UPDATE would change are left alone); the command tag is `UPDATE 0`.
+    pub(super) fn update_pg_settings(&mut self, u: &ir::Update) -> SqlResult<QueryResult> {
+        if !u.returning.is_empty() {
+            return Err(SqlError::feature_not_supported("cannot perform UPDATE RETURNING on relation \"pg_settings\"")
+                .with_hint("You need an unconditional ON UPDATE DO INSTEAD rule with a RETURNING clause."));
+        }
+        let target = |a: &ir::Assignment, c: &str| a.columns.len() == 1 && a.columns[0].len() == 1 && a.columns[0][0] == c;
+        let Some(setting) = u.assignments.iter().rev().find(|a| target(a, "setting")).map(|a| a.value.clone()) else {
+            return Ok(QueryResult { tag: "UPDATE 0".into(), ..Default::default() });
+        };
+        let Statement::Query(mut q) = pgmem_parse::parse_one("SELECT set_config(name, NULL, false) FROM pg_catalog.pg_settings")? else {
+            return Err(SqlError::internal("pg_settings rule"));
+        };
+        let mut selection = u.selection.clone();
+        for a in u.assignments.iter().filter(|a| target(a, "name")) {
+            let same = ir::Expr::Binary { left: Box::new(ir::Expr::Column(vec!["name".into()])), op: "=".into(), right: Box::new(a.value.clone()) };
+            selection = Some(match selection {
+                Some(s) => ir::Expr::And(Box::new(s), Box::new(same)),
+                None => same,
+            });
+        }
+        if let ir::SetExpr::Select(s) = &mut q.body {
+            if let Some(ir::SelectItem::Expr { expr: ir::Expr::Function(f), .. }) = s.projection.first_mut() {
+                f.args[1] = setting;
+            }
+            s.selection = selection;
+            if let (Some(alias), Some(ir::TableRef::Table { alias: a, .. })) = (&u.alias, s.from.first_mut()) {
+                *a = Some(ir::TableAlias { name: alias.clone(), columns: Vec::new(), column_types: Vec::new() });
+            }
+        }
+        let r = self.run_in_txn(&Statement::Query(q), &[], &[])?;
+        Ok(QueryResult { tag: "UPDATE 0".into(), changed_settings: r.changed_settings, notices: r.notices, ..Default::default() })
+    }
     /// The session objects snapshot builtins and catalog views read.
     pub(super) fn objects(&self) -> Arc<SessionObjects> {
         Arc::new(SessionObjects {

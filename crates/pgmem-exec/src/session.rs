@@ -579,6 +579,7 @@ impl Session {
             Statement::Explain(e) => return self.explain(e, param_types, params),
             Statement::Discard(k) => return self.discard(*k),
             Statement::Copy(c) => return self.copy(c),
+            Statement::Update(u) if objects::is_pg_settings(&u.table) => return self.update_pg_settings(u),
             _ => {}
         }
         let env = self.env();
