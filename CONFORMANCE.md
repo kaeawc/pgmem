@@ -7,19 +7,19 @@ PostgreSQL 18; CI re-verifies every record against PostgreSQL and runs it agains
 A record passes when pgmem returns the same column names, column types and text values, or
 the same SQLSTATE and error message.
 
-pgmem passes **2880 / 3309 records (87.0%)**.
+pgmem passes **2944 / 3309 records (89.0%)**.
 
 | Area | Records | Pass | Rate |
 |---|---:|---:|---:|
 | catalog | 226 | 190 | 84.1% |
 | constraints | 171 | 101 | 59.1% |
-| ddl | 386 | 233 | 60.4% |
-| dml | 282 | 267 | 94.7% |
+| ddl | 386 | 236 | 61.1% |
+| dml | 282 | 281 | 99.6% |
 | functions | 445 | 439 | 98.7% |
 | queries | 440 | 439 | 99.8% |
 | session | 419 | 368 | 87.8% |
 | smoke | 7 | 7 | 100.0% |
-| transactions | 522 | 448 | 85.8% |
+| transactions | 522 | 495 | 94.8% |
 | types | 411 | 388 | 94.4% |
 
 ## By file
@@ -44,18 +44,18 @@ pgmem passes **2880 / 3309 records (87.0%)**.
 | ddl/generated.slt | 23 | 9 | 39.1% |
 | ddl/identity.slt | 38 | 26 | 68.4% |
 | ddl/indexes.slt | 33 | 26 | 78.8% |
-| ddl/migrations.slt | 58 | 25 | 43.1% |
+| ddl/migrations.slt | 58 | 28 | 48.3% |
 | ddl/schema.slt | 31 | 31 | 100.0% |
 | ddl/sequences.slt | 34 | 21 | 61.8% |
 | ddl/truncate_comment.slt | 14 | 12 | 85.7% |
 | ddl/views.slt | 33 | 5 | 15.2% |
-| dml/delete.slt | 32 | 30 | 93.8% |
+| dml/delete.slt | 32 | 32 | 100.0% |
 | dml/insert.slt | 45 | 45 | 100.0% |
 | dml/merge.slt | 25 | 25 | 100.0% |
-| dml/on_conflict.slt | 45 | 40 | 88.9% |
-| dml/orm_patterns.slt | 29 | 23 | 79.3% |
+| dml/on_conflict.slt | 45 | 44 | 97.8% |
+| dml/orm_patterns.slt | 29 | 29 | 100.0% |
 | dml/truncate.slt | 37 | 37 | 100.0% |
-| dml/update.slt | 48 | 46 | 95.8% |
+| dml/update.slt | 48 | 48 | 100.0% |
 | dml/writable_cte.slt | 21 | 21 | 100.0% |
 | functions/arrays.slt | 49 | 45 | 91.8% |
 | functions/conditional_misc.slt | 49 | 47 | 95.9% |
@@ -82,13 +82,13 @@ pgmem passes **2880 / 3309 records (87.0%)**.
 | session/set_show.slt | 133 | 133 | 100.0% |
 | session/utility.slt | 48 | 45 | 93.8% |
 | smoke/basics.slt | 7 | 7 | 100.0% |
-| transactions/advisory.slt | 38 | 26 | 68.4% |
-| transactions/basics.slt | 84 | 79 | 94.0% |
-| transactions/chain.slt | 28 | 20 | 71.4% |
+| transactions/advisory.slt | 38 | 38 | 100.0% |
+| transactions/basics.slt | 84 | 84 | 100.0% |
+| transactions/chain.slt | 28 | 28 | 100.0% |
 | transactions/deferred.slt | 59 | 37 | 62.7% |
-| transactions/row_locks.slt | 61 | 44 | 72.1% |
+| transactions/row_locks.slt | 61 | 61 | 100.0% |
 | transactions/savepoints.slt | 86 | 86 | 100.0% |
-| transactions/serialization.slt | 59 | 49 | 83.1% |
+| transactions/serialization.slt | 59 | 54 | 91.5% |
 | transactions/settings.slt | 52 | 52 | 100.0% |
 | transactions/visibility.slt | 55 | 55 | 100.0% |
 | types/arrays.slt | 37 | 36 | 97.3% |

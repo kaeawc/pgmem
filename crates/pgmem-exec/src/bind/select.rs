@@ -29,8 +29,18 @@ impl Binder<'_> {
                 ctx.ctes.push(plan.1);
             }
         }
+        if let Some(l) = q.locking.first()
+            && !matches!(q.body, ir::SetExpr::Select(_))
+        {
+            return Err(lock_misuse(l, "UNION/INTERSECT/EXCEPT"));
+        }
+        let mut lock_targets = 0;
         let mut bound = match &q.body {
-            ir::SetExpr::Select(s) => self.bind_select(s, &q.order_by, &ctx)?,
+            ir::SetExpr::Select(s) => {
+                let (b, n) = self.bind_select_locking(s, &q.order_by, &q.locking, &ctx)?;
+                lock_targets = n;
+                b
+            }
             body => {
                 let mut b = self.bind_set_expr(body, &ctx)?;
                 if !q.order_by.is_empty() {
@@ -50,11 +60,19 @@ impl Binder<'_> {
             };
             let limit = q.limit.as_ref().map(|l| as_int8(l, "LIMIT")).transpose()?;
             let offset = q.offset.as_ref().map(|o| as_int8(o, "OFFSET")).transpose()?;
-            bound.rel = if q.with_ties {
-                limit_with_ties(bound.rel, limit, offset)
+            if lock_targets > 0 {
+                bound.rel = lock_rows(bound.rel, &q.locking, lock_targets, bound.columns.len(), limit, offset);
+                lock_targets = 0;
             } else {
-                Rel::Limit { input: Box::new(bound.rel), limit, offset, ties: None }
-            };
+                bound.rel = if q.with_ties {
+                    limit_with_ties(bound.rel, limit, offset)
+                } else {
+                    Rel::Limit { input: Box::new(bound.rel), limit, offset, ties: None }
+                };
+            }
+        }
+        if lock_targets > 0 {
+            bound.rel = lock_rows(bound.rel, &q.locking, lock_targets, bound.columns.len(), None, None);
         }
         if !cte_plans.is_empty() {
             bound.rel = Rel::With { ctes: cte_plans, body: Box::new(bound.rel) };
@@ -217,8 +235,35 @@ impl Binder<'_> {
     }
 
     fn bind_select(&self, s: &ir::Select, order_by: &[ir::OrderByExpr], ctx: &Ctx) -> SqlResult<BoundQuery> {
+        Ok(self.bind_select_locking(s, order_by, &[], ctx)?.0)
+    }
+
+    /// A SELECT, with its FOR UPDATE / SHARE clauses: the rows of each locked table's
+    /// `(tableoid, ctid)` follow the visible columns (their number is returned).
+    fn bind_select_locking(
+        &self,
+        s: &ir::Select,
+        order_by: &[ir::OrderByExpr],
+        locking: &[ir::LockClause],
+        ctx: &Ctx,
+    ) -> SqlResult<(BoundQuery, usize)> {
         // FROM
         let (mut rel, scope) = self.bind_from(&s.from, ctx)?;
+        let lock_junk = lock_targets(&scope, locking)?;
+        if let Some(l) = locking.first() {
+            let what = if !matches!(s.distinct, ir::Distinct::All) {
+                Some("DISTINCT clause")
+            } else if !s.group_by.is_empty() {
+                Some("GROUP BY clause")
+            } else if s.having.is_some() {
+                Some("HAVING clause")
+            } else {
+                None
+            };
+            if let Some(what) = what {
+                return Err(lock_misuse(l, what));
+            }
+        }
         let level = Level::sharing(scope, ctx.current());
         let mut sctx = ctx.nested_same_level(&level);
         sctx.windows = s.windows.clone();
@@ -383,6 +428,9 @@ impl Binder<'_> {
             d.iter().for_each(&mut collect);
         }
         let grouped = !group.is_empty() || !all_aggs.is_empty() || having.is_some();
+        if grouped && let Some(l) = locking.first() {
+            return Err(lock_misuse(l, "aggregate functions"));
+        }
         if grouped {
             let sets = s.grouping_sets.clone();
             let pk_groups = if sets.is_some() { Vec::new() } else { functional_dependencies(&group, &level.scope, self.catalog) };
@@ -415,18 +463,23 @@ impl Binder<'_> {
             if let Some(h) = having {
                 rel = Rel::Filter { input: Box::new(rel), pred: h };
             }
-            return self.finish_select(
-                rel,
-                exprs,
-                columns,
-                order_exprs,
-                distinct_rw,
-                &s.distinct,
-                set_col + usize::from(grouping.sets.is_some()),
-            );
+            return Ok((
+                self.finish_select(
+                    rel,
+                    exprs,
+                    columns,
+                    order_exprs,
+                    distinct_rw,
+                    &s.distinct,
+                    set_col + usize::from(grouping.sets.is_some()),
+                    Vec::new(),
+                )?,
+                0,
+            ));
         }
         let width = level.scope.width();
-        self.finish_select(rel, exprs, columns, order_exprs, distinct_on, &s.distinct, width)
+        let targets = lock_junk.len() / 2;
+        Ok((self.finish_select(rel, exprs, columns, order_exprs, distinct_on, &s.distinct, width, lock_junk)?, targets))
     }
 
     /// Window functions, projection, ORDER BY, DISTINCT and junk-column removal.
@@ -440,7 +493,11 @@ impl Binder<'_> {
         mut distinct_on: Option<Vec<Expr>>,
         distinct: &ir::Distinct,
         input_width: usize,
+        lock_junk: Vec<Expr>,
     ) -> SqlResult<BoundQuery> {
+        if !lock_junk.is_empty() && exprs.iter().chain(order_exprs.iter().map(|(e, _, _)| e)).any(|e| matches!(e, Expr::WindowCall(_))) {
+            return Err(SqlError::feature_not_supported("FOR UPDATE is not allowed with window functions"));
+        }
         // Window functions over the (possibly aggregated) input.
         let mut wins: Vec<WinCall> = Vec::new();
         exprs.iter().for_each(|e| collect_windows(e, &mut wins));
@@ -541,6 +598,14 @@ impl Binder<'_> {
                 }
             }
         }
+        // Locked tables' row identities stay after the visible columns (for LockRows).
+        let lock_cols: Vec<usize> = lock_junk
+            .into_iter()
+            .map(|e| {
+                exprs.push(e);
+                exprs.len() - 1
+            })
+            .collect();
         rel = Rel::Project { input: Box::new(rel), exprs: exprs.clone() };
         if !keys.is_empty() {
             rel = Rel::Sort { input: Box::new(rel), keys };
@@ -556,8 +621,9 @@ impl Binder<'_> {
             }
             _ => {}
         }
-        if exprs.len() > visible {
-            rel = Rel::Project { input: Box::new(rel), exprs: (0..visible).map(Expr::Col).collect() };
+        if exprs.len() > visible || !lock_cols.is_empty() {
+            let keep = (0..visible).chain(lock_cols.iter().copied()).map(Expr::Col).collect();
+            rel = Rel::Project { input: Box::new(rel), exprs: keep };
         }
         Ok(BoundQuery { rel, columns })
     }
@@ -967,10 +1033,11 @@ impl Binder<'_> {
                     slots.push(i);
                     missing.push(c.missing.clone());
                 }
+                cols.extend(super::system_scope_cols(&qualifier));
                 if let Some(a) = alias {
                     apply_column_aliases(&mut cols, &a.columns, &a.name)?;
                 }
-                Ok((Rel::Scan { table: def.oid, slots, missing }, Scope::from_cols(cols)))
+                Ok((Rel::Scan { table: def.oid, slots, missing, system: true }, Scope::from_cols(cols)))
             }
             Some(Relation::View(view)) => {
                 let top = Level::new(Scope::default());
@@ -1132,7 +1199,7 @@ fn join_scopes(l: Scope, r: Scope, using: &[String], kind: JoinKind) -> Scope {
 }
 
 fn apply_column_aliases(cols: &mut [ScopeCol], aliases: &[String], table: &str) -> SqlResult<()> {
-    let live: Vec<usize> = cols.iter().enumerate().filter(|(_, c)| !c.dropped).map(|(i, _)| i).collect();
+    let live: Vec<usize> = cols.iter().enumerate().filter(|(_, c)| !c.dropped && !c.system).map(|(i, _)| i).collect();
     if aliases.len() > live.len() {
         return Err(SqlError::new(
             code::INVALID_COLUMN_REFERENCE,
@@ -1421,6 +1488,84 @@ fn in_set(s: &ir::SetExpr, name: &str) -> bool {
         ir::SetExpr::Query(q) => query_references(q, name),
         ir::SetExpr::Dml(_) => false,
     }
+}
+
+/// LockRows over a SELECT whose rows carry `targets` (tableoid, ctid) pairs after `visible`
+/// columns; LIMIT / OFFSET count the rows that were locked (SKIP LOCKED ones do not count).
+fn lock_rows(input: Rel, locking: &[ir::LockClause], targets: usize, visible: usize, limit: Option<Expr>, offset: Option<Expr>) -> Rel {
+    use pgmem_storage::locks::RowLockMode;
+    let strongest = locking.iter().map(|l| l.strength).max_by_key(|s| match s {
+        ir::LockStrength::KeyShare => 0,
+        ir::LockStrength::Share => 1,
+        ir::LockStrength::NoKeyUpdate => 2,
+        ir::LockStrength::Update => 3,
+    });
+    let mode = match strongest {
+        Some(ir::LockStrength::KeyShare) => RowLockMode::KeyShare,
+        Some(ir::LockStrength::Share) => RowLockMode::Share,
+        Some(ir::LockStrength::NoKeyUpdate) => RowLockMode::NoKeyUpdate,
+        _ => RowLockMode::Update,
+    };
+    let wait = if locking.iter().any(|l| l.nowait) {
+        pgmem_storage::LockWait::NoWait
+    } else if locking.iter().any(|l| l.skip_locked) {
+        pgmem_storage::LockWait::SkipLocked
+    } else {
+        pgmem_storage::LockWait::Block
+    };
+    Rel::LockRows {
+        input: Box::new(input),
+        targets: (0..targets).map(|i| (visible + 2 * i, visible + 2 * i + 1)).collect(),
+        mode,
+        wait,
+        limit,
+        offset,
+        visible,
+    }
+}
+
+fn lock_strength_name(l: &ir::LockClause) -> &'static str {
+    match l.strength {
+        ir::LockStrength::Update => "FOR UPDATE",
+        ir::LockStrength::NoKeyUpdate => "FOR NO KEY UPDATE",
+        ir::LockStrength::Share => "FOR SHARE",
+        ir::LockStrength::KeyShare => "FOR KEY SHARE",
+    }
+}
+
+fn lock_misuse(l: &ir::LockClause, what: &str) -> SqlError {
+    SqlError::feature_not_supported(format!("{} is not allowed with {what}", lock_strength_name(l)))
+}
+
+/// The `tableoid` and `ctid` columns of each table a locking clause applies to (all tables
+/// in FROM, or those named in OF), as pairs.
+fn lock_targets(scope: &Scope, locking: &[ir::LockClause]) -> SqlResult<Vec<Expr>> {
+    let Some(first) = locking.first() else { return Ok(Vec::new()) };
+    let named: Vec<&str> = locking.iter().flat_map(|l| l.of.iter().map(|n| n.base())).collect();
+    for n in &named {
+        if !scope.cols.iter().any(|c| c.system && c.qualifier.as_deref() == Some(*n)) {
+            return Err(SqlError::new(
+                code::UNDEFINED_TABLE,
+                format!("relation \"{n}\" in {} clause not found in FROM clause", lock_strength_name(first)),
+            ));
+        }
+    }
+    let mut out = Vec::new();
+    for (i, c) in scope.cols.iter().enumerate() {
+        if !(c.system && c.name == "ctid") {
+            continue;
+        }
+        let q = c.qualifier.as_deref().unwrap_or("");
+        if !named.is_empty() && !named.contains(&q) {
+            continue;
+        }
+        let oid_col = scope.cols.iter().position(|x| x.system && x.name == "tableoid" && x.qualifier == c.qualifier);
+        if let Some(o) = oid_col {
+            out.push(Expr::Col(o));
+            out.push(Expr::Col(i));
+        }
+    }
+    Ok(out)
 }
 
 /// A data-modifying WITH query below the statement's own WITH.

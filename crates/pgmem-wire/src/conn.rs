@@ -150,7 +150,13 @@ impl Conn {
         wr: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>,
     ) -> io::Result<bool> {
         let conn = self;
-        let keep_going = conn.dispatch(msg);
+        // A statement may wait for a lock (`pg_advisory_lock`): let the runtime move other
+        // connections off this worker meanwhile.
+        let keep_going = if tokio::runtime::Handle::current().runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+            tokio::task::block_in_place(|| conn.dispatch(msg))
+        } else {
+            conn.dispatch(msg)
+        };
         if !conn.out.buf.is_empty() {
             wr.write_all(&conn.out.buf).await?;
             conn.out.buf.clear();

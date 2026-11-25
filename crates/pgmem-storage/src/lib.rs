@@ -13,6 +13,8 @@
 //! or update the same row: the later COMMIT fails with `40001`, standing in for the row lock
 //! wait Postgres would perform. Sequences are non-transactional, as in Postgres.
 
+pub mod advisory;
+pub mod locks;
 pub mod notify;
 
 pub use notify::{Notification, NotifyHub};
@@ -74,6 +76,9 @@ pub struct Database {
     next_row_id: AtomicU64,
     sequences: Mutex<HashMap<Oid, SeqState>>,
     notify: notify::NotifyHub,
+    advisory: advisory::AdvisoryLocks,
+    locks: locks::LockTable,
+    next_txn_id: AtomicU64,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -94,7 +99,15 @@ impl Database {
             next_row_id: AtomicU64::new(1),
             sequences: Mutex::new(HashMap::new()),
             notify: notify::NotifyHub::default(),
+            advisory: advisory::AdvisoryLocks::default(),
+            locks: locks::LockTable::default(),
+            next_txn_id: AtomicU64::new(1),
         }
+    }
+
+    /// The advisory lock table shared by every session.
+    pub fn advisory(&self) -> &advisory::AdvisoryLocks {
+        &self.advisory
     }
 
     /// The LISTEN / NOTIFY queue shared by every session.
@@ -115,6 +128,8 @@ impl Database {
     pub fn begin(self: &Arc<Self>, isolation: Isolation) -> Txn {
         let base = self.current();
         Txn {
+            id: self.next_txn_id.fetch_add(1, Ordering::Relaxed),
+            held_rows: std::cell::RefCell::new(Vec::new()),
             db: Arc::clone(self),
             isolation,
             base,
@@ -218,6 +233,8 @@ struct TableChanges {
 #[derive(Clone, Debug)]
 struct Savepoint {
     name: String,
+    /// `held_rows` length when the savepoint was set.
+    row_locks: usize,
     catalog: Option<Catalog>,
     changes: HashMap<Oid, TableChanges>,
     /// `seq_undo` length when the savepoint was set.
@@ -252,6 +269,10 @@ impl Drop for SeqUndo {
 /// A transaction. Dropping it without committing rolls it back.
 #[derive(Debug)]
 pub struct Txn {
+    /// Owner of the transaction's row and table locks.
+    id: u64,
+    /// Row locks taken, in order (ROLLBACK TO releases the later ones).
+    held_rows: std::cell::RefCell<Vec<(Oid, RowId, locks::RowLockMode)>>,
     db: Arc<Database>,
     isolation: Isolation,
     /// The committed state this transaction currently reads from.
@@ -407,6 +428,7 @@ impl Txn {
     pub fn savepoint(&mut self, name: &str) {
         self.savepoints.push(Savepoint {
             name: name.to_owned(),
+            row_locks: self.held_rows.borrow().len(),
             catalog: self.catalog.clone(),
             changes: self.changes.clone(),
             seq_undo: self.seq_undo.entries.len(),
@@ -428,6 +450,8 @@ impl Txn {
         self.changes = sp.changes;
         self.seq_undo.undo_to(sp.seq_undo);
         self.savepoints.truncate(idx + 1);
+        let released: Vec<_> = self.held_rows.borrow_mut().drain(sp.row_locks..).collect();
+        self.db.locks.release_rows(self.id, &released);
         Ok(())
     }
 
@@ -490,6 +514,63 @@ impl Txn {
 
     /// Discards this transaction's effects.
     pub fn rollback(self) {}
+
+    /// Locks a row of `table` (named `table_name` in errors) for this transaction. In
+    /// REPEATABLE READ and SERIALIZABLE, a row another transaction changed since the snapshot
+    /// is a serialization failure. Returns false when SKIP LOCKED skips it.
+    pub fn lock_row(&self, table: Oid, table_name: &str, id: RowId, mode: locks::RowLockMode, wait: LockWait) -> SqlResult<bool> {
+        if self.isolation != Isolation::ReadCommitted && !self.row_is_current(table, id) {
+            return Err(SqlError::new(code::SERIALIZATION_FAILURE, "could not serialize access due to concurrent update"));
+        }
+        if self.db.locks.row_conflict(self.id, table, id, mode) {
+            match wait {
+                LockWait::NoWait => {
+                    return Err(SqlError::new(
+                        code::LOCK_NOT_AVAILABLE,
+                        format!("could not obtain lock on row in relation \"{table_name}\""),
+                    ));
+                }
+                LockWait::SkipLocked => return Ok(false),
+                LockWait::Block => {}
+            }
+        }
+        self.db.locks.grant_row(self.id, table, id, mode);
+        self.held_rows.borrow_mut().push((table, id, mode));
+        Ok(true)
+    }
+
+    /// `LOCK TABLE ... IN mode MODE [NOWAIT]`.
+    pub fn lock_table(&self, table: Oid, table_name: &str, mode: locks::TableLockMode, nowait: bool) -> SqlResult<()> {
+        if nowait && self.db.locks.table_conflict(self.id, table, mode) {
+            return Err(SqlError::new(code::LOCK_NOT_AVAILABLE, format!("could not obtain lock on relation \"{table_name}\"")));
+        }
+        self.db.locks.grant_table(self.id, table, mode);
+        Ok(())
+    }
+
+    /// Whether the row version this transaction sees is still the latest committed one (or
+    /// one this transaction wrote).
+    fn row_is_current(&self, table: Oid, id: RowId) -> bool {
+        if self.changes.get(&table).is_some_and(|c| c.inserted.contains_key(&id)) {
+            return true;
+        }
+        self.db.current().tables.get(&table).is_some_and(|d| d.rows.contains_key(&id))
+    }
+}
+
+/// What a lock request does when another transaction holds a conflicting lock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LockWait {
+    /// Postgres would wait; pgmem proceeds (the conflict surfaces at commit).
+    Block,
+    NoWait,
+    SkipLocked,
+}
+
+impl Drop for Txn {
+    fn drop(&mut self) {
+        self.db.locks.release_all(self.id);
+    }
 }
 
 fn scan_with(base: &DbState, changes: &HashMap<Oid, TableChanges>, table: Oid) -> Vec<(RowId, Row)> {

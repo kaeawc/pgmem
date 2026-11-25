@@ -33,11 +33,24 @@ pub struct ScopeCol {
     pub hidden_unqualified: bool,
     /// Not addressable at all (dropped columns keep their slot).
     pub dropped: bool,
+    /// A system column (`ctid`, `xmin`, ...): addressable by name, not part of `*` or the
+    /// row type.
+    pub system: bool,
 }
 
 impl ScopeCol {
     pub fn new(qualifier: Option<String>, name: impl Into<String>, ty: Type) -> ScopeCol {
-        ScopeCol { qualifier, name: name.into(), ty, typmod: -1, table_oid: 0, attnum: 0, hidden_unqualified: false, dropped: false }
+        ScopeCol {
+            qualifier,
+            name: name.into(),
+            ty,
+            typmod: -1,
+            table_oid: 0,
+            attnum: 0,
+            hidden_unqualified: false,
+            dropped: false,
+            system: false,
+        }
     }
 }
 
@@ -49,9 +62,28 @@ pub struct Scope {
     pub star: Vec<usize>,
 }
 
+/// A table's system columns, in `pg_attribute` order (attnum -1 to -6), as table scans and
+/// UPDATE / DELETE targets append them after the user columns.
+pub const SYSTEM_COLUMNS: [(&str, Type); 6] =
+    [("ctid", Type::Tid), ("xmin", Type::Xid), ("cmin", Type::Cid), ("xmax", Type::Xid), ("cmax", Type::Cid), ("tableoid", Type::Oid)];
+
+/// [`SYSTEM_COLUMNS`] as scope columns of `qualifier`.
+pub fn system_scope_cols(qualifier: &str) -> Vec<ScopeCol> {
+    SYSTEM_COLUMNS
+        .iter()
+        .enumerate()
+        .map(|(i, (name, ty))| {
+            let mut c = ScopeCol::new(Some(qualifier.to_owned()), *name, ty.clone());
+            c.system = true;
+            c.attnum = -i16::try_from(i + 1).unwrap_or(0);
+            c
+        })
+        .collect()
+}
+
 impl Scope {
     pub fn from_cols(cols: Vec<ScopeCol>) -> Scope {
-        let star = cols.iter().enumerate().filter(|(_, c)| !c.dropped).map(|(i, _)| i).collect();
+        let star = cols.iter().enumerate().filter(|(_, c)| !c.dropped && !c.system).map(|(i, _)| i).collect();
         Scope { cols, star }
     }
 
@@ -61,7 +93,12 @@ impl Scope {
 
     /// Positions of `qualifier.*`.
     pub fn qualified_star(&self, qualifier: &str) -> Vec<usize> {
-        self.cols.iter().enumerate().filter(|(_, c)| !c.dropped && c.qualifier.as_deref() == Some(qualifier)).map(|(i, _)| i).collect()
+        self.cols
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| !c.dropped && !c.system && c.qualifier.as_deref() == Some(qualifier))
+            .map(|(i, _)| i)
+            .collect()
     }
 
     pub fn has_qualifier(&self, qualifier: &str) -> bool {

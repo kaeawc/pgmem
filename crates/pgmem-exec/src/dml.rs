@@ -11,7 +11,8 @@ use crate::plan::Row;
 use crate::run::run;
 use crate::session::SessionEnv;
 use pgmem_catalog::{ConstraintKind, FkAction, Identity, TableDef};
-use pgmem_storage::{RowId, Txn};
+use pgmem_storage::locks::RowLockMode;
+use pgmem_storage::{LockWait, RowId, Txn};
 use pgmem_types::{GroupKey, SqlError, SqlResult, Value, code, text};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -24,6 +25,17 @@ pub use merge::exec_merge;
 pub struct DmlResult {
     pub count: u64,
     pub rows: Vec<Row>,
+}
+
+/// The system column values (`bind::SYSTEM_COLUMNS` order) of the row stored as `id` (None:
+/// not stored yet). pgmem has no tuple headers: `ctid` and `xmin` derive from the row id,
+/// which changes with every new row version, as theirs do.
+pub fn system_values(table: pgmem_catalog::Oid, id: Option<RowId>, xmax: i64) -> [Value; 6] {
+    let id = id.unwrap_or(0);
+    #[allow(clippy::cast_possible_truncation)]
+    let ctid = Value::Tid((id >> 16) as u32, (id & 0xffff) as u16);
+    let xmin = Value::Int8(i64::try_from(id & 0xffff_ffff).unwrap_or(0));
+    [ctid, xmin, Value::Int8(0), Value::Int8(xmax), Value::Int8(0), Value::Oid(table)]
 }
 
 fn display(v: &Value) -> String {
@@ -483,7 +495,10 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
                                 }
                             }
                             if !plan.returning.is_empty() {
-                                let r = returning_row(&new_row, Some(&existing_row), Some(&new_row), width);
+                                // The locked-then-updated row version: xmax is the updating transaction.
+                                let mut current = new_row.clone();
+                                current.extend(system_values(table.oid, Some(id), env.txid));
+                                let r = returning_row(&current, Some(&existing_row), Some(&new_row), width);
                                 returning_rows.push(plan.returning.iter().map(|e| eval(e, &r, &ctx)).collect::<SqlResult<Vec<_>>>()?);
                             }
                             effects.push(Effect::Update(id, existing_row, new_row));
@@ -495,7 +510,9 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
             check_not_null(&table, &row)?;
             check_checks(&plan.rules, &row, &ctx)?;
             if !plan.returning.is_empty() {
-                let r = returning_row(&row, None, Some(&row), width);
+                let mut current = row.clone();
+                current.extend(system_values(table.oid, None, 0));
+                let r = returning_row(&current, None, Some(&row), width);
                 returning_rows.push(plan.returning.iter().map(|e| eval(e, &r, &ctx)).collect::<SqlResult<Vec<_>>>()?);
             }
             pending.push(row.clone());
@@ -557,19 +574,22 @@ fn matching_rows(
     let mut out = Vec::new();
     for (id, mut row) in ctx.txn.scan(table.oid) {
         pad(&mut row, table);
+        // The statement's row: the target row, its system columns, then any FROM / USING row.
+        let mut target = row.clone();
+        target.extend(system_values(table.oid, Some(id), 0));
         match &extra_rows {
             None => {
                 let ok = match filter {
                     None => true,
-                    Some(f) => eval_pred(f, &row, ctx)?,
+                    Some(f) => eval_pred(f, &target, ctx)?,
                 };
                 if ok {
-                    out.push((id, row.clone(), row));
+                    out.push((id, row, target));
                 }
             }
             Some(extra_rows) => {
                 for er in extra_rows {
-                    let mut combined = row.clone();
+                    let mut combined = target.clone();
                     combined.extend(er.iter().cloned());
                     let ok = match filter {
                         None => true,
@@ -634,6 +654,12 @@ pub fn exec_update(plan: &UpdatePlan, txn: &mut Txn, params: &[Value], env: &Ses
     let count = changes.len() as u64;
     let mut old_versions = Vec::new();
     let mut new_versions = Vec::new();
+    for (id, old, new) in &changes {
+        // FOR UPDATE when a unique key changes, else FOR NO KEY UPDATE (as Postgres' UPDATE).
+        let key_changed = plan.rules.uniques.iter().any(|u| u.columns.iter().any(|c| old.get(*c) != new.get(*c)));
+        let mode = if key_changed { RowLockMode::Update } else { RowLockMode::NoKeyUpdate };
+        txn.lock_row(table.oid, &table.name, *id, mode, LockWait::Block)?;
+    }
     for (id, old, new) in changes {
         old_versions.push(old);
         new_versions.push(new.clone());
@@ -667,6 +693,9 @@ pub fn exec_delete(plan: &DeletePlan, txn: &mut Txn, params: &[Value], env: &Ses
         }
     }
     let count = targets.len() as u64;
+    for (id, _) in &targets {
+        txn.lock_row(table.oid, &table.name, *id, RowLockMode::Update, LockWait::Block)?;
+    }
     let mut removed = Vec::new();
     for (id, row) in targets {
         txn.delete(table.oid, id);

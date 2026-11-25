@@ -124,6 +124,13 @@ pub(crate) const RETURNING_ALIASES_MARKER: &str = "__pgmem_returning_aliases";
 /// A window frame's EXCLUDE clause, as the first PARTITION BY item: `__pgmem_frame_exclude('ties')`.
 pub(crate) const FRAME_EXCLUDE_MARKER: &str = "__pgmem_frame_exclude";
 
+/// The OF-list markers of `FOR NO KEY UPDATE` and `FOR KEY SHARE`.
+pub(crate) const NO_KEY_UPDATE_MARKER: &str = "__pgmem_lock_no_key_update";
+pub(crate) const KEY_SHARE_MARKER: &str = "__pgmem_lock_key_share";
+
+/// `WHERE CURRENT OF c` is rewritten to `WHERE __pgmem_current_of('c', ctid, tableoid)`.
+pub(crate) const CURRENT_OF_FN: &str = "__pgmem_current_of";
+
 /// `SEARCH BREADTH FIRST`'s depth: field 0 of the search record.
 pub(crate) const SEARCH_DEPTH_FN: &str = "__pgmem_search_depth";
 
@@ -268,6 +275,34 @@ fn rewrite_returning_with(
         drop[j] = true;
     }
     true
+}
+
+/// Puts a marker locking clause `FOR SHARE OF marker` before the one starting at `sig[k]`
+/// (its FOR): the lowering gives the next clause the marker's strength.
+fn lock_marker(insert_after: &mut std::collections::HashMap<usize, String>, sig: &[usize], k: usize, marker: &str) {
+    if k > 0 {
+        insert_after.insert(sig[k - 1], format!(" FOR SHARE OF {marker}"));
+    }
+}
+
+/// `WHERE CURRENT OF cursor` → `WHERE __pgmem_current_of('cursor', ctid, tableoid)`.
+fn rewrite_current_of(
+    tokens: &Tokens,
+    sig: &[usize],
+    k: usize,
+    drop: &mut [bool],
+    insert_after: &mut std::collections::HashMap<usize, String>,
+) {
+    use sqlparser::tokenizer::Token;
+    if !(is_word(tokens, sig, k, "WHERE") && is_word(tokens, sig, k + 1, "CURRENT") && is_word(tokens, sig, k + 2, "OF")) {
+        return;
+    }
+    let Some(Token::Word(name)) = sig.get(k + 3).map(|&j| &tokens[j]) else { return };
+    let name = if name.quote_style.is_some() { name.value.clone() } else { name.value.to_lowercase() };
+    for n in 1..=3 {
+        drop[sig[k + n]] = true;
+    }
+    insert_after.insert(sig[k], format!(" {CURRENT_OF_FN}('{}', ctid, tableoid)", name.replace('\'', "''")));
 }
 
 /// `WITH RECURSIVE name AS (...) SEARCH ... / CYCLE ...` (recorded, then stripped).
@@ -482,16 +517,21 @@ fn rewrite_unsupported(sql: &str) -> Option<String> {
             continue;
         }
         rewrite_frame_exclude(&tokens, &sig, k, &mut drop, &mut insert_after);
+        rewrite_current_of(&tokens, &sig, k, &mut drop, &mut insert_after);
         // MERGE's `THEN INSERT DEFAULT VALUES` → `THEN INSERT VALUES (__pgmem_default_values())`.
         if word(&tokens[i], "THEN") && at(1, "INSERT") && at(2, "DEFAULT") && at(3, "VALUES") {
             drop[sig[k + 2]] = true;
             replace[sig[k + 3]] = Some("VALUES (__pgmem_default_values())");
         }
+        // `FOR NO KEY UPDATE` / `FOR KEY SHARE` → `FOR UPDATE` / `FOR SHARE` with a marker
+        // table first in OF (sqlparser has neither strength).
         if word(&tokens[i], "FOR") && at(1, "NO") && at(2, "KEY") && at(3, "UPDATE") {
             drop[sig[k + 1]] = true;
             drop[sig[k + 2]] = true;
+            lock_marker(&mut insert_after, &sig, k, NO_KEY_UPDATE_MARKER);
         } else if word(&tokens[i], "FOR") && at(1, "KEY") && at(2, "SHARE") {
             drop[sig[k + 1]] = true;
+            lock_marker(&mut insert_after, &sig, k, KEY_SHARE_MARKER);
         } else if word(&tokens[i], "DROP") && at(1, "INDEX") && at(2, "CONCURRENTLY") {
             drop[sig[k + 2]] = true;
         } else if word(&tokens[i], "AT") && at(1, "LOCAL") {
@@ -936,7 +976,20 @@ pub(crate) fn lower_statement(stmt: sq::Statement) -> SqlResult<Statement> {
             }
             Statement::Explain(Box::new(explain))
         }
-        S::Lock(l) => Statement::Lock { tables: l.tables.iter().map(|t| object_name(&t.name)).collect::<SqlResult<Vec<_>>>()? },
+        S::Lock(l) => Statement::Lock {
+            tables: l.tables.iter().map(|t| object_name(&t.name)).collect::<SqlResult<Vec<_>>>()?,
+            mode: match l.lock_mode {
+                Some(sq::LockTableMode::AccessShare) => 1,
+                Some(sq::LockTableMode::RowShare) => 2,
+                Some(sq::LockTableMode::RowExclusive) => 3,
+                Some(sq::LockTableMode::ShareUpdateExclusive) => 4,
+                Some(sq::LockTableMode::Share) => 5,
+                Some(sq::LockTableMode::ShareRowExclusive) => 6,
+                Some(sq::LockTableMode::Exclusive) => 7,
+                _ => 8,
+            },
+            nowait: l.nowait,
+        },
         S::Comment { object_type, object_name: target_name, comment, .. } => {
             use pgmem_ir::CommentTarget as T;
             let target = match object_type {

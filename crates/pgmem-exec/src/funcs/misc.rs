@@ -39,6 +39,15 @@ fn resolve_uuid_settings(name: &str, args: &[Type]) -> SqlResult<Option<Resolved
             vec![args[0].clone()],
             Type::Int4,
         ),
+        "__pgmem_current_of" if n == 3 => resolved(lenient("current_of", current_of), vec![Type::Text, Type::Tid, Type::Oid], Type::Bool),
+        "hashtext" if n == 1 => resolved(
+            strict("hashtext", |a, _| {
+                #[allow(clippy::cast_possible_wrap)]
+                Ok(Value::Int4(hash_bytes(a[0].as_str().unwrap_or("").as_bytes()) as i32))
+            }),
+            vec![Type::Text],
+            Type::Int4,
+        ),
         "merge_action" if n == 0 => resolved(
             lenient("merge_action", |_, ctx| {
                 let a = ctx.state.merge_action.get();
@@ -136,20 +145,43 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
             };
             resolved(f, targets, Type::Int4)
         }
-        // Advisory locks: pgmem has no lock manager, so they always succeed immediately.
-        "pg_advisory_lock" | "pg_advisory_xact_lock" | "pg_advisory_lock_shared" | "pg_advisory_xact_lock_shared" => {
-            resolved(strict(name_static(name), |_, _| Ok(Value::Text(String::new()))), vec![Type::Int8; n.max(1)], Type::Void)
-        }
-        "pg_try_advisory_lock"
+        // Advisory locks, shared by every session (`pgmem_storage::advisory`).
+        "pg_advisory_lock"
+        | "pg_advisory_xact_lock"
+        | "pg_advisory_lock_shared"
+        | "pg_advisory_xact_lock_shared"
+        | "pg_try_advisory_lock"
         | "pg_try_advisory_xact_lock"
-        | "pg_advisory_unlock"
         | "pg_try_advisory_lock_shared"
-        | "pg_advisory_unlock_shared" => {
-            resolved(strict(name_static(name), |_, _| Ok(Value::Bool(true))), vec![Type::Int8; n.max(1)], Type::Bool)
+        | "pg_try_advisory_xact_lock_shared"
+        | "pg_advisory_unlock"
+        | "pg_advisory_unlock_shared"
+            if n == 1 || n == 2 =>
+        {
+            let f: crate::plan::ScalarFn = match name {
+                "pg_advisory_lock" => |a, c| advisory_lock(a, c, false, false),
+                "pg_advisory_xact_lock" => |a, c| advisory_lock(a, c, false, true),
+                "pg_advisory_lock_shared" => |a, c| advisory_lock(a, c, true, false),
+                "pg_advisory_xact_lock_shared" => |a, c| advisory_lock(a, c, true, true),
+                "pg_try_advisory_lock" => |a, c| advisory_try(a, c, false, false),
+                "pg_try_advisory_xact_lock" => |a, c| advisory_try(a, c, false, true),
+                "pg_try_advisory_lock_shared" => |a, c| advisory_try(a, c, true, false),
+                "pg_try_advisory_xact_lock_shared" => |a, c| advisory_try(a, c, true, true),
+                "pg_advisory_unlock" => |a, c| advisory_unlock(a, c, false),
+                _ => |a, c| advisory_unlock(a, c, true),
+            };
+            let ret = if name.starts_with("pg_try") || name.contains("unlock") { Type::Bool } else { Type::Void };
+            let arg = if n == 1 { vec![Type::Int8] } else { vec![Type::Int4, Type::Int4] };
+            resolved(strict(name_static(name), f), arg, ret)
         }
-        "pg_advisory_unlock_all" if n == 0 => {
-            resolved(lenient("pg_advisory_unlock_all", |_, _| Ok(Value::Text(String::new()))), vec![], Type::Void)
-        }
+        "pg_advisory_unlock_all" if n == 0 => resolved(
+            lenient("pg_advisory_unlock_all", |_, c| {
+                c.txn.database().advisory().release(c.env.backend_pid, false);
+                Ok(Value::Text(String::new()))
+            }),
+            vec![],
+            Type::Void,
+        ),
         "pg_sleep" if n == 1 => resolved(strict("pg_sleep", |_, _| Ok(Value::Text(String::new()))), vec![Type::Float8], Type::Void),
         "txid_current" | "pg_current_xact_id" if n == 0 => {
             resolved(lenient("txid_current", |_, c| Ok(Value::Int8(c.env.txid))), vec![], Type::Int8)
@@ -209,6 +241,7 @@ fn name_static(name: &str) -> &'static str {
         "pg_try_advisory_xact_lock" => "pg_try_advisory_xact_lock",
         "pg_advisory_unlock" => "pg_advisory_unlock",
         "pg_try_advisory_lock_shared" => "pg_try_advisory_lock_shared",
+        "pg_try_advisory_xact_lock_shared" => "pg_try_advisory_xact_lock_shared",
         _ => "pg_advisory_unlock_shared",
     }
 }
@@ -296,6 +329,124 @@ fn current_setting(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
         None if a.get(1).and_then(Value::as_bool) == Some(true) => Ok(Value::Null),
         None => Err(crate::settings::unrecognized(&name)),
     }
+}
+
+/// `WHERE CURRENT OF cursor` for a target row (`ctid`, `tableoid`).
+fn current_of(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
+    let name = a[0].as_str().unwrap_or("");
+    let cursor = ctx
+        .env
+        .objects
+        .cursors
+        .iter()
+        .find(|c| c.name == name)
+        .ok_or_else(|| SqlError::new(code::INVALID_CURSOR_NAME, format!("cursor \"{name}\" does not exist")))?;
+    let Value::Oid(table) = a[2] else { return Ok(Value::Bool(false)) };
+    let not_updatable = || {
+        let table_name = ctx.txn.catalog().table_by_oid(table).map(|t| t.name.clone()).unwrap_or_default();
+        SqlError::new("24000", format!("cursor \"{name}\" is not a simply updatable scan of table \"{table_name}\""))
+    };
+    if !cursor.updatable {
+        return Err(not_updatable());
+    }
+    match &cursor.current {
+        Some((t, ctid)) if *t == table => Ok(Value::Bool(*ctid == a[1])),
+        Some(_) => Err(not_updatable()),
+        None => Err(SqlError::new("24000", format!("cursor \"{name}\" is not positioned on a row"))),
+    }
+}
+
+/// Postgres' `hash_bytes` (Bob Jenkins' lookup3, `hashfn.c`), as `hashtext` uses it.
+pub(crate) fn hash_bytes(k: &[u8]) -> u32 {
+    fn mix(a: &mut u32, b: &mut u32, c: &mut u32) {
+        *a = a.wrapping_sub(*c);
+        *a ^= c.rotate_left(4);
+        *c = c.wrapping_add(*b);
+        *b = b.wrapping_sub(*a);
+        *b ^= a.rotate_left(6);
+        *a = a.wrapping_add(*c);
+        *c = c.wrapping_sub(*b);
+        *c ^= b.rotate_left(8);
+        *b = b.wrapping_add(*a);
+        *a = a.wrapping_sub(*c);
+        *a ^= c.rotate_left(16);
+        *c = c.wrapping_add(*b);
+        *b = b.wrapping_sub(*a);
+        *b ^= a.rotate_left(19);
+        *a = a.wrapping_add(*c);
+        *c = c.wrapping_sub(*b);
+        *c ^= b.rotate_left(4);
+        *b = b.wrapping_add(*a);
+    }
+    fn finish(a: &mut u32, b: &mut u32, c: &mut u32) {
+        *c ^= *b;
+        *c = c.wrapping_sub(b.rotate_left(14));
+        *a ^= *c;
+        *a = a.wrapping_sub(c.rotate_left(11));
+        *b ^= *a;
+        *b = b.wrapping_sub(a.rotate_left(25));
+        *c ^= *b;
+        *c = c.wrapping_sub(b.rotate_left(16));
+        *a ^= *c;
+        *a = a.wrapping_sub(c.rotate_left(4));
+        *b ^= *a;
+        *b = b.wrapping_sub(a.rotate_left(14));
+        *c ^= *b;
+        *c = c.wrapping_sub(b.rotate_left(24));
+    }
+    let word = |s: &[u8]| s.iter().enumerate().fold(0u32, |acc, (i, &x)| acc.wrapping_add(u32::from(x) << (8 * i)));
+    #[allow(clippy::cast_possible_truncation)]
+    let init = 0x9e37_79b9u32.wrapping_add(k.len() as u32).wrapping_add(3_923_095);
+    let (mut a, mut b, mut c) = (init, init, init);
+    let mut rest = k;
+    while rest.len() >= 12 {
+        a = a.wrapping_add(word(&rest[0..4]));
+        b = b.wrapping_add(word(&rest[4..8]));
+        c = c.wrapping_add(word(&rest[8..12]));
+        mix(&mut a, &mut b, &mut c);
+        rest = &rest[12..];
+    }
+    // The last 11 bytes; the lowest byte of c is reserved for the length.
+    a = a.wrapping_add(word(&rest[..rest.len().min(4)]));
+    if rest.len() > 4 {
+        b = b.wrapping_add(word(&rest[4..rest.len().min(8)]));
+    }
+    if rest.len() > 8 {
+        c = c.wrapping_add(word(&rest[8..]) << 8);
+    }
+    finish(&mut a, &mut b, &mut c);
+    c
+}
+
+/// The advisory lock key of a bigint argument or a pair of int4 arguments.
+fn advisory_key(a: &[Value]) -> pgmem_storage::advisory::AdvisoryKey {
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    match a {
+        [k] => {
+            let k = k.as_i64().unwrap_or(0);
+            ((k >> 32) as u32, k as u32, 1)
+        }
+        [x, y, ..] => (x.as_i64().unwrap_or(0) as u32, y.as_i64().unwrap_or(0) as u32, 2),
+        [] => (0, 0, 1),
+    }
+}
+
+fn advisory_try(a: &[Value], ctx: &EvalCtx, shared: bool, xact: bool) -> SqlResult<Value> {
+    Ok(Value::Bool(ctx.txn.database().advisory().try_lock(advisory_key(a), ctx.env.backend_pid, shared, xact)))
+}
+
+/// Waits for the lock, up to `lock_timeout` (0 = forever).
+fn advisory_lock(a: &[Value], ctx: &EvalCtx, shared: bool, xact: bool) -> SqlResult<Value> {
+    let ms: u64 = ctx.state.setting(ctx.env, "lock_timeout").and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+    let timeout = (ms > 0).then(|| std::time::Duration::from_millis(ms));
+    if !ctx.txn.database().advisory().lock(advisory_key(a), ctx.env.backend_pid, shared, xact, timeout) {
+        return Err(SqlError::new(code::LOCK_NOT_AVAILABLE, "canceling statement due to lock timeout"));
+    }
+    Ok(Value::Text(String::new()))
+}
+
+fn advisory_unlock(a: &[Value], ctx: &EvalCtx, shared: bool) -> SqlResult<Value> {
+    Ok(Value::Bool(ctx.txn.database().advisory().unlock(advisory_key(a), ctx.env.backend_pid, shared)))
 }
 
 /// `pg_notify(channel, payload)`: queued for the transaction's commit.

@@ -52,7 +52,12 @@ impl Session {
     pub(super) fn objects(&self) -> Arc<SessionObjects> {
         Arc::new(SessionObjects {
             prepared: self.prepared.iter().filter(|(n, _)| !n.is_empty()).map(|(n, p)| (n.clone(), Arc::clone(p))).collect(),
-            cursors: self.cursors.values().map(|c| c.info.clone()).chain(self.protocol_portals.values().cloned()).collect(),
+            cursors: self
+                .cursors
+                .values()
+                .map(|c| CursorInfo { current: c.current_row_id(), ..c.info.clone() })
+                .chain(self.protocol_portals.values().cloned())
+                .collect(),
             listening: self.listening.iter().cloned().collect(),
         })
     }
@@ -91,6 +96,8 @@ impl Session {
             binary: false,
             scroll: false,
             creation_time: self.clock.now_micros(),
+            current: None,
+            updatable: false,
         };
         self.protocol_portals.insert(name.to_owned(), info);
     }
@@ -201,7 +208,7 @@ impl Session {
         if self.cursors.contains_key(&d.name) {
             return Err(SqlError::new(code::DUPLICATE_CURSOR, format!("cursor \"{}\" already exists", d.name)));
         }
-        let r = self.run_in_txn(&Statement::Query(Box::new(d.query.clone())), &[], &[])?;
+        let (r, row_ids) = self.cursor_rows(&d.query)?;
         let info = CursorInfo {
             name: d.name.clone(),
             text: d.text.clone(),
@@ -209,10 +216,49 @@ impl Session {
             binary: d.binary,
             scroll: d.scroll.unwrap_or_else(|| default_scrollable(&d.query)),
             creation_time: self.clock.now_micros(),
+            current: None,
+            updatable: !row_ids.is_empty(),
         };
-        let cursor = Cursor::new(info, r.columns, r.rows, self.setting_marks.len());
+        let cursor = Cursor::new(info, r.columns, r.rows, self.setting_marks.len()).with_row_ids(row_ids);
         self.cursors.insert(d.name.clone(), cursor);
         Ok(tag("DECLARE CURSOR"))
+    }
+
+    /// A cursor query's result and, for a plain SELECT from one table, each row's table OID
+    /// and `ctid` (what `WHERE CURRENT OF` compares with).
+    fn cursor_rows(&mut self, q: &ir::Query) -> SqlResult<(QueryResult, Vec<Option<crate::portal::RowIdentity>>)> {
+        let plain = |q: &ir::Query| -> bool {
+            let simple_scan = q.order_by.is_empty() && q.limit.is_none() && q.offset.is_none();
+            (simple_scan || !q.locking.is_empty())
+                && matches!(&q.body, ir::SetExpr::Select(s)
+                if s.distinct == ir::Distinct::All && s.group_by.is_empty() && s.having.is_none()
+                    && matches!(s.from.as_slice(), [ir::TableRef::Table { .. }]))
+        };
+        if plain(q) {
+            let mut with_ids = q.clone();
+            if let ir::SetExpr::Select(s) = &mut with_ids.body {
+                for col in ["tableoid", "ctid"] {
+                    s.projection.push(ir::SelectItem::Expr { expr: ir::Expr::Column(vec![col.to_owned()]), alias: None });
+                }
+            }
+            if let Ok(mut r) = self.run_in_txn(&Statement::Query(Box::new(with_ids)), &[], &[]) {
+                let ids = r
+                    .rows
+                    .iter_mut()
+                    .map(|row| {
+                        let ctid = row.pop();
+                        match (row.pop(), ctid) {
+                            (Some(Value::Oid(t)), Some(c)) => Some((t, c)),
+                            _ => None,
+                        }
+                    })
+                    .collect();
+                r.columns.truncate(r.columns.len().saturating_sub(2));
+                return Ok((r, ids));
+            }
+        }
+        let r = self.run_in_txn(&Statement::Query(Box::new(q.clone())), &[], &[])?;
+        Ok((r, Vec::new()))
     }
 
     /// The columns a FETCH from `name` returns (Describe).
@@ -311,6 +357,7 @@ impl Session {
             Ok(())
         };
         let committed = commit && result.is_ok();
+        self.db.advisory().release(self.backend_pid, true);
         self.cursors.retain(|_, c| c.info.hold && (committed || !c.in_txn));
         for c in self.cursors.values_mut() {
             c.in_txn = false;
@@ -408,11 +455,20 @@ impl Session {
         Ok(tag(tag_name))
     }
 
-    pub(super) fn lock_tables(&self, tables: &[ir::ObjectName]) -> SqlResult<QueryResult> {
+    pub(super) fn lock_tables(&self, tables: &[ir::ObjectName], mode: u8, nowait: bool) -> SqlResult<QueryResult> {
         if !self.in_block() {
             return Err(SqlError::new(code::NO_ACTIVE_SQL_TRANSACTION, "LOCK TABLE can only be used in transaction blocks"));
         }
         self.check_relations(tables)?;
+        let _ctx = pgmem_types::context::enter(self.format_context());
+        let catalog = self.catalog_snapshot();
+        if let Some(txn) = self.txn.as_ref() {
+            for t in tables {
+                if let Some(rel) = catalog.find_relation(t)? {
+                    txn.lock_table(rel.oid(), t.base(), mode, nowait)?;
+                }
+            }
+        }
         Ok(tag("LOCK TABLE"))
     }
 
@@ -435,6 +491,8 @@ impl Session {
     /// Forgets this session's LISTEN registrations (at disconnect).
     pub(super) fn unregister_listener(&self) {
         self.db.notifications().remove(self.backend_pid);
+        self.db.advisory().release(self.backend_pid, false);
+        self.db.advisory().release(self.backend_pid, true);
     }
 }
 

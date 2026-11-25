@@ -144,9 +144,12 @@ pub enum Statement {
         tables: Vec<ObjectName>,
         in_block_ok: bool,
     },
-    /// `LOCK [TABLE] name, ... [IN mode MODE] [NOWAIT]`.
+    /// `LOCK [TABLE] name, ... [IN mode MODE] [NOWAIT]`: `mode` from 1 (ACCESS SHARE) to 8
+    /// (ACCESS EXCLUSIVE, the default).
     Lock {
         tables: Vec<ObjectName>,
+        mode: u8,
+        nowait: bool,
     },
 }
 

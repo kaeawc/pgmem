@@ -86,6 +86,14 @@ pub struct DeletePlan {
     pub returning_cols: Vec<OutCol>,
 }
 
+/// [`physical_scope`] followed by the system columns: the row UPDATE / DELETE filters and
+/// RETURNING see.
+pub fn target_scope(table: &TableDef, qualifier: &str) -> Scope {
+    let mut cols = physical_scope(table, qualifier).cols;
+    cols.extend(super::system_scope_cols(qualifier));
+    Scope::from_cols(cols)
+}
+
 /// The scope of a table's physical row (dropped columns occupy unaddressable slots).
 pub fn physical_scope(table: &TableDef, qualifier: &str) -> Scope {
     let cols = table
@@ -395,8 +403,6 @@ pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<Inser
         }
     };
     let row_scope = physical_scope(&table, &qualifier);
-    let row_level = Level::new(row_scope.clone());
-    let row_ctx = Ctx::new(&row_level);
     let on_conflict = match &ins.on_conflict {
         None => None,
         Some(oc) => {
@@ -424,7 +430,8 @@ pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<Inser
             Some(OnConflictPlan { arbiter, update })
         }
     };
-    let (returning, returning_cols) = b.bind_returning(&ins.returning, &row_ctx, &table)?;
+    let returning_level = Level::new(target_scope(&table, &qualifier));
+    let (returning, returning_cols) = b.bind_returning(&ins.returning, &Ctx::new(&returning_level), &table)?;
     Ok(InsertPlan { rules, columns, rows, overriding_system_value: ins.overriding_system_value, on_conflict, returning, returning_cols })
 }
 
@@ -544,7 +551,7 @@ pub fn bind_update(b: &Binder, upd: &ir::Update, outer: &Ctx) -> SqlResult<Updat
     let table = lookup_table(b, &upd.table)?;
     let qualifier = upd.alias.clone().unwrap_or_else(|| table.name.clone());
     let rules = b.bind_row_rules(&table)?;
-    let target_scope = physical_scope(&table, &qualifier);
+    let target_scope = target_scope(&table, &qualifier);
     let width = target_scope.width();
     let (from, scope) = if upd.from.is_empty() {
         (None, target_scope)
@@ -570,7 +577,7 @@ pub fn bind_update(b: &Binder, upd: &ir::Update, outer: &Ctx) -> SqlResult<Updat
 pub fn bind_delete(b: &Binder, del: &ir::Delete, outer: &Ctx) -> SqlResult<DeletePlan> {
     let table = lookup_table(b, &del.table)?;
     let qualifier = del.alias.clone().unwrap_or_else(|| table.name.clone());
-    let target_scope = physical_scope(&table, &qualifier);
+    let target_scope = target_scope(&table, &qualifier);
     let width = target_scope.width();
     let (using, scope) = if del.using.is_empty() {
         (None, target_scope)

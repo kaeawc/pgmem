@@ -128,6 +128,7 @@ mod timestamptz;
 mod transactions;
 mod trim_length;
 mod truncate;
+mod txn_locks;
 mod unary_minus;
 mod union;
 mod unique;

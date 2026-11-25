@@ -429,6 +429,10 @@ pub fn resolve_binary(op: &str, l: &Type, r: &Type) -> SqlResult<Resolved> {
     use Type::*;
     let res = |func: Func, lt: Type, rt: Type, ret: Type| Ok(Resolved { func, args: vec![lt, rt], ret });
     if let Some(func) = comparison(op) {
+        // `xid = int4` / `xid <> int4` (`xideqint4`, `xidneqint4`): `RETURNING (xmax = 0)`.
+        if matches!(op, "=" | "<>" | "!=") && matches!((l, r), (Xid | Cid, Int4 | Int2) | (Int4 | Int2, Xid | Cid)) {
+            return res(func, l.clone(), r.clone(), Bool);
+        }
         if let Some(t) = common_type(l, r)
             && comparable(&t)
         {

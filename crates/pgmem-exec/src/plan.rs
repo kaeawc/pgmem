@@ -567,10 +567,13 @@ pub enum Rel {
     },
     /// A table's live columns: physical slot of each output column, and the value rows
     /// shorter than the slot read back as.
+    /// A table's rows: the stored `slots` (`missing` when a row predates the column), then
+    /// with `system` the system columns.
     Scan {
         table: Oid,
         slots: Vec<usize>,
         missing: Vec<Value>,
+        system: bool,
     },
     /// `SELECT srf(...), ...`: the input row extended with one column per set-returning
     /// function, as many rows as the longest function result (shorter ones padded with
@@ -641,6 +644,18 @@ pub enum Rel {
     /// recursive CTE while it iterates).
     CteScan {
         id: usize,
+    },
+    /// SELECT ... FOR UPDATE / SHARE: locks the rows of each target (`(tableoid, ctid)`
+    /// column pairs), then applies OFFSET / LIMIT to the rows it locked; outputs the first
+    /// `visible` columns.
+    LockRows {
+        input: Box<Rel>,
+        targets: Vec<(usize, usize)>,
+        mode: pgmem_storage::locks::RowLockMode,
+        wait: pgmem_storage::LockWait,
+        limit: Option<Expr>,
+        offset: Option<Expr>,
+        visible: usize,
     },
     With {
         ctes: Vec<CtePlan>,
