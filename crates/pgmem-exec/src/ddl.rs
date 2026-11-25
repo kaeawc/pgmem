@@ -129,6 +129,9 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
             crate::ddl_views::refresh_matview(name, *concurrently, *with_data, txn, env, state)
         }
         Statement::RenameIndex { name, new_name, if_exists } => rename_index(name, new_name, *if_exists, txn),
+        Statement::AlterSequence { name, if_exists, options, rename_to } => {
+            crate::ddl_sequences::alter_sequence(name, *if_exists, options, rename_to.as_deref(), txn)
+        }
         Statement::RenameView { name, new_name, materialized, if_exists } => {
             crate::ddl_views::rename_view(name, new_name, *materialized, *if_exists, txn)
         }
@@ -199,6 +202,26 @@ pub(crate) fn alter_table_action(
     env: &SessionEnv,
     state: &StatementState,
 ) -> SqlResult<QualName> {
+    let table = txn.catalog().table_q(current).cloned().ok_or_else(|| SqlError::undefined_table(&current.name))?;
+    if crate::ddl_sequences::alter_identity(txn, &table, action)? {
+        return Ok(current.clone());
+    }
+    // Generated columns reading a dropped column: an error, or dropped too with CASCADE.
+    if let ir::AlterTableAction::DropColumn { name, cascade, .. } = action {
+        let users: Vec<String> = table
+            .live_columns()
+            .filter(|(_, c)| c.name != *name && c.generated.as_ref().is_some_and(|g| g.referenced_columns().iter().any(|r| r == name)))
+            .map(|(_, c)| c.name.clone())
+            .collect();
+        if !users.is_empty() && !cascade {
+            let lines: Vec<String> = users.iter().map(|u| format!("column {u} of table {} depends on column {name}", table.name)).collect();
+            return Err(dependents_error("column", &format!("{name} of table {}", table.name), lines.join("\n")));
+        }
+        for u in users {
+            let drop = ir::AlterTableAction::DropColumn { name: u, if_exists: true, cascade: true };
+            alter_table_action(txn, current, &drop, env, state)?;
+        }
+    }
     let table = txn.catalog().table_q(current).cloned().ok_or_else(|| SqlError::undefined_table(&current.name))?;
     column_view_dependencies(txn, &table, action)?;
     let has_rows = !txn.scan(table.oid).is_empty();

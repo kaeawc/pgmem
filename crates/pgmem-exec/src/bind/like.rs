@@ -186,11 +186,8 @@ fn identity_sequence(b: &Binder, src: &TableDef, column: &str, table: &TableDef,
         oid: 0,
         schema: table.schema.clone(),
         name,
-        start: from.start,
-        increment: from.increment,
-        min: from.min,
-        max: from.max,
         owned_by: Some((table.name.clone(), column.to_owned())),
+        ..(**from).clone()
     })
 }
 

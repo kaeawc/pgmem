@@ -8,10 +8,10 @@ and what comes next. Updated with every PR.
 | Metric | Value | How it is measured |
 |---|---|---|
 | pgmem-go parity | **564 / 564** Go tests ported | `scripts/parity.py check` ([PARITY.md](PARITY.md)) |
-| Integration suite on pgmem | **621 / 621** pass | `cargo nextest run -p pgmem --test it` |
-| Integration suite on real PostgreSQL 18 | **621 / 621** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
+| Integration suite on pgmem | **624 / 624** pass | `cargo nextest run -p pgmem --test it` |
+| Integration suite on real PostgreSQL 18 | **624 / 624** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
 | Go pgx example suites (sqlc) against the Rust binary | **27 / 27** pass | `make examples` (CI `pgx-examples`) |
-| **SQL conformance corpus** (3309 records, 9 areas) | **3089 / 3309 (93.4%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
+| **SQL conformance corpus** (3309 records, 9 areas) | **3130 / 3309 (94.6%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
 
 ### Conformance history
 
@@ -39,7 +39,8 @@ and what comes next. Updated with every PR.
 | 2026-11-25 | #125 query statements: MERGE, writable CTEs, RETURNING old/new, GROUPING SETS, window RANGE offsets / EXCLUDE, SEARCH / CYCLE | 564/564 | 2880/3309 (87.0%) |
 | 2026-11-25 | #126 system columns, row / table / advisory locks, READ ONLY, AND CHAIN, WHERE CURRENT OF | 564/564 | 2944/3309 (89.0%) |
 | 2026-11-25 | #127 deferrable constraints, SET CONSTRAINTS, NOT VALID, FK fidelity, SERIALIZABLE write skew | 564/564 | 3022/3309 (91.3%) |
-| 2026-11-25 | updatable views, materialized views, DROP / ALTER dependencies, CREATE TABLE AS / LIKE, ON COMMIT, index and constraint renames | 564/564 | 3089/3309 (93.4%) |
+| 2026-11-25 | #128 updatable views, materialized views, DROP / ALTER dependencies, CREATE TABLE AS / LIKE, ON COMMIT, index and constraint renames | 564/564 | 3089/3309 (93.4%) |
+| 2026-11-25 | sequence parameters and ALTER SEQUENCE, identity options and ALTER ... IDENTITY, generated column rules | 564/564 | 3130/3309 (94.6%) |
 
 ## Supported
 
@@ -114,7 +115,14 @@ and what comes next. Updated with every PR.
 - **Constraints**: NOT NULL (named, Postgres 18 style), CHECK, PRIMARY KEY, UNIQUE (NULLS NOT
   DISTINCT), FOREIGN KEY (multi-column, MATCH SIMPLE / FULL; NO ACTION / RESTRICT (23001) /
   CASCADE / SET NULL / SET DEFAULT on delete and update, `SET NULL (cols)`), serial and identity
-  columns, generated columns; Postgres constraint naming. DEFERRABLE / INITIALLY DEFERRED
+  columns, generated columns; Postgres constraint naming.
+  Sequences take every CREATE / ALTER SEQUENCE parameter (AS type, INCREMENT, MIN/MAXVALUE,
+  START, RESTART, CACHE, CYCLE, OWNED BY, RENAME) with Postgres' validation, and read as a
+  relation (`SELECT last_value, is_called FROM seq`); identity columns take sequence options and
+  `ALTER COLUMN ... ADD / SET GENERATED, SET option, RESTART, DROP IDENTITY`, and `OVERRIDING
+  USER VALUE`; generated columns are checked (immutable, no other generated column), may be
+  added to filled tables, and take `SET / DROP EXPRESSION`; dropping a column they read needs
+  CASCADE. DEFERRABLE / INITIALLY DEFERRED
   foreign keys and unique constraints with `SET CONSTRAINTS` (checked at commit or `...
   IMMEDIATE`; a failed COMMIT rolls back), non-deferrable unique checks row by row (UPDATE in
   scan order), deferrable ones at statement end; `ADD CONSTRAINT ... NOT VALID`, `VALIDATE
@@ -170,6 +178,8 @@ and what comes next. Updated with every PR.
 
 ## Known gaps
 
+- VIRTUAL generated columns (Postgres 18's default) are computed on write, like STORED; the
+  values read back are the same.
 - WITH LOCAL CHECK OPTION checks like CASCADED; views with INSTEAD OF triggers or rules are not
   supported (no triggers yet).
 - `pg_proc` and `pg_trigger` have no user rows (no user functions or triggers yet). Deparsed
@@ -198,9 +208,8 @@ and what comes next. Updated with every PR.
 Hill-climb, ordered by conformance records recovered per unit of work and by what blocks real
 clients. Each item names the corpus area it moves (see CONFORMANCE.md for per-file rates).
 
-1. **Types and DDL**: identity / generated column and sequence fidelity (ddl/identity,
-   ddl/generated, ddl/sequences), range types (and EXCLUDE constraints), network types, bit
-   strings, array lower bounds, pretty deparse.
+1. **Types**: range and multirange types (and EXCLUDE constraints), network types, bit
+   strings, money, array lower bounds, `regprocedure`, pretty deparse.
 2. **Functions/procedures/triggers** (SQL and PL/pgSQL), `DO` blocks — large; most of ddl/migrations.
 3. Roles, extensions (pgcrypto, uuid-ossp, citext), COPY, collations, catalog remainder.
 4. Client matrix in CI: psql, tokio-postgres and sqlx (Go pgx is covered by `examples/`).

@@ -109,6 +109,7 @@ mod returning_star;
 mod savepoint;
 mod schemas;
 mod select_star;
+mod sequence_identity;
 mod serial;
 mod serialization;
 mod server;

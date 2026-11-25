@@ -559,8 +559,11 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
                         )
                         .with_detail(format!("Column \"{}\" is a generated column.", col.name)));
                     }
-                    if col.identity == Some(Identity::Always) && !plan.overriding_system_value {
+                    if col.identity == Some(Identity::Always) && !plan.overriding_system_value && !plan.overriding_user_value {
                         return Err(identity_always_error(&col.name));
+                    }
+                    if col.identity.is_some() && plan.overriding_user_value {
+                        continue;
                     }
                     row[slot] = v;
                     explicit[slot] = true;

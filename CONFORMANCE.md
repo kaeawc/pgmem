@@ -7,13 +7,13 @@ PostgreSQL 18; CI re-verifies every record against PostgreSQL and runs it agains
 A record passes when pgmem returns the same column names, column types and text values, or
 the same SQLSTATE and error message.
 
-pgmem passes **3089 / 3309 records (93.4%)**.
+pgmem passes **3130 / 3309 records (94.6%)**.
 
 | Area | Records | Pass | Rate |
 |---|---:|---:|---:|
-| catalog | 226 | 194 | 85.8% |
+| catalog | 226 | 196 | 86.7% |
 | constraints | 171 | 151 | 88.3% |
-| ddl | 386 | 300 | 77.7% |
+| ddl | 386 | 339 | 87.8% |
 | dml | 282 | 281 | 99.6% |
 | functions | 445 | 439 | 98.7% |
 | queries | 440 | 439 | 99.8% |
@@ -27,9 +27,9 @@ pgmem passes **3089 / 3309 records (93.4%)**.
 | File | Records | Pass | Rate |
 |---|---:|---:|---:|
 | catalog/comments.slt | 32 | 29 | 90.6% |
-| catalog/information_schema.slt | 38 | 34 | 89.5% |
+| catalog/information_schema.slt | 38 | 35 | 92.1% |
 | catalog/orm_reflection.slt | 35 | 30 | 85.7% |
-| catalog/pg_catalog.slt | 51 | 44 | 86.3% |
+| catalog/pg_catalog.slt | 51 | 45 | 88.2% |
 | catalog/psql_describe.slt | 22 | 16 | 72.7% |
 | catalog/regtypes.slt | 33 | 28 | 84.8% |
 | catalog/settings.slt | 15 | 13 | 86.7% |
@@ -41,12 +41,12 @@ pgmem passes **3089 / 3309 records (93.4%)**.
 | ddl/alter_table.slt | 46 | 46 | 100.0% |
 | ddl/create_table.slt | 40 | 40 | 100.0% |
 | ddl/drop.slt | 36 | 26 | 72.2% |
-| ddl/generated.slt | 23 | 9 | 39.1% |
-| ddl/identity.slt | 38 | 26 | 68.4% |
+| ddl/generated.slt | 23 | 23 | 100.0% |
+| ddl/identity.slt | 38 | 38 | 100.0% |
 | ddl/indexes.slt | 33 | 33 | 100.0% |
 | ddl/migrations.slt | 58 | 28 | 48.3% |
 | ddl/schema.slt | 31 | 31 | 100.0% |
-| ddl/sequences.slt | 34 | 21 | 61.8% |
+| ddl/sequences.slt | 34 | 34 | 100.0% |
 | ddl/truncate_comment.slt | 14 | 12 | 85.7% |
 | ddl/views.slt | 33 | 28 | 84.8% |
 | dml/delete.slt | 32 | 32 | 100.0% |

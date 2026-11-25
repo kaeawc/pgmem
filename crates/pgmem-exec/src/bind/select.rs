@@ -1066,8 +1066,20 @@ impl Binder<'_> {
                     ScopeCol::new(Some(qualifier.clone()), "log_cnt", Type::Int8),
                     ScopeCol::new(Some(qualifier), "is_called", Type::Bool),
                 ];
-                let _ = seq;
-                Err(feature("selecting from a sequence")).or(Ok((Rel::Values { rows: vec![] }, Scope::from_cols(cols))))
+                let field = |name: &'static str, f: crate::plan::ScalarFn| Expr::Call {
+                    func: crate::plan::Func { name, f, strict: true },
+                    args: vec![Expr::Const(Value::Oid(seq.oid))],
+                };
+                let row = vec![
+                    field("last_value", crate::funcs::misc::sequence_last_value),
+                    Expr::Const(Value::Int8(0)),
+                    field("is_called", crate::funcs::misc::sequence_is_called),
+                ];
+                let mut cols = cols;
+                if let Some(a) = alias {
+                    apply_column_aliases(&mut cols, &a.columns, &a.name)?;
+                }
+                Ok((Rel::Values { rows: vec![row] }, Scope::from_cols(cols)))
             }
             Some(Relation::Index { .. }) => Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{base}\" is an index"))),
             None => Err(SqlError::undefined_table(&name.to_string())),

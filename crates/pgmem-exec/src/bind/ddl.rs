@@ -108,19 +108,12 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
         if table.columns.iter().any(|x| x.name == c.name) {
             return Err(SqlError::new(code::DUPLICATE_COLUMN, format!("column \"{}\" specified more than once", c.name)));
         }
-        let mut col = if let Some((ty, max)) = serial_type(&c.ty.name).filter(|_| c.ty.array_dims == 0) {
+        let mut col = if let Some((ty, _)) = serial_type(&c.ty.name).filter(|_| c.ty.array_dims == 0) {
             let seq = choose_name(catalog, &schema, &taken, default_constraint_name(&name, &[&c.name], "seq"));
             taken.push(seq.clone());
-            sequences.push(SequenceDef {
-                oid: 0,
-                schema: schema.clone(),
-                name: seq.clone(),
-                start: 1,
-                increment: 1,
-                min: 1,
-                max,
-                owned_by: Some((name.clone(), c.name.clone())),
-            });
+            let mut def = SequenceDef::new(schema.clone(), seq.clone(), ty.clone());
+            def.owned_by = Some((name.clone(), c.name.clone()));
+            sequences.push(def);
             let mut col = ColumnDef::new(c.name.clone(), ty);
             col.not_null = true;
             col.default = Some(nextval_default(&schema, &seq));
@@ -140,35 +133,17 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
                 ir::ColumnConstraintKind::Null => {}
                 ir::ColumnConstraintKind::Default(e) => col.default = Some(e.clone()),
                 ir::ColumnConstraintKind::Generated(e) => col.generated = Some(e.clone()),
-                ir::ColumnConstraintKind::Identity { always } => {
+                ir::ColumnConstraintKind::Identity { always, options } => {
                     if col.default.is_some() && serial_type(&c.ty.name).is_some() {
                         return Err(SqlError::syntax(format!(
                             "both default and identity specified for column \"{}\" of table \"{name}\"",
                             c.name
                         )));
                     }
-                    let max = match col.ty {
-                        Type::Int2 => i64::from(i16::MAX),
-                        Type::Int4 => i64::from(i32::MAX),
-                        Type::Int8 => i64::MAX,
-                        _ => {
-                            return Err(SqlError::datatype_mismatch(
-                                "identity column type must be smallint, integer, or bigint".to_string(),
-                            ));
-                        }
-                    };
-                    let seq = choose_name(catalog, &schema, &taken, default_constraint_name(&name, &[&c.name], "seq"));
-                    taken.push(seq.clone());
-                    sequences.push(SequenceDef {
-                        oid: 0,
-                        schema: schema.clone(),
-                        name: seq.clone(),
-                        start: 1,
-                        increment: 1,
-                        min: 1,
-                        max,
-                        owned_by: Some((name.clone(), c.name.clone())),
-                    });
+                    let seq = identity_sequence(catalog, &schema, &name, &c.name, &col.ty, options, &mut taken)?;
+                    let seq_name = seq.name.clone();
+                    sequences.push(seq);
+                    let seq = seq_name;
                     col.identity = Some(if *always { Identity::Always } else { Identity::ByDefault });
                     col.not_null = true;
                     col.default = Some(nextval_default(&schema, &seq));
@@ -194,19 +169,9 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
         }
     }
     // Validate expressions now that every column is known.
-    for col in &table.columns {
-        if let Some(g) = &col.generated {
-            check_expr_binds(b, &table, g, Clause::Check)?;
-            if let ir::Expr::Column(_) = g {}
-            for other in &table.columns {
-                if other.generated.is_some() && other.name != col.name && expr_mentions(g, &other.name) {
-                    return Err(SqlError::syntax(format!(
-                        "cannot use generated column \"{}\" in column generation expression",
-                        other.name
-                    ))
-                    .with_detail("A generated column cannot reference another generated column."));
-                }
-            }
+    for (slot, col) in table.columns.iter().enumerate() {
+        if col.generated.is_some() {
+            check_generated(b, &table, slot)?;
         }
         if let Some(d) = &col.default
             && col.identity.is_none()
@@ -246,6 +211,64 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
         table.indexes.push(idx);
     }
     Ok(Some(CreateTablePlan { table, sequences, comments: likes.comments }))
+}
+
+/// Functions whose result is not immutable: a generation expression may not call them.
+const NOT_IMMUTABLE: &[&str] = &[
+    "now",
+    "current_timestamp",
+    "current_date",
+    "current_time",
+    "localtime",
+    "localtimestamp",
+    "clock_timestamp",
+    "statement_timestamp",
+    "transaction_timestamp",
+    "timeofday",
+    "random",
+    "random_normal",
+    "gen_random_uuid",
+    "uuidv4",
+    "uuidv7",
+    "nextval",
+    "currval",
+    "lastval",
+    "setval",
+    "current_setting",
+    "current_user",
+    "session_user",
+    "current_schema",
+    "txid_current",
+    "pg_backend_pid",
+];
+
+/// A generation expression's rules: it binds against the row, reads no other generated
+/// column and is immutable.
+fn check_generated(b: &Binder, table: &TableDef, slot: usize) -> SqlResult<()> {
+    let col = &table.columns[slot];
+    let Some(g) = &col.generated else { return Ok(()) };
+    check_expr_binds(b, table, g, Clause::Check)?;
+    for other in &table.columns {
+        if other.generated.is_some() && !other.dropped && other.name != col.name && expr_mentions(g, &other.name) {
+            return Err(SqlError::new(
+                code::INVALID_OBJECT_DEFINITION,
+                format!("cannot use generated column \"{}\" in column generation expression", other.name),
+            )
+            .with_detail("A generated column cannot reference another generated column."));
+        }
+    }
+    let mut volatile = false;
+    g.walk(&mut |e| {
+        if let ir::Expr::Function(f) = e
+            && NOT_IMMUTABLE.contains(&f.name.base())
+        {
+            volatile = true;
+        }
+    });
+    if volatile {
+        return Err(SqlError::new(code::INVALID_OBJECT_DEFINITION, "generation expression is not immutable"));
+    }
+    Ok(())
 }
 
 fn expr_mentions(e: &ir::Expr, column: &str) -> bool {
@@ -606,13 +629,34 @@ pub fn bind_create_sequence(b: &Binder, cs: &ir::CreateSequence) -> SqlResult<Op
         }
         return Err(SqlError::new(code::DUPLICATE_TABLE, format!("relation \"{name}\" already exists")));
     }
-    let increment = cs.increment.unwrap_or(1);
-    if increment == 0 {
-        return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, "INCREMENT must not be zero"));
+    let mut seq = SequenceDef::new(schema.clone(), name, Type::Int8);
+    crate::sequences::apply_options(b.catalog, &mut seq, &cs.options, true)?;
+    if let Some(Some(owner)) = &cs.options.owned_by {
+        seq.owned_by = Some(crate::sequences::resolve_owner(b.catalog, &schema, owner)?);
     }
-    let (min, max) = if increment > 0 { (1, i64::MAX) } else { (i64::MIN, -1) };
-    let start = cs.start.unwrap_or(if increment > 0 { min } else { max });
-    Ok(Some(SequenceDef { oid: 0, schema, name, start, increment, min: min.min(start), max: max.max(start), owned_by: None }))
+    Ok(Some(seq))
+}
+
+/// The sequence behind identity column `column` of `table` (of type `ty`), named like
+/// Postgres does (`table_column_seq`).
+pub fn identity_sequence(
+    catalog: &Catalog,
+    schema: &str,
+    table: &str,
+    column: &str,
+    ty: &Type,
+    options: &ir::SequenceOptions,
+    taken: &mut Vec<String>,
+) -> SqlResult<SequenceDef> {
+    if !matches!(ty, Type::Int2 | Type::Int4 | Type::Int8) {
+        return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, "identity column type must be smallint, integer, or bigint"));
+    }
+    let name = choose_name(catalog, schema, taken, default_constraint_name(table, &[column], "seq"));
+    taken.push(name.clone());
+    let mut seq = SequenceDef::new(schema, name, ty.clone());
+    crate::sequences::apply_options(catalog, &mut seq, options, true)?;
+    seq.owned_by = Some((table.to_owned(), column.to_owned()));
+    Ok(seq)
 }
 
 /// Result of analyzing one ALTER TABLE action.
@@ -657,18 +701,32 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
                     format!("column \"{}\" of relation \"{tname}\" already exists", column.name),
                 ));
             }
-            // Analyze the column through a one-column CREATE TABLE to reuse all the rules.
+            // Analyze the column through a one-column CREATE TABLE to reuse all the rules (a
+            // generation expression is checked against the whole table afterwards).
+            let mut probe_column = column.clone();
+            let generated = probe_column.constraints.iter().find_map(|c| match &c.kind {
+                ir::ColumnConstraintKind::Generated(e) => Some(e.clone()),
+                _ => None,
+            });
+            probe_column.constraints.retain(|c| !matches!(c.kind, ir::ColumnConstraintKind::Generated(_)));
             let ct = ir::CreateTable {
                 name: ir::ObjectName(vec![table.schema.clone(), format!("{tname}__pgmem_add")]),
                 if_not_exists: false,
                 temporary: false,
-                columns: vec![column.clone()],
+                columns: vec![probe_column],
                 constraints: vec![],
                 as_query: None,
                 options: ir::CreateTableOptions::default(),
             };
             let probe = bind_create_table(b, &ct)?.ok_or_else(|| SqlError::internal("ALTER TABLE ADD COLUMN analysis"))?;
             let mut col = probe.table.columns.into_iter().next().ok_or_else(|| SqlError::internal("no column"))?;
+            if generated.is_some() && col.default.is_some() {
+                return Err(SqlError::syntax(format!(
+                    "both default and generation expression specified for column \"{}\" of table \"{tname}\"",
+                    col.name
+                )));
+            }
+            col.generated.clone_from(&generated);
             let mut sequences = probe.sequences;
             for s in &mut sequences {
                 s.name = s.name.replacen(&format!("{tname}__pgmem_add"), &tname, 1);
@@ -699,6 +757,7 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
             }
             def.columns.push(col);
             let slot = def.columns.len() - 1;
+            check_generated(b, &def, slot)?;
             let mut taken = Vec::new();
             for con in &column.constraints {
                 let kind = match &con.kind {
@@ -714,7 +773,7 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
                 };
                 add_constraint(b, &mut def, con.name.clone(), &kind, true, &mut taken, con.timing)?;
             }
-            let validate = if needs_rewrite { Validation::ConvertColumn { slot, using: None } } else { Validation::None };
+            let validate = if needs_rewrite { Validation::ConvertColumn { slot, using: generated } } else { Validation::None };
             Ok(AlterOutcome::Replace { def: Box::new(def), rename_from: None, sequences, validate })
         }
         ir::AlterTableAction::DropColumn { name, if_exists, cascade } => {
@@ -744,6 +803,40 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
                 return Err(SqlError::new(code::DUPLICATE_COLUMN, format!("column \"{new}\" of relation \"{tname}\" already exists")));
             }
             def.columns[slot].name = new.clone();
+            Ok(AlterOutcome::Replace { def: Box::new(def), rename_from: None, sequences: vec![], validate: Validation::None })
+        }
+        ir::AlterTableAction::AddIdentity { .. } | ir::AlterTableAction::SetIdentity { .. } | ir::AlterTableAction::DropIdentity { .. } => {
+            Err(SqlError::internal("identity actions run in ddl::alter_identity"))
+        }
+        ir::AlterTableAction::SetExpression { column, expr } => {
+            let slot = def.column_index(column).ok_or_else(|| not_found(column))?;
+            if def.columns[slot].generated.is_none() {
+                return Err(SqlError::new(
+                    code::OBJECT_NOT_IN_PREREQUISITE_STATE,
+                    format!("column \"{column}\" of relation \"{tname}\" is not a generated column"),
+                ));
+            }
+            def.columns[slot].generated = Some(expr.clone());
+            check_generated(b, &def, slot)?;
+            Ok(AlterOutcome::Replace {
+                def: Box::new(def),
+                rename_from: None,
+                sequences: vec![],
+                validate: Validation::ConvertColumn { slot, using: Some(expr.clone()) },
+            })
+        }
+        ir::AlterTableAction::DropExpression { column, if_exists } => {
+            let slot = def.column_index(column).ok_or_else(|| not_found(column))?;
+            if def.columns[slot].generated.is_none() {
+                if *if_exists {
+                    return Ok(AlterOutcome::Nothing);
+                }
+                return Err(SqlError::new(
+                    code::OBJECT_NOT_IN_PREREQUISITE_STATE,
+                    format!("column \"{column}\" of relation \"{tname}\" is not a generated column"),
+                ));
+            }
+            def.columns[slot].generated = None;
             Ok(AlterOutcome::Replace { def: Box::new(def), rename_from: None, sequences: vec![], validate: Validation::None })
         }
         ir::AlterTableAction::RenameConstraint { old, new } => {

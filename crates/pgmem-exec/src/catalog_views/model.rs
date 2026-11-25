@@ -47,13 +47,7 @@ pub fn not_null_constraint_name(table: &str, column: &str) -> String {
 
 /// The data type a sequence was declared with, recovered from its range.
 pub fn sequence_type(seq: &SequenceDef) -> Type {
-    if seq.max <= i64::from(i16::MAX) && seq.min >= i64::from(i16::MIN) {
-        Type::Int2
-    } else if seq.max <= i64::from(i32::MAX) && seq.min >= i64::from(i32::MIN) {
-        Type::Int4
-    } else {
-        Type::Int8
-    }
+    seq.data_type.clone()
 }
 
 /// One attribute of a relation (`pg_attribute`), user columns only (attnum > 0).

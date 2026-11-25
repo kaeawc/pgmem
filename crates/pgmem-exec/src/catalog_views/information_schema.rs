@@ -324,7 +324,7 @@ fn column_row(ctx: &EvalCtx, m: &Model, s: &Spec, schema: &str, rel: &str, table
                     ("identity_increment", txt(seq.increment.to_string())),
                     ("identity_maximum", txt(seq.max.to_string())),
                     ("identity_minimum", txt(seq.min.to_string())),
-                    ("identity_cycle", txt("NO")),
+                    ("identity_cycle", txt(if seq.cycle { "YES" } else { "NO" })),
                 ]);
             }
         }
@@ -561,6 +561,7 @@ fn sequences(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("minimum_value", txt(seq.min.to_string())),
                 ("maximum_value", txt(seq.max.to_string())),
                 ("increment", txt(seq.increment.to_string())),
+                ("cycle_option", txt(if seq.cycle { "YES" } else { "NO" })),
             ])
         })
         .collect())

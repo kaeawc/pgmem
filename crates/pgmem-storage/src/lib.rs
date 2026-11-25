@@ -62,10 +62,12 @@ impl Isolation {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 struct SeqState {
-    /// The last value handed out, if any.
-    last: Option<i64>,
+    /// `last_value`: the last value handed out, or the next one when not `called`.
+    value: i64,
+    /// `is_called`.
+    called: bool,
 }
 
 /// The shared database. One per pgmem server.
@@ -170,15 +172,21 @@ impl Database {
     /// `nextval`: non-transactional, so a rolled-back transaction leaves a gap.
     pub fn nextval(&self, seq: &SequenceDef) -> SqlResult<i64> {
         let mut seqs = lock(&self.sequences);
-        let st = seqs.entry(seq.oid).or_default();
-        let next = match st.last {
-            None => seq.start,
-            Some(last) => last.checked_add(seq.increment).ok_or_else(|| reached_limit(seq))?,
+        let st = seqs.entry(seq.oid).or_insert(SeqState { value: seq.start, called: false });
+        let next = if st.called { st.value.checked_add(seq.increment) } else { Some(st.value) };
+        let next = match next {
+            Some(n) if (seq.min..=seq.max).contains(&n) => n,
+            // CYCLE wraps to the other end.
+            _ if seq.cycle => {
+                if seq.increment > 0 {
+                    seq.min
+                } else {
+                    seq.max
+                }
+            }
+            _ => return Err(reached_limit(seq)),
         };
-        if next > seq.max || next < seq.min {
-            return Err(reached_limit(seq));
-        }
-        st.last = Some(next);
+        *st = SeqState { value: next, called: true };
         Ok(next)
     }
 
@@ -190,28 +198,35 @@ impl Database {
                 format!("setval: value {value} is out of bounds for sequence \"{}\" ({}..{})", seq.name, seq.min, seq.max),
             ));
         }
-        let mut seqs = lock(&self.sequences);
-        let st = seqs.entry(seq.oid).or_default();
-        st.last = if is_called { Some(value) } else { value.checked_sub(seq.increment) };
+        lock(&self.sequences).insert(seq.oid, SeqState { value, called: is_called });
         Ok(value)
     }
 
     /// The sequence's last value (`pg_sequences.last_value`), if it was ever used.
     pub fn sequence_last_value(&self, seq: &SequenceDef) -> Option<i64> {
-        lock(&self.sequences).get(&seq.oid).and_then(|s| s.last)
+        lock(&self.sequences).get(&seq.oid).filter(|s| s.called).map(|s| s.value)
     }
 
-    /// Resets a sequence to its start (`TRUNCATE ... RESTART IDENTITY`, `ALTER SEQUENCE ... RESTART`).
-    /// Returns its previous last value.
-    pub fn reset_sequence(&self, seq: &SequenceDef) -> Option<i64> {
-        lock(&self.sequences).remove(&seq.oid).and_then(|s| s.last)
+    /// `SELECT last_value, is_called FROM seq`.
+    pub fn sequence_state(&self, seq: &SequenceDef) -> (i64, bool) {
+        lock(&self.sequences).get(&seq.oid).map_or((seq.start, false), |s| (s.value, s.called))
     }
 
-    fn restore_sequence(&self, oid: Oid, last: Option<i64>) {
+    /// Restarts a sequence at `at` (its start when None): the next nextval returns it.
+    /// Returns its previous state.
+    fn restart_sequence(&self, seq: &SequenceDef, at: Option<i64>) -> Option<SeqState> {
         let mut seqs = lock(&self.sequences);
-        match last {
-            Some(v) => {
-                seqs.insert(oid, SeqState { last: Some(v) });
+        match at {
+            Some(value) => seqs.insert(seq.oid, SeqState { value, called: false }),
+            None => seqs.remove(&seq.oid),
+        }
+    }
+
+    fn restore_sequence(&self, oid: Oid, state: Option<SeqState>) {
+        let mut seqs = lock(&self.sequences);
+        match state {
+            Some(st) => {
+                seqs.insert(oid, st);
             }
             None => {
                 seqs.remove(&oid);
@@ -271,7 +286,7 @@ struct Savepoint {
 #[derive(Debug)]
 struct SeqUndo {
     db: Arc<Database>,
-    entries: Vec<(Oid, Option<i64>)>,
+    entries: Vec<(Oid, Option<SeqState>)>,
 }
 
 impl SeqUndo {
@@ -340,8 +355,15 @@ impl Txn {
 
     /// Resets a sequence to its start, undone if the transaction (or the enclosing savepoint)
     /// rolls back.
+    /// Resets a sequence to its start (`TRUNCATE ... RESTART IDENTITY`, `ALTER SEQUENCE ...
+    /// RESTART`), undone if the transaction rolls back.
     pub fn reset_sequence(&mut self, seq: &SequenceDef) {
-        let prev = self.db.reset_sequence(seq);
+        self.restart_sequence(seq, None);
+    }
+
+    /// `ALTER SEQUENCE ... RESTART [WITH at]`.
+    pub fn restart_sequence(&mut self, seq: &SequenceDef, at: Option<i64>) {
+        let prev = self.db.restart_sequence(seq, at);
         self.seq_undo.entries.push((seq.oid, prev));
     }
 
