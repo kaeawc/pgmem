@@ -149,6 +149,17 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
             crate::ddl_views::refresh_matview(name, *concurrently, *with_data, txn, env, state)
         }
         Statement::RenameIndex { name, new_name, if_exists } => rename_index(name, new_name, *if_exists, txn),
+        Statement::CreateRole { name, options, if_not_exists } => crate::roles::create_role(name, options, *if_not_exists, txn, env),
+        Statement::AlterRole { name, action } => crate::roles::alter_role(name, action, txn, env),
+        Statement::DropRole { names, if_exists } => crate::roles::drop_role(names, *if_exists, txn, env),
+        Statement::Grant(g) => crate::roles::grant(g, txn, env),
+        Statement::GrantRole { roles, members, admin, revoke } => crate::roles::grant_role(roles, members, *admin, *revoke, txn, env),
+        Statement::AlterDefaultPrivileges { schemas, kind, grant } => {
+            crate::roles::alter_default_privileges(schemas, *kind, grant, txn, env)
+        }
+        Statement::DropOwned { roles, .. } => crate::roles::drop_owned(roles, txn, env),
+        Statement::ReassignOwned { roles, to } => crate::roles::reassign_owned(roles, to, txn, env),
+        Statement::AlterOwner { object, name, owner } => crate::roles::alter_owner(*object, name, owner, txn, env),
         Statement::CreateFunction(cf) => crate::functions::create_function(cf, txn),
         Statement::DropFunction { items, if_exists, cascade, kind } => {
             crate::functions::drop_function(items, *if_exists, *cascade, *kind, txn)
@@ -232,6 +243,10 @@ pub(crate) fn alter_table_action(
 ) -> SqlResult<QualName> {
     let table = txn.catalog().table_q(current).cloned().ok_or_else(|| SqlError::undefined_table(&current.name))?;
     if crate::ddl_sequences::alter_identity(txn, &table, action)? {
+        return Ok(current.clone());
+    }
+    if let ir::AlterTableAction::OwnerTo(owner) = action {
+        crate::roles::set_owner(txn, env, table.oid, owner)?;
         return Ok(current.clone());
     }
     if let ir::AlterTableAction::EnableTrigger { name, enabled } = action {

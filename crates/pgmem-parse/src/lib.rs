@@ -14,6 +14,7 @@ mod dml;
 mod expr;
 mod funcddl;
 mod query;
+mod roles;
 mod search_cycle;
 mod sqljson;
 mod typeddl;
@@ -271,6 +272,7 @@ fn lower_parsed(p: Parsed) -> SqlResult<Statement> {
         Parsed::Sql(s) => lower_statement(*s),
         Parsed::TypeDdl(t) => typeddl::lower(*t),
         Parsed::FuncDdl(f) => funcddl::lower(*f),
+        Parsed::Role(r) => roles::lower(*r),
         Parsed::Utility(u) => utility::lower(*u),
         Parsed::Schema(s, elements) => {
             let sq::Statement::CreateSchema { schema_name, if_not_exists, .. } = *s else {
@@ -319,6 +321,7 @@ enum Parsed {
     Sql(Box<sq::Statement>),
     TypeDdl(Box<typeddl::TypeDdl>),
     FuncDdl(Box<funcddl::FuncDdl>),
+    Role(Box<roles::RoleStmt>),
     Utility(Box<utility::Utility>),
     /// `CREATE SCHEMA ...` followed by its schema elements.
     Schema(Box<sq::Statement>, Vec<Parsed>),
@@ -349,6 +352,11 @@ fn parse_statements(sql: &str) -> Result<Vec<Parsed>, ParserError> {
         }
         if let Some(f) = funcddl::try_parse(&mut p)? {
             out.push(Parsed::FuncDdl(Box::new(f)));
+            expecting_delimiter = true;
+            continue;
+        }
+        if let Some(r) = roles::try_parse(&mut p)? {
+            out.push(Parsed::Role(Box::new(r)));
             expecting_delimiter = true;
             continue;
         }
@@ -1434,6 +1442,19 @@ fn lower_set(set: sq::Set) -> SqlResult<Statement> {
             let (isolation, read_only) = transaction_modes(&modes);
             Statement::Transaction(TransactionStmt::SetTransaction { isolation, read_only })
         }
+        sq::Set::SetRole { context_modifier, role_name } => Statement::Set {
+            name: "role".into(),
+            value: vec![role_name.as_ref().map_or_else(|| "none".to_owned(), ident)],
+            local: matches!(context_modifier, Some(sq::ContextModifier::Local)),
+        },
+        sq::Set::SetSessionAuthorization(p) => Statement::Set {
+            name: "session_authorization".into(),
+            value: vec![match p.kind {
+                sq::SetSessionAuthorizationParamKind::Default => "default".to_owned(),
+                sq::SetSessionAuthorizationParamKind::User(u) => ident(&u),
+            }],
+            local: matches!(p.scope, sq::ContextModifier::Local),
+        },
         _ => Statement::NoOp { tag: "SET".into() },
     })
 }

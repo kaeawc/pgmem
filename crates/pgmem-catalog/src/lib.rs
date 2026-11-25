@@ -11,6 +11,9 @@ use pgmem_types::{SqlError, SqlResult, Type, Value, code};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+mod roles;
+pub use roles::{DefaultPrivilege, Grant, GrantObject, RoleDef};
+
 pub type Oid = u32;
 
 /// The schema every database starts with, first on the default `search_path` after `$user`.
@@ -572,6 +575,14 @@ pub struct Catalog {
     functions: BTreeMap<Oid, Arc<FunctionDef>>,
     /// Triggers by OID.
     triggers: BTreeMap<Oid, Arc<TriggerDef>>,
+    /// Roles created with CREATE ROLE (the session user and predefined roles are implicit).
+    roles: BTreeMap<String, Arc<RoleDef>>,
+    /// (role, member, admin option).
+    members: Vec<(String, String, bool)>,
+    grants: Vec<Grant>,
+    default_privileges: Vec<DefaultPrivilege>,
+    /// Object owners other than the bootstrap superuser, by OID.
+    owners: BTreeMap<Oid, String>,
     /// `COMMENT ON` text by (classoid, objoid, objsubid), as in `pg_description`.
     comments: BTreeMap<(Oid, Oid, i32), String>,
     next_oid: Oid,
@@ -603,6 +614,11 @@ impl Catalog {
             types: BTreeMap::new(),
             functions: BTreeMap::new(),
             triggers: BTreeMap::new(),
+            roles: BTreeMap::new(),
+            members: Vec::new(),
+            grants: Vec::new(),
+            default_privileges: Vec::new(),
+            owners: BTreeMap::new(),
             comments: BTreeMap::new(),
             next_oid: FIRST_USER_OID,
         }
@@ -1062,6 +1078,8 @@ impl Catalog {
 
     pub fn drop_function(&mut self, oid: Oid) -> Option<Arc<FunctionDef>> {
         self.triggers.retain(|_, t| t.function != oid);
+        self.grants.retain(|g| g.object != GrantObject::Function(oid));
+        self.owners.remove(&oid);
         self.functions.remove(&oid)
     }
 
@@ -1142,6 +1160,8 @@ impl Catalog {
     pub fn drop_table(&mut self, name: &QualName) -> Option<Arc<TableDef>> {
         let dropped = self.tables.remove(name)?;
         self.triggers.retain(|_, t| t.table != dropped.oid);
+        self.grants.retain(|g| g.object != GrantObject::Relation(dropped.oid));
+        self.owners.remove(&dropped.oid);
         // Sequences owned by the table's columns go with it.
         self.sequences.retain(|_, s| s.schema != name.schema || s.owned_by.as_ref().is_none_or(|(t, _)| *t != name.name));
         Some(dropped)
@@ -1162,6 +1182,8 @@ impl Catalog {
     pub fn drop_view(&mut self, name: &QualName) -> Option<Arc<ViewDef>> {
         let dropped = self.views.remove(name)?;
         self.triggers.retain(|_, t| t.table != dropped.oid);
+        self.grants.retain(|g| g.object != GrantObject::Relation(dropped.oid));
+        self.owners.remove(&dropped.oid);
         Some(dropped)
     }
 

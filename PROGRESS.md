@@ -8,10 +8,10 @@ and what comes next. Updated with every PR.
 | Metric | Value | How it is measured |
 |---|---|---|
 | pgmem-go parity | **564 / 564** Go tests ported | `scripts/parity.py check` ([PARITY.md](PARITY.md)) |
-| Integration suite on pgmem | **636 / 636** pass | `cargo nextest run -p pgmem --test it` |
-| Integration suite on real PostgreSQL 18 | **636 / 636** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
+| Integration suite on pgmem | **637 / 637** pass | `cargo nextest run -p pgmem --test it` |
+| Integration suite on real PostgreSQL 18 | **637 / 637** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
 | Go pgx example suites (sqlc) against the Rust binary | **27 / 27** pass | `make examples` (CI `pgx-examples`) |
-| **SQL conformance corpus** (3309 records, 9 areas) | **3240 / 3309 (97.9%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
+| **SQL conformance corpus** (3309 records, 9 areas) | **3265 / 3309 (98.7%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
 
 ### Conformance history
 
@@ -43,7 +43,8 @@ and what comes next. Updated with every PR.
 | 2026-11-25 | #129 sequence parameters and ALTER SEQUENCE, identity options and ALTER ... IDENTITY, generated column rules | 564/564 | 3130/3309 (94.6%) |
 | 2026-11-25 | #130 range and multirange types, EXCLUDE constraints, WITHOUT OVERLAPS keys | 564/564 | 3165/3309 (95.6%) |
 | 2026-11-25 | #131 array lower bounds, bit strings, money, inet/cidr/macaddr, pretty deparse | 564/564 | 3183/3309 (96.2%) |
-| 2026-11-25 | SQL and PL/pgSQL functions and procedures, DO, CALL, triggers | 564/564 | 3240/3309 (97.9%) |
+| 2026-11-25 | #132 SQL and PL/pgSQL functions and procedures, DO, CALL, triggers | 564/564 | 3240/3309 (97.9%) |
+| 2026-11-25 | roles, memberships, GRANT / REVOKE with enforcement, default privileges, owners | 564/564 | 3265/3309 (98.7%) |
 
 ## Supported
 
@@ -154,6 +155,15 @@ and what comes next. Updated with every PR.
   `pg_trigger`, `information_schema.routines` / `parameters` / `triggers`,
   `pg_get_function_arguments` / `_result` / `_identity_arguments`, `pg_get_functiondef`,
   `pg_get_triggerdef`.
+- **Roles and privileges**: CREATE / ALTER (options, RENAME, SET / RESET) / DROP ROLE / USER /
+  GROUP, memberships (`IN ROLE`, `GRANT role TO`, REVOKE) with `pg_has_role`; GRANT / REVOKE
+  (ALL or listed privileges, WITH GRANT OPTION, GRANT OPTION FOR) on tables, sequences, schemas,
+  functions, types, `ALL TABLES / SEQUENCES / FUNCTIONS IN SCHEMA`, PUBLIC; `ALTER DEFAULT
+  PRIVILEGES`; ownership (`OWNER TO`, REASSIGN / DROP OWNED); SET ROLE / RESET ROLE / SET SESSION
+  AUTHORIZATION with `current_user`; privileges enforced for non-superusers (42501) on SELECT /
+  INSERT / UPDATE / DELETE / TRUNCATE; `has_table_privilege`, `has_schema_privilege`,
+  `has_sequence_privilege`; DROP ROLE dependency errors (2BP01); `pg_roles`, `pg_authid`,
+  `information_schema.table_privileges` / `role_table_grants`.
 - **Transactions**: BEGIN/COMMIT/ROLLBACK [AND [NO] CHAIN], savepoints, failed-transaction state
   (25P02), READ COMMITTED (per-statement snapshots) and REPEATABLE READ/SERIALIZABLE
   (transaction snapshot; updating, deleting or locking a row changed since the snapshot fails
@@ -209,6 +219,9 @@ and what comes next. Updated with every PR.
   values read back are the same.
 - WITH LOCAL CHECK OPTION checks like CASCADED; views with INSTEAD OF triggers or rules are not
   supported (no triggers yet).
+- The session user is always a superuser (no login authentication). Column-level privileges,
+  row-level security and privileges on views' underlying tables (checked as the view owner) are
+  not modelled.
 - Functions called from a query (and BEFORE row triggers) run read-only: data-modifying
   statements in them fail (0A000); CALL, DO and AFTER / statement triggers may modify data.
   Set-returning user functions work in FROM, not in the select list. No transaction control

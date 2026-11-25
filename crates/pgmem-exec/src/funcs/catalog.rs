@@ -61,6 +61,165 @@ fn model<'a>(ctx: &'a EvalCtx) -> Model<'a> {
     Model::new(ctx.txn.catalog(), ctx.env)
 }
 
+/// `pg_get_function_*` / `pg_get_functiondef` / `pg_get_triggerdef`.
+fn routine_text_function(name: &str, n: usize) -> SqlResult<Option<Resolved>> {
+    use Type::{Bool, Oid, Text};
+    match name {
+        "pg_get_triggerdef" if n == 1 || n == 2 => resolved(
+            strict("pg_get_triggerdef", |a, c| {
+                let Some(o) = oid_arg(&a[0]) else { return Ok(Value::Null) };
+                let cat = c.txn.catalog();
+                Ok(cat
+                    .triggers()
+                    .find(|t| t.oid == o)
+                    .map_or(Value::Null, |t| Value::Text(crate::catalog_views::routines::trigger_def(cat, t))))
+            }),
+            [Oid, Bool][..n].to_vec(),
+            Text,
+        ),
+        "pg_get_triggerdef" => Ok(None),
+        _ if n != 1 => Ok(None),
+        _ => {
+            let f = match name {
+                "pg_get_function_arguments" => strict("pg_get_function_arguments", |a, c| function_text(a, c, FnText::Arguments)),
+                "pg_get_function_identity_arguments" => {
+                    strict("pg_get_function_identity_arguments", |a, c| function_text(a, c, FnText::Identity))
+                }
+                "pg_get_function_result" => strict("pg_get_function_result", |a, c| function_text(a, c, FnText::Result)),
+                _ => strict("pg_get_functiondef", |a, c| function_text(a, c, FnText::Definition)),
+            };
+            resolved(f, vec![Oid], Text)
+        }
+    }
+}
+
+fn privilege_function(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
+    let targets = args.iter().map(|t| if *t == Type::Unknown { Type::Text } else { t.clone() }).collect();
+    let f = match name {
+        "has_table_privilege" => strict("has_table_privilege", |a, c| privilege_check(a, c, PrivKind::Table)),
+        "has_sequence_privilege" => strict("has_sequence_privilege", |a, c| privilege_check(a, c, PrivKind::Sequence)),
+        "has_schema_privilege" => strict("has_schema_privilege", |a, c| privilege_check(a, c, PrivKind::Schema)),
+        _ => strict("pg_has_role", |a, c| privilege_check(a, c, PrivKind::Role)),
+    };
+    resolved(f, targets, Type::Bool)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PrivKind {
+    Table,
+    Sequence,
+    Schema,
+    Role,
+}
+
+/// A role argument: a name, or an OID of the session user / a created role.
+fn role_arg(v: &Value, ctx: &EvalCtx) -> SqlResult<String> {
+    let cat = ctx.txn.catalog();
+    if let Some(o) = oid_arg(v).filter(|_| !matches!(v, Value::Text(_))) {
+        if o == 10 {
+            return Ok(ctx.env.user.clone());
+        }
+        return cat
+            .roles()
+            .find(|r| r.oid == o)
+            .map(|r| r.name.clone())
+            .ok_or_else(|| SqlError::new(code::UNDEFINED_OBJECT, format!("role with OID {o} does not exist")));
+    }
+    let name = text_arg(v).to_owned();
+    if !crate::roles::role_exists(cat, ctx.env, &name) && name != "public" {
+        return Err(SqlError::new(code::UNDEFINED_OBJECT, format!("role \"{name}\" does not exist")));
+    }
+    Ok(name)
+}
+
+/// `has_table_privilege([user,] table, 'SELECT, INSERT [WITH GRANT OPTION]')` and its
+/// schema / sequence / role siblings: true if any listed privilege is held.
+fn privilege_check(a: &[Value], ctx: &EvalCtx, kind: PrivKind) -> SqlResult<Value> {
+    let (user, object, privs) = match a {
+        [o, p] => (crate::roles::current_role(ctx.env), o, p),
+        [u, o, p] => (role_arg(u, ctx)?, o, p),
+        _ => return Ok(Value::Null),
+    };
+    let cat = ctx.txn.catalog();
+    let raw: Vec<String> = text_arg(privs).split(',').map(|w| w.trim().to_owned()).collect();
+    let words: Vec<String> = raw
+        .iter()
+        .map(|w| w.to_lowercase().trim_end_matches(" with grant option").trim_end_matches(" with admin option").trim().to_owned())
+        .collect();
+    let unrecognized = |i: usize| SqlError::new(code::INVALID_PARAMETER_VALUE, format!("unrecognized privilege type: \"{}\"", raw[i]));
+    if kind == PrivKind::Role {
+        let role = role_arg(object, ctx)?;
+        for (i, w) in words.iter().enumerate() {
+            if !matches!(w.as_str(), "member" | "usage" | "set") {
+                return Err(unrecognized(i));
+            }
+        }
+        let member = crate::roles::is_superuser(cat, ctx.env, &user) || cat.roles_of(&user).contains(&role);
+        return Ok(Value::Bool(member));
+    }
+    let (object, valid) = match kind {
+        PrivKind::Schema => {
+            let s = text_arg(object).to_owned();
+            let s = match oid_arg(object).filter(|_| !matches!(object, Value::Text(_))) {
+                Some(o) => cat.schema_by_oid(o).map(|sc| sc.name.clone()).unwrap_or(s),
+                None => s,
+            };
+            if cat.schema(&s).is_none() && !pgmem_catalog::is_system_schema(&s) {
+                return Err(pgmem_catalog::undefined_schema(&s));
+            }
+            (pgmem_catalog::GrantObject::Schema(s), "usage create")
+        }
+        _ => {
+            let rel = match object {
+                Value::Text(t) => crate::reg::relation_from_text(t, cat)?,
+                other => cat.relation_by_oid(oid_arg(other).unwrap_or(0)),
+            };
+            let Some(rel) = rel else {
+                // System catalogs are readable by everyone.
+                let system = match object {
+                    Value::Text(t) => crate::catalog_views::system_relation(None, &crate::funcs::misc::parse_qualified(t)).is_some(),
+                    other => crate::catalog_views::system_relation_by_oid(oid_arg(other).unwrap_or(0)).is_some(),
+                };
+                if system {
+                    return Ok(Value::Bool(words.iter().all(|w| w == "select")));
+                }
+                return Err(match object {
+                    Value::Text(t) => SqlError::undefined_table(t),
+                    other => {
+                        SqlError::new(code::UNDEFINED_TABLE, format!("relation with OID {} does not exist", oid_arg(other).unwrap_or(0)))
+                    }
+                });
+            };
+            let valid = if kind == PrivKind::Sequence {
+                "usage select update"
+            } else {
+                "select insert update delete truncate references trigger maintain"
+            };
+            (pgmem_catalog::GrantObject::Relation(rel.oid()), valid)
+        }
+    };
+    let mut held = false;
+    for (i, w) in words.iter().enumerate() {
+        if !valid.split(' ').any(|v| v == w) {
+            return Err(unrecognized(i));
+        }
+        let letter = match w.as_str() {
+            "select" => 'r',
+            "insert" => 'a',
+            "update" => 'w',
+            "delete" => 'd',
+            "truncate" => 'D',
+            "references" => 'x',
+            "trigger" => 't',
+            "maintain" => 'm',
+            "usage" => 'U',
+            _ => 'C',
+        };
+        held |= crate::roles::has_privilege(cat, ctx.env, &user, &object, letter);
+    }
+    Ok(Value::Bool(held))
+}
+
 #[derive(Clone, Copy)]
 enum FnText {
     Arguments,
@@ -249,29 +408,11 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
     let name_arg = Type::Name;
     match name {
         "format_type" if n == 2 => resolved(lenient("format_type", format_type_fn), vec![Oid, Int4], Text),
-        "pg_get_function_arguments" | "pg_get_function_identity_arguments" | "pg_get_function_result" | "pg_get_functiondef" if n == 1 => {
-            let f = match name {
-                "pg_get_function_arguments" => strict("pg_get_function_arguments", |a, c| function_text(a, c, FnText::Arguments)),
-                "pg_get_function_identity_arguments" => {
-                    strict("pg_get_function_identity_arguments", |a, c| function_text(a, c, FnText::Identity))
-                }
-                "pg_get_function_result" => strict("pg_get_function_result", |a, c| function_text(a, c, FnText::Result)),
-                _ => strict("pg_get_functiondef", |a, c| function_text(a, c, FnText::Definition)),
-            };
-            resolved(f, vec![Oid], Text)
-        }
-        "pg_get_triggerdef" if n == 1 || n == 2 => resolved(
-            strict("pg_get_triggerdef", |a, c| {
-                let Some(o) = oid_arg(&a[0]) else { return Ok(Value::Null) };
-                let cat = c.txn.catalog();
-                Ok(cat
-                    .triggers()
-                    .find(|t| t.oid == o)
-                    .map_or(Value::Null, |t| Value::Text(crate::catalog_views::routines::trigger_def(cat, t))))
-            }),
-            [Oid, Bool][..n].to_vec(),
-            Text,
-        ),
+        "pg_get_function_arguments"
+        | "pg_get_function_identity_arguments"
+        | "pg_get_function_result"
+        | "pg_get_functiondef"
+        | "pg_get_triggerdef" => routine_text_function(name, n),
         "pg_get_constraintdef" if n == 1 || n == 2 => {
             resolved(strict("pg_get_constraintdef", constraintdef_fn), [Oid, Bool][..n].to_vec(), Text)
         }
@@ -304,6 +445,9 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
             Bool,
         ),
         "pg_type_is_visible" | "pg_function_is_visible" if n == 1 => resolved(strict("pg_type_is_visible", always_true), vec![Oid], Bool),
+        "has_table_privilege" | "has_schema_privilege" | "has_sequence_privilege" | "pg_has_role" if n == 2 || n == 3 => {
+            privilege_function(name, args)
+        }
         "has_table_privilege"
         | "has_schema_privilege"
         | "has_database_privilege"

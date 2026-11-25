@@ -42,30 +42,5 @@ session/extensions.slt:78c914c21f3e5d24  # SELECT installed_version IS NOT NULL 
 session/extensions.slt:6095da0ee328ac66  # SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'btree_gist'
 session/extensions.slt:b5188c728c7d0a7e  # DROP EXTENSION citext
 session/extensions.slt:adf882d006810dbf  # CREATE EXTENSION no_such_extension
-session/roles.slt:01fc7c3b702d88ac  # DROP ROLE IF EXISTS conf_sess_reader
-session/roles.slt:b8c800a5acda0e0c  # DROP ROLE IF EXISTS conf_sess_writer
-session/roles.slt:dfbf7fb3babe5bd0  # DROP ROLE IF EXISTS conf_sess_login
-session/roles.slt:639cc2c6696c661a  # CREATE ROLE conf_sess_reader
-session/roles.slt:190ff1231f4b2e5e  # CREATE ROLE conf_sess_writer NOLOGIN
-session/roles.slt:f8014ca71c49d476  # CREATE ROLE conf_sess_login WITH LOGIN PASSWORD 'secret' CONNECTION LIMIT 5 VALID UNTIL 'infinity'
-session/roles.slt:639cc2c6696c661a#2  # CREATE ROLE conf_sess_reader
-session/roles.slt:27f2652dab3d2b2a  # SELECT rolname, rolcanlogin, rolsuper, rolinherit, rolconnlimit
-session/roles.slt:e6bf20461eb46734  # ALTER ROLE conf_sess_login WITH NOLOGIN
-session/roles.slt:79c855723fcd5a76  # ALTER ROLE conf_sess_login SET search_path = public
-session/roles.slt:509f63c246dffab7  # ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO conf_sess_reader
-session/roles.slt:06ee33c783f99c6c  # SELECT has_table_privilege('conf_sess_reader', 'docs', 'SELECT'), has_table_privilege('conf_sess_reader', 'docs', 'INSERT')
-session/roles.slt:cb18faf25d529273  # SELECT privilege_type FROM information_schema.role_table_grants
-session/roles.slt:3e12e00edce14407  # SELECT has_table_privilege('conf_sess_reader', 'docs', 'SELECT')
-session/roles.slt:ade7aa7206dc0793  # GRANT SELECT ON docs TO conf_sess_nobody
-session/roles.slt:1dea9a7a11fe527c  # SET ROLE conf_sess_nobody
-session/roles.slt:cfe9c10841e246c4  # SELECT current_user
-session/roles.slt:22a2bdc3808c50f6  # SELECT * FROM docs
-session/roles.slt:4d97632e7eb3510b  # DROP ROLE conf_sess_reader
-session/roles.slt:c280e3ef40438959  # DROP OWNED BY conf_sess_reader
-session/roles.slt:4d97632e7eb3510b#2  # DROP ROLE conf_sess_reader
-session/roles.slt:c212a265a798fcdf  # DROP ROLE conf_sess_writer
-session/roles.slt:c212a265a798fcdf#2  # DROP ROLE conf_sess_writer
-session/roles.slt:4704b79a683ed8c5  # DROP ROLE conf_sess_login
-session/roles.slt:dfbf7fb3babe5bd0#2  # DROP ROLE IF EXISTS conf_sess_login
 types/casts.slt:562a638a088bc3c9  # SELECT 'pg_catalog.lower'::regproc
 types/casts.slt:fc3868fddb298ef7  # INSERT INTO c (v) VALUES (B'1'::text || 'abcd')

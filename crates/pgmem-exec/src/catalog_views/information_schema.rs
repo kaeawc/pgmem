@@ -580,26 +580,35 @@ fn sequences(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
 fn table_privileges(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let m = snapshot(ctx);
     let s = Spec::parse(TABLE_PRIVILEGES);
-    let user = &ctx.env.user;
-    let rels: Vec<(String, String)> = m
+    let rels: Vec<(u32, String, String)> = m
         .tables()
         .into_iter()
-        .map(|t| (t.schema.clone(), t.name.clone()))
-        .chain(m.views().into_iter().map(|v| (v.schema.clone(), v.name.clone())))
+        .map(|t| (t.oid, t.schema.clone(), t.name.clone()))
+        .chain(m.views().into_iter().map(|v| (v.oid, v.schema.clone(), v.name.clone())))
         .collect();
+    let row = |grantor: &str, grantee: &str, schema: &str, rel: &str, p: &str, grantable: bool| {
+        s.row(vec![
+            ("grantor", name(grantor)),
+            ("grantee", name(if grantee.is_empty() { "PUBLIC" } else { grantee })),
+            ("table_catalog", catalog_name(ctx)),
+            ("table_schema", name(schema)),
+            ("table_name", name(rel)),
+            ("privilege_type", txt(p)),
+            ("is_grantable", yes_no(grantable)),
+            ("with_hierarchy", yes_no(p == "SELECT")),
+        ])
+    };
     let mut rows = Vec::new();
-    for (schema, rel) in rels {
+    for (oid, schema, rel) in rels {
+        // The owner holds every privilege, grantable.
+        let owner = crate::roles::owner_of(m.catalog, ctx.env, oid);
         for p in ["INSERT", "SELECT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"] {
-            rows.push(s.row(vec![
-                ("grantor", name(user)),
-                ("grantee", name(user)),
-                ("table_catalog", catalog_name(ctx)),
-                ("table_schema", name(&schema)),
-                ("table_name", name(&rel)),
-                ("privilege_type", txt(p)),
-                ("is_grantable", yes_no(true)),
-                ("with_hierarchy", yes_no(p == "SELECT")),
-            ]));
+            rows.push(row(&owner, &owner, &schema, &rel, p, true));
+        }
+        for g in m.catalog.grants().iter().filter(|g| g.object == pgmem_catalog::GrantObject::Relation(oid)) {
+            for c in "arwdDxt".chars().filter(|c| g.privileges.contains(c)) {
+                rows.push(row(&g.grantor, &g.grantee, &schema, &rel, crate::roles::privilege_name(c), g.grantable.contains(&c)));
+            }
         }
     }
     Ok(rows)

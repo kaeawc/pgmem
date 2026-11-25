@@ -605,7 +605,26 @@ impl Session {
         let binder = Binder::new(&catalog, param_types);
         let top = Level::new(Scope::default());
         let ctx = Ctx::new(&top);
+        crate::roles::check_statement(stmt, &catalog, &env)?;
         let result = crate::statement::exec_statement(stmt, &binder, &ctx, txn, params, &env, &state)?;
+        // New relations: their owner (when not the session user) and default privileges.
+        let created = match stmt {
+            Statement::CreateTable(ct) => Some((&ct.name, 'r')),
+            Statement::CreateView(cv) => Some((&cv.name, 'r')),
+            Statement::CreateSequence(cs) => Some((&cs.name, 'S')),
+            _ => None,
+        };
+        if let Some((name, kind)) = created
+            && let Ok(Some(rel)) = txn.catalog().lookup_relation(name)
+            && !catalog.relation(rel.schema(), rel.name()).is_some_and(|r| r.oid() == rel.oid())
+        {
+            let role = crate::roles::current_role(&env);
+            if role != env.user {
+                txn.catalog_mut().set_owner(rel.oid(), Some(&role));
+            }
+            let schema = rel.schema().to_owned();
+            crate::roles::apply_defaults(txn, &env, rel.oid(), &schema, kind);
+        }
         if let Statement::CreateTable(ct) = stmt
             && ct.options.on_commit != ir::OnCommit::PreserveRows
             && let Ok(Some(Relation::Table(t))) = txn.catalog().lookup_relation(&ct.name)
@@ -976,6 +995,23 @@ impl Session {
             "session characteristics as transaction isolation level" => "default_transaction_isolation".to_owned(),
             _ => name,
         };
+        if name == "role" || name == "session_authorization" {
+            let target = value.join(", ");
+            let catalog = self.catalog_snapshot();
+            let env = self.env();
+            if name == "role" {
+                crate::roles::check_set_role(&catalog, &env, &target)?;
+                let stored =
+                    if target.eq_ignore_ascii_case("none") || target.eq_ignore_ascii_case("default") { "none".to_owned() } else { target };
+                self.store_setting("role", stored, local);
+            } else {
+                if !target.eq_ignore_ascii_case("default") && !crate::roles::role_exists(&catalog, &env, &target) {
+                    return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, format!("role \"{target}\" does not exist")));
+                }
+                self.store_setting("role", "none".to_owned(), local);
+            }
+            return Ok(QueryResult { tag: "SET".into(), ..Default::default() });
+        }
         if name == "transaction_isolation" {
             let level = match value.join(", ").to_ascii_lowercase().as_str() {
                 "repeatable read" => ir::IsolationLevel::RepeatableRead,
