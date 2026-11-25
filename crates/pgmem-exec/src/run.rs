@@ -20,6 +20,37 @@ pub fn run(rel: &Rel, ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             .into_iter()
             .map(|(_, stored)| slots.iter().zip(missing).map(|(s, m)| stored.get(*s).cloned().unwrap_or_else(|| m.clone())).collect())
             .collect()),
+        Rel::ProjectSet { input, srfs } => {
+            let rows = run(input, ctx)?;
+            let mut out = Vec::new();
+            for row in rows {
+                let mut results = Vec::with_capacity(srfs.len());
+                for (srf, args, cols) in srfs {
+                    let vals = args.iter().map(|a| eval(a, &row, ctx)).collect::<SqlResult<Vec<_>>>()?;
+                    let produced = (srf.f)(&vals, ctx)?;
+                    // A multi-column function yields one record per row.
+                    let values: Vec<Value> =
+                        produced
+                            .into_iter()
+                            .map(|mut r| {
+                                if *cols == 1 {
+                                    r.pop().unwrap_or(Value::Null)
+                                } else {
+                                    Value::Record(pgmem_types::usertype::RECORD_OID, r)
+                                }
+                            })
+                            .collect();
+                    results.push(values);
+                }
+                let n = results.iter().map(Vec::len).max().unwrap_or(0);
+                for i in 0..n {
+                    let mut r = row.clone();
+                    r.extend(results.iter().map(|v| v.get(i).cloned().unwrap_or(Value::Null)));
+                    out.push(r);
+                }
+            }
+            Ok(out)
+        }
         Rel::FuncScan { srf, args, ordinality } => {
             let vals = args.iter().map(|a| eval(a, &[], ctx)).collect::<SqlResult<Vec<_>>>()?;
             let mut rows = (srf.f)(&vals, ctx)?;

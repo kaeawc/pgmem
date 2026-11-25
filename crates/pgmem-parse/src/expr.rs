@@ -147,6 +147,15 @@ pub(crate) fn lower_expr(e: sq::Expr) -> SqlResult<Expr> {
             // POSITION(sub IN str) is position(str, sub) in Postgres' catalog.
             Expr::Function(Box::new(FunctionCall::new("position", vec![lower_expr(*r#in)?, lower_expr(*expr)?])))
         }
+        // `x IS [NOT] [form] NORMALIZED` → is_normalized(x, 'form').
+        E::IsNormalized { expr, form, negated } => {
+            let form = form.map_or_else(|| "NFC".to_owned(), |f| f.to_string());
+            let call = Expr::Function(Box::new(FunctionCall::new(
+                "is_normalized",
+                vec![lower_expr(*expr)?, Expr::Literal(Literal::String(form))],
+            )));
+            if negated { Expr::Not(b(call)) } else { call }
+        }
         E::Substring { expr, substring_from, substring_for, shorthand, .. } => {
             let mut args = vec![lower_expr(*expr)?];
             match (substring_from, substring_for) {
@@ -365,10 +374,103 @@ pub(crate) fn binary_op_name(op: &sq::BinaryOperator) -> SqlResult<String> {
     })
 }
 
+/// Parameter names (and defaults) of the built-in functions that take named arguments.
+fn builtin_params(name: &str) -> Option<&'static [(&'static str, Option<Literal>)]> {
+    use Literal as L;
+    static MAKE_INTERVAL: std::sync::LazyLock<Vec<(&str, Option<Literal>)>> = std::sync::LazyLock::new(|| {
+        let z = || Some(L::Integer("0".into()));
+        vec![
+            ("years", z()),
+            ("months", z()),
+            ("weeks", z()),
+            ("days", z()),
+            ("hours", z()),
+            ("mins", z()),
+            ("secs", Some(L::Decimal("0.0".into()))),
+        ]
+    });
+    static MAKE_DATE: [(&str, Option<Literal>); 3] = [("year", None), ("month", None), ("day", None)];
+    static MAKE_TIME: [(&str, Option<Literal>); 3] = [("hour", None), ("min", None), ("sec", None)];
+    static MAKE_TIMESTAMP: [(&str, Option<Literal>); 6] =
+        [("year", None), ("month", None), ("mday", None), ("hour", None), ("min", None), ("sec", None)];
+    static MAKE_TIMESTAMPTZ: [(&str, Option<Literal>); 7] =
+        [("year", None), ("month", None), ("mday", None), ("hour", None), ("min", None), ("sec", None), ("timezone", None)];
+    static JSONB_SET: [(&str, Option<Literal>); 4] =
+        [("jsonb_in", None), ("path", None), ("replacement", None), ("create_if_missing", Some(L::Bool(true)))];
+    static JSONB_INSERT: [(&str, Option<Literal>); 4] =
+        [("jsonb_in", None), ("path", None), ("replacement", None), ("insert_after", Some(L::Bool(false)))];
+    static JSONB_PATH: std::sync::LazyLock<Vec<(&str, Option<Literal>)>> = std::sync::LazyLock::new(|| {
+        vec![("target", None), ("path", None), ("vars", Some(L::String("{}".into()))), ("silent", Some(L::Bool(false)))]
+    });
+    Some(match name {
+        "make_interval" => MAKE_INTERVAL.as_slice(),
+        "make_date" => &MAKE_DATE,
+        "make_time" => &MAKE_TIME,
+        "make_timestamp" => &MAKE_TIMESTAMP,
+        "make_timestamptz" => &MAKE_TIMESTAMPTZ,
+        "jsonb_set" => &JSONB_SET,
+        "jsonb_insert" => &JSONB_INSERT,
+        "jsonb_path_exists"
+        | "jsonb_path_match"
+        | "jsonb_path_query"
+        | "jsonb_path_query_array"
+        | "jsonb_path_query_first"
+        | "jsonb_path_exists_tz"
+        | "jsonb_path_match_tz"
+        | "jsonb_path_query_tz"
+        | "jsonb_path_query_array_tz"
+        | "jsonb_path_query_first_tz" => JSONB_PATH.as_slice(),
+        _ => return None,
+    })
+}
+
+/// Places `name => value` arguments by parameter position, filling defaults for the rest.
+fn place_named_args(func: &str, positional: Vec<Expr>, named: Vec<(String, Expr)>) -> SqlResult<Vec<Expr>> {
+    let Some(params) = builtin_params(func) else { return Err(unsupported("named arguments for this function")) };
+    let mut slots: Vec<Option<Expr>> = vec![None; params.len()];
+    for (i, e) in positional.into_iter().enumerate() {
+        *slots.get_mut(i).ok_or_else(|| SqlError::new("42883", format!("function {func} does not exist")))? = Some(e);
+    }
+    for (name, e) in named {
+        let i = params
+            .iter()
+            .position(|(p, _)| *p == name)
+            .ok_or_else(|| SqlError::new("42883", format!("function {func} has no parameter named \"{name}\"")))?;
+        if slots[i].is_some() {
+            return Err(SqlError::syntax(format!("argument name \"{name}\" used more than once")));
+        }
+        slots[i] = Some(e);
+    }
+    // Trailing parameters without a value take their defaults (or are omitted when optional).
+    let last = slots.iter().rposition(Option::is_some).unwrap_or(0);
+    let mut out = Vec::new();
+    for (i, slot) in slots.into_iter().enumerate() {
+        match (slot, &params[i].1) {
+            (Some(e), _) => out.push(e),
+            (None, Some(d)) => out.push(Expr::Literal(d.clone())),
+            (None, None) if i > last => break,
+            (None, None) => return Err(SqlError::new("42883", format!("function {func} does not exist"))),
+        }
+    }
+    Ok(out)
+}
+
 fn lower_binary(left: sq::Expr, op: &sq::BinaryOperator, right: sq::Expr) -> SqlResult<Expr> {
     match op {
         sq::BinaryOperator::And => Ok(Expr::And(b(lower_expr(left)?), b(lower_expr(right)?))),
         sq::BinaryOperator::Or => Ok(Expr::Or(b(lower_expr(left)?), b(lower_expr(right)?))),
+        // `(s1, e1) OVERLAPS (s2, e2)` is the function overlaps(s1, e1, s2, e2).
+        sq::BinaryOperator::Overlaps => {
+            let pair = |e: sq::Expr, side: &str| -> SqlResult<Vec<Expr>> {
+                match e {
+                    sq::Expr::Tuple(items) if items.len() == 2 => items.into_iter().map(lower_expr).collect(),
+                    _ => Err(SqlError::syntax(format!("wrong number of parameters on {side} side of OVERLAPS expression"))),
+                }
+            };
+            let mut args = pair(left, "left")?;
+            args.extend(pair(right, "right")?);
+            Ok(Expr::Function(Box::new(FunctionCall::new("overlaps", args))))
+        }
         _ => {
             let name = binary_op_name(op)?;
             let (l, r) = (lower_expr(left)?, lower_expr(right)?);
@@ -568,9 +670,19 @@ fn lower_function(f: sq::Function) -> SqlResult<Expr> {
             {
                 return lower_json_constructor(&base, list, f.filter, f.over.is_some());
             }
+            let mut named: Vec<(String, Expr)> = Vec::new();
             for arg in list.args {
                 match arg {
-                    sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Expr(e)) => call.args.push(lower_expr(e)?),
+                    sq::FunctionArg::Named { name, arg: sq::FunctionArgExpr::Expr(e), .. }
+                    | sq::FunctionArg::ExprNamed { name: sq::Expr::Identifier(name), arg: sq::FunctionArgExpr::Expr(e), .. } => {
+                        named.push((ident(&name), lower_expr(e)?));
+                    }
+                    sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Expr(e)) => {
+                        if !named.is_empty() {
+                            return Err(SqlError::syntax("positional argument cannot follow named argument"));
+                        }
+                        call.args.push(lower_expr(e)?);
+                    }
                     sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Wildcard) => call.star = true,
                     sq::FunctionArg::Unnamed(sq::FunctionArgExpr::QualifiedWildcard(n)) => {
                         call.args.push(Expr::Column({
@@ -581,6 +693,25 @@ fn lower_function(f: sq::Function) -> SqlResult<Expr> {
                     }
                     _ => return Err(unsupported("named function arguments")),
                 }
+            }
+            if !named.is_empty() {
+                call.args = place_named_args(&base, std::mem::take(&mut call.args), named)?;
+            }
+            // `normalize(x, NFKC)`: the form is a keyword.
+            if base == "normalize"
+                && let Some(Expr::Column(parts)) = call.args.get(1)
+                && let [form] = parts.as_slice()
+            {
+                call.args[1] = Expr::Literal(Literal::String(form.to_ascii_uppercase()));
+            }
+            // `VARIADIC arr` (marked by the token rewrite).
+            if let Some(Expr::Function(v)) = call.args.last()
+                && v.name.base() == crate::VARIADIC_MARKER
+                && v.args.len() == 1
+                && let Some(Expr::Function(v)) = call.args.pop()
+            {
+                call.args.extend(v.args);
+                call.variadic = true;
             }
             for clause in list.clauses {
                 match clause {
@@ -656,7 +787,9 @@ pub(crate) fn lower_type(dt: &sq::DataType) -> SqlResult<TypeName> {
             ..simple(if matches!(tz, sq::TimezoneInfo::WithTimeZone | sq::TimezoneInfo::Tz) { "timetz" } else { "time" })
         },
         D::Date => simple("date"),
-        D::Interval { .. } => simple("interval"),
+        D::Interval { precision, .. } => {
+            TypeName { modifiers: precision.iter().filter_map(|n| i64::try_from(*n).ok()).collect(), ..simple("interval") }
+        }
         D::JSON => simple("json"),
         D::JSONB => simple("jsonb"),
         D::Regclass => simple("regclass"),

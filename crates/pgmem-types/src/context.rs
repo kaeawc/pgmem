@@ -22,10 +22,53 @@ pub enum DateOrder {
     Ymd,
 }
 
+/// The output half of `DateStyle`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum DateStyle {
+    #[default]
+    Iso,
+    Sql,
+    Postgres,
+    German,
+}
+
+/// `IntervalStyle`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum IntervalStyle {
+    #[default]
+    Postgres,
+    PostgresVerbose,
+    SqlStandard,
+    Iso8601,
+}
+
+/// The settings that shape text output of dates, intervals and floats.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OutputStyle {
+    pub date_style: DateStyle,
+    pub date_order: DateOrder,
+    pub interval_style: IntervalStyle,
+    pub extra_float_digits: i32,
+}
+
+impl Default for OutputStyle {
+    fn default() -> OutputStyle {
+        OutputStyle {
+            date_style: DateStyle::Iso,
+            date_order: DateOrder::Mdy,
+            interval_style: IntervalStyle::Postgres,
+            extra_float_digits: 1,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Context {
     pub zone: Zone,
     pub date_order: DateOrder,
+    pub date_style: DateStyle,
+    pub interval_style: IntervalStyle,
+    pub extra_float_digits: i32,
     /// Statement start, microseconds since 2000-01-01 UTC (for `'now'`, `'today'`, ...).
     pub now: i64,
     /// User-defined types of the running transaction's catalog.
@@ -96,6 +139,9 @@ impl Default for Context {
         Context {
             zone: Zone::utc(),
             date_order: DateOrder::Mdy,
+            date_style: DateStyle::Iso,
+            interval_style: IntervalStyle::Postgres,
+            extra_float_digits: 1,
             now: 0,
             types: Arc::default(),
             bytea_escape: false,
@@ -118,6 +164,19 @@ pub fn with_zone<R>(f: impl FnOnce(&Zone) -> R) -> R {
     CURRENT.with(|c| match c.borrow().as_ref() {
         Some(ctx) => f(&ctx.zone),
         None => f(&Zone::utc()),
+    })
+}
+
+/// The output styles in effect on this thread.
+pub fn output_style() -> OutputStyle {
+    CURRENT.with(|c| match c.borrow().as_ref() {
+        Some(ctx) => OutputStyle {
+            date_style: ctx.date_style,
+            date_order: ctx.date_order,
+            interval_style: ctx.interval_style,
+            extra_float_digits: ctx.extra_float_digits,
+        },
+        None => OutputStyle::default(),
     })
 }
 

@@ -174,8 +174,32 @@ pub fn parse_one(sql: &str) -> SqlResult<Statement> {
 /// statement (`SELECT * FROM t`) and `BETWEEN [A]SYMMETRIC` (the low bound wrapped in
 /// [`SYMMETRIC_MARKER`]). Works on tokens, so string literals and identifiers are never
 /// touched. Returns None if nothing changed.
+/// Wraps the argument of `VARIADIC` in function calls (sqlparser lacks the keyword).
+pub(crate) const VARIADIC_MARKER: &str = "__pgmem_variadic";
+
+/// The index (into `sig`) of the parenthesis closing the one at `sig[k]`.
+fn matching_paren(tokens: &[sqlparser::tokenizer::Token], sig: &[usize], k: usize) -> Option<usize> {
+    use sqlparser::tokenizer::Token;
+    let mut depth = 0usize;
+    for (n, &j) in sig.iter().enumerate().skip(k) {
+        match tokens[j] {
+            Token::LParen => depth += 1,
+            Token::RParen => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(n);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn rewrite_unsupported(sql: &str) -> Option<String> {
     use sqlparser::tokenizer::{Token, Tokenizer};
+    let assigned = rewrite_array_assignments(sql);
+    let sql = assigned.as_deref().unwrap_or(sql);
     let tokens = Tokenizer::new(&PostgreSqlDialect {}, sql).tokenize().ok()?;
     let word = |t: &Token, w: &str| matches!(t, Token::Word(x) if x.quote_style.is_none() && x.value.eq_ignore_ascii_case(w));
     // Indexes of significant (non-whitespace) tokens.
@@ -206,6 +230,59 @@ fn rewrite_unsupported(sql: &str) -> Option<String> {
             continue;
         }
         let at = |o: usize, w: &str| sig.get(k + o).is_some_and(|&j| word(&tokens[j], w));
+        // `substring(x SIMILAR p ESCAPE e)` → `substring(x, p, e)`.
+        if word(&tokens[i], "SUBSTRING")
+            && sig.get(k + 1).is_some_and(|&j| tokens[j] == Token::LParen)
+            && let Some(close) = matching_paren(&tokens, &sig, k + 1)
+        {
+            let mut depth = 0usize;
+            let inner: Vec<usize> = sig[k + 2..close].to_vec();
+            let similar = inner.iter().any(|&j| {
+                match tokens[j] {
+                    Token::LParen => depth += 1,
+                    Token::RParen => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+                depth == 0 && word(&tokens[j], "SIMILAR")
+            });
+            if similar {
+                let mut depth = 0usize;
+                for &j in &inner {
+                    match tokens[j] {
+                        Token::LParen => depth += 1,
+                        Token::RParen => depth = depth.saturating_sub(1),
+                        _ if depth == 0 && (word(&tokens[j], "SIMILAR") || word(&tokens[j], "ESCAPE")) => replace[j] = Some(","),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        // `f(a, VARIADIC arr)` → `f(a, __pgmem_variadic(arr))`.
+        if word(&tokens[i], "VARIADIC")
+            && k > 0
+            && matches!(tokens[sig[k - 1]], Token::LParen | Token::Comma)
+            && let Some(open) = {
+                // The call's opening parenthesis: the nearest unmatched one before.
+                let mut depth = 0usize;
+                sig[..k].iter().rposition(|&j| match tokens[j] {
+                    Token::RParen => {
+                        depth += 1;
+                        false
+                    }
+                    Token::LParen if depth > 0 => {
+                        depth -= 1;
+                        false
+                    }
+                    Token::LParen => true,
+                    _ => false,
+                })
+            }
+            && let Some(close) = matching_paren(&tokens, &sig, open)
+            && close > k
+        {
+            replace[i] = Some("__pgmem_variadic(");
+            replace[sig[close]] = Some("))");
+        }
         if word(&tokens[i], "FOR") && at(1, "NO") && at(2, "KEY") && at(3, "UPDATE") {
             drop[sig[k + 1]] = true;
             drop[sig[k + 2]] = true;
@@ -242,7 +319,7 @@ fn rewrite_unsupported(sql: &str) -> Option<String> {
         }
     }
     if !drop.contains(&true) && replace.iter().all(Option::is_none) {
-        return None;
+        return assigned;
     }
     Some(
         tokens
@@ -253,6 +330,98 @@ fn rewrite_unsupported(sql: &str) -> Option<String> {
             .map(|((t, _), r)| r.map_or_else(|| t.to_string(), str::to_owned))
             .collect(),
     )
+}
+
+/// `UPDATE t SET col[i] = v, col[lo:hi][...] = w`: subscripted assignment targets become
+/// `col = __pgmem_array_set(col, (v), 'flags', bounds...)`, where each flag is `i` (an index,
+/// one bound follows) or `r` (a range, lower and upper follow; NULL for an omitted bound).
+fn rewrite_array_assignments(sql: &str) -> Option<String> {
+    use sqlparser::tokenizer::{Token, Tokenizer};
+    let tokens = Tokenizer::new(&PostgreSqlDialect {}, sql).tokenize().ok()?;
+    let word = |t: &Token, w: &str| matches!(t, Token::Word(x) if x.quote_style.is_none() && x.value.eq_ignore_ascii_case(w));
+    let next_sig = |from: usize| (from..tokens.len()).find(|&j| !matches!(tokens[j], Token::Whitespace(_)));
+    let mut out = String::new();
+    let mut in_set = false;
+    let mut changed = false;
+    let mut i = 0;
+    while i < tokens.len() {
+        let t = &tokens[i];
+        if word(t, "SET") {
+            in_set = true;
+        } else if word(t, "WHERE") || word(t, "FROM") || word(t, "RETURNING") || *t == Token::SemiColon {
+            in_set = false;
+        }
+        let starts_target =
+            in_set && matches!(t, Token::Word(_)) && !word(t, "SET") && next_sig(i + 1).is_some_and(|j| tokens[j] == Token::LBracket);
+        if !starts_target {
+            out.push_str(&t.to_string());
+            i += 1;
+            continue;
+        }
+        // Subscripts: [a] or [a:b] (either side optional), possibly several.
+        let col = t.to_string();
+        let mut j = next_sig(i + 1)?;
+        let mut flags = String::new();
+        let mut bounds: Vec<String> = Vec::new();
+        while tokens.get(j) == Some(&Token::LBracket) {
+            let mut depth = 0usize;
+            let mut k = j + 1;
+            let mut colon = None;
+            while k < tokens.len() {
+                match &tokens[k] {
+                    Token::LBracket | Token::LParen => depth += 1,
+                    Token::RBracket if depth == 0 => break,
+                    Token::RBracket | Token::RParen => depth -= 1,
+                    Token::Colon if depth == 0 => colon = Some(k),
+                    _ => {}
+                }
+                k += 1;
+            }
+            let text = |a: usize, b: usize| -> String {
+                let s: String = tokens[a..b].iter().map(Token::to_string).collect();
+                if s.trim().is_empty() { "NULL".to_owned() } else { format!("({})", s.trim()) }
+            };
+            match colon {
+                Some(c) => {
+                    flags.push('r');
+                    bounds.push(text(j + 1, c));
+                    bounds.push(text(c + 1, k));
+                }
+                None => {
+                    flags.push('i');
+                    bounds.push(text(j + 1, k));
+                }
+            }
+            j = next_sig(k + 1)?;
+        }
+        if tokens.get(j) != Some(&Token::Eq) {
+            out.push_str(&t.to_string());
+            i += 1;
+            continue;
+        }
+        // The value: up to a top-level comma or the end of the SET list.
+        let start = j + 1;
+        let mut depth = 0usize;
+        let mut k = start;
+        while k < tokens.len() {
+            match &tokens[k] {
+                Token::LParen | Token::LBracket => depth += 1,
+                Token::RParen | Token::RBracket => depth = depth.saturating_sub(1),
+                Token::Comma if depth == 0 => break,
+                Token::SemiColon => break,
+                t if depth == 0 && (word(t, "WHERE") || word(t, "FROM") || word(t, "RETURNING")) => break,
+                _ => {}
+            }
+            k += 1;
+        }
+        let value: String = tokens[start..k].iter().map(Token::to_string).collect();
+        let func = if flags.contains('r') { "__pgmem_array_set_slice" } else { "__pgmem_array_set" };
+        out.push_str(&format!("{col} = {func}({col}, ({}), '{flags}', {})", value.trim(), bounds.join(", ")));
+        out.push(' ');
+        changed = true;
+        i = k;
+    }
+    changed.then_some(out)
 }
 
 /// Splits on top-level semicolons, respecting quotes and dollar quotes. Only used by the
@@ -474,9 +643,7 @@ fn lower_statement(stmt: sq::Statement) -> SqlResult<Statement> {
             sq::Reset::ConfigurationParameter(name) => Statement::Reset { name: Some(object_name(&name)?.to_string()) },
             sq::Reset::SessionAuthorization => Statement::NoOp { tag: "RESET".into() },
         },
-        S::ShowVariable { variable } => {
-            Statement::Show { name: variable.iter().map(ident).collect::<Vec<_>>().join(" ").to_ascii_lowercase() }
-        }
+        S::ShowVariable { variable } => Statement::Show { name: show_name(&variable.iter().map(ident).collect::<Vec<_>>()) },
         S::Discard { object_type } => Statement::NoOp {
             tag: match object_type {
                 sq::DiscardObject::ALL => "DISCARD ALL",
@@ -564,6 +731,17 @@ fn set_value(e: &sq::Expr) -> String {
     }
 }
 
+/// A SHOW target: the multi-word names (`TIME ZONE`, `TRANSACTION ISOLATION LEVEL`) are
+/// joined with spaces; anything else (`myapp.user_id`) is a dotted parameter name.
+fn show_name(parts: &[String]) -> String {
+    let spaced = parts.join(" ").to_ascii_lowercase();
+    match spaced.as_str() {
+        "time zone" | "transaction isolation level" | "session authorization" | "all" => spaced,
+        _ if parts.len() == 1 => spaced,
+        _ => parts.join(".").to_ascii_lowercase(),
+    }
+}
+
 fn lower_set(set: sq::Set) -> SqlResult<Statement> {
     Ok(match set {
         sq::Set::SingleAssignment { scope, variable, values, .. } => Statement::Set {
@@ -575,6 +753,28 @@ fn lower_set(set: sq::Set) -> SqlResult<Statement> {
         sq::Set::SetNames { charset_name, .. } => {
             Statement::Set { name: "client_encoding".into(), value: vec![ident(&charset_name)], local: false }
         }
+        // SET SESSION CHARACTERISTICS AS TRANSACTION sets the session defaults.
+        sq::Set::SetTransaction { modes, session: true, .. } => match transaction_modes(&modes) {
+            (Some(level), _) => Statement::Set {
+                name: "default_transaction_isolation".into(),
+                value: vec![
+                    match level {
+                        IsolationLevel::ReadUncommitted => "read uncommitted",
+                        IsolationLevel::ReadCommitted => "read committed",
+                        IsolationLevel::RepeatableRead => "repeatable read",
+                        IsolationLevel::Serializable => "serializable",
+                    }
+                    .into(),
+                ],
+                local: false,
+            },
+            (None, Some(ro)) => Statement::Set {
+                name: "default_transaction_read_only".into(),
+                value: vec![if ro { "on" } else { "off" }.into()],
+                local: false,
+            },
+            (None, None) => Statement::NoOp { tag: "SET".into() },
+        },
         sq::Set::SetTransaction { modes, .. } => {
             let (isolation, read_only) = transaction_modes(&modes);
             Statement::Transaction(TransactionStmt::SetTransaction { isolation, read_only })

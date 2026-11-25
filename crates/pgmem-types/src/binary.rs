@@ -159,22 +159,50 @@ fn put_i32(out: &mut Vec<u8>, n: i32) {
     out.extend_from_slice(&n.to_be_bytes());
 }
 
+/// The dimensions of a (rectangular, nested) array value.
+pub fn array_dims(items: &[Value]) -> Vec<usize> {
+    let mut dims = vec![items.len()];
+    let mut cur = items;
+    while let Some(Value::Array(inner)) = cur.first() {
+        dims.push(inner.len());
+        cur = inner;
+    }
+    dims
+}
+
+/// The elements of a nested array in storage (row-major) order.
+pub fn array_flatten(items: &[Value]) -> Vec<&Value> {
+    let mut out = Vec::new();
+    for item in items {
+        match item {
+            Value::Array(inner) => out.extend(array_flatten(inner)),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// `array_send`: dimensions and lower bounds, then the elements in row-major order.
 fn encode_array(items: &[Value], elem: &Type) -> SqlResult<Vec<u8>> {
     let mut out = Vec::new();
-    let has_null = items.iter().any(Value::is_null);
+    let flat = array_flatten(items);
+    let has_null = flat.iter().any(|v| v.is_null());
     let elem_oid = i32::try_from(elem.oid()).map_err(|_| SqlError::internal("element oid overflow"))?;
-    if items.is_empty() {
+    if flat.is_empty() {
         put_i32(&mut out, 0);
         put_i32(&mut out, 0);
         put_i32(&mut out, elem_oid);
         return Ok(out);
     }
-    put_i32(&mut out, 1);
+    let dims = array_dims(items);
+    put_i32(&mut out, i32::try_from(dims.len()).map_err(|_| SqlError::internal("too many dimensions"))?);
     put_i32(&mut out, i32::from(has_null));
     put_i32(&mut out, elem_oid);
-    put_i32(&mut out, i32::try_from(items.len()).map_err(|_| SqlError::internal("array too large"))?);
-    put_i32(&mut out, 1);
-    for item in items {
+    for d in &dims {
+        put_i32(&mut out, i32::try_from(*d).map_err(|_| SqlError::internal("array too large"))?);
+        put_i32(&mut out, 1);
+    }
+    for item in flat {
         if item.is_null() {
             put_i32(&mut out, -1);
         } else {
@@ -281,27 +309,44 @@ impl Reader<'_> {
 
 fn decode_array(b: &[u8], elem: &Type, ty: &Type) -> SqlResult<Vec<Value>> {
     let mut r = Reader { b, pos: 0, ty };
-    let ndim = r.i32()?;
+    let ndim = usize::try_from(r.i32()?).map_err(|_| bad(ty, "negative dimension count"))?;
     let _has_null = r.i32()?;
     let _elem_oid = r.i32()?;
-    match ndim {
-        0 => return Ok(Vec::new()),
-        1 => {}
-        _ => return Err(SqlError::feature_not_supported("multidimensional arrays are not supported")),
+    if ndim == 0 {
+        return Ok(Vec::new());
     }
-    let len = usize::try_from(r.i32()?).map_err(|_| bad(ty, "negative dimension"))?;
-    let _lower = r.i32()?;
-    let mut out = Vec::with_capacity(len);
-    for _ in 0..len {
+    if ndim > 6 {
+        return Err(SqlError::new(
+            code::PROGRAM_LIMIT_EXCEEDED,
+            format!("number of array dimensions ({ndim}) exceeds the maximum allowed (6)"),
+        ));
+    }
+    let mut dims = Vec::with_capacity(ndim);
+    for _ in 0..ndim {
+        dims.push(usize::try_from(r.i32()?).map_err(|_| bad(ty, "negative dimension"))?);
+        let _lower = r.i32()?;
+    }
+    let total: usize = dims.iter().product();
+    let mut flat = Vec::with_capacity(total);
+    for _ in 0..total {
         let n = r.i32()?;
         if n < 0 {
-            out.push(Value::Null);
+            flat.push(Value::Null);
         } else {
             let chunk = r.bytes(usize::try_from(n).map_err(|_| bad(ty, "bad length"))?)?;
-            out.push(decode(chunk, elem)?);
+            flat.push(decode(chunk, elem)?);
         }
     }
-    Ok(out)
+    Ok(nest(&mut flat.into_iter(), &dims))
+}
+
+/// Rebuilds nested arrays from row-major elements.
+fn nest(items: &mut impl Iterator<Item = Value>, dims: &[usize]) -> Vec<Value> {
+    match dims {
+        [] => Vec::new(),
+        [n] => items.take(*n).collect(),
+        [n, rest @ ..] => (0..*n).map(|_| Value::Array(nest(items, rest))).collect(),
+    }
 }
 
 #[cfg(test)]

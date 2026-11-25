@@ -75,53 +75,28 @@ fn push_fraction(out: &mut String, micros: i64) {
     }
 }
 
-/// Parses `YYYY-MM-DD` (year may have more than 4 digits) into (year, month, day).
-fn parse_ymd(s: &str) -> Option<(i32, u32, u32)> {
-    let mut parts = s.splitn(3, '-');
-    let y: i32 = parts.next()?.parse().ok()?;
-    let m: u32 = parts.next()?.parse().ok()?;
-    let d: u32 = parts.next()?.parse().ok()?;
-    calendar::valid_date(y, m, d).then_some((y, m, d))
-}
-
 /// Parses timestamptz input. Accepts the ISO forms Postgres accepts in practice: a date, an
 /// optional `T` or space, a time with optional fraction, and an optional zone (`Z`, `UTC`,
 /// `+HH`, `+HH:MM`, `+HHMM`). A missing zone means the session zone (UTC). Also `epoch`,
 /// `infinity`, `-infinity`.
 pub fn parse_timestamptz(input: &str) -> SqlResult<i64> {
-    let s = input.trim();
-    let err =
-        || SqlError::new(code::INVALID_DATETIME_FORMAT, format!("invalid input syntax for type timestamp with time zone: \"{input}\""));
-    match s.to_ascii_lowercase().as_str() {
-        "infinity" | "+infinity" => return Ok(TS_INFINITY),
-        "-infinity" => return Ok(TS_NEG_INFINITY),
-        "epoch" => return Ok(-PG_EPOCH_UNIX_SECS * USECS_PER_SEC),
-        _ => {}
-    }
-    let (body, bc) = match s.strip_suffix(" BC").or_else(|| s.strip_suffix(" bc")) {
-        Some(b) => (b.trim(), true),
-        None => (s, false),
+    use crate::dtparse::Decoded;
+    let local = match crate::dtparse::decode_datetime(input, "timestamp with time zone")? {
+        Decoded::Epoch => return Ok(-PG_EPOCH_UNIX_SECS * USECS_PER_SEC),
+        Decoded::Infinity => return Ok(TS_INFINITY),
+        Decoded::NegInfinity => return Ok(TS_NEG_INFINITY),
+        Decoded::Fields { tm, zone, .. } => {
+            let local = tm.to_micros();
+            match zone {
+                Some(z) => local - i64::from(z.offset_for_local(local)) * USECS_PER_SEC,
+                None => crate::context::with_zone(|z| z.utc_of_local(local)),
+            }
+        }
     };
-    // The date runs up to the first space or 'T' after the day.
-    let date_end = body.find([' ', 'T', 't']).unwrap_or(body.len());
-    let (y, m, d) = parse_ymd(&body[..date_end]).ok_or_else(err)?;
-    let year = if bc { 1 - y } else { y };
-    let midnight = calendar::days_from_ymd(year, m, d) * USECS_PER_DAY;
-    let rest = body[date_end..].trim_start_matches(['T', 't', ' ']);
-    if rest.is_empty() {
-        return Ok(midnight);
-    }
-    // Split the time from the zone: the zone starts at the first '+', '-', 'Z' or alphabetic
-    // character after the time digits.
-    let zone_start = rest.find(|c: char| c == '+' || c == '-' || c.is_ascii_alphabetic()).unwrap_or(rest.len());
-    let (time_part, zone_part) = rest.split_at(zone_start);
-    let time = parse_time_of_day(time_part.trim()).ok_or_else(err)?;
-    let offset_secs = parse_zone(zone_part.trim()).ok_or_else(err)?;
-    let t = midnight + time - offset_secs * USECS_PER_SEC;
-    if !(MIN_TIMESTAMP..END_TIMESTAMP).contains(&t) {
+    if !(MIN_TIMESTAMP..END_TIMESTAMP).contains(&local) {
         return Err(SqlError::new(code::DATETIME_FIELD_OVERFLOW, format!("timestamp out of range: \"{input}\"")));
     }
-    Ok(t)
+    Ok(local)
 }
 
 /// Parses `HH:MM[:SS[.ffffff]]` into microseconds since midnight. `24:00:00` is allowed.
@@ -171,33 +146,6 @@ fn fraction_to_micros(frac: &str) -> i64 {
     v
 }
 
-/// Parses a zone suffix to an offset east of UTC, in seconds. Empty = UTC (session zone).
-fn parse_zone(z: &str) -> Option<i64> {
-    if z.is_empty() || z.eq_ignore_ascii_case("z") || z.eq_ignore_ascii_case("utc") || z.eq_ignore_ascii_case("gmt") {
-        return Some(0);
-    }
-    let (sign, digits) = match z.as_bytes().first()? {
-        b'+' => (1, &z[1..]),
-        b'-' => (-1, &z[1..]),
-        _ => return None,
-    };
-    let (h, m, s) = if let Some((h, rest)) = digits.split_once(':') {
-        let (m, s) = rest.split_once(':').unwrap_or((rest, "0"));
-        (h.parse::<i64>().ok()?, m.parse::<i64>().ok()?, s.parse::<i64>().ok()?)
-    } else {
-        match digits.len() {
-            1 | 2 => (digits.parse().ok()?, 0, 0),
-            4 => (digits[..2].parse().ok()?, digits[2..].parse().ok()?, 0),
-            6 => (digits[..2].parse().ok()?, digits[2..4].parse().ok()?, digits[4..].parse().ok()?),
-            _ => return None,
-        }
-    };
-    if h > 15 || m > 59 || s > 59 {
-        return None;
-    }
-    Some(sign * (h * 3600 + m * 60 + s))
-}
-
 pub const DATE_INFINITY: i32 = i32::MAX;
 pub const DATE_NEG_INFINITY: i32 = i32::MIN;
 
@@ -235,17 +183,20 @@ pub fn format_date(days: i32) -> String {
 }
 
 pub fn parse_date(input: &str) -> SqlResult<i32> {
-    let s = input.trim();
-    match s.to_ascii_lowercase().as_str() {
-        "infinity" | "+infinity" => return Ok(DATE_INFINITY),
-        "-infinity" => return Ok(DATE_NEG_INFINITY),
-        "epoch" => return Ok(-10957),
-        _ => {}
+    use crate::dtparse::Decoded;
+    match crate::dtparse::decode_datetime(input, "date")? {
+        Decoded::Epoch => Ok(-10957),
+        Decoded::Infinity => Ok(DATE_INFINITY),
+        Decoded::NegInfinity => Ok(DATE_NEG_INFINITY),
+        Decoded::Fields { tm, .. } => {
+            let days = calendar::days_from_ymd(tm.year, tm.month, tm.day);
+            // Postgres' date range: 4713 BC to 5874897 AD.
+            if !(-2_451_545..=2_145_031_948).contains(&days) {
+                return Err(SqlError::new(code::DATETIME_FIELD_OVERFLOW, format!("date out of range: \"{input}\"")));
+            }
+            Ok(i32::try_from(days).unwrap_or(DATE_INFINITY))
+        }
     }
-    // A full timestamp is accepted too; the time part is discarded.
-    let ts = parse_timestamp(s)
-        .map_err(|_| SqlError::new(code::INVALID_DATETIME_FORMAT, format!("invalid input syntax for type date: \"{input}\"")))?;
-    Ok(i32::try_from(ts.div_euclid(USECS_PER_DAY)).unwrap_or(DATE_INFINITY))
 }
 
 /// `timestamp without time zone` output: `2024-07-15 12:00:00[.ffffff]`.
@@ -258,22 +209,18 @@ pub fn format_timestamp(micros: i64) -> String {
 
 /// `timestamp` input: like timestamptz, but an explicit zone is ignored.
 pub fn parse_timestamp(input: &str) -> SqlResult<i64> {
-    let s = input.trim();
-    let err = || SqlError::new(code::INVALID_DATETIME_FORMAT, format!("invalid input syntax for type timestamp: \"{input}\""));
-    let lower = s.to_ascii_lowercase();
-    if matches!(lower.as_str(), "infinity" | "+infinity" | "-infinity" | "epoch") {
-        return parse_timestamptz(s);
+    use crate::dtparse::Decoded;
+    let t = match crate::dtparse::decode_datetime(input, "timestamp")? {
+        Decoded::Epoch => return Ok(-PG_EPOCH_UNIX_SECS * USECS_PER_SEC),
+        Decoded::Infinity => return Ok(TS_INFINITY),
+        Decoded::NegInfinity => return Ok(TS_NEG_INFINITY),
+        // An explicit zone is ignored.
+        Decoded::Fields { tm, .. } => tm.to_micros(),
+    };
+    if !(MIN_TIMESTAMP..END_TIMESTAMP).contains(&t) {
+        return Err(SqlError::new(code::DATETIME_FIELD_OVERFLOW, format!("timestamp out of range: \"{input}\"")));
     }
-    let date_end = s.find([' ', 'T', 't']).unwrap_or(s.len());
-    if date_end < 8 {
-        return Err(err());
-    }
-    let rest = s[date_end..].trim_start_matches(['T', 't', ' ']);
-    let zone_start = rest.find(|c: char| c == '+' || (c == '-') || c.is_ascii_alphabetic()).unwrap_or(rest.len());
-    let without_zone = format!("{}{}", &s[..date_end], if rest.is_empty() { String::new() } else { format!(" {}", &rest[..zone_start]) });
-    let bc = lower.ends_with(" bc");
-    let base = if bc { format!("{without_zone} BC") } else { without_zone };
-    parse_timestamptz(base.trim()).map_err(|_| err())
+    Ok(t)
 }
 
 pub fn format_time(micros: i64) -> String {
@@ -286,12 +233,14 @@ pub fn format_time(micros: i64) -> String {
 }
 
 pub fn parse_time(input: &str) -> SqlResult<i64> {
-    let s = input.trim();
-    // Accept and drop a trailing zone; a leading date is accepted too.
-    let core = if s.len() > 10 && s.as_bytes().get(4) == Some(&b'-') { s[10..].trim_start_matches(['T', ' ']) } else { s };
-    let end = core.find(|c: char| c == '+' || c == '-' || c.is_ascii_alphabetic()).unwrap_or(core.len());
-    parse_time_of_day(core[..end].trim())
-        .ok_or_else(|| SqlError::new(code::INVALID_DATETIME_FORMAT, format!("invalid input syntax for type time: \"{input}\"")))
+    match crate::dtparse::decode_time(input, "time without time zone")? {
+        crate::dtparse::Decoded::Fields { tm, .. } => Ok(time_of(&tm)),
+        _ => Err(SqlError::new(code::INVALID_DATETIME_FORMAT, format!("invalid input syntax for type time: \"{input}\""))),
+    }
+}
+
+fn time_of(tm: &Tm) -> i64 {
+    ((i64::from(tm.hour) * 60 + i64::from(tm.minute)) * 60 + i64::from(tm.second)) * USECS_PER_SEC + i64::from(tm.micros)
 }
 
 pub fn format_timetz(micros: i64, zone_east_secs: i32) -> String {
@@ -306,12 +255,32 @@ pub fn format_timetz(micros: i64, zone_east_secs: i32) -> String {
 }
 
 pub fn parse_timetz(input: &str) -> SqlResult<(i64, i32)> {
-    let s = input.trim();
-    let err = || SqlError::new(code::INVALID_DATETIME_FORMAT, format!("invalid input syntax for type time with time zone: \"{input}\""));
-    let end = s.find(|c: char| c == '+' || c == '-' || c.is_ascii_alphabetic()).unwrap_or(s.len());
-    let t = parse_time_of_day(s[..end].trim()).ok_or_else(err)?;
-    let z = parse_zone(s[end..].trim()).ok_or_else(err)?;
-    Ok((t, i32::try_from(z).map_err(|_| err())?))
+    match crate::dtparse::decode_time(input, "time with time zone")? {
+        crate::dtparse::Decoded::Fields { tm, has_date, zone, .. } => {
+            if !has_date && matches!(zone, Some(crate::dtparse::ZoneSpec::Named(_))) {
+                // A zone name's offset needs a date.
+                return Err(SqlError::new(
+                    code::INVALID_DATETIME_FORMAT,
+                    format!("invalid input syntax for type time with time zone: \"{input}\""),
+                ));
+            }
+            let t = time_of(&tm);
+            // Without a date, a zone's offset is taken at today's date.
+            let day = if has_date {
+                calendar::days_from_ymd(tm.year, tm.month, tm.day)
+            } else {
+                let ctx = crate::context::current();
+                ctx.zone.local_of_utc(ctx.now).div_euclid(USECS_PER_DAY)
+            };
+            let local = day * USECS_PER_DAY + t;
+            let off = match zone {
+                Some(z) => z.offset_for_local(local),
+                None => crate::context::with_zone(|z| i32::try_from((local - z.utc_of_local(local)) / USECS_PER_SEC).unwrap_or(0)),
+            };
+            Ok((t, off))
+        }
+        _ => Err(SqlError::new(code::INVALID_DATETIME_FORMAT, format!("invalid input syntax for type time with time zone: \"{input}\""))),
+    }
 }
 
 /// Postgres `interval`: months, days and microseconds are kept separately because a month is
@@ -342,17 +311,41 @@ impl Interval {
             + i128::from(self.micros)
     }
 
+    /// `infinity` / `-infinity` (Postgres 17): every field at its maximum / minimum.
+    pub const INFINITY: Interval = Interval { months: i32::MAX, days: i32::MAX, micros: i64::MAX };
+    pub const NEG_INFINITY: Interval = Interval { months: i32::MIN, days: i32::MIN, micros: i64::MIN };
+
+    pub fn is_infinite(&self) -> bool {
+        *self == Interval::INFINITY || *self == Interval::NEG_INFINITY
+    }
+
     pub fn checked_add(&self, other: &Interval) -> SqlResult<Interval> {
         let overflow = || SqlError::out_of_range("interval");
-        Ok(Interval {
+        if self.is_infinite() || other.is_infinite() {
+            if self.is_infinite() && other.is_infinite() && self != other {
+                return Err(overflow());
+            }
+            return Ok(if self.is_infinite() { *self } else { *other });
+        }
+        let r = Interval {
             months: self.months.checked_add(other.months).ok_or_else(overflow)?,
             days: self.days.checked_add(other.days).ok_or_else(overflow)?,
             micros: self.micros.checked_add(other.micros).ok_or_else(overflow)?,
-        })
+        };
+        if r.is_infinite() {
+            return Err(overflow());
+        }
+        Ok(r)
     }
 
     pub fn negate(&self) -> SqlResult<Interval> {
         let overflow = || SqlError::out_of_range("interval");
+        if *self == Interval::INFINITY {
+            return Ok(Interval::NEG_INFINITY);
+        }
+        if *self == Interval::NEG_INFINITY {
+            return Ok(Interval::INFINITY);
+        }
         Ok(Interval {
             months: self.months.checked_neg().ok_or_else(overflow)?,
             days: self.days.checked_neg().ok_or_else(overflow)?,
@@ -363,6 +356,18 @@ impl Interval {
     /// `interval * float8`, following Postgres' `interval_mul` cascade of fractional parts.
     #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
     pub fn mul_f64(&self, factor: f64) -> SqlResult<Interval> {
+        if self.is_infinite() || factor.is_infinite() {
+            let sign = if self.is_infinite() {
+                if *self == Interval::INFINITY { 1.0 } else { -1.0 }
+            } else {
+                f64::from(self.total_micros_i128().signum() as i32)
+            };
+            let s = sign * factor.signum();
+            if factor.is_nan() || factor == 0.0 || s == 0.0 || (!self.is_infinite() && *self == Interval::ZERO) {
+                return Err(SqlError::out_of_range("interval"));
+            }
+            return Ok(if s > 0.0 { Interval::INFINITY } else { Interval::NEG_INFINITY });
+        }
         let months_f = f64::from(self.months) * factor;
         let months = months_f.trunc();
         let mut days_f = f64::from(self.days) * factor;
@@ -398,6 +403,9 @@ impl Ord for Interval {
 /// Formats an interval in Postgres' default `IntervalStyle = postgres`:
 /// `1 year 2 mons 3 days 04:05:06.789`, `-1 days +02:00:00`, `00:00:00`.
 pub fn format_interval(iv: &Interval) -> String {
+    if iv.is_infinite() {
+        return if *iv == Interval::INFINITY { "infinity".into() } else { "-infinity".into() };
+    }
     let mut out = String::new();
     let years = iv.months / 12;
     let mons = iv.months % 12;
@@ -446,6 +454,227 @@ pub fn format_interval(iv: &Interval) -> String {
     out
 }
 
+const MONTH_ABBREVS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const DAY_ABBREVS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/// `date_out` under the session's `DateStyle` (`EncodeDateOnly`).
+pub fn date_out(days: i32) -> String {
+    use crate::context::{DateOrder, DateStyle};
+    let style = crate::context::output_style();
+    let Some((year, m, d)) = date_to_ymd(days).filter(|_| style.date_style != DateStyle::Iso) else { return format_date(days) };
+    let (y, bc) = if year <= 0 { (1 - year, " BC") } else { (year, "") };
+    let dmy = style.date_order == DateOrder::Dmy;
+    match style.date_style {
+        DateStyle::German => format!("{d:02}.{m:02}.{y:04}{bc}"),
+        DateStyle::Sql if dmy => format!("{d:02}/{m:02}/{y:04}{bc}"),
+        DateStyle::Sql => format!("{m:02}/{d:02}/{y:04}{bc}"),
+        _ if dmy => format!("{d:02}-{m:02}-{y:04}{bc}"),
+        _ => format!("{m:02}-{d:02}-{y:04}{bc}"),
+    }
+}
+
+/// `timestamp_out` under the session's `DateStyle`.
+pub fn timestamp_out(micros: i64) -> String {
+    if crate::context::output_style().date_style == crate::context::DateStyle::Iso || to_tm(micros).is_none() {
+        return format_timestamp(micros);
+    }
+    encode_datetime(micros, None)
+}
+
+/// `timestamptz_out` under the session's `DateStyle`; non-ISO styles show the zone
+/// abbreviation (`EST`).
+pub fn timestamptz_out(micros: i64) -> String {
+    if crate::context::output_style().date_style == crate::context::DateStyle::Iso || to_tm(micros).is_none() {
+        return format_timestamptz(micros);
+    }
+    let (local, abbrev) = crate::context::with_zone(|z| (z.local_of_utc(micros), z.abbrev_at(micros)));
+    encode_datetime(local, Some(&abbrev))
+}
+
+/// `EncodeDateTime` for the SQL, German and Postgres styles.
+fn encode_datetime(local: i64, zone: Option<&str>) -> String {
+    use crate::context::{DateOrder, DateStyle};
+    let style = crate::context::output_style();
+    let tm = Tm::from_micros(local);
+    let (y, bc) = if tm.year <= 0 { (1 - tm.year, " BC") } else { (tm.year, "") };
+    let mut secs = format!("{:02}", tm.second);
+    push_fraction(&mut secs, i64::from(tm.micros));
+    let clock = format!("{:02}:{:02}:{secs}", tm.hour, tm.minute);
+    let (m, d) = (tm.month, tm.day);
+    let dmy = style.date_order == DateOrder::Dmy;
+    let mut out = match style.date_style {
+        DateStyle::German => format!("{d:02}.{m:02}.{y:04} {clock}"),
+        DateStyle::Sql if dmy => format!("{d:02}/{m:02}/{y:04} {clock}"),
+        DateStyle::Sql => format!("{m:02}/{d:02}/{y:04} {clock}"),
+        _ => {
+            let dow = DAY_ABBREVS[usize::try_from((local.div_euclid(USECS_PER_DAY) + 6).rem_euclid(7)).unwrap_or(0)];
+            let mon = MONTH_ABBREVS[usize::try_from(m).unwrap_or(1).saturating_sub(1)];
+            if dmy { format!("{dow} {d:02} {mon} {clock} {y:04}") } else { format!("{dow} {mon} {d:02} {clock} {y:04}") }
+        }
+    };
+    if let Some(z) = zone {
+        out.push(' ');
+        out.push_str(z);
+    }
+    out.push_str(bc);
+    out
+}
+
+/// `interval_out` under the session's `IntervalStyle` (`EncodeInterval`).
+pub fn interval_out(iv: &Interval) -> String {
+    use crate::context::IntervalStyle;
+    if iv.is_infinite() {
+        return format_interval(iv);
+    }
+    let fields = IntervalFields::of(iv);
+    match crate::context::output_style().interval_style {
+        IntervalStyle::Postgres => format_interval(iv),
+        IntervalStyle::SqlStandard => fields.sql_standard(),
+        IntervalStyle::Iso8601 => fields.iso_8601(),
+        IntervalStyle::PostgresVerbose => fields.verbose(),
+    }
+}
+
+/// An interval broken into `pg_tm` fields (each truncated toward zero, so all share the sign
+/// of their source field).
+struct IntervalFields {
+    year: i64,
+    mon: i64,
+    mday: i64,
+    hour: i64,
+    min: i64,
+    sec: i64,
+    fsec: i64,
+}
+
+impl IntervalFields {
+    fn of(iv: &Interval) -> IntervalFields {
+        let t = iv.micros;
+        IntervalFields {
+            year: i64::from(iv.months / 12),
+            mon: i64::from(iv.months % 12),
+            mday: i64::from(iv.days),
+            hour: t / USECS_PER_HOUR,
+            min: (t % USECS_PER_HOUR) / USECS_PER_MINUTE,
+            sec: (t % USECS_PER_MINUTE) / USECS_PER_SEC,
+            fsec: t % USECS_PER_SEC,
+        }
+    }
+
+    /// `AppendSeconds`: absolute seconds, optionally zero-padded, with the fraction trimmed.
+    fn seconds(&self, fill: bool) -> String {
+        let mut out = if fill { format!("{:02}", self.sec.abs()) } else { self.sec.abs().to_string() };
+        push_fraction(&mut out, self.fsec.abs());
+        out
+    }
+
+    fn sql_standard(&self) -> String {
+        let f = self;
+        let neg = f.year < 0 || f.mon < 0 || f.mday < 0 || f.hour < 0 || f.min < 0 || f.sec < 0 || f.fsec < 0;
+        let pos = f.year > 0 || f.mon > 0 || f.mday > 0 || f.hour > 0 || f.min > 0 || f.sec > 0 || f.fsec > 0;
+        let year_month = f.year != 0 || f.mon != 0;
+        let day_time = f.mday != 0 || f.hour != 0 || f.min != 0 || f.sec != 0 || f.fsec != 0;
+        let standard = !(neg && pos) && !(year_month && day_time);
+        if !neg && !pos {
+            return "0".into();
+        }
+        if !standard {
+            let ys = if f.year < 0 || f.mon < 0 { '-' } else { '+' };
+            let ds = if f.mday < 0 { '-' } else { '+' };
+            let ss = if f.hour < 0 || f.min < 0 || f.sec < 0 || f.fsec < 0 { '-' } else { '+' };
+            return format!(
+                "{ys}{}-{} {ds}{} {ss}{}:{:02}:{}",
+                f.year.abs(),
+                f.mon.abs(),
+                f.mday.abs(),
+                f.hour.abs(),
+                f.min.abs(),
+                f.seconds(true)
+            );
+        }
+        let sign = if neg { "-" } else { "" };
+        if year_month {
+            format!("{sign}{}-{}", f.year.abs(), f.mon.abs())
+        } else if f.mday != 0 {
+            format!("{sign}{} {}:{:02}:{}", f.mday.abs(), f.hour.abs(), f.min.abs(), f.seconds(true))
+        } else {
+            format!("{sign}{}:{:02}:{}", f.hour.abs(), f.min.abs(), f.seconds(true))
+        }
+    }
+
+    fn iso_8601(&self) -> String {
+        let f = self;
+        if [f.year, f.mon, f.mday, f.hour, f.min, f.sec, f.fsec].iter().all(|v| *v == 0) {
+            return "PT0S".into();
+        }
+        let mut out = String::from("P");
+        let part = |out: &mut String, v: i64, unit: char| {
+            if v != 0 {
+                let _ = write!(out, "{v}{unit}");
+            }
+        };
+        part(&mut out, f.year, 'Y');
+        part(&mut out, f.mon, 'M');
+        part(&mut out, f.mday, 'D');
+        if f.hour != 0 || f.min != 0 || f.sec != 0 || f.fsec != 0 {
+            out.push('T');
+        }
+        part(&mut out, f.hour, 'H');
+        part(&mut out, f.min, 'M');
+        if f.sec != 0 || f.fsec != 0 {
+            if f.sec < 0 || f.fsec < 0 {
+                out.push('-');
+            }
+            out.push_str(&f.seconds(false));
+            out.push('S');
+        }
+        out
+    }
+
+    fn verbose(&self) -> String {
+        let f = self;
+        let mut out = String::from("@");
+        let (mut is_zero, mut is_before) = (true, false);
+        for (v, unit) in [(f.year, "year"), (f.mon, "mon"), (f.mday, "day"), (f.hour, "hour"), (f.min, "min")] {
+            if v == 0 {
+                continue;
+            }
+            let shown = if is_zero {
+                is_before = v < 0;
+                v.abs()
+            } else if is_before {
+                -v
+            } else {
+                v
+            };
+            let _ = write!(out, " {shown} {unit}{}", if shown == 1 { "" } else { "s" });
+            is_zero = false;
+        }
+        if f.sec != 0 || f.fsec != 0 {
+            out.push(' ');
+            if f.sec < 0 || (f.sec == 0 && f.fsec < 0) {
+                if is_zero {
+                    is_before = true;
+                } else if !is_before {
+                    out.push('-');
+                }
+            } else if is_before {
+                out.push('-');
+            }
+            let plural = if f.sec.abs() != 1 || f.fsec != 0 { "s" } else { "" };
+            let _ = write!(out, "{} sec{plural}", f.seconds(false));
+            is_zero = false;
+        }
+        if is_zero {
+            out.push_str(" 0");
+        }
+        if is_before {
+            out.push_str(" ago");
+        }
+        out
+    }
+}
+
 /// Parses interval input in the forms Postgres accepts in practice: unit lists
 /// (`1 day 2 hours`, `3 mons`, `1.5 hours`, `-2 days`), clock times (`01:02:03`, `-00:00:01.5`),
 /// mixes of both (`1 day 02:00:00`), the `@ ... ago` verbose style and ISO-8601 durations
@@ -455,6 +684,11 @@ pub fn parse_interval(input: &str) -> SqlResult<Interval> {
     let mut s = input.trim().to_ascii_lowercase();
     if s.is_empty() {
         return Err(err());
+    }
+    match s.as_str() {
+        "infinity" | "+infinity" => return Ok(Interval::INFINITY),
+        "-infinity" => return Ok(Interval::NEG_INFINITY),
+        _ => {}
     }
     if let Some(rest) = s.strip_prefix('p') {
         return parse_iso_interval(rest).ok_or_else(err);
@@ -600,6 +834,9 @@ fn parse_iso_interval(s: &str) -> Option<Interval> {
 /// `timestamptz + interval`: months are added on the calendar (clamping the day of month),
 /// then days, then microseconds — Postgres' `timestamptz_pl_interval` in a UTC session.
 pub fn add_interval(ts: i64, iv: &Interval) -> SqlResult<i64> {
+    if iv.is_infinite() {
+        return infinite_shift(ts, iv);
+    }
     if ts == TS_INFINITY || ts == TS_NEG_INFINITY {
         return Ok(ts);
     }
@@ -623,6 +860,15 @@ pub fn add_interval(ts: i64, iv: &Interval) -> SqlResult<i64> {
     Ok(out)
 }
 
+/// A timestamp plus an infinite interval: that infinity, unless the timestamp is the other.
+pub fn infinite_shift(ts: i64, iv: &Interval) -> SqlResult<i64> {
+    let up = *iv == Interval::INFINITY;
+    if (up && ts == TS_NEG_INFINITY) || (!up && ts == TS_INFINITY) {
+        return Err(SqlError::new(code::DATETIME_FIELD_OVERFLOW, "timestamp out of range"));
+    }
+    Ok(if up { TS_INFINITY } else { TS_NEG_INFINITY })
+}
+
 pub fn days_in_month(year: i32, month: u32) -> u32 {
     calendar::days_in_month(year, month)
 }
@@ -630,6 +876,14 @@ pub fn days_in_month(year: i32, month: u32) -> u32 {
 /// `timestamptz - timestamptz`: Postgres returns days + time (no months), justified so that the
 /// microsecond part is under a day (`interval_justify_hours`).
 pub fn sub_timestamps(a: i64, b: i64) -> SqlResult<Interval> {
+    let inf = |t: i64| t == TS_INFINITY || t == TS_NEG_INFINITY;
+    if inf(a) || inf(b) {
+        if inf(a) && a == b {
+            return Err(SqlError::new(code::DATETIME_FIELD_OVERFLOW, "interval out of range"));
+        }
+        let up = if inf(a) { a == TS_INFINITY } else { b == TS_NEG_INFINITY };
+        return Ok(if up { Interval::INFINITY } else { Interval::NEG_INFINITY });
+    }
     let diff = a.checked_sub(b).ok_or_else(|| SqlError::out_of_range("interval"))?;
     let days = diff / USECS_PER_DAY;
     let micros = diff % USECS_PER_DAY;

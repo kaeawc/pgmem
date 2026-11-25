@@ -20,6 +20,19 @@ pub struct StatementState {
     pub subqueries: RefCell<HashMap<usize, Rc<Vec<Row>>>>,
     /// `currval` values set by `nextval` during this statement (merged into the session).
     pub currval: RefCell<HashMap<Oid, i64>>,
+    /// `set_config` changes made during this statement: (name, stored value, is_local).
+    pub settings: RefCell<Vec<(String, String, bool)>>,
+}
+
+impl StatementState {
+    /// A setting as this statement sees it: its own `set_config` changes first.
+    pub fn setting(&self, env: &crate::session::SessionEnv, name: &str) -> Option<String> {
+        let key = name.to_ascii_lowercase();
+        if let Some((_, v, _)) = self.settings.borrow().iter().rev().find(|(n, _, _)| *n == key) {
+            return Some(v.clone());
+        }
+        env.setting(&key).or_else(|| crate::settings::lookup(&key).and_then(|d| d.boot).map(str::to_owned))
+    }
 }
 
 /// Everything an expression needs at run time.
@@ -190,7 +203,8 @@ pub fn eval(expr: &Expr, row: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
             let arr = eval(array, row, ctx)?;
             let items = match arr {
                 Value::Null => return Ok(Value::Null),
-                Value::Array(items) => items,
+                // Every element counts, whatever the dimensions.
+                Value::Array(items) => pgmem_types::binary::array_flatten(&items).into_iter().cloned().collect::<Vec<_>>(),
                 other => return Err(SqlError::internal(format!("ANY/ALL over non-array {}", other.kind()))),
             };
             quantified(&l, items.into_iter(), cmp, *all, ctx)?
@@ -228,32 +242,45 @@ pub fn eval(expr: &Expr, row: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
                 }
             }
         }
-        Expr::Array(items) => Value::Array(items.iter().map(|e| eval(e, row, ctx)).collect::<SqlResult<Vec<_>>>()?),
-        Expr::Subscript { expr, index, upper, slice } => {
-            let arr = eval(expr, row, ctx)?;
-            let Value::Array(items) = arr else { return Ok(Value::Null) };
-            let idx = eval(index, row, ctx)?;
-            if *slice {
-                let lo = if idx.is_null() { 1 } else { idx.as_i64().unwrap_or(1) };
-                let hi = match upper {
-                    Some(u) => match eval(u, row, ctx)? {
-                        Value::Null => i64::try_from(items.len()).unwrap_or(i64::MAX),
-                        v => v.as_i64().unwrap_or(0),
-                    },
-                    None => i64::try_from(items.len()).unwrap_or(i64::MAX),
+        Expr::SrfCall { .. } => {
+            return Err(SqlError::feature_not_supported("set-returning function called in a context that cannot accept a set"));
+        }
+        Expr::Array(items) => {
+            let vals = items.iter().map(|e| eval(e, row, ctx)).collect::<SqlResult<Vec<_>>>()?;
+            // Sub-arrays become an inner dimension; they must all have the same shape.
+            if vals.iter().any(|v| matches!(v, Value::Array(_))) {
+                let shape = |v: &Value| match v {
+                    Value::Array(a) => Some(pgmem_types::binary::array_dims(a)),
+                    _ => None,
                 };
-                let lo = lo.max(1);
-                let hi = hi.min(i64::try_from(items.len()).unwrap_or(i64::MAX));
-                if lo > hi {
+                let first = shape(&vals[0]);
+                if first.is_none() || vals.iter().any(|v| shape(v) != first) {
+                    return Err(SqlError::new(
+                        code::ARRAY_SUBSCRIPT_ERROR,
+                        "multidimensional arrays must have array expressions with matching dimensions",
+                    ));
+                }
+                // ARRAY[ARRAY[]::int[], ...] is empty.
+                if first.as_deref() == Some(&[0][..]) {
                     return Ok(Value::Array(Vec::new()));
                 }
-                let (lo, hi) = (usize::try_from(lo - 1).unwrap_or(0), usize::try_from(hi).unwrap_or(0));
-                return Ok(Value::Array(items[lo..hi].to_vec()));
             }
-            match idx.as_i64() {
-                Some(i) if i >= 1 => items.get(usize::try_from(i - 1).unwrap_or(usize::MAX)).cloned().unwrap_or(Value::Null),
-                _ => Value::Null,
+            Value::Array(vals)
+        }
+        Expr::Subscript { expr, subs, slice } => {
+            let arr = eval(expr, row, ctx)?;
+            let Value::Array(items) = arr else { return Ok(Value::Null) };
+            let mut bounds = Vec::with_capacity(subs.len());
+            for s in subs {
+                let lo = s.lower.as_ref().map(|e| eval(e, row, ctx)).transpose()?;
+                let hi = s.upper.as_ref().map(|e| eval(e, row, ctx)).transpose()?;
+                // A NULL subscript makes the whole result NULL.
+                if lo.as_ref().is_some_and(Value::is_null) || hi.as_ref().is_some_and(Value::is_null) {
+                    return Ok(Value::Null);
+                }
+                bounds.push((lo.and_then(|v| v.as_i64()), hi.and_then(|v| v.as_i64()), s.range));
             }
+            if *slice { array_slice(&items, &bounds) } else { array_element(&items, &bounds) }
         }
         Expr::Row { fields, type_oid, .. } => {
             Value::Record(*type_oid, fields.iter().map(|e| eval(e, row, ctx)).collect::<SqlResult<Vec<_>>>()?)
@@ -305,6 +332,50 @@ fn quantified(l: &Value, items: impl Iterator<Item = Value>, cmp: &crate::plan::
         return Ok(Value::Bool(all));
     }
     if saw_null { Ok(Value::Null) } else { Ok(Value::Bool(all)) }
+}
+
+/// `arr[i][j]...`: NULL unless there is exactly one subscript per dimension, all in range.
+fn array_element(items: &[Value], subs: &[(Option<i64>, Option<i64>, bool)]) -> Value {
+    let mut cur = items;
+    for (k, (i, _, _)) in subs.iter().enumerate() {
+        let Some(i) = *i else { return Value::Null };
+        let Some(item) = usize::try_from(i - 1).ok().and_then(|i| cur.get(i)) else { return Value::Null };
+        if k + 1 == subs.len() {
+            return if matches!(item, Value::Array(_)) { Value::Null } else { item.clone() };
+        }
+        match item {
+            Value::Array(inner) => cur = inner,
+            _ => return Value::Null,
+        }
+    }
+    Value::Null
+}
+
+/// `arr[lo:hi][...]`: every dimension sliced (a bare index `i` is `1:i`, missing bounds are
+/// the array's); an empty result is the empty array.
+fn array_slice(items: &[Value], subs: &[(Option<i64>, Option<i64>, bool)]) -> Value {
+    fn go(items: &[Value], subs: &[(Option<i64>, Option<i64>, bool)]) -> Option<Vec<Value>> {
+        let Some(((lo, hi, range), rest)) = subs.split_first() else { return Some(items.to_vec()) };
+        let len = i64::try_from(items.len()).unwrap_or(i64::MAX);
+        let (lo, hi) = if *range { (lo.unwrap_or(1), hi.unwrap_or(len)) } else { (1, lo.unwrap_or(len)) };
+        let (lo, hi) = (lo.max(1), hi.min(len));
+        if lo > hi {
+            return None;
+        }
+        let picked = &items[usize::try_from(lo - 1).unwrap_or(0)..usize::try_from(hi).unwrap_or(0)];
+        if rest.is_empty() {
+            return Some(picked.to_vec());
+        }
+        let mut out = Vec::with_capacity(picked.len());
+        for p in picked {
+            match p {
+                Value::Array(inner) => out.push(Value::Array(go(inner, rest)?)),
+                other => out.push(other.clone()),
+            }
+        }
+        Some(out)
+    }
+    Value::Array(go(items, subs).unwrap_or_default())
 }
 
 /// Evaluates a predicate: true only for SQL TRUE.

@@ -100,6 +100,14 @@ pub enum SubqueryKind {
     Array,
 }
 
+/// One dimension of a subscript: `[i]` (`lower` only) or `[lo:hi]` (either bound optional).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubscriptPart {
+    pub lower: Option<Expr>,
+    pub upper: Option<Expr>,
+    pub range: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
     Const(Value),
@@ -166,11 +174,19 @@ pub enum Expr {
         correlated: bool,
     },
     Array(Vec<Expr>),
-    /// `arr[i]` (1-based) / `arr[lo:hi]`.
+    /// A set-returning function in the select list (`SELECT unnest(a)`); the binder moves it
+    /// into a [`Rel::ProjectSet`] and leaves a column reference in its place. `cols` is its
+    /// number of output columns (more than one makes a record value).
+    SrfCall {
+        srf: Srf,
+        args: Vec<Expr>,
+        cols: usize,
+    },
+    /// `arr[i][j]` (1-based) / `arr[lo:hi][...]`: one part per dimension. With `slice`, every
+    /// part is a range (a bare index `i` meaning `1:i`).
     Subscript {
         expr: Box<Expr>,
-        index: Box<Expr>,
-        upper: Option<Box<Expr>>,
+        subs: Vec<SubscriptPart>,
         slice: bool,
     },
     /// A composite value built from its fields (`ROW(...)`, a whole-row reference); the type
@@ -285,13 +301,18 @@ impl Expr {
                     probe.walk(f);
                 }
             }
-            Expr::Subscript { expr, index, upper, .. } => {
+            Expr::Subscript { expr, subs, .. } => {
                 expr.walk(f);
-                index.walk(f);
-                if let Some(u) = upper {
-                    u.walk(f);
+                for s in subs {
+                    if let Some(l) = &s.lower {
+                        l.walk(f);
+                    }
+                    if let Some(u) = &s.upper {
+                        u.walk(f);
+                    }
                 }
             }
+            Expr::SrfCall { args, .. } => args.iter().for_each(|x| x.walk(f)),
             Expr::AggCall(a) => {
                 a.args.iter().for_each(|x| x.walk(f));
                 if let Some(fl) = &a.filter {
@@ -335,9 +356,21 @@ impl Expr {
                 Expr::Subquery { id, plan, kind, correlated }
             }
             Expr::Array(v) => Expr::Array(vec(v, f)?),
-            Expr::Subscript { expr, index, upper, slice } => {
-                Expr::Subscript { expr: boxed(expr, f)?, index: boxed(index, f)?, upper: upper.map(|u| boxed(u, f)).transpose()?, slice }
-            }
+            Expr::SrfCall { srf, args, cols } => Expr::SrfCall { srf, args: vec(args, f)?, cols },
+            Expr::Subscript { expr, subs, slice } => Expr::Subscript {
+                expr: boxed(expr, f)?,
+                subs: subs
+                    .into_iter()
+                    .map(|s| {
+                        Ok(SubscriptPart {
+                            lower: s.lower.map(|l| l.transform(f)).transpose()?,
+                            upper: s.upper.map(|u| u.transform(f)).transpose()?,
+                            range: s.range,
+                        })
+                    })
+                    .collect::<SqlResult<Vec<_>>>()?,
+                slice,
+            },
             Expr::Row { fields, types, type_oid } => Expr::Row { fields: vec(fields, f)?, types, type_oid },
             Expr::Field { expr, idx } => Expr::Field { expr: boxed(expr, f)?, idx },
             Expr::FieldStore { expr, idx, value, type_oid, width } => {
@@ -380,6 +413,29 @@ pub enum AggKind {
     VarPop,
     BitAnd,
     BitOr,
+    BitXor,
+    /// Two-argument float8 statistics (`float8_regr_accum`), arguments (Y, X).
+    Corr,
+    CovarPop,
+    CovarSamp,
+    RegrCount,
+    RegrSxx,
+    RegrSyy,
+    RegrSxy,
+    RegrAvgX,
+    RegrAvgY,
+    RegrR2,
+    RegrSlope,
+    RegrIntercept,
+    /// Ordered-set aggregates: args are (sorted value, direct argument).
+    PercentileCont,
+    PercentileDisc,
+    Mode,
+    /// Hypothetical-set aggregates: args are the sorted columns, then the hypothetical row.
+    HypRank,
+    HypDenseRank,
+    HypPercentRank,
+    HypCumeDist,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -490,6 +546,13 @@ pub enum Rel {
         table: Oid,
         slots: Vec<usize>,
         missing: Vec<Value>,
+    },
+    /// `SELECT srf(...), ...`: the input row extended with one column per set-returning
+    /// function, as many rows as the longest function result (shorter ones padded with
+    /// NULLs), no rows when every function returns none.
+    ProjectSet {
+        input: Box<Rel>,
+        srfs: Vec<(Srf, Vec<Expr>, usize)>,
     },
     FuncScan {
         srf: Srf,

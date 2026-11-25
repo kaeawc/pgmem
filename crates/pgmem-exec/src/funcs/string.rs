@@ -56,6 +56,8 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
             [_, t] if t.is_integer() || (name == "substr" && *t == Type::Unknown) => {
                 resolved(strict("substring", substring), vec![Type::Text, Type::Int4], Type::Text)
             }
+            // Unknown literals prefer the text (SIMILAR) form, as in Postgres.
+            [_, Type::Unknown, Type::Unknown] if name != "substr" => resolved(strict("substring", similar_substring), texts(3), Type::Text),
             [_, t, u] if (t.is_integer() || *t == Type::Unknown) && (u.is_integer() || *u == Type::Unknown) => {
                 resolved(strict("substring", substring), vec![Type::Text, Type::Int4, Type::Int4], Type::Text)
             }
@@ -114,11 +116,6 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
             Type::Int4,
         ),
         "chr" if n == 1 => resolved(strict("chr", chr), vec![Type::Int4], Type::Text),
-        "to_hex" => match args {
-            [Type::Int8] => resolved(strict("to_hex", to_hex), vec![Type::Int8], Type::Text),
-            [t] if t.is_integer() || *t == Type::Unknown => resolved(strict("to_hex", to_hex), vec![Type::Int4], Type::Text),
-            _ => Err(err()),
-        },
         "md5" => match args {
             [Type::Bytea] => resolved(strict("md5", md5_fn), vec![Type::Bytea], Type::Text),
             _ => text_fn(strict("md5", md5_fn), 1, Type::Text),
@@ -139,7 +136,52 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
     }
 }
 
+const T: Type = Type::Text;
+const I: Type = Type::Int4;
+
+/// A regexp function taking a prefix (at least `min` arguments) of `sig`.
+fn regex_sig(name: &str, args: &[Type], sig: &[Type], min: usize, f: crate::plan::Func, ret: Type) -> SqlResult<Option<Resolved>> {
+    if args.len() < min || args.len() > sig.len() {
+        return Err(no_function(name, args));
+    }
+    for (a, want) in args.iter().zip(sig) {
+        let ok = *a == Type::Unknown || if want.is_integer() { a.is_integer() } else { super::implicit_ok(a, &Type::Text) };
+        if !ok {
+            return Err(no_function(name, args));
+        }
+    }
+    resolved(f, sig[..args.len()].to_vec(), ret)
+}
+
+/// `to_bin`, `to_oct`, `to_hex`.
+fn resolve_radix(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
+    let err = || no_function(name, args);
+    match name {
+        "to_bin" | "to_oct" => {
+            let f = if name == "to_bin" {
+                strict("to_bin", |a, _| Ok(Value::Text(radix(&a[0], 2))))
+            } else {
+                strict("to_oct", |a, _| Ok(Value::Text(radix(&a[0], 8))))
+            };
+            match args {
+                [Type::Int8] => resolved(f, vec![Type::Int8], Type::Text),
+                [t] if t.is_integer() || *t == Type::Unknown => resolved(f, vec![Type::Int4], Type::Text),
+                _ => Err(err()),
+            }
+        }
+        "to_hex" => match args {
+            [Type::Int8] => resolved(strict("to_hex", to_hex), vec![Type::Int8], Type::Text),
+            [t] if t.is_integer() || *t == Type::Unknown => resolved(strict("to_hex", to_hex), vec![Type::Int4], Type::Text),
+            _ => Err(err()),
+        },
+        _ => Ok(None),
+    }
+}
+
 fn resolve_more(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
+    if let Some(r) = resolve_radix(name, args)? {
+        return Ok(Some(r));
+    }
     let err = || no_function(name, args);
     let n = args.len();
     let text_fn = |f: crate::plan::Func, arity: usize, ret: Type| -> SqlResult<Option<Resolved>> {
@@ -155,7 +197,15 @@ fn resolve_more(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
             resolved(lenient("format", format_fn), targets, Type::Text)
         }
         "quote_ident" => text_fn(strict("quote_ident", |a, _| Ok(Value::Text(quote_ident(s(&a[0]))))), 1, Type::Text),
-        "quote_literal" => text_fn(strict("quote_literal", |a, _| Ok(Value::Text(quote_literal(s(&a[0]))))), 1, Type::Text),
+        "quote_literal" => match args {
+            [t] if !is_texty(t) && *t != Type::Varchar && *t != Type::Bpchar => {
+                resolved(strict("quote_literal", |a, _| Ok(Value::Text(quote_literal(&any_text(&a[0])?)))), vec![t.clone()], Type::Text)
+            }
+            _ => text_fn(strict("quote_literal", |a, _| Ok(Value::Text(quote_literal(s(&a[0]))))), 1, Type::Text),
+        },
+        "unistr" => text_fn(strict("unistr", unistr), 1, Type::Text),
+        "normalize" if n == 1 || n == 2 => text_fn(strict("normalize", normalize), n, Type::Text),
+        "is_normalized" if n == 1 || n == 2 => text_fn(strict("is_normalized", is_normalized), n, Type::Bool),
         "quote_nullable" => resolved(
             lenient("quote_nullable", |a, _| Ok(Value::Text(if a[0].is_null() { "NULL".into() } else { quote_literal(s(&a[0])) }))),
             texts(1),
@@ -181,11 +231,17 @@ fn resolve_more(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
         "convert" if n == 3 => resolved(strict("convert", convert), vec![Type::Bytea, Type::Name, Type::Name], Type::Bytea),
         "encode" if n == 2 => resolved(strict("encode", encode), vec![Type::Bytea, Type::Text], Type::Text),
         "decode" if n == 2 => resolved(strict("decode", decode), texts(2), Type::Bytea),
-        "regexp_replace" => match n {
-            3 => text_fn(strict("regexp_replace", regexp_replace), 3, Type::Text),
-            4 => text_fn(strict("regexp_replace", regexp_replace), 4, Type::Text),
+        "regexp_replace" => match args {
+            [_, _, _] => text_fn(strict("regexp_replace", regexp_replace), 3, Type::Text),
+            [_, _, _, t] if !t.is_integer() => text_fn(strict("regexp_replace", regexp_replace), 4, Type::Text),
+            [_, _, _, _] | [_, _, _, _, _] | [_, _, _, _, _, _] => {
+                regex_sig(name, args, &[T, T, T, I, I, T], 4, strict("regexp_replace", regexp_replace_n), Type::Text)
+            }
             _ => Err(err()),
         },
+        "regexp_count" if n > 2 => regex_sig(name, args, &[T, T, I, T], 2, strict("regexp_count", regexp_count), Type::Int4),
+        "regexp_instr" => regex_sig(name, args, &[T, T, I, I, I, T, I], 2, strict("regexp_instr", regexp_instr), Type::Int4),
+        "regexp_substr" => regex_sig(name, args, &[T, T, I, I, T, I], 2, strict("regexp_substr", regexp_substr), Type::Text),
         "regexp_match" => match n {
             2 | 3 => text_fn(strict("regexp_match", regexp_match), n, Type::array_of(Type::Text)),
             _ => Err(err()),
@@ -198,13 +254,7 @@ fn resolve_more(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
             ),
             _ => Err(err()),
         },
-        "regexp_count" if n == 2 => text_fn(
-            strict("regexp_count", |a, _| {
-                Ok(Value::Int4(i32::try_from(compile(s(&a[1]), "")?.find_iter(s(&a[0])).count()).unwrap_or(i32::MAX)))
-            }),
-            2,
-            Type::Int4,
-        ),
+        "regexp_count" if n == 2 => text_fn(strict("regexp_count", regexp_count), 2, Type::Int4),
         "regexp_split_to_array" => match n {
             2 | 3 => text_fn(strict("regexp_split_to_array", regexp_split), n, Type::array_of(Type::Text)),
             _ => Err(err()),
@@ -330,14 +380,32 @@ fn similar_to_regex(p: &str, esc: Option<char>) -> SqlResult<String> {
     let mut out = String::new();
     let mut chars = p.chars();
     let mut in_bracket = false;
+    let mut quotes = 0;
     while let Some(c) = chars.next() {
         if Some(c) == esc {
-            if let Some(n) = chars.next() {
-                out.push_str(&regex::escape(&n.to_string()));
+            match chars.next() {
+                // `esc"` separators split the pattern into prefix, returned part and suffix
+                // (`similar_escape_internal`).
+                Some('"') => {
+                    match quotes {
+                        0 => out.push_str("){1,1}?("),
+                        1 => out.push_str("){1,1}(?:"),
+                        _ => {
+                            return Err(SqlError::new(
+                                code::INVALID_REGULAR_EXPRESSION,
+                                "SQL regular expression may not contain more than two escape-double-quote separators",
+                            ));
+                        }
+                    }
+                    quotes += 1;
+                }
+                Some(n) => out.push_str(&regex::escape(&n.to_string())),
+                None => {}
             }
             continue;
         }
         match c {
+            '(' if !in_bracket => out.push_str("(?:"),
             '%' if !in_bracket => out.push_str(".*"),
             '_' if !in_bracket => out.push('.'),
             '[' => {
@@ -361,35 +429,51 @@ fn similar_to_regex(p: &str, esc: Option<char>) -> SqlResult<String> {
 /// Compiles a Postgres (ARE) regular expression. Flags: `i` case-insensitive, `g` global
 /// (handled by callers), `n`/`m` newline-sensitive, `s` single-line, `x` extended.
 pub fn compile(pattern: &str, flags: &str) -> SqlResult<regex::Regex> {
-    let mut b = regex::RegexBuilder::new(&translate_are(pattern));
+    // `parse_re_flags`: later flags override earlier ones.
+    let (mut icase, mut quote, mut expanded) = (false, false, false);
+    let (mut multi_line, mut dot_nl) = (false, true);
     for f in flags.chars() {
         match f {
-            'i' => {
-                b.case_insensitive(true);
-            }
-            'c' => {
-                b.case_insensitive(false);
-            }
-            'n' | 'm' => {
-                b.multi_line(true);
-            }
-            's' => {
-                b.dot_matches_new_line(true);
-            }
-            'x' => {
-                b.ignore_whitespace(true);
-            }
-            'g' => {}
+            'i' => icase = true,
+            'c' => icase = false,
+            'n' | 'm' => (multi_line, dot_nl) = (true, false),
+            's' => (multi_line, dot_nl) = (false, true),
+            'p' => (multi_line, dot_nl) = (false, false),
+            'w' => (multi_line, dot_nl) = (true, true),
+            'x' => expanded = true,
+            't' => expanded = false,
+            'q' => quote = true,
+            'g' | 'e' | 'b' => {}
             other => {
                 return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, format!("invalid regular expression option: \"{other}\"")));
             }
         }
     }
-    // Postgres' `.` matches newlines unless newline-sensitive mode is on.
-    if !flags.contains('n') && !flags.contains('m') {
-        b.dot_matches_new_line(true);
-    }
-    b.build().map_err(|e| SqlError::new(code::INVALID_REGULAR_EXPRESSION, format!("invalid regular expression: {e}")))
+    let body = if quote { regex::escape(pattern) } else { translate_are(pattern) };
+    let mut b = regex::RegexBuilder::new(&body);
+    b.case_insensitive(icase).multi_line(multi_line).dot_matches_new_line(dot_nl).ignore_whitespace(expanded && !quote);
+    b.build().map_err(|e| SqlError::new(code::INVALID_REGULAR_EXPRESSION, format!("invalid regular expression: {}", regex_error(&e))))
+}
+
+/// Postgres' wording (`regerror`) for the common syntax errors.
+fn regex_error(e: &regex::Error) -> String {
+    let msg = e.to_string();
+    let detail = msg.lines().rev().find(|l| l.trim_start().starts_with("error:")).map_or(msg.as_str(), |l| l.trim_start()[6..].trim());
+    let known = [
+        ("unclosed group", "parentheses () not balanced"),
+        ("unopened group", "parentheses () not balanced"),
+        ("unclosed character class", "brackets [] not balanced"),
+        ("repetition operator missing expression", "quantifier operand invalid"),
+        ("unclosed counted repetition", "braces {} not balanced"),
+        ("invalid character class range", "invalid character range"),
+        ("invalid escape sequence", "invalid escape \\ sequence"),
+        ("unrecognized escape sequence", "invalid escape \\ sequence"),
+        ("decimal literal", "invalid repetition count(s)"),
+        ("counted repetition", "invalid repetition count(s)"),
+        ("repetition count", "invalid repetition count(s)"),
+        ("backreferences are not supported", "invalid backreference number"),
+    ];
+    known.iter().find(|(k, _)| detail.contains(k)).map_or_else(|| detail.to_owned(), |(_, v)| (*v).to_owned())
 }
 
 /// Rewrites the few ARE constructs Rust's regex syntax spells differently.
@@ -605,6 +689,105 @@ fn to_hex(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     }))
 }
 
+/// `to_bin` / `to_oct`: the two's-complement digits of the integer's own width.
+fn radix(v: &Value, base: u32) -> String {
+    #[allow(clippy::cast_sign_loss)]
+    let n: u64 = match v {
+        Value::Int8(n) => *n as u64,
+        v => u64::from(int(v) as u32),
+    };
+    match base {
+        2 => format!("{n:b}"),
+        _ => format!("{n:o}"),
+    }
+}
+
+/// `unistr`: `\XXXX`, `\+XXXXXX`, `\uXXXX`, `\UXXXXXXXX` escapes and `\\`.
+fn unistr(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let bad = || {
+        SqlError::new("22025", "invalid Unicode escape").with_hint("Unicode escapes must be \\XXXX, \\+XXXXXX, \\uXXXX, or \\UXXXXXXXX.")
+    };
+    let src: Vec<char> = s(&a[0]).chars().collect();
+    let mut out = String::new();
+    let mut pending_high: Option<u32> = None;
+    let mut i = 0;
+    while i < src.len() {
+        if src[i] != '\\' {
+            if pending_high.is_some() {
+                return Err(SqlError::new("22025", "invalid Unicode surrogate pair"));
+            }
+            out.push(src[i]);
+            i += 1;
+            continue;
+        }
+        let (skip, digits) = match src.get(i + 1) {
+            Some('\\') => {
+                out.push('\\');
+                i += 2;
+                continue;
+            }
+            Some('+') => (2, 6),
+            Some('u') => (2, 4),
+            Some('U') => (2, 8),
+            Some(c) if c.is_ascii_hexdigit() => (1, 4),
+            _ => return Err(bad()),
+        };
+        let hex: String = src.get(i + skip..i + skip + digits).ok_or_else(bad)?.iter().collect();
+        if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(bad());
+        }
+        let cp = u32::from_str_radix(&hex, 16).map_err(|_| bad())?;
+        i += skip + digits;
+        if (0xD800..0xDC00).contains(&cp) {
+            if pending_high.is_some() {
+                return Err(SqlError::new("22025", "invalid Unicode surrogate pair"));
+            }
+            pending_high = Some(cp);
+            continue;
+        }
+        let cp = if (0xDC00..0xE000).contains(&cp) {
+            let hi = pending_high.take().ok_or_else(|| SqlError::new("22025", "invalid Unicode surrogate pair"))?;
+            0x10000 + ((hi - 0xD800) << 10) + (cp - 0xDC00)
+        } else {
+            if pending_high.is_some() {
+                return Err(SqlError::new("22025", "invalid Unicode surrogate pair"));
+            }
+            cp
+        };
+        out.push(char::from_u32(cp).ok_or_else(|| SqlError::new("22025", format!("invalid Unicode code point: {cp:04X}")))?);
+    }
+    if pending_high.is_some() {
+        return Err(SqlError::new("22025", "invalid Unicode surrogate pair"));
+    }
+    Ok(Value::Text(out))
+}
+
+fn normalization_form(a: &[Value]) -> SqlResult<()> {
+    let form = a.get(1).map_or("NFC", s).trim().to_ascii_uppercase();
+    if !matches!(form.as_str(), "NFC" | "NFD" | "NFKC" | "NFKD") {
+        return Err(SqlError::new(code::SYNTAX_ERROR, format!("invalid normalization form: {form}")));
+    }
+    Ok(())
+}
+
+/// `normalize` / `IS NORMALIZED`: ASCII text is normalized in every form; pgmem has no
+/// Unicode normalization tables for anything else.
+fn normalize(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    normalization_form(a)?;
+    if !s(&a[0]).is_ascii() {
+        return Err(SqlError::feature_not_supported("Unicode normalization of non-ASCII text is not supported by pgmem"));
+    }
+    Ok(a[0].clone())
+}
+
+fn is_normalized(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    normalization_form(a)?;
+    if !s(&a[0]).is_ascii() {
+        return Err(SqlError::feature_not_supported("Unicode normalization of non-ASCII text is not supported by pgmem"));
+    }
+    Ok(Value::Bool(true))
+}
+
 fn md5_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     use md5::Digest;
     let bytes: &[u8] = match &a[0] {
@@ -672,12 +855,43 @@ fn format_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
             pos = fmt[i..j].iter().collect::<String>().parse::<usize>().ok();
             i = j + 1;
         }
-        // Optional flags/width.
-        let left_align = fmt.get(i) == Some(&'-');
+        // Optional flags/width; `*` (or `*n$`) takes the width from an argument.
+        let mut left_align = fmt.get(i) == Some(&'-');
         if left_align {
             i += 1;
         }
         let mut width = String::new();
+        if fmt.get(i) == Some(&'*') {
+            i += 1;
+            let mut j = i;
+            while j < fmt.len() && fmt[j].is_ascii_digit() {
+                j += 1;
+            }
+            let widx = if j > i && fmt.get(j) == Some(&'$') {
+                let p = fmt[i..j].iter().collect::<String>().parse::<usize>().unwrap_or(0);
+                i = j + 1;
+                if p == 0 {
+                    return Err(SqlError::new(
+                        code::INVALID_PARAMETER_VALUE,
+                        "format specifies argument 0, but arguments are numbered from 1",
+                    ));
+                }
+                p - 1
+            } else {
+                next
+            };
+            next = widx + 1;
+            let warg = args.get(widx).ok_or_else(|| SqlError::new(code::INVALID_PARAMETER_VALUE, "too few arguments for format()"))?;
+            let w = if warg.is_null() {
+                0
+            } else {
+                any_text(warg)?.trim().parse::<i64>().map_err(|_| SqlError::invalid_text("integer", &any_text(warg).unwrap_or_default()))?
+            };
+            if w < 0 {
+                left_align = true;
+            }
+            width = w.unsigned_abs().to_string();
+        }
         while i < fmt.len() && fmt[i].is_ascii_digit() {
             width.push(fmt[i]);
             i += 1;
@@ -851,12 +1065,12 @@ fn replacement(r: &str) -> String {
     out
 }
 
-fn regexp_replace(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
-    let flags = a.get(3).map_or("", s);
-    let re = compile(s(&a[1]), flags)?;
-    let rep = replacement(s(&a[2]));
-    let out = if flags.contains('g') { re.replace_all(s(&a[0]), rep.as_str()) } else { re.replace(s(&a[0]), rep.as_str()) };
-    Ok(Value::Text(out.into_owned()))
+fn regexp_replace(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
+    let flags = a.get(3).cloned().unwrap_or(Value::Text(String::new()));
+    regexp_replace_n(
+        &[a[0].clone(), a[1].clone(), a[2].clone(), Value::Int4(1), Value::Int4(if s(&flags).contains('g') { 0 } else { 1 }), flags],
+        ctx,
+    )
 }
 
 fn regexp_match(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
@@ -873,13 +1087,173 @@ fn regexp_match(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     })
 }
 
+/// The byte offset of 1-based character position `start` (validated), or None past the end.
+fn start_offset(src: &str, start: i64) -> SqlResult<Option<usize>> {
+    if start <= 0 {
+        return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, format!("invalid value for parameter \"start\": {start}")));
+    }
+    let skip = usize::try_from(start - 1).unwrap_or(usize::MAX);
+    Ok(if skip == 0 { Some(0) } else { src.char_indices().map(|(i, _)| i).chain(std::iter::once(src.len())).nth(skip) })
+}
+
+/// Successive matches from byte offset `from`, as Postgres finds them: the search resumes at
+/// the end of each match, one character further after an empty one.
+fn matches_from<'h>(re: &regex::Regex, src: &'h str, from: usize) -> Vec<regex::Captures<'h>> {
+    let mut out = Vec::new();
+    let mut pos = from;
+    while pos <= src.len() {
+        let Some(c) = re.captures_at(src, pos) else { break };
+        let m = c.get(0).map_or((pos, pos), |m| (m.start(), m.end()));
+        pos = if m.1 == m.0 { m.1 + src[m.1..].chars().next().map_or(1, char::len_utf8) } else { m.1 };
+        out.push(c);
+    }
+    out
+}
+
+fn no_global(flags: &str, func: &str) -> SqlResult<()> {
+    if flags.contains('g') {
+        return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, format!("{func}() does not support the \"global\" option")));
+    }
+    Ok(())
+}
+
+fn positive(v: Option<&Value>, param: &str, default: i64) -> SqlResult<i64> {
+    let n = v.map_or(default, int);
+    if n <= 0 {
+        return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, format!("invalid value for parameter \"{param}\": {n}")));
+    }
+    Ok(n)
+}
+
+/// `regexp_replace(source, pattern, replacement, start [, N [, flags]])`.
+fn regexp_replace_n(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let src = s(&a[0]);
+    let flags = a.get(5).map_or("", s);
+    let re = compile(s(&a[1]), flags)?;
+    let n = a.get(4).map_or(if flags.contains('g') { 0 } else { 1 }, int);
+    if n < 0 {
+        return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, format!("invalid value for parameter \"n\": {n}")));
+    }
+    let all = n == 0 || flags.contains('g');
+    let Some(from) = start_offset(src, int(&a[3]))? else { return Ok(Value::Text(src.to_owned())) };
+    let rep = replacement(s(&a[2]));
+    let mut out = String::with_capacity(src.len());
+    let mut last = 0;
+    for (i, c) in matches_from(&re, src, from).iter().enumerate() {
+        if !all && i64::try_from(i + 1).unwrap_or(i64::MAX) != n {
+            continue;
+        }
+        let m = c.get(0).map_or(0..0, |m| m.range());
+        out.push_str(&src[last..m.start]);
+        c.expand(&rep, &mut out);
+        last = m.end;
+        if !all {
+            break;
+        }
+    }
+    out.push_str(&src[last..]);
+    Ok(Value::Text(out))
+}
+
+/// `regexp_count(string, pattern [, start [, flags]])`.
+fn regexp_count(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let src = s(&a[0]);
+    let flags = a.get(3).map_or("", s);
+    no_global(flags, "regexp_count")?;
+    let re = compile(s(&a[1]), flags)?;
+    let Some(from) = start_offset(src, a.get(2).map_or(1, int))? else { return Ok(Value::Int4(0)) };
+    Ok(Value::Int4(i32::try_from(matches_from(&re, src, from).len()).unwrap_or(i32::MAX)))
+}
+
+/// The Nth match's capture `subexpr` (0 = the whole match), for regexp_instr / regexp_substr.
+fn nth_match<'h>(src: &'h str, a: &[Value], n_at: usize, flags: &str, sub_at: usize, func: &str) -> SqlResult<Option<regex::Match<'h>>> {
+    no_global(flags, func)?;
+    let re = compile(s(&a[1]), flags)?;
+    let Some(from) = start_offset(src, a.get(2).map_or(1, int))? else { return Ok(None) };
+    let n = positive(a.get(n_at), "n", 1)?;
+    let sub = a.get(sub_at).map_or(0, int);
+    if sub < 0 {
+        return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, format!("invalid value for parameter \"subexpr\": {sub}")));
+    }
+    let all = matches_from(&re, src, from);
+    let Some(c) = all.into_iter().nth(usize::try_from(n - 1).unwrap_or(usize::MAX)) else { return Ok(None) };
+    Ok(c.get(usize::try_from(sub).unwrap_or(usize::MAX)))
+}
+
+/// `regexp_instr(string, pattern [, start [, N [, endoption [, flags [, subexpr]]]]])`.
+fn regexp_instr(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let src = s(&a[0]);
+    let end = a.get(4).map_or(0, int);
+    if end != 0 && end != 1 {
+        return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, format!("invalid value for parameter \"endoption\": {end}")));
+    }
+    let m = nth_match(src, a, 3, a.get(5).map_or("", s), 6, "regexp_instr")?;
+    Ok(Value::Int4(m.map_or(0, |m| {
+        let at = if end == 1 { m.end() } else { m.start() };
+        i32::try_from(src[..at].chars().count() + 1).unwrap_or(i32::MAX)
+    })))
+}
+
+/// `regexp_substr(string, pattern [, start [, N [, flags [, subexpr]]]])`.
+fn regexp_substr(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let src = s(&a[0]);
+    let m = nth_match(src, a, 3, a.get(4).map_or("", s), 5, "regexp_substr")?;
+    Ok(m.map_or(Value::Null, |m| Value::Text(m.as_str().to_owned())))
+}
+
+/// `regexp_matches(string, pattern [, flags])`: one text[] row per match.
+pub fn regexp_matches(a: &[Value], _: &EvalCtx) -> SqlResult<Vec<crate::plan::Row>> {
+    if a.iter().any(Value::is_null) {
+        return Ok(Vec::new());
+    }
+    let src = s(&a[0]);
+    let flags = a.get(2).map_or("", s);
+    let re = compile(s(&a[1]), flags)?;
+    let mut found = matches_from(&re, src, 0);
+    if !flags.contains('g') {
+        found.truncate(1);
+    }
+    Ok(found
+        .iter()
+        .map(|c| {
+            let arr = if c.len() == 1 {
+                vec![Value::Text(c.get(0).map_or("", |m| m.as_str()).to_owned())]
+            } else {
+                (1..c.len()).map(|i| c.get(i).map_or(Value::Null, |m| Value::Text(m.as_str().to_owned()))).collect()
+            };
+            vec![Value::Array(arr)]
+        })
+        .collect())
+}
+
+/// `regexp_split_to_table(string, pattern [, flags])`.
+pub fn regexp_split_to_table(a: &[Value], ctx: &EvalCtx) -> SqlResult<Vec<crate::plan::Row>> {
+    if a.iter().any(Value::is_null) {
+        return Ok(Vec::new());
+    }
+    match regexp_split(a, ctx)? {
+        Value::Array(items) => Ok(items.into_iter().map(|v| vec![v]).collect()),
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// `regexp_split_to_array`: the pieces between matches, ignoring zero-length matches at
+/// the start, at the end, or right after another match.
 fn regexp_split(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     let re = compile(s(&a[1]), a.get(2).map_or("", s))?;
     let src = s(&a[0]);
-    if s(&a[1]).is_empty() {
-        return Ok(Value::Array(src.chars().map(|c| Value::Text(c.to_string())).collect()));
+    let mut out = Vec::new();
+    let (mut last, mut prev_end) = (0, 0);
+    for c in matches_from(&re, src, 0) {
+        let Some(m) = c.get(0) else { continue };
+        if m.start() < src.len() && m.end() > prev_end {
+            out.push(Value::Text(src[last..m.start()].to_owned()));
+            last = m.end();
+        }
+        prev_end = m.end();
     }
-    Ok(Value::Array(re.split(src).map(|p| Value::Text(p.to_owned())).collect()))
+    out.push(Value::Text(src[last..].to_owned()));
+    Ok(Value::Array(out))
 }
 
 #[cfg(test)]

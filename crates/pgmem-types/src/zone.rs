@@ -86,6 +86,14 @@ impl Zone {
     }
 
     /// An IANA zone by name, case-insensitively, reporting its canonical spelling.
+    /// An IANA zone by name, case-insensitively (`america/new_york`), or `UTC`/`GMT`.
+    pub fn named_ci(name: &str) -> Option<Zone> {
+        if name.eq_ignore_ascii_case("utc") || name.eq_ignore_ascii_case("gmt") {
+            return Some(Zone::utc());
+        }
+        Zone::named(name)
+    }
+
     fn named(name: &str) -> Option<Zone> {
         let tz = TimeZone::get(name).ok()?;
         let canonical = tz.iana_name().map_or_else(|| name.to_owned(), str::to_owned);

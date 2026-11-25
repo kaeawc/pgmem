@@ -142,8 +142,10 @@ pub mod code {
     pub const NULL_VALUE_NOT_ALLOWED: &str = "22004";
     pub const INVALID_DATETIME_FORMAT: &str = "22007";
     pub const DATETIME_FIELD_OVERFLOW: &str = "22008";
+    pub const INVALID_TIME_ZONE_DISPLACEMENT_VALUE: &str = "22009";
     pub const DIVISION_BY_ZERO: &str = "22012";
     pub const INVALID_PARAMETER_VALUE: &str = "22023";
+    pub const CANT_CHANGE_RUNTIME_PARAM: &str = "55P02";
     pub const INVALID_REGULAR_EXPRESSION: &str = "2201B";
     pub const ARRAY_SUBSCRIPT_ERROR: &str = "2202E";
     pub const INVALID_TEXT_REPRESENTATION: &str = "22P02";
@@ -191,6 +193,7 @@ pub mod code {
     pub const DUPLICATE_PREPARED_STATEMENT: &str = "42P05";
     pub const DUPLICATE_SCHEMA: &str = "42P06";
     pub const UNTRANSLATABLE_CHARACTER: &str = "22P05";
+    pub const PROGRAM_LIMIT_EXCEEDED: &str = "54000";
     pub const DUPLICATE_TABLE: &str = "42P07";
     pub const DUPLICATE_ALIAS: &str = "42712";
     pub const DUPLICATE_OBJECT: &str = "42710";

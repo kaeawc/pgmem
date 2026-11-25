@@ -1,6 +1,6 @@
 //! Expression binding.
 
-use super::{Binder, Clause, Ctx, Level, agg_misuse, feature, resolve_type_name, window_misuse};
+use super::{Binder, Clause, Ctx, Level, agg_misuse, resolve_type_name, window_misuse};
 use crate::cast::{CoercionContext, cast_context, cast_value, cast_value_ctx};
 use crate::funcs::{self, EQ, common_type, comparison, resolve_binary, resolve_function, resolve_unary};
 use crate::plan::{AggCall, AggKind, Expr, Frame, FrameBound, FrameUnits, SortKey, SubqueryKind, WinCall, WinKind};
@@ -266,6 +266,22 @@ fn aggregate_kind(name: &str) -> Option<AggKind> {
         "var_pop" => AggKind::VarPop,
         "bit_and" => AggKind::BitAnd,
         "bit_or" => AggKind::BitOr,
+        "bit_xor" => AggKind::BitXor,
+        "corr" => AggKind::Corr,
+        "covar_pop" => AggKind::CovarPop,
+        "covar_samp" => AggKind::CovarSamp,
+        "regr_count" => AggKind::RegrCount,
+        "regr_sxx" => AggKind::RegrSxx,
+        "regr_syy" => AggKind::RegrSyy,
+        "regr_sxy" => AggKind::RegrSxy,
+        "regr_avgx" => AggKind::RegrAvgX,
+        "regr_avgy" => AggKind::RegrAvgY,
+        "regr_r2" => AggKind::RegrR2,
+        "regr_slope" => AggKind::RegrSlope,
+        "regr_intercept" => AggKind::RegrIntercept,
+        "percentile_cont" => AggKind::PercentileCont,
+        "percentile_disc" => AggKind::PercentileDisc,
+        "mode" => AggKind::Mode,
         _ => return None,
     })
 }
@@ -334,10 +350,9 @@ fn aggregate_types(kind: AggKind, name: &str, args: &[Type]) -> SqlResult<(Vec<T
         },
         AggKind::ArrayAgg => {
             let t = if first == Type::Unknown { Type::Text } else { first };
-            if matches!(t, Type::Array(_)) {
-                return Err(feature("array_agg over arrays (multidimensional arrays)"));
-            }
-            (vec![t.clone()], Type::array_of(t))
+            // array_agg(anyarray) stacks the inputs into one more dimension.
+            let ret = if matches!(t, Type::Array(_)) { t.clone() } else { Type::array_of(t.clone()) };
+            (vec![t], ret)
         }
         AggKind::JsonbAgg | AggKind::JsonbAggStrict | AggKind::JsonAgg | AggKind::JsonAggStrict => {
             let ret = if matches!(kind, AggKind::JsonAgg | AggKind::JsonAggStrict) { Type::Json } else { Type::Jsonb };
@@ -356,12 +371,36 @@ fn aggregate_types(kind: AggKind, name: &str, args: &[Type]) -> SqlResult<(Vec<T
                 _ => return Err(err()),
             }
         }
-        AggKind::BitAnd | AggKind::BitOr => {
+        AggKind::BitAnd | AggKind::BitOr | AggKind::BitXor => {
             if !first.is_integer() {
                 return Err(err());
             }
             (vec![first.clone()], first)
         }
+        AggKind::Corr
+        | AggKind::CovarPop
+        | AggKind::CovarSamp
+        | AggKind::RegrCount
+        | AggKind::RegrSxx
+        | AggKind::RegrSyy
+        | AggKind::RegrSxy
+        | AggKind::RegrAvgX
+        | AggKind::RegrAvgY
+        | AggKind::RegrR2
+        | AggKind::RegrSlope
+        | AggKind::RegrIntercept => {
+            if !args.iter().all(|t| t.is_numeric() || *t == Type::Unknown) {
+                return Err(err());
+            }
+            (vec![Type::Float8, Type::Float8], if kind == AggKind::RegrCount { Type::Int8 } else { Type::Float8 })
+        }
+        AggKind::PercentileCont
+        | AggKind::PercentileDisc
+        | AggKind::Mode
+        | AggKind::HypRank
+        | AggKind::HypDenseRank
+        | AggKind::HypPercentRank
+        | AggKind::HypCumeDist => return Err(err()),
     })
 }
 
@@ -517,75 +556,13 @@ impl Binder<'_> {
                 let bound = items.iter().map(|i| self.bind_expr(i, ctx)).collect::<SqlResult<Vec<_>>>()?;
                 let types: Vec<Type> = bound.iter().map(|(_, t)| t.clone()).collect();
                 let t = common_of(&types, "ARRAY")?;
-                if matches!(t, Type::Array(_)) {
-                    return Err(feature("multidimensional arrays"));
-                }
                 let items =
                     bound.into_iter().map(|(e, et)| coerce(self, e, &et, &t, CoercionContext::Implicit)).collect::<SqlResult<Vec<_>>>()?;
-                Ok((fold(Expr::Array(items)), Type::array_of(t)))
+                // ARRAY[ARRAY[...], ...] builds a multidimensional array of the same type.
+                let ty = if matches!(t, Type::Array(_)) { t } else { Type::array_of(t) };
+                Ok((fold(Expr::Array(items)), ty))
             }
-            ir::Expr::Subscript { expr, index } => {
-                let (arr, t) = self.bind_expr(expr, ctx)?;
-                if t == Type::Jsonb {
-                    // jsonb subscripts are `->` steps: text keys or integer indexes.
-                    let ir::Subscript::Index(i) = index else {
-                        return Err(SqlError::datatype_mismatch("jsonb subscript does not support slices"));
-                    };
-                    let (k, kt) = self.bind_expr(i, ctx)?;
-                    let kt2 = if kt.is_integer() {
-                        Type::Int4
-                    } else if kt == Type::Unknown || kt.is_string() {
-                        Type::Text
-                    } else {
-                        return Err(SqlError::datatype_mismatch(format!("subscript type {} is not supported", kt.name()))
-                            .with_hint("jsonb subscript must be coercible to either integer or text."));
-                    };
-                    let k = coerce(self, k, &kt, &kt2, CoercionContext::Implicit)?;
-                    let func = funcs::lenient("jsonb_subscript", |a, _| crate::funcs::json::subscript(&a[0], &a[1]));
-                    return Ok((Expr::Call { func, args: vec![arr, k] }, Type::Jsonb));
-                }
-                // int2vector / oidvector subscripts start at 0.
-                let zero_based = matches!(t, Type::Int2Vector | Type::OidVector);
-                let elem = match &t {
-                    Type::Array(e) => (**e).clone(),
-                    Type::Int2Vector | Type::OidVector => t.element().cloned().unwrap_or(Type::Int2),
-                    other => {
-                        return Err(SqlError::datatype_mismatch(format!(
-                            "cannot subscript type {} because it does not support subscripting",
-                            other.name()
-                        )));
-                    }
-                };
-                let int_expr = |e: &ir::Expr| -> SqlResult<Expr> {
-                    let (x, xt) = self.bind_expr(e, ctx)?;
-                    let x = coerce(self, x, &xt, &Type::Int4, CoercionContext::Assignment)?;
-                    if zero_based {
-                        return Ok(self.apply_binary("+", x, Type::Int4, Expr::Const(Value::Int4(1)), Type::Int4)?.0);
-                    }
-                    Ok(x)
-                };
-                Ok(match index {
-                    ir::Subscript::Index(i) => {
-                        (Expr::Subscript { expr: Box::new(arr), index: Box::new(int_expr(i)?), upper: None, slice: false }, elem)
-                    }
-                    ir::Subscript::Slice { lower, upper } => {
-                        let lo = match lower {
-                            Some(l) => int_expr(l)?,
-                            None => Expr::null(),
-                        };
-                        let hi = upper.as_ref().map(|u| int_expr(u)).transpose()?;
-                        (
-                            Expr::Subscript {
-                                expr: Box::new(arr),
-                                index: Box::new(lo),
-                                upper: Some(Box::new(hi.unwrap_or(Expr::null()))),
-                                slice: true,
-                            },
-                            t,
-                        )
-                    }
-                })
-            }
+            ir::Expr::Subscript { .. } => self.bind_subscripts(e, ctx),
             ir::Expr::Row(items) => {
                 let bound = items.iter().map(|i| self.bind_expr(i, ctx)).collect::<SqlResult<Vec<_>>>()?;
                 let (fields, types): (Vec<Expr>, Vec<Type>) = bound.into_iter().unzip();
@@ -973,6 +950,18 @@ impl Binder<'_> {
             [s, n] if s == "pg_catalog" || s == "public" => n.as_str(),
             _ => return Err(funcs::no_function(&f.name.to_string(), &[])),
         };
+        if f.over.is_none() && !f.within_group.is_empty() {
+            let hyp = match name {
+                "rank" => Some(AggKind::HypRank),
+                "dense_rank" => Some(AggKind::HypDenseRank),
+                "percent_rank" => Some(AggKind::HypPercentRank),
+                "cume_dist" => Some(AggKind::HypCumeDist),
+                _ => None,
+            };
+            if let Some(kind) = hyp {
+                return self.bind_hypothetical(name, kind, f, ctx);
+            }
+        }
         if let Some(kind) = window_kind(name) {
             return self.bind_window_call(name, kind, None, f, ctx);
         }
@@ -1004,6 +993,28 @@ impl Binder<'_> {
             return Err(SqlError::syntax(format!("{name}(*) specified, but {name} is not an aggregate function")));
         }
         let mut bound = f.args.iter().map(|a| self.bind_expr(a, ctx)).collect::<SqlResult<Vec<_>>>()?;
+        // `f(VARIADIC arr)`: the array's elements become the arguments (an array known when the
+        // statement is bound: an ARRAY[...] constructor or a constant).
+        if f.variadic
+            && let Some((last, lt)) = bound.pop()
+        {
+            let Type::Array(elem) = &lt else {
+                return Err(SqlError::new(code::DATATYPE_MISMATCH, "VARIADIC argument must be an array"));
+            };
+            match fold(last) {
+                Expr::Array(items) => bound.extend(items.into_iter().map(|e| (e, (**elem).clone()))),
+                Expr::Const(Value::Array(items)) => {
+                    bound.extend(items.into_iter().map(|v| (Expr::Const(v), (**elem).clone())));
+                }
+                Expr::Const(Value::Null) => {
+                    return Ok((
+                        Expr::Const(Value::Null),
+                        if name == "num_nulls" || name == "num_nonnulls" { Type::Int4 } else { Type::Text },
+                    ));
+                }
+                _ => return Err(SqlError::feature_not_supported("VARIADIC with a non-constant array is not supported by pgmem")),
+            }
+        }
         // SQL/JSON query functions also get their RETURNING type's OID (the 4th argument's
         // type), to coerce results at run time under ON ERROR.
         if matches!(name, "__pgmem_json_value" | "__pgmem_json_query" | "__pgmem_json_exists")
@@ -1051,6 +1062,9 @@ impl Binder<'_> {
             return self.bind_enum_function(name, *oid, bound);
         }
         let types: Vec<Type> = bound.iter().map(|(_, t)| t.clone()).collect();
+        if let Some((outs, targets, f)) = select_list_srf(name, &types)? {
+            return self.bind_srf_call(name, outs, targets, f, bound, ctx);
+        }
         let res = resolve_function(name, &types)?.ok_or_else(|| funcs::no_function(name, &types))?;
         let args = bound
             .into_iter()
@@ -1095,6 +1109,16 @@ impl Binder<'_> {
     }
 
     fn make_agg(&self, name: &str, kind: AggKind, f: &ir::FunctionCall, ctx: &Ctx) -> SqlResult<AggCall> {
+        let ordered_set = matches!(kind, AggKind::PercentileCont | AggKind::PercentileDisc | AggKind::Mode);
+        if ordered_set {
+            return self.make_ordered_set_agg(name, kind, f, ctx);
+        }
+        if !f.within_group.is_empty() {
+            return Err(SqlError::new(
+                code::WRONG_OBJECT_TYPE,
+                format!("{name} is not an ordered-set aggregate, so it cannot have WITHIN GROUP"),
+            ));
+        }
         let bound = self.bind_agg_args(f, ctx)?;
         let types: Vec<Type> = bound.iter().map(|(_, t)| t.clone()).collect();
         let expected_args = match kind {
@@ -1103,7 +1127,19 @@ impl Binder<'_> {
             | AggKind::JsonbObjectAgg
             | AggKind::JsonObjectAgg
             | AggKind::JsonbObjectAggStrict
-            | AggKind::JsonObjectAggStrict => 2,
+            | AggKind::JsonObjectAggStrict
+            | AggKind::Corr
+            | AggKind::CovarPop
+            | AggKind::CovarSamp
+            | AggKind::RegrCount
+            | AggKind::RegrSxx
+            | AggKind::RegrSyy
+            | AggKind::RegrSxy
+            | AggKind::RegrAvgX
+            | AggKind::RegrAvgY
+            | AggKind::RegrR2
+            | AggKind::RegrSlope
+            | AggKind::RegrIntercept => 2,
             _ => 1,
         };
         if bound.len() != expected_args {
@@ -1116,7 +1152,7 @@ impl Binder<'_> {
             .map(|((e, et), t)| coerce(self, e, &et, t, CoercionContext::Implicit))
             .collect::<SqlResult<Vec<_>>>()?;
         let inner = ctx.with_clause(Clause::Other);
-        let filter = f.filter.as_ref().map(|fl| self.bind_predicate(fl, "FILTER", &inner)).transpose()?;
+        let filter = f.filter.as_ref().map(|fl| self.bind_predicate(fl, "FILTER", &ctx.with_clause(Clause::Filter))).transpose()?;
         let order_by = f
             .order_by
             .iter()
@@ -1134,6 +1170,90 @@ impl Binder<'_> {
             arg_ty: targets.first().cloned().unwrap_or(Type::Unknown),
             ty: ret,
         })
+    }
+
+    /// `percentile_cont(fraction) WITHIN GROUP (ORDER BY x)` and friends: the sorted input
+    /// becomes argument 0 and the direct argument (if any) argument 1.
+    fn make_ordered_set_agg(&self, name: &str, kind: AggKind, f: &ir::FunctionCall, ctx: &Ctx) -> SqlResult<AggCall> {
+        if f.within_group.is_empty() {
+            let types =
+                self.bind_agg_args(f, ctx)?.into_iter().map(|(_, t)| if t == Type::Unknown { Type::Text } else { t }).collect::<Vec<_>>();
+            return Err(funcs::no_function(name, &types));
+        }
+        if f.distinct {
+            return Err(SqlError::new(code::WRONG_OBJECT_TYPE, "cannot use DISTINCT with WITHIN GROUP"));
+        }
+        let inner = ctx.with_clause(Clause::Other);
+        let direct = f.args.iter().map(|a| self.bind_expr(a, &inner)).collect::<SqlResult<Vec<_>>>()?;
+        let sorted = f.within_group.iter().map(|o| self.bind_expr(&o.expr, &inner)).collect::<SqlResult<Vec<_>>>()?;
+        let mut types: Vec<Type> = direct.iter().map(|(_, t)| t.clone()).collect();
+        types.extend(sorted.iter().map(|(_, t)| t.clone()));
+        let err = || funcs::no_function(name, &types);
+        let want_direct = usize::from(kind != AggKind::Mode);
+        if direct.len() != want_direct || sorted.len() != 1 {
+            return Err(err());
+        }
+        let (sexpr, st) = sorted.into_iter().next().ok_or_else(err)?;
+        let st = if st == Type::Unknown { Type::Text } else { st.base() };
+        let sort_target = match kind {
+            AggKind::PercentileCont if st == Type::Interval => Type::Interval,
+            AggKind::PercentileCont if st.is_numeric() => Type::Float8,
+            AggKind::PercentileCont => return Err(err()),
+            _ => st,
+        };
+        let mut args = vec![coerce(self, sexpr, &types[want_direct], &sort_target, CoercionContext::Implicit)?];
+        let mut ty = sort_target.clone();
+        if let Some((d, dt)) = direct.into_iter().next() {
+            let array = matches!(dt, Type::Array(_));
+            let target = if array { Type::array_of(Type::Float8) } else { Type::Float8 };
+            let elem_ok = match &dt {
+                Type::Array(e) => e.is_numeric(),
+                t => t.is_numeric() || *t == Type::Unknown,
+            };
+            if !elem_ok {
+                return Err(err());
+            }
+            args.push(coerce(self, d, &dt, &target, CoercionContext::Implicit)?);
+            if array {
+                ty = Type::array_of(ty);
+            }
+        }
+        let filter = f.filter.as_ref().map(|fl| self.bind_predicate(fl, "FILTER", &ctx.with_clause(Clause::Filter))).transpose()?;
+        let o = &f.within_group[0];
+        let order_by = vec![SortKey { expr: args[0].clone(), desc: o.desc, nulls_first: o.nulls_first.unwrap_or(o.desc) }];
+        Ok(AggCall { kind, args, distinct: false, filter, order_by, arg_ty: sort_target, ty })
+    }
+
+    /// `rank(args) WITHIN GROUP (ORDER BY cols)` and the other hypothetical-set aggregates.
+    fn bind_hypothetical(&self, name: &str, kind: AggKind, f: &ir::FunctionCall, ctx: &Ctx) -> SqlResult<Bound> {
+        if !ctx.clause.agg_allowed() {
+            return Err(agg_misuse(ctx.clause, "aggregate functions"));
+        }
+        let inner = ctx.with_clause(Clause::Other);
+        let direct = f.args.iter().map(|a| self.bind_expr(a, &inner)).collect::<SqlResult<Vec<_>>>()?;
+        let sorted = f.within_group.iter().map(|o| self.bind_expr(&o.expr, &inner)).collect::<SqlResult<Vec<_>>>()?;
+        if direct.len() != sorted.len() {
+            let types: Vec<Type> = direct.iter().chain(&sorted).map(|(_, t)| t.clone()).collect();
+            return Err(funcs::no_function(name, &types));
+        }
+        let mut args = Vec::new();
+        let mut order_by = Vec::new();
+        let mut targets = Vec::new();
+        for ((d, dt), ((e, et), o)) in direct.iter().zip(sorted.into_iter().zip(&f.within_group)) {
+            let t = common_of(&[dt.clone(), et.clone()], "WITHIN GROUP")?;
+            let e = coerce(self, e, &et, &t, CoercionContext::Implicit)?;
+            order_by.push(SortKey { expr: e.clone(), desc: o.desc, nulls_first: o.nulls_first.unwrap_or(o.desc) });
+            args.push(e);
+            targets.push((d.clone(), dt.clone(), t));
+        }
+        for (d, dt, t) in targets {
+            args.push(coerce(self, d, &dt, &t, CoercionContext::Implicit)?);
+        }
+        let filter = f.filter.as_ref().map(|fl| self.bind_predicate(fl, "FILTER", &ctx.with_clause(Clause::Filter))).transpose()?;
+        let ty = if matches!(kind, AggKind::HypRank | AggKind::HypDenseRank) { Type::Int8 } else { Type::Float8 };
+        let call = AggCall { kind, args, distinct: false, filter, order_by, arg_ty: Type::Unknown, ty: ty.clone() };
+        ctx.current().aggs.borrow_mut().push(call.clone());
+        Ok((Expr::AggCall(Box::new(call)), ty))
     }
 
     fn bind_aggregate(&self, name: &str, kind: AggKind, f: &ir::FunctionCall, ctx: &Ctx) -> SqlResult<Bound> {
@@ -1275,6 +1395,115 @@ impl Binder<'_> {
                 Ok((Expr::Subquery { id: self.fresh_id(), plan: Box::new(plan), kind, correlated }, Type::Bool))
             }
         }
+    }
+
+    /// A chain of subscripts (`x[1][2:3]`): jsonb subscripts are `->` steps, array subscripts
+    /// address one dimension each (int2vector / oidvector start at 0).
+    fn bind_subscripts(&self, e: &ir::Expr, ctx: &Ctx) -> SqlResult<Bound> {
+        let mut chain = Vec::new();
+        let mut cur = e;
+        while let ir::Expr::Subscript { expr, index } = cur {
+            chain.push(index);
+            cur = expr;
+        }
+        chain.reverse();
+        let (mut base, t) = self.bind_expr(cur, ctx)?;
+        if t == Type::Jsonb {
+            for index in chain {
+                let ir::Subscript::Index(i) = index else {
+                    return Err(SqlError::datatype_mismatch("jsonb subscript does not support slices"));
+                };
+                let (k, kt) = self.bind_expr(i, ctx)?;
+                let kt2 = if kt.is_integer() {
+                    Type::Int4
+                } else if kt == Type::Unknown || kt.is_string() {
+                    Type::Text
+                } else {
+                    return Err(SqlError::datatype_mismatch(format!("subscript type {} is not supported", kt.name()))
+                        .with_hint("jsonb subscript must be coercible to either integer or text."));
+                };
+                let k = coerce(self, k, &kt, &kt2, CoercionContext::Implicit)?;
+                let func = funcs::lenient("jsonb_subscript", |a, _| crate::funcs::json::subscript(&a[0], &a[1]));
+                base = Expr::Call { func, args: vec![base, k] };
+            }
+            return Ok((base, Type::Jsonb));
+        }
+        let zero_based = matches!(t, Type::Int2Vector | Type::OidVector);
+        let elem = match &t {
+            Type::Array(e) => (**e).clone(),
+            Type::Int2Vector | Type::OidVector => t.element().cloned().unwrap_or(Type::Int2),
+            other => {
+                return Err(SqlError::datatype_mismatch(format!(
+                    "cannot subscript type {} because it does not support subscripting",
+                    other.name()
+                )));
+            }
+        };
+        if chain.len() > 6 {
+            return Err(SqlError::new(
+                code::PROGRAM_LIMIT_EXCEEDED,
+                format!("number of array dimensions ({}) exceeds the maximum allowed (6)", chain.len()),
+            ));
+        }
+        let int_expr = |e: &ir::Expr| -> SqlResult<Expr> {
+            let (x, xt) = self.bind_expr(e, ctx)?;
+            let x = coerce(self, x, &xt, &Type::Int4, CoercionContext::Assignment)?;
+            if zero_based {
+                return Ok(self.apply_binary("+", x, Type::Int4, Expr::Const(Value::Int4(1)), Type::Int4)?.0);
+            }
+            Ok(x)
+        };
+        let slice = chain.iter().any(|s| matches!(s, ir::Subscript::Slice { .. }));
+        let mut subs = Vec::with_capacity(chain.len());
+        for index in chain {
+            subs.push(match index {
+                ir::Subscript::Index(i) => crate::plan::SubscriptPart { lower: Some(int_expr(i)?), upper: None, range: false },
+                ir::Subscript::Slice { lower, upper } => crate::plan::SubscriptPart {
+                    lower: lower.as_ref().map(|l| int_expr(l)).transpose()?,
+                    upper: upper.as_ref().map(|u| int_expr(u)).transpose()?,
+                    range: true,
+                },
+            });
+        }
+        let ty = if slice { t.clone() } else { elem };
+        Ok((Expr::Subscript { expr: Box::new(base), subs, slice }, ty))
+    }
+
+    /// A set-returning function called outside FROM: allowed in the select list (it becomes a
+    /// ProjectSet column), an error elsewhere.
+    fn bind_srf_call(
+        &self,
+        name: &str,
+        outs: Vec<Type>,
+        targets: Vec<Type>,
+        f: crate::plan::SrfFn,
+        bound: Vec<Bound>,
+        ctx: &Ctx,
+    ) -> SqlResult<Bound> {
+        if ctx.clause != Clause::SelectList {
+            let what = match ctx.clause {
+                Clause::Where => "WHERE",
+                Clause::JoinOn => "JOIN conditions",
+                Clause::GroupBy => "GROUP BY",
+                Clause::Having => "HAVING",
+                Clause::Values => "VALUES",
+                Clause::Check => "check constraints",
+                Clause::Default => "DEFAULT expressions",
+                Clause::OrderBy => "ORDER BY",
+                Clause::Returning => "RETURNING",
+                _ => "this context",
+            };
+            let _ = name;
+            return Err(SqlError::feature_not_supported(format!("set-returning functions are not allowed in {what}")));
+        }
+        let args = bound
+            .into_iter()
+            .zip(&targets)
+            .map(|((e, et), t)| coerce(self, e, &et, t, CoercionContext::Implicit))
+            .collect::<SqlResult<Vec<_>>>()?;
+        let ty = if outs.len() == 1 { outs[0].clone() } else { Type::Record };
+        let cols = outs.len();
+        Ok((Expr::SrfCall { srf: crate::plan::Srf { name: "srf", f }, args, cols }, ty))
     }
 
     /// `(a, b) IN (SELECT x, y ...)`: compares row values against the subquery's rows.
@@ -1453,4 +1682,19 @@ fn flatten(e: Expr) -> Expr {
         Expr::Or(items) => Expr::Or(items.into_iter().flat_map(|i| if let Expr::Or(inner) = i { inner } else { vec![i] }).collect()),
         other => other,
     }
+}
+
+/// The set-returning functions usable in the select list: (output column types, argument
+/// types, implementation).
+fn select_list_srf(name: &str, types: &[Type]) -> SqlResult<Option<funcs::array::SrfResolution>> {
+    if let Some(r) = funcs::array::resolve_srf(name, types)? {
+        return Ok(Some(r));
+    }
+    if let Some((cols, f)) = funcs::json::resolve_srf(name, types) {
+        return Ok(Some((cols.into_iter().map(|(_, t)| t).collect(), vec![funcs::json::srf_arg_type(name)], f)));
+    }
+    if let Some((cols, targets, f)) = funcs::json::resolve_path_srf(name, types) {
+        return Ok(Some((cols.into_iter().map(|(_, t)| t).collect(), targets, f)));
+    }
+    Ok(None)
 }

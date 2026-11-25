@@ -9,6 +9,7 @@ pub mod datetime;
 pub mod json;
 pub mod math;
 pub mod misc;
+pub mod numfmt;
 pub mod sqljson;
 pub mod string;
 

@@ -15,6 +15,10 @@ use std::fmt;
 const NUMERIC_MIN_SIG_DIGITS: i64 = 16;
 const NUMERIC_MAX_DISPLAY_SCALE: i64 = 1000;
 const NUMERIC_MAX_PRECISION: u32 = 1000;
+/// `numeric.c`'s literal for log10(e): Postgres' scale estimates truncate products with it, so
+/// the slightly shorter constant is kept rather than `f64::consts::LOG10_E`.
+#[allow(clippy::approx_constant)]
+const PG_LOG10_E: f64 = 0.434_294_481_903_252;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Numeric {
@@ -488,6 +492,17 @@ impl Numeric {
         let sweight = (weight + 1) * 4 / 2 - 1;
         let rscale = u32::try_from((NUMERIC_MIN_SIG_DIGITS - sweight).max(i64::from(self.scale())).clamp(0, NUMERIC_MAX_DISPLAY_SCALE))
             .unwrap_or(16);
+        self.sqrt_to_scale(rscale)
+    }
+
+    /// The square root rounded to `rscale` digits.
+    pub fn sqrt_to_scale(&self, rscale: u32) -> SqlResult<Numeric> {
+        if self.is_nan() || *self == Numeric::PosInf {
+            return Ok(self.clone());
+        }
+        if self.signum() < 0 {
+            return Err(SqlError::new("2201F", "cannot take square root of a negative number"));
+        }
         let Numeric::Value { mantissa, scale } = self else { return Ok(Numeric::NaN) };
         // sqrt(m / 10^s) at rscale+1 digits: isqrt(m * 10^(2(rscale+1) - s)) / 10^(rscale+1)
         let work = rscale + 1;
@@ -601,6 +616,325 @@ fn round_div(num: &BigInt, den: &BigInt) -> BigInt {
         if (num.sign() == Sign::Minus) != (den.sign() == Sign::Minus) { q - BigInt::one() } else { q + BigInt::one() }
     } else {
         q
+    }
+}
+
+/// Transcendental functions (`exp`, `ln`, `log`, `power`) with `numeric.c`'s result-scale
+/// rules. The values are computed in exact fixed-point arithmetic with guard digits and then
+/// rounded, so they agree with Postgres digit for digit.
+impl Numeric {
+    /// `log10(|self|)`, approximately (from the leading digits), for scale estimates.
+    fn approx_log10(&self) -> f64 {
+        let Numeric::Value { mantissa, scale } = self else { return 0.0 };
+        let digits = mantissa.abs().to_string();
+        let lead: f64 = format!("0.{}", &digits[..digits.len().min(17)]).parse().unwrap_or(0.1);
+        #[allow(clippy::cast_precision_loss)]
+        let exp10 = (digits.len() as f64) - f64::from(*scale);
+        lead.log10() + exp10
+    }
+
+    /// `estimate_ln_dweight`: the decimal weight of `ln(self)`.
+    fn estimate_ln_dweight(&self) -> i64 {
+        if self.signum() <= 0 {
+            return 0;
+        }
+        let lo = Numeric::Value { mantissa: BigInt::from(9), scale: 1 };
+        let hi = Numeric::Value { mantissa: BigInt::from(11), scale: 1 };
+        if self.cmp_num(&lo).is_ge() && self.cmp_num(&hi).is_le() {
+            let x = self.sub(&Numeric::from_i64(1));
+            if x.is_zero() {
+                return 0;
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            return x.approx_log10().floor() as i64;
+        }
+        let ln_var = self.approx_log10() * std::f64::consts::LN_10;
+        #[allow(clippy::cast_possible_truncation)]
+        let w = ln_var.abs().log10() as i64;
+        w
+    }
+
+    /// The value times 10^p, rounded.
+    fn fixed(&self, p: u32) -> BigInt {
+        match self.rescale(i32::try_from(p).unwrap_or(i32::MAX), true) {
+            Numeric::Value { mantissa, .. } => mantissa,
+            _ => BigInt::zero(),
+        }
+    }
+
+    /// `exp(numeric)`.
+    pub fn exp(&self) -> SqlResult<Numeric> {
+        match self {
+            Numeric::NaN | Numeric::PosInf => return Ok(self.clone()),
+            Numeric::NegInf => return Ok(Numeric::zero()),
+            Numeric::Value { .. } => {}
+        }
+        let x = self.to_f64();
+        #[allow(clippy::cast_possible_truncation)]
+        let val = (x * PG_LOG10_E).clamp(-2000.0, 2000.0) as i64;
+        let rscale = clamp_scale((NUMERIC_MIN_SIG_DIGITS - val).max(i64::from(self.scale())));
+        exp_to_scale(self, rscale)
+    }
+
+    /// `ln(numeric)`.
+    pub fn ln(&self) -> SqlResult<Numeric> {
+        ln_domain(self)?;
+        if !self.is_finite() {
+            return Ok(self.clone());
+        }
+        let rscale = clamp_scale((NUMERIC_MIN_SIG_DIGITS - self.estimate_ln_dweight()).max(i64::from(self.scale())));
+        Ok(ln_to_scale(self, rscale))
+    }
+
+    /// `log(base, numeric)`.
+    pub fn log(base: &Numeric, x: &Numeric) -> SqlResult<Numeric> {
+        ln_domain(base)?;
+        ln_domain(x)?;
+        if base.is_nan() || x.is_nan() {
+            return Ok(Numeric::NaN);
+        }
+        if !base.is_finite() || !x.is_finite() {
+            return match (base.is_finite(), x.is_finite()) {
+                (false, false) => Ok(Numeric::NaN),
+                (true, false) if base.cmp_num(&Numeric::from_i64(1)).is_eq() => {
+                    Err(SqlError::new(code::DIVISION_BY_ZERO, "division by zero"))
+                }
+                (true, false) => Ok(if base.cmp_num(&Numeric::from_i64(1)).is_lt() { Numeric::NegInf } else { Numeric::PosInf }),
+                _ => Ok(Numeric::Value { mantissa: BigInt::zero(), scale: 0 }),
+            };
+        }
+        let (bw, xw) = (base.estimate_ln_dweight(), x.estimate_ln_dweight());
+        let result_dweight = xw - bw;
+        let rscale = clamp_scale((NUMERIC_MIN_SIG_DIGITS - result_dweight).max(i64::from(base.scale())).max(i64::from(x.scale())));
+        let p = rscale + u32::try_from((result_dweight + 10).max(10)).unwrap_or(10) + 10;
+        let lb = ln_to_scale(base, p);
+        let lx = ln_to_scale(x, p);
+        if lb.is_zero() {
+            return Err(SqlError::new(code::DIVISION_BY_ZERO, "division by zero"));
+        }
+        Ok(lx.div_to_scale(&lb, rscale))
+    }
+
+    /// `power(numeric, numeric)` (`power_var` / `power_var_int`).
+    pub fn power(&self, exp: &Numeric) -> SqlResult<Numeric> {
+        let one = Numeric::from_i64(1);
+        if self.is_nan() || exp.is_nan() {
+            // 1 ^ NaN and NaN ^ 0 are 1.
+            if self.cmp_num(&one).is_eq() && !self.is_nan() || exp.is_zero() && !exp.is_nan() {
+                return Ok(one.rescale(0, true));
+            }
+            return Ok(Numeric::NaN);
+        }
+        if self.is_zero() && exp.signum() < 0 {
+            return Err(SqlError::new("2201F", "zero raised to a negative power is undefined"));
+        }
+        let int_exp = exp.is_finite() && exp.trunc(0).cmp_num(exp).is_eq();
+        if self.signum() < 0 && !int_exp && exp.is_finite() {
+            return Err(SqlError::new("2201F", "a negative number raised to a non-integer power yields a complex result"));
+        }
+        if !self.is_finite() || !exp.is_finite() {
+            return Ok(power_infinite(self, exp));
+        }
+        if int_exp && let Some(n) = exp.to_i64().and_then(|n| i32::try_from(n).ok()) {
+            return power_int(self, n, exp.scale());
+        }
+        if self.is_zero() {
+            return Ok(Numeric::Value { mantissa: BigInt::zero(), scale: 16 });
+        }
+        // result = exp(exp * ln(base)); estimate its weight at low precision first.
+        let ln_dweight = self.estimate_ln_dweight();
+        let local = u32::try_from((8 - ln_dweight).max(0)).unwrap_or(0);
+        let approx = ln_to_scale(self, local).mul(exp);
+        let val = approx.to_f64();
+        if val.abs() > 2000.0 * 3.01 {
+            if val > 0.0 {
+                return Err(SqlError::new(code::NUMERIC_VALUE_OUT_OF_RANGE, "value overflows numeric format"));
+            }
+            return Ok(Numeric::Value { mantissa: BigInt::zero(), scale: 1000 });
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let val = (val * PG_LOG10_E) as i64;
+        let rscale = clamp_scale((NUMERIC_MIN_SIG_DIGITS - val).max(i64::from(self.scale())).max(i64::from(exp.scale())));
+        let sig = (i64::from(rscale) + val).max(0);
+        let ln_scale = u32::try_from((sig - ln_dweight + 8).max(0)).unwrap_or(0) + 8;
+        let product = ln_to_scale(self, ln_scale).mul(exp);
+        exp_to_scale(&product, rscale)
+    }
+}
+
+fn clamp_scale(s: i64) -> u32 {
+    u32::try_from(s.clamp(0, NUMERIC_MAX_DISPLAY_SCALE)).unwrap_or(16)
+}
+
+fn ln_domain(x: &Numeric) -> SqlResult<()> {
+    if x.is_zero() {
+        return Err(SqlError::new("2201E", "cannot take logarithm of zero"));
+    }
+    if x.signum() < 0 || *x == Numeric::NegInf {
+        return Err(SqlError::new("2201E", "cannot take logarithm of a negative number"));
+    }
+    Ok(())
+}
+
+/// `exp(x)` rounded to `rscale` digits.
+fn exp_to_scale(x: &Numeric, rscale: u32) -> SqlResult<Numeric> {
+    let xf = x.to_f64();
+    if xf.abs() >= 6000.0 {
+        if xf > 0.0 {
+            return Err(SqlError::new(code::NUMERIC_VALUE_OUT_OF_RANGE, "value overflows numeric format"));
+        }
+        return Ok(Numeric::Value { mantissa: BigInt::zero(), scale: rscale });
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let dweight = (xf.abs() * PG_LOG10_E) as u32 + 1;
+    let neg = x.signum() < 0;
+    let ax = x.abs();
+    // Relative precision for the result: rscale digits after the point of a value with up to
+    // `dweight` digits before it (or, for exp of a negative number, that many leading zeros).
+    let p = rscale + dweight + 20;
+    let e = exp_fixed(&ax.fixed(p), p);
+    let r = if neg {
+        Numeric::from_i64(1).div_to_scale(&Numeric::Value { mantissa: e, scale: p }, rscale)
+    } else {
+        Numeric::Value { mantissa: e, scale: p }.rescale(i32::try_from(rscale).unwrap_or(0), true)
+    };
+    Ok(r)
+}
+
+/// `exp` of a non-negative fixed-point value `x / 10^p`, as a fixed-point value.
+fn exp_fixed(x: &BigInt, p: u32) -> BigInt {
+    let one = pow10(p);
+    let half = &one / 2;
+    let mut y = x.clone();
+    let mut k = 0;
+    while y.abs() > half {
+        y /= 2;
+        k += 1;
+    }
+    let mut sum = one.clone();
+    let mut term = one.clone();
+    let mut n = 1u32;
+    loop {
+        term = term * &y / (&one * n);
+        if term.is_zero() {
+            break;
+        }
+        sum += &term;
+        n += 1;
+    }
+    for _ in 0..k {
+        sum = &sum * &sum / &one;
+    }
+    sum
+}
+
+/// `ln(x)` (x > 0, finite) rounded to `rscale` digits.
+fn ln_to_scale(x: &Numeric, rscale: u32) -> Numeric {
+    // x = m * 10^e with m in [1, 10): ln x = ln m + e ln 10.
+    #[allow(clippy::cast_possible_truncation)]
+    let e = x.approx_log10().floor() as i64;
+    let p = rscale + 20 + u32::try_from(e.unsigned_abs().to_string().len()).unwrap_or(0);
+    let m = match x {
+        Numeric::Value { mantissa, scale } => {
+            let s = i64::from(*scale) + e;
+            // m = mantissa / 10^s, fixed at p digits.
+            let shift = i64::from(p) - s;
+            if shift >= 0 {
+                mantissa * pow10(u32::try_from(shift).unwrap_or(0))
+            } else {
+                round_div(mantissa, &pow10(u32::try_from(-shift).unwrap_or(0)))
+            }
+        }
+        _ => BigInt::zero(),
+    };
+    let mut l = ln_fixed(&m, p);
+    if e != 0 {
+        l += ln_fixed(&(pow10(p) * 10), p) * e;
+    }
+    Numeric::Value { mantissa: l, scale: p }.rescale(i32::try_from(rscale).unwrap_or(0), true)
+}
+
+/// `ln` of a positive fixed-point value `x / 10^p` near [0.1, 10].
+fn ln_fixed(x: &BigInt, p: u32) -> BigInt {
+    let one = pow10(p);
+    let lo = &one * 9 / 10;
+    let hi = &one * 11 / 10;
+    let mut y = x.clone();
+    let mut k = 0u32;
+    while y < lo || y > hi {
+        y = (&y * &one).sqrt();
+        k += 1;
+    }
+    // ln y = 2 atanh((y - 1) / (y + 1))
+    let z = (&y - &one) * &one / (&y + &one);
+    let z2 = &z * &z / &one;
+    let mut sum = z.clone();
+    let mut term = z;
+    let mut n = 1u32;
+    loop {
+        term = term * &z2 / &one;
+        n += 2;
+        let t = &term / n;
+        if t.is_zero() {
+            break;
+        }
+        sum += t;
+    }
+    sum * 2 * BigInt::from(2).pow(k)
+}
+
+/// `power_var_int`: an integer power, exact then rounded to Postgres' result scale.
+fn power_int(base: &Numeric, n: i32, exp_dscale: u32) -> SqlResult<Numeric> {
+    let f = if base.is_zero() { 0.0 } else { f64::from(n) * base.approx_log10_pg() };
+    if f > 131_072.0 * 4.0 * 1.01 {
+        return Err(SqlError::new(code::NUMERIC_VALUE_OUT_OF_RANGE, "value overflows numeric format"));
+    }
+    if f + 1.0 < -1000.0 * 1.01 {
+        return Ok(Numeric::Value { mantissa: BigInt::zero(), scale: 1000 });
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let rscale = clamp_scale((NUMERIC_MIN_SIG_DIGITS - f as i64).max(i64::from(base.scale())).max(i64::from(exp_dscale)));
+    let rs = i32::try_from(rscale).unwrap_or(0);
+    if n == 0 {
+        return Ok(Numeric::from_i64(1).rescale(rs, true));
+    }
+    let Numeric::Value { mantissa, scale } = base else { return Ok(Numeric::NaN) };
+    let abs_n = n.unsigned_abs();
+    let pow = Numeric::Value { mantissa: mantissa.pow(abs_n), scale: scale * abs_n };
+    if n > 0 { Ok(pow.rescale(rs, true)) } else { Ok(Numeric::from_i64(1).div_to_scale(&pow, rscale)) }
+}
+
+impl Numeric {
+    /// `power_var_int`'s weight estimate: `log10(f) + p` from up to 16 leading digits.
+    fn approx_log10_pg(&self) -> f64 {
+        self.abs().approx_log10()
+    }
+}
+
+/// `power` with an infinite operand (Postgres 14 rules).
+fn power_infinite(base: &Numeric, exp: &Numeric) -> Numeric {
+    let one = Numeric::from_i64(1);
+    let zero = Numeric::zero();
+    if exp.is_zero() || base.cmp_num(&one).is_eq() {
+        return one;
+    }
+    match exp {
+        Numeric::PosInf | Numeric::NegInf => {
+            let mag = base.abs().cmp_num(&one);
+            let pos = *exp == Numeric::PosInf;
+            if mag.is_eq() {
+                return one;
+            }
+            if (mag.is_gt()) == pos { Numeric::PosInf } else { zero }
+        }
+        _ => {
+            // base is ±Infinity, exp finite and nonzero.
+            if exp.signum() < 0 {
+                return zero;
+            }
+            let odd = exp.trunc(0).cmp_num(exp).is_eq() && exp.rem(&Numeric::from_i64(2)).is_ok_and(|r| !r.is_zero());
+            if *base == Numeric::NegInf && odd { Numeric::NegInf } else { Numeric::PosInf }
+        }
     }
 }
 

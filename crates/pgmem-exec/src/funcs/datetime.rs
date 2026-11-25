@@ -140,6 +140,13 @@ fn resolve_constructors(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>
             [_, _] => resolved(strict("to_timestamp", to_timestamp_fmt_fn), vec![Type::Text, Type::Text], Type::Timestamptz),
             _ => Err(err()),
         },
+        "to_number" if n == 2 => resolved(
+            strict("to_number", |a, _| {
+                Ok(Value::Numeric(super::numfmt::to_number(a[0].as_str().unwrap_or(""), a[1].as_str().unwrap_or(""))?))
+            }),
+            vec![Type::Text, Type::Text],
+            Type::Numeric,
+        ),
         "to_date" if n == 2 => resolved(strict("to_date", to_date_fn), vec![Type::Text, Type::Text], Type::Date),
         "to_char" if n == 2 => {
             let src = match &args[0] {
@@ -156,7 +163,7 @@ fn resolve_constructors(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>
             let f = match name {
                 "justify_days" => strict("justify_days", |a, _| Ok(Value::Interval(justify_days(iv(&a[0]))))),
                 "justify_hours" => strict("justify_hours", |a, _| Ok(Value::Interval(justify_hours(iv(&a[0]))))),
-                _ => strict("justify_interval", |a, _| Ok(Value::Interval(justify_days(justify_hours(iv(&a[0])))))),
+                _ => strict("justify_interval", |a, _| Ok(Value::Interval(justify_interval(iv(&a[0]))))),
             };
             resolved(f, vec![Type::Interval], Type::Interval)
         }
@@ -167,6 +174,7 @@ fn resolve_constructors(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>
                     Ok(Value::Bool(match &a[0] {
                         Value::Timestamptz(t) | Value::Timestamp(t) => *t != TS_INFINITY && *t != TS_NEG_INFINITY,
                         Value::Date(d) => *d != dt::DATE_INFINITY && *d != dt::DATE_NEG_INFINITY,
+                        Value::Interval(i) => !i.is_infinite(),
                         _ => true,
                     }))
                 }),
@@ -175,6 +183,26 @@ fn resolve_constructors(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>
             )
         }
         "timezone" if n == 2 => resolve_at_time_zone(&args[1], &args[0]).map(Some),
+        "overlaps" if n == 4 => {
+            // Each period is (start, end) or (start, interval); endpoints share one type.
+            let ends = [&args[0], &args[2]].into_iter().chain([&args[1], &args[3]].into_iter().filter(|t| **t != Type::Interval));
+            let mut t = Type::Unknown;
+            for e in ends {
+                t = match (&t, e) {
+                    (Type::Unknown, e) => e.clone(),
+                    (a, Type::Unknown) => a.clone(),
+                    (a, e) => super::common_type(a, e).ok_or_else(|| no_function(name, args))?,
+                };
+            }
+            let t = match t {
+                Type::Unknown => Type::Timestamptz,
+                Type::Date => Type::Timestamp,
+                t @ (Type::Timestamp | Type::Timestamptz | Type::Time | Type::TimeTz) => t,
+                _ => return Err(no_function(name, args)),
+            };
+            let end = |a: &Type| if *a == Type::Interval { Type::Interval } else { t.clone() };
+            resolved(lenient("overlaps", overlaps_fn), vec![t.clone(), end(&args[1]), t.clone(), end(&args[3])], Type::Bool)
+        }
         _ => Ok(None),
     }
 }
@@ -929,92 +957,423 @@ fn to_char_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
             };
             Ok(Value::Text(format_template(&Tm { hour: u32::try_from(i.micros / USECS_PER_HOUR).unwrap_or(0), ..base }, fmt)))
         }
-        v => {
-            // Numeric formatting: the common `FM999...`, `9990.00` shapes.
-            let n = v.as_f64().unwrap_or(0.0);
-            let decimals = fmt.split_once(['.', 'D']).map_or(0, |(_, f)| f.chars().filter(|c| *c == '9' || *c == '0').count());
-            let s = format!("{n:.decimals$}");
-            Ok(Value::Text(if fmt.starts_with("FM") { s } else { format!(" {s}") }))
-        }
+        v => Ok(Value::Text(super::numfmt::to_char(v, fmt)?)),
     }
 }
 
-/// Parses `src` according to a Postgres template (the patterns that carry date/time fields).
-fn parse_template(src: &str, fmt: &str) -> SqlResult<Tm> {
-    let bad = || SqlError::new(code::INVALID_DATETIME_FORMAT, format!("invalid value \"{src}\" for \"{fmt}\""));
-    let mut t = Tm { year: 1, month: 1, day: 1, hour: 0, minute: 0, second: 0, micros: 0 };
-    let mut pm: Option<bool> = None;
-    let mut s = src.trim_start();
+/// Template patterns that read input, longest first (`DCH_keywords` order matters for prefixes).
+const INPUT_PATTERNS: &[&str] = &[
+    "A.D.", "A.M.", "B.C.", "P.M.", "Y,YYY", "HH24", "HH12", "IDDD", "IYYY", "MONTH", "SSSSS", "SSSS", "YYYY", "DDD", "IYY", "MON", "TZH",
+    "TZM", "YYY", "DAY", "FF1", "FF2", "FF3", "FF4", "FF5", "FF6", "AD", "AM", "BC", "CC", "DD", "DY", "HH", "ID", "IW", "IY", "MI", "MM",
+    "MS", "OF", "PM", "RM", "SS", "TZ", "US", "WW", "YY", "D", "I", "J", "Q", "W", "Y",
+];
+
+/// Fields collected by `DCH_from_char`.
+#[derive(Default)]
+struct FromChar {
+    year: Option<i64>,
+    year_digits: usize,
+    cc: Option<i64>,
+    month: Option<i64>,
+    day: Option<i64>,
+    doy: Option<i64>,
+    ww: Option<i64>,
+    julian: Option<i64>,
+    hour: i64,
+    clock12: bool,
+    minute: i64,
+    second: i64,
+    micros: i64,
+    ssss: Option<i64>,
+    pm: Option<bool>,
+    bc: bool,
+    tzh: Option<i64>,
+    tzm: Option<i64>,
+    tz: Option<i32>,
+}
+
+/// Parses `src` according to a Postgres template: the broken-down local time and the zone
+/// offset (seconds east) when the template has one.
+fn parse_template(src: &str, fmt: &str) -> SqlResult<(Tm, Option<i32>)> {
+    let mut fc = FromChar::default();
+    let mut s = src;
     let mut f = fmt;
-    let take_num = |s: &mut &str, max: usize| -> Option<i64> {
-        let n = s.chars().take(max).take_while(char::is_ascii_digit).count();
-        if n == 0 {
-            return None;
-        }
-        let v = s[..n].parse().ok();
-        *s = &s[n..];
-        v
-    };
     while !f.is_empty() {
-        let body = f.strip_prefix("FM").unwrap_or(f);
-        if let Some(pat) = PATTERNS.iter().find(|p| body.starts_with(**p)) {
-            f = &body[pat.len()..];
-            match pat.to_ascii_uppercase().as_str() {
-                "YYYY" => t.year = i32::try_from(take_num(&mut s, 4).ok_or_else(bad)?).map_err(|_| bad())?,
-                "YY" => t.year = 2000 + i32::try_from(take_num(&mut s, 2).ok_or_else(bad)?).map_err(|_| bad())?,
-                "MM" => t.month = u32::try_from(take_num(&mut s, 2).ok_or_else(bad)?).map_err(|_| bad())?,
-                "DD" => t.day = u32::try_from(take_num(&mut s, 2).ok_or_else(bad)?).map_err(|_| bad())?,
-                "HH24" | "HH12" | "HH" => t.hour = u32::try_from(take_num(&mut s, 2).ok_or_else(bad)?).map_err(|_| bad())?,
-                "MI" => t.minute = u32::try_from(take_num(&mut s, 2).ok_or_else(bad)?).map_err(|_| bad())?,
-                "SS" => t.second = u32::try_from(take_num(&mut s, 2).ok_or_else(bad)?).map_err(|_| bad())?,
-                "MS" => t.micros = u32::try_from(take_num(&mut s, 3).ok_or_else(bad)? * 1000).map_err(|_| bad())?,
-                "US" => t.micros = u32::try_from(take_num(&mut s, 6).ok_or_else(bad)?).map_err(|_| bad())?,
-                "MON" | "MONTH" => {
-                    let idx = MONTHS.iter().position(|m| s.len() >= 3 && s[..3].eq_ignore_ascii_case(&m[..3])).ok_or_else(bad)?;
-                    let full = MONTHS[idx];
-                    s = if s.len() >= full.len() && s[..full.len()].eq_ignore_ascii_case(full) { &s[full.len()..] } else { &s[3..] };
-                    t.month = u32::try_from(idx + 1).unwrap_or(1);
-                }
-                "AM" | "PM" => {
-                    let up = s.get(..2).map(str::to_ascii_uppercase);
-                    pm = Some(up.as_deref() == Some("PM"));
-                    s = s.get(2..).unwrap_or("");
-                }
-                _ => {
-                    return Err(SqlError::feature_not_supported(format!(
-                        "template pattern \"{pat}\" is not supported by pgmem for parsing"
-                    )));
+        let mut fill = false;
+        loop {
+            if let Some(r) = f.strip_prefix("FM").or_else(|| f.strip_prefix("fm")) {
+                f = r;
+                fill = true;
+            } else if let Some(r) = f.strip_prefix("FX").or_else(|| f.strip_prefix("fx")) {
+                f = r;
+            } else {
+                break;
+            }
+        }
+        let upper = f.to_ascii_uppercase();
+        let Some(pat) = INPUT_PATTERNS.iter().find(|p| upper.starts_with(**p)) else {
+            let c = f.chars().next().unwrap_or(' ');
+            f = &f[c.len_utf8()..];
+            if c == '"' {
+                // Quoted literal: skip as many input characters.
+                let end = f.find('"').unwrap_or(f.len());
+                let n = f[..end].chars().count();
+                f = f.get(end + 1..).unwrap_or("");
+                s = s.char_indices().nth(n).map_or("", |(i, _)| &s[i..]);
+                continue;
+            }
+            // A template separator matches any run of non-alphanumeric input characters.
+            if c.is_alphanumeric() {
+                s = s.char_indices().nth(1).map_or("", |(i, _)| &s[i..]);
+            } else {
+                s = s.trim_start_matches(|ch: char| !ch.is_alphanumeric() && ch != '-' && ch != '+');
+                if !c.is_whitespace() {
+                    s = s.strip_prefix(['-', '+']).unwrap_or(s);
                 }
             }
-        } else {
-            let fc = f.chars().next().unwrap_or(' ');
-            f = &f[fc.len_utf8()..];
-            // Separators in the template match any run of non-alphanumeric input characters.
-            s = s.trim_start_matches(|c: char| !c.is_alphanumeric());
-            let _ = fc;
+            continue;
+        };
+        f = &f[pat.len()..];
+        // An ordinal suffix after a number pattern.
+        let th = f.starts_with("TH") || f.starts_with("th");
+        if th {
+            f = &f[2..];
+        }
+        // Variable-width fields: before a separator (or the end), or in fill mode, read every digit.
+        let next_sep = fill || th || f.is_empty() || f.chars().next().is_some_and(|c| !c.is_alphanumeric()) || !next_is_digit_pattern(f);
+        s = s.trim_start_matches(' ');
+        let field = PatField { name: pat, next_sep };
+        read_pattern(&mut fc, pat, &mut s, &field, src, fmt)?;
+        if th {
+            let ord = s.len().min(2);
+            if s[..ord].chars().all(|c| c.is_ascii_alphabetic()) {
+                s = &s[ord..];
+            }
         }
     }
-    if let Some(is_pm) = pm {
-        t.hour = t.hour % 12 + if is_pm { 12 } else { 0 };
+    build_from_char(&fc, src)
+}
+
+/// Reads one template field's input into `fc` (`DCH_from_char`'s per-node actions).
+fn read_pattern(fc: &mut FromChar, pat: &&str, input: &mut &str, field: &PatField, src: &str, fmt: &str) -> SqlResult<()> {
+    let bad = || SqlError::new(code::INVALID_DATETIME_FORMAT, format!("invalid value \"{src}\" for \"{fmt}\""));
+    let mut s = *input;
+    let num = |s: &mut &str, len: usize, signed: bool| field.read(s, len, signed).map(|(v, _)| v);
+    match *pat {
+        "YYYY" | "IYYY" => {
+            let before = s.len();
+            fc.year = Some(num(&mut s, 4, false)?);
+            fc.year_digits = before - s.len();
+        }
+        "Y,YYY" => {
+            let hi = num(&mut s, 1, false)?;
+            s = s.strip_prefix(',').ok_or_else(bad)?;
+            let lo = num(&mut s, 3, false)?;
+            fc.year = Some(hi * 1000 + lo);
+            fc.year_digits = 4;
+        }
+        "YYY" | "IYY" => {
+            let before = s.len();
+            fc.year = Some(num(&mut s, 3, false)?);
+            fc.year_digits = before - s.len();
+        }
+        "YY" | "IY" => {
+            let before = s.len();
+            fc.year = Some(num(&mut s, 2, false)?);
+            fc.year_digits = before - s.len();
+        }
+        "Y" | "I" => {
+            let before = s.len();
+            fc.year = Some(num(&mut s, 1, false)?);
+            fc.year_digits = before - s.len();
+        }
+        "CC" => fc.cc = Some(num(&mut s, 2, false)?),
+        "MM" => fc.month = Some(num(&mut s, 2, false)?),
+        "DD" => fc.day = Some(num(&mut s, 2, false)?),
+        "DDD" | "IDDD" => fc.doy = Some(num(&mut s, 3, false)?),
+        "WW" | "IW" => fc.ww = Some(num(&mut s, 2, false)?),
+        "D" | "ID" | "Q" | "W" => {
+            num(&mut s, 1, false)?;
+        }
+        "J" => fc.julian = Some(num(&mut s, 7, false)?),
+        "HH" | "HH12" => {
+            fc.hour = num(&mut s, 2, false)?;
+            fc.clock12 = true;
+        }
+        "HH24" => fc.hour = num(&mut s, 2, false)?,
+        "MI" => fc.minute = num(&mut s, 2, false)?,
+        "SS" => fc.second = num(&mut s, 2, false)?,
+        "SSSS" | "SSSSS" => fc.ssss = Some(num(&mut s, 5, false)?),
+        "MS" => fc.micros = num(&mut s, 3, false)? * 1000,
+        "US" => fc.micros = num(&mut s, 6, false)?,
+        "FF1" | "FF2" | "FF3" | "FF4" | "FF5" | "FF6" => {
+            // The fraction scales by the digits actually read.
+            let n = usize::from(pat.as_bytes()[2] - b'0');
+            let (v, digits) = field.read(&mut s, n, false)?;
+            fc.micros = v * 10i64.pow(6u32.saturating_sub(u32::try_from(digits).unwrap_or(6)));
+        }
+        "TZH" => fc.tzh = Some(num(&mut s, 2, true)?),
+        "TZM" => fc.tzm = Some(num(&mut s, 2, false)?),
+        "OF" => {
+            let h = num(&mut s, 2, true)?;
+            let m = if let Some(r) = s.strip_prefix(':') {
+                s = r;
+                num(&mut s, 2, false)?
+            } else {
+                0
+            };
+            fc.tzh = Some(h);
+            fc.tzm = Some(m);
+        }
+        "TZ" => {
+            let len = s.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(s.len());
+            let (secs, _) = pgmem_types::zone::abbreviation(&s[..len]).ok_or_else(bad)?;
+            fc.tz = Some(secs);
+            s = &s[len..];
+        }
+        "AM" | "PM" | "A.M." | "P.M." => {
+            let up = s.to_ascii_uppercase();
+            let (is_pm, len) = if up.starts_with("A.M.") {
+                (false, 4)
+            } else if up.starts_with("P.M.") {
+                (true, 4)
+            } else if up.starts_with("AM") {
+                (false, 2)
+            } else if up.starts_with("PM") {
+                (true, 2)
+            } else {
+                return Err(bad());
+            };
+            fc.pm = Some(is_pm);
+            fc.clock12 = true;
+            s = &s[len..];
+        }
+        "AD" | "BC" | "A.D." | "B.C." => {
+            let up = s.to_ascii_uppercase();
+            let (bc, len) = if up.starts_with("B.C.") {
+                (true, 4)
+            } else if up.starts_with("A.D.") {
+                (false, 4)
+            } else if up.starts_with("BC") {
+                (true, 2)
+            } else if up.starts_with("AD") {
+                (false, 2)
+            } else {
+                return Err(bad());
+            };
+            fc.bc = bc;
+            s = &s[len..];
+        }
+        "MONTH" | "MON" => {
+            let idx = MONTHS
+                .iter()
+                .position(|m| s.len() >= 3 && s.is_char_boundary(3) && s[..3].eq_ignore_ascii_case(&m[..3]))
+                .ok_or_else(bad)?;
+            let full = MONTHS[idx];
+            s = if *pat == "MONTH" && s.len() >= full.len() && s.is_char_boundary(full.len()) && s[..full.len()].eq_ignore_ascii_case(full)
+            {
+                &s[full.len()..]
+            } else {
+                &s[3..]
+            };
+            fc.month = Some(i64::try_from(idx + 1).unwrap_or(1));
+        }
+        "RM" => {
+            let up = s.to_ascii_uppercase();
+            let (idx, r) =
+                ROMAN.iter().enumerate().rev().filter(|(_, r)| up.starts_with(**r)).max_by_key(|(_, r)| r.len()).ok_or_else(bad)?;
+            fc.month = Some(i64::try_from(idx + 1).unwrap_or(1));
+            s = &s[r.len()..];
+        }
+        "DAY" | "DY" => {
+            let idx =
+                DAYS.iter().position(|d| s.len() >= 3 && s.is_char_boundary(3) && s[..3].eq_ignore_ascii_case(&d[..3])).ok_or_else(bad)?;
+            let full = DAYS[idx];
+            s = if *pat == "DAY" && s.len() >= full.len() && s.is_char_boundary(full.len()) && s[..full.len()].eq_ignore_ascii_case(full) {
+                &s[full.len()..]
+            } else {
+                &s[3..]
+            };
+        }
+        _ => return Err(SqlError::feature_not_supported(format!("template pattern \"{pat}\" is not supported by pgmem for parsing"))),
     }
-    if !calendar::valid_date(t.year, t.month, t.day) || t.hour > 23 || t.minute > 59 || t.second > 59 {
-        return Err(SqlError::new(code::DATETIME_FIELD_OVERFLOW, format!("date/time field value out of range: \"{src}\"")));
+    *input = s;
+    Ok(())
+}
+
+/// Builds the timestamp from the collected fields (`do_to_timestamp`).
+fn build_from_char(fc: &FromChar, src: &str) -> SqlResult<(Tm, Option<i32>)> {
+    let range = || SqlError::new(code::DATETIME_FIELD_OVERFLOW, format!("date/time field value out of range: \"{src}\""));
+    let mut year = match (fc.year, fc.cc) {
+        (Some(y), cc) => {
+            // Partial years are adjusted toward 2020 (`adjust_partial_year_to_2020`).
+            match (fc.year_digits, cc) {
+                (1, _) => y + 2000,
+                (2, _) if y < 70 => y + 2000,
+                (2, _) => y + 1900,
+                (3, _) if y < 520 => y + 2000,
+                (3, _) => y + 1000,
+                _ => y,
+            }
+        }
+        (None, Some(cc)) => (cc - 1) * 100 + 1,
+        // Without a year field the year is 0 (1 BC), as in Postgres.
+        (None, None) => 0,
+    };
+    if fc.bc && fc.year.is_some() {
+        if year <= 0 {
+            return Err(range());
+        }
+        year = -(year - 1);
     }
-    Ok(t)
+    let year32 = i32::try_from(year).map_err(|_| range())?;
+    let (mut y, mut m, mut d) = (year32, fc.month.unwrap_or(1), fc.day.unwrap_or(1));
+    if let Some(j) = fc.julian {
+        let (jy, jm, jd) = calendar::ymd_from_days(j - 2_451_545);
+        (y, m, d) = (jy, i64::from(jm), i64::from(jd));
+    } else if fc.month.is_none() && fc.day.is_none() {
+        let day_of_year = fc.doy.or_else(|| fc.ww.map(|w| (w - 1) * 7 + 1));
+        if let Some(doy) = day_of_year {
+            let (jy, jm, jd) = calendar::ymd_from_days(calendar::days_from_ymd(y, 1, 1) + doy - 1);
+            (y, m, d) = (jy, i64::from(jm), i64::from(jd));
+        }
+    }
+    let (m, d) = (u32::try_from(m).map_err(|_| range())?, u32::try_from(d).map_err(|_| range())?);
+    if !calendar::valid_date(y, m, d) {
+        return Err(range());
+    }
+    let mut hour = fc.hour;
+    if fc.clock12 {
+        if !(1..=12).contains(&hour) {
+            return Err(SqlError::new(code::INVALID_DATETIME_FORMAT, format!("hour \"{hour}\" is invalid for the 12-hour clock"))
+                .with_hint("Use the 24-hour clock, or give an hour between 1 and 12."));
+        }
+        match fc.pm {
+            Some(true) if hour < 12 => hour += 12,
+            Some(false) if hour == 12 => hour = 0,
+            _ => {}
+        }
+    }
+    let (mut minute, mut second) = (fc.minute, fc.second);
+    if let Some(ssss) = fc.ssss {
+        hour = ssss / 3600;
+        minute = ssss / 60 % 60;
+        second = ssss % 60;
+    }
+    if hour > 24 || minute > 59 || second > 60 {
+        return Err(range());
+    }
+    let t = Tm {
+        year: y,
+        month: m,
+        day: d,
+        hour: u32::try_from(hour).map_err(|_| range())?,
+        minute: u32::try_from(minute).map_err(|_| range())?,
+        second: u32::try_from(second).map_err(|_| range())?,
+        micros: u32::try_from(fc.micros).map_err(|_| range())?,
+    };
+    let zone = match (fc.tz, fc.tzh) {
+        (Some(z), _) => Some(z),
+        (None, Some(h)) => {
+            let mins = fc.tzm.unwrap_or(0);
+            let secs = i32::try_from(h.abs() * 3600 + mins * 60).map_err(|_| range())?;
+            Some(if h < 0 || (h == 0 && src.contains("-0")) { -secs } else { secs })
+        }
+        (None, None) => None,
+    };
+    Ok((t, zone))
+}
+
+/// A numeric template field being read (`from_char_parse_int_len`).
+struct PatField<'a> {
+    name: &'a str,
+    /// Followed by a separator (or the end, or in fill mode): read every digit.
+    next_sep: bool,
+}
+
+impl PatField<'_> {
+    /// Reads the field's number: (value, digits read).
+    fn read(&self, s: &mut &str, len: usize, signed: bool) -> SqlResult<(i64, usize)> {
+        let b = s.as_bytes();
+        let mut end = usize::from(signed && matches!(b.first(), Some(b'-' | b'+')));
+        let start = end;
+        while end < b.len() && b[end].is_ascii_digit() && (self.next_sep || end - start < len) {
+            end += 1;
+        }
+        let shown: String = s.chars().take(len).collect();
+        if end == start {
+            return Err(SqlError::new(code::INVALID_DATETIME_FORMAT, format!("invalid value \"{shown}\" for \"{}\"", self.name))
+                .with_detail("Value must be an integer."));
+        }
+        if !self.next_sep && end - start < len {
+            let remain = s.chars().count();
+            return Err(SqlError::new(
+                code::INVALID_DATETIME_FORMAT,
+                format!("source string too short for \"{}\" formatting field", self.name),
+            )
+            .with_detail(format!("Field requires {len} characters, but only {remain} remain."))
+            .with_hint("If your source string is not fixed-width, try using the \"FM\" modifier."));
+        }
+        let v = s[..end].parse::<i64>().map_err(|_| SqlError::new(code::DATETIME_FIELD_OVERFLOW, "value for field is out of range"))?;
+        *s = &s[end..];
+        Ok((v, end - start))
+    }
+}
+
+/// Whether the template continues with a digit-reading pattern (no separator between).
+fn next_is_digit_pattern(f: &str) -> bool {
+    let up = f.trim_start_matches("FM").to_ascii_uppercase();
+    INPUT_PATTERNS.iter().find(|p| up.starts_with(**p)).is_some_and(|p| {
+        !matches!(*p, "MONTH" | "MON" | "DAY" | "DY" | "AM" | "PM" | "A.M." | "P.M." | "AD" | "BC" | "A.D." | "B.C." | "TZ" | "RM")
+    })
 }
 
 fn to_timestamp_fmt_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
-    let t = parse_template(a[0].as_str().unwrap_or(""), a[1].as_str().unwrap_or(""))?;
+    let (t, z) = parse_template(a[0].as_str().unwrap_or(""), a[1].as_str().unwrap_or(""))?;
+    let local = dt::from_tm(&t)?;
     // Fields without a zone in the template are local time in the session zone.
-    Ok(Value::Timestamptz(zone::from_local(dt::from_tm(&t)?)))
+    Ok(Value::Timestamptz(match z {
+        Some(off) => local - i64::from(off) * pgmem_types::datetime::USECS_PER_SEC,
+        None => zone::from_local(local),
+    }))
 }
 
 fn to_date_fn(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
-    let t = parse_template(a[0].as_str().unwrap_or(""), a[1].as_str().unwrap_or(""))?;
+    let (t, _) = parse_template(a[0].as_str().unwrap_or(""), a[1].as_str().unwrap_or(""))?;
     Ok(Value::Date(dt::date_from_ymd(t.year, t.month, t.day)?))
 }
 
+/// `interval_justify_interval`.
+fn justify_interval(i: Interval) -> Interval {
+    if i.is_infinite() {
+        return i;
+    }
+    let mut out = i;
+    out.days += i32::try_from(out.micros / USECS_PER_DAY).unwrap_or(0);
+    out.micros %= USECS_PER_DAY;
+    out.months += out.days / 30;
+    out.days %= 30;
+    if out.months > 0 && (out.days < 0 || (out.days == 0 && out.micros < 0)) {
+        out.days += 30;
+        out.months -= 1;
+    } else if out.months < 0 && (out.days > 0 || (out.days == 0 && out.micros > 0)) {
+        out.days -= 30;
+        out.months += 1;
+    }
+    if out.days > 0 && out.micros < 0 {
+        out.micros += USECS_PER_DAY;
+        out.days -= 1;
+    } else if out.days < 0 && out.micros > 0 {
+        out.micros -= USECS_PER_DAY;
+        out.days += 1;
+    }
+    out
+}
+
 fn justify_hours(i: Interval) -> Interval {
+    if i.is_infinite() {
+        return i;
+    }
     let mut out = i;
     out.days += i32::try_from(i.micros / USECS_PER_DAY).unwrap_or(0);
     out.micros %= USECS_PER_DAY;
@@ -1029,6 +1388,9 @@ fn justify_hours(i: Interval) -> Interval {
 }
 
 fn justify_days(i: Interval) -> Interval {
+    if i.is_infinite() {
+        return i;
+    }
     let mut out = i;
     out.months += i.days / 30;
     out.days %= 30;
@@ -1064,6 +1426,9 @@ fn ts_plus_interval(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
 /// `timestamptz + interval`: months and days move the local (session zone) wall-clock time,
 /// the time part is absolute, as in Postgres' `timestamptz_pl_interval`.
 pub fn tstz_add_interval(t: i64, i: &Interval) -> SqlResult<i64> {
+    if i.is_infinite() {
+        return dt::infinite_shift(t, i);
+    }
     if t == TS_INFINITY || t == TS_NEG_INFINITY {
         return Ok(t);
     }
@@ -1073,6 +1438,58 @@ pub fn tstz_add_interval(t: i64, i: &Interval) -> SqlResult<i64> {
         out = zone::from_local(local);
     }
     out.checked_add(i.micros).ok_or_else(|| SqlError::new(code::DATETIME_FIELD_OVERFLOW, "timestamp out of range"))
+}
+
+/// `overlaps_timestamp`, with Postgres' handling of NULL endpoints.
+fn overlaps_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
+    let end = |s: &Value, e: &Value| -> SqlResult<Value> {
+        match (s, e) {
+            (s, Value::Interval(_)) if !s.is_null() => ts_plus_interval(&[s.clone(), e.clone()], ctx),
+            (_, Value::Interval(_)) => Ok(Value::Null),
+            _ => Ok(e.clone()),
+        }
+    };
+    let gt = |x: &Value, y: &Value| -> SqlResult<bool> { Ok(pgmem_types::compare_values(x, y)?.is_gt()) };
+    let lt = |x: &Value, y: &Value| -> SqlResult<bool> { Ok(pgmem_types::compare_values(x, y)?.is_lt()) };
+    // Order each period's endpoints; a single NULL endpoint becomes the end.
+    let norm = |s: Value, e: Value| -> SqlResult<Option<(Value, Value)>> {
+        Ok(match (s.is_null(), e.is_null()) {
+            (true, true) => None,
+            (true, false) => Some((e, Value::Null)),
+            (false, true) => Some((s, Value::Null)),
+            (false, false) if gt(&s, &e)? => Some((e, s)),
+            _ => Some((s, e)),
+        })
+    };
+    let (Some((ts1, te1)), Some((ts2, te2))) = (norm(a[0].clone(), end(&a[0], &a[1])?)?, norm(a[2].clone(), end(&a[2], &a[3])?)?) else {
+        return Ok(Value::Null);
+    };
+    let (n1, n2) = (te1.is_null(), te2.is_null());
+    Ok(if gt(&ts1, &ts2)? {
+        if n2 {
+            Value::Null
+        } else if lt(&ts1, &te2)? {
+            Value::Bool(true)
+        } else if n1 {
+            Value::Null
+        } else {
+            Value::Bool(false)
+        }
+    } else if lt(&ts1, &ts2)? {
+        if n1 {
+            Value::Null
+        } else if lt(&ts2, &te1)? {
+            Value::Bool(true)
+        } else if n2 {
+            Value::Null
+        } else {
+            Value::Bool(false)
+        }
+    } else if n1 || n2 {
+        Value::Null
+    } else {
+        Value::Bool(true)
+    })
 }
 
 fn ts_minus_interval(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
@@ -1085,9 +1502,6 @@ fn ts_minus_ts(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
         (Value::Time(x), Value::Time(y)) => Ok(Value::Interval(Interval::from_micros(x - y))),
         (x, y) => {
             let (Some(x), Some(y)) = (ts_micros(x), ts_micros(y)) else { return Err(SqlError::internal("timestamp - timestamp")) };
-            if [x, y].iter().any(|t| *t == TS_INFINITY || *t == TS_NEG_INFINITY) {
-                return Err(SqlError::new(code::DATETIME_FIELD_OVERFLOW, "cannot subtract infinite timestamps"));
-            }
             Ok(Value::Interval(sub_timestamps(x, y)?))
         }
     }
@@ -1221,9 +1635,9 @@ mod tests {
             "2024-01 1 001 1 01 21 2460311 I    lit"
         );
         assert_eq!(format_template(&t("2024-02-29 00:00:00+00"), "Dy Mon DD"), "Thu Feb 29");
-        let d = parse_template("05 Jul 2024", "DD Mon YYYY").expect("parse");
+        let (d, _) = parse_template("05 Jul 2024", "DD Mon YYYY").expect("parse");
         assert_eq!((d.year, d.month, d.day), (2024, 7, 5));
-        let p = parse_template("2024-07-05 2:03:09 PM", "YYYY-MM-DD HH:MI:SS AM").expect("parse");
+        let (p, _) = parse_template("2024-07-05 2:03:09 PM", "YYYY-MM-DD HH:MI:SS AM").expect("parse");
         assert_eq!((p.hour, p.minute, p.second), (14, 3, 9));
     }
 

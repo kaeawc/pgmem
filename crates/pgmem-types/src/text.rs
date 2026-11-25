@@ -3,8 +3,7 @@
 //! `IntervalStyle=postgres`, `extra_float_digits=1`, `bytea_output=hex`).
 
 use crate::datetime::{
-    format_date, format_interval, format_time, format_timestamp, format_timestamptz, format_timetz, parse_date, parse_interval, parse_time,
-    parse_timestamp, parse_timestamptz, parse_timetz,
+    format_time, format_timetz, parse_date, parse_interval, parse_time, parse_timestamp, parse_timestamptz, parse_timetz,
 };
 use crate::json::Jsonb;
 use crate::{SqlError, SqlResult, Type, Value, code};
@@ -18,19 +17,19 @@ pub fn encode(v: &Value, ty: &Type) -> SqlResult<String> {
         (Value::Int2(n), _) => n.to_string(),
         (Value::Int4(n), _) => n.to_string(),
         (Value::Int8(n), _) => n.to_string(),
-        (Value::Float4(f), _) => format_float4(*f),
-        (Value::Float8(f), Type::Float4) => format_float4(*f as f32),
-        (Value::Float8(f), _) => format_float8(*f),
+        (Value::Float4(f), _) => float4_out(*f),
+        (Value::Float8(f), Type::Float4) => float4_out(*f as f32),
+        (Value::Float8(f), _) => float8_out(*f),
         (Value::Numeric(n), _) => n.to_string(),
         (Value::Text(s), _) => s.clone(),
         (Value::Bytea(b), _) => format_bytea(b),
         (Value::Uuid(u), _) => format_uuid(u),
-        (Value::Timestamptz(t), _) => format_timestamptz(*t),
-        (Value::Timestamp(t), _) => format_timestamp(*t),
-        (Value::Date(d), _) => format_date(*d),
+        (Value::Timestamptz(t), _) => crate::datetime::timestamptz_out(*t),
+        (Value::Timestamp(t), _) => crate::datetime::timestamp_out(*t),
+        (Value::Date(d), _) => crate::datetime::date_out(*d),
         (Value::Time(t), _) => format_time(*t),
         (Value::TimeTz(t, z), _) => format_timetz(*t, *z),
-        (Value::Interval(iv), _) => format_interval(iv),
+        (Value::Interval(iv), _) => crate::datetime::interval_out(iv),
         (Value::Jsonb(j), _) => j.to_string(),
         (Value::Json(s), _) => s.clone(),
         (Value::Oid(o), _) => o.to_string(),
@@ -246,6 +245,33 @@ fn format_shortest(sci: &str, max_fixed_exp: i32) -> String {
     out
 }
 
+/// `float8out` under `extra_float_digits`: shortest round-trip when positive, else
+/// `%.{15 + extra_float_digits}g`.
+pub fn float8_out(f: f64) -> String {
+    let efd = crate::context::output_style().extra_float_digits;
+    if efd > 0 || !f.is_finite() || f == 0.0 {
+        return format_float8(f);
+    }
+    format_precision(&format!("{:.*e}", usize::try_from((14 + efd).max(0)).unwrap_or(0), f), (15 + efd).max(1))
+}
+
+/// `float4out` under `extra_float_digits` (`%.{6 + extra_float_digits}g` when not positive).
+pub fn float4_out(f: f32) -> String {
+    let efd = crate::context::output_style().extra_float_digits;
+    if efd > 0 || !f.is_finite() || f == 0.0 {
+        return format_float4(f);
+    }
+    format_precision(&format!("{:.*e}", usize::try_from((5 + efd).max(0)).unwrap_or(0), f), (6 + efd).max(1))
+}
+
+/// `%g`: a `{:.Ne}` rendering with trailing zeros dropped, in fixed notation unless the
+/// exponent is < -4 or >= the precision.
+fn format_precision(sci: &str, precision: i32) -> String {
+    let (mantissa, exp) = sci.split_once('e').unwrap_or((sci, "0"));
+    let mantissa = if mantissa.contains('.') { mantissa.trim_end_matches('0').trim_end_matches('.') } else { mantissa };
+    format_shortest(&format!("{mantissa}e{exp}"), precision)
+}
+
 pub fn format_float8(f: f64) -> String {
     if f.is_nan() {
         return "NaN".into();
@@ -397,31 +423,40 @@ pub fn parse_uuid(s: &str) -> SqlResult<[u8; 16]> {
 }
 
 fn format_array(items: &[Value], elem: &Type) -> SqlResult<String> {
-    let mut out = String::from("{");
+    let mut out = String::new();
+    write_array(&mut out, items, elem)?;
+    Ok(out)
+}
+
+/// `array_out`; nested arrays are inner dimensions (`{{1,2},{3,4}}`).
+fn write_array(out: &mut String, items: &[Value], elem: &Type) -> SqlResult<()> {
+    out.push('{');
     for (i, item) in items.iter().enumerate() {
         if i > 0 {
             out.push(',');
         }
-        if item.is_null() {
-            out.push_str("NULL");
-            continue;
-        }
-        let s = encode(item, elem)?;
-        if array_elem_needs_quotes(&s) {
-            out.push('"');
-            for c in s.chars() {
-                if c == '"' || c == '\\' {
-                    out.push('\\');
+        match item {
+            Value::Null => out.push_str("NULL"),
+            Value::Array(inner) if !matches!(elem, Type::Array(_)) => write_array(out, inner, elem)?,
+            _ => {
+                let s = encode(item, elem)?;
+                if array_elem_needs_quotes(&s) {
+                    out.push('"');
+                    for c in s.chars() {
+                        if c == '"' || c == '\\' {
+                            out.push('\\');
+                        }
+                        out.push(c);
+                    }
+                    out.push('"');
+                } else {
+                    out.push_str(&s);
                 }
-                out.push(c);
             }
-            out.push('"');
-        } else {
-            out.push_str(&s);
         }
     }
     out.push('}');
-    Ok(out)
+    Ok(())
 }
 
 fn array_elem_needs_quotes(s: &str) -> bool {
@@ -430,8 +465,9 @@ fn array_elem_needs_quotes(s: &str) -> bool {
         || s.chars().any(|c| matches!(c, '{' | '}' | ',' | '"' | '\\') || c.is_ascii_whitespace())
 }
 
-/// `array_in` for one-dimensional arrays: `{1,2,NULL}`, `{"a b","c\"d"}`, optional
-/// `[lo:hi]=` dimension decoration is accepted and ignored.
+/// `array_in`: `{1,2,NULL}`, `{"a b","c\"d"}`, `{{1,2},{3,4}}` (rectangular; nested arrays
+/// are returned as inner dimensions). An optional `[lo:hi]=` dimension decoration is accepted
+/// and ignored.
 pub fn parse_array(s: &str, elem: &Type) -> SqlResult<Vec<Value>> {
     let err = || SqlError::new(code::INVALID_TEXT_REPRESENTATION, format!("malformed array literal: \"{s}\""));
     let mut t = s.trim();
@@ -439,67 +475,116 @@ pub fn parse_array(s: &str, elem: &Type) -> SqlResult<Vec<Value>> {
         let eq = t.find('=').ok_or_else(err)?;
         t = t[eq + 1..].trim();
     }
-    let body = t.strip_prefix('{').and_then(|r| r.strip_suffix('}')).ok_or_else(err)?;
-    let mut out = Vec::new();
-    if body.trim().is_empty() {
-        return Ok(out);
-    }
-    let chars: Vec<char> = body.chars().collect();
+    let chars: Vec<char> = t.chars().collect();
     let mut i = 0;
+    let v = parse_array_level(&chars, &mut i, elem, &err)?;
+    while i < chars.len() && chars[i].is_whitespace() {
+        i += 1;
+    }
+    if i != chars.len() {
+        return Err(err());
+    }
+    let Value::Array(items) = v else { return Err(err()) };
+    if !rectangular(&items) {
+        return Err(err().with_detail("Multidimensional arrays must have sub-arrays with matching dimensions."));
+    }
+    // `{{}}` is an empty array.
+    if items.iter().all(|x| matches!(x, Value::Array(a) if a.is_empty())) && !items.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(items)
+}
+
+/// True if every nested level has sub-arrays of one length (and no level mixes arrays with
+/// scalars).
+pub fn rectangular(items: &[Value]) -> bool {
+    let arrays = items.iter().filter(|x| matches!(x, Value::Array(_))).count();
+    if arrays == 0 {
+        return true;
+    }
+    if arrays != items.len() {
+        return false;
+    }
+    let subs: Vec<&Vec<Value>> = items.iter().filter_map(|x| if let Value::Array(a) = x { Some(a) } else { None }).collect();
+    let len = subs[0].len();
+    subs.iter().all(|a| a.len() == len && rectangular(a))
+        && subs.iter().map(|a| a.iter().filter(|x| matches!(x, Value::Array(_))).count()).collect::<std::collections::HashSet<_>>().len()
+            <= 1
+}
+
+fn parse_array_level(chars: &[char], i: &mut usize, elem: &Type, err: &dyn Fn() -> SqlError) -> SqlResult<Value> {
+    let skip_ws = |i: &mut usize| {
+        while *i < chars.len() && chars[*i].is_whitespace() {
+            *i += 1;
+        }
+    };
+    skip_ws(i);
+    if chars.get(*i) != Some(&'{') {
+        return Err(err());
+    }
+    *i += 1;
+    let mut out = Vec::new();
+    skip_ws(i);
+    if chars.get(*i) == Some(&'}') {
+        *i += 1;
+        return Ok(Value::Array(out));
+    }
     loop {
-        while i < chars.len() && chars[i].is_whitespace() {
-            i += 1;
-        }
-        if i < chars.len() && chars[i] == '{' {
-            return Err(SqlError::feature_not_supported("multidimensional arrays are not supported"));
-        }
-        let mut buf = String::new();
-        let mut quoted = false;
-        if i < chars.len() && chars[i] == '"' {
-            quoted = true;
-            i += 1;
-            loop {
-                let c = *chars.get(i).ok_or_else(err)?;
-                i += 1;
-                match c {
-                    '"' => break,
-                    '\\' => {
-                        buf.push(*chars.get(i).ok_or_else(err)?);
-                        i += 1;
+        skip_ws(i);
+        if chars.get(*i) == Some(&'{') {
+            out.push(parse_array_level(chars, i, elem, err)?);
+        } else {
+            let mut buf = String::new();
+            let mut quoted = false;
+            if chars.get(*i) == Some(&'"') {
+                quoted = true;
+                *i += 1;
+                loop {
+                    let c = *chars.get(*i).ok_or_else(err)?;
+                    *i += 1;
+                    match c {
+                        '"' => break,
+                        '\\' => {
+                            buf.push(*chars.get(*i).ok_or_else(err)?);
+                            *i += 1;
+                        }
+                        c => buf.push(c),
                     }
-                    c => buf.push(c),
                 }
-            }
-            while i < chars.len() && chars[i].is_whitespace() {
-                i += 1;
-            }
-        } else {
-            while i < chars.len() && chars[i] != ',' {
-                if chars[i] == '\\' {
-                    i += 1;
-                    buf.push(*chars.get(i).ok_or_else(err)?);
-                } else if chars[i] == '"' || chars[i] == '{' || chars[i] == '}' {
+            } else {
+                while *i < chars.len() && chars[*i] != ',' && chars[*i] != '}' {
+                    if chars[*i] == '\\' {
+                        *i += 1;
+                        buf.push(*chars.get(*i).ok_or_else(err)?);
+                    } else if chars[*i] == '"' || chars[*i] == '{' {
+                        return Err(err());
+                    } else {
+                        buf.push(chars[*i]);
+                    }
+                    *i += 1;
+                }
+                let trimmed = buf.trim_end().len();
+                buf.truncate(trimmed);
+                if buf.is_empty() {
                     return Err(err());
-                } else {
-                    buf.push(chars[i]);
                 }
-                i += 1;
             }
-            let trimmed = buf.trim_end().len();
-            buf.truncate(trimmed);
+            if !quoted && buf.eq_ignore_ascii_case("null") {
+                out.push(Value::Null);
+            } else {
+                out.push(decode(&buf, elem)?);
+            }
         }
-        if !quoted && buf.eq_ignore_ascii_case("null") {
-            out.push(Value::Null);
-        } else {
-            out.push(decode(&buf, elem)?);
-        }
-        match chars.get(i) {
-            None => break,
-            Some(',') => i += 1,
-            Some(_) => return Err(err()),
+        skip_ws(i);
+        match chars.get(*i) {
+            Some(',') => *i += 1,
+            Some('}') => {
+                *i += 1;
+                return Ok(Value::Array(out));
+            }
+            _ => return Err(err()),
         }
     }
-    Ok(out)
 }
 
 #[cfg(test)]
