@@ -24,6 +24,8 @@ pub struct StatementState {
     pub settings: RefCell<Vec<(String, String, bool)>>,
     /// `pg_notify` calls made during this statement: (channel, payload).
     pub notifies: RefCell<Vec<(String, String)>>,
+    /// `merge_action()` while a MERGE evaluates RETURNING.
+    pub merge_action: std::cell::Cell<&'static str>,
 }
 
 impl StatementState {
@@ -237,6 +239,16 @@ pub fn eval(expr: &Expr, row: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
                         ));
                     }
                 },
+                SubqueryKind::Row => match rows.len() {
+                    0 => Value::Null,
+                    1 => Value::Record(pgmem_types::usertype::RECORD_OID, rows[0].clone()),
+                    _ => {
+                        return Err(SqlError::new(
+                            code::CARDINALITY_VIOLATION,
+                            "more than one row returned by a subquery used as an expression",
+                        ));
+                    }
+                },
                 SubqueryKind::Array => Value::Array(rows.iter().map(|r| r.first().cloned().unwrap_or(Value::Null)).collect()),
                 SubqueryKind::Quantified { probe, cmp, all } => {
                     let p = eval(probe, row, ctx)?;
@@ -286,6 +298,13 @@ pub fn eval(expr: &Expr, row: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
         }
         Expr::Row { fields, type_oid, .. } => {
             Value::Record(*type_oid, fields.iter().map(|e| eval(e, row, ctx)).collect::<SqlResult<Vec<_>>>()?)
+        }
+        Expr::Grouping { col, values, .. } => {
+            let set = match row.get(*col) {
+                Some(Value::Int4(i)) => usize::try_from(*i).unwrap_or(0),
+                _ => 0,
+            };
+            Value::Int4(values.get(set).copied().unwrap_or(0))
         }
         Expr::Field { expr, idx } => match eval(expr, row, ctx)? {
             Value::Record(_, mut fields) if *idx < fields.len() => fields.swap_remove(*idx),

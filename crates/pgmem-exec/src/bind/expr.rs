@@ -950,6 +950,14 @@ impl Binder<'_> {
             [s, n] if s == "pg_catalog" || s == "public" => n.as_str(),
             _ => return Err(funcs::no_function(&f.name.to_string(), &[])),
         };
+        if name == "grouping" && f.name.0.len() == 1 {
+            // Resolved against the GROUP BY when the query is aggregated.
+            if matches!(ctx.clause, Clause::Where | Clause::GroupBy | Clause::JoinOn) {
+                return Err(SqlError::new(code::GROUPING_ERROR, format!("grouping operations are not allowed in {}", ctx.clause.name())));
+            }
+            let args = f.args.iter().map(|a| Ok(self.bind_expr(a, ctx)?.0)).collect::<SqlResult<Vec<_>>>()?;
+            return Ok((Expr::Grouping { args, col: usize::MAX, values: Vec::new() }, Type::Int4));
+        }
         if f.over.is_none() && !f.within_group.is_empty() {
             let hyp = match name {
                 "rank" => Some(AggKind::HypRank),
@@ -1096,12 +1104,17 @@ impl Binder<'_> {
     }
 
     fn bind_agg_args(&self, f: &ir::FunctionCall, ctx: &Ctx) -> SqlResult<Vec<Bound>> {
-        let inner = ctx.with_clause(Clause::Other);
+        // A window aggregate's arguments may hold the query's aggregates (`sum(sum(x)) OVER ()`).
+        let window = ctx.clause == Clause::WindowArg;
+        let inner = ctx.with_clause(if window { Clause::WindowArg } else { Clause::AggArg });
         let mut out = Vec::new();
         for a in &f.args {
             let b = self.bind_expr(a, &inner)?;
-            if contains_agg(&b.0) {
+            if !window && contains_agg(&b.0) {
                 return Err(SqlError::new(code::GROUPING_ERROR, "aggregate function calls cannot be nested"));
+            }
+            if !window && super::select_contains_window(&b.0) {
+                return Err(SqlError::new(code::GROUPING_ERROR, "aggregate function calls cannot contain window function calls"));
             }
             out.push(b);
         }
@@ -1258,7 +1271,7 @@ impl Binder<'_> {
 
     fn bind_aggregate(&self, name: &str, kind: AggKind, f: &ir::FunctionCall, ctx: &Ctx) -> SqlResult<Bound> {
         if !ctx.clause.agg_allowed() {
-            if ctx.clause == Clause::Other {
+            if matches!(ctx.clause, Clause::Other | Clause::AggArg) {
                 return Err(SqlError::new(code::GROUPING_ERROR, "aggregate function calls cannot be nested"));
             }
             return Err(agg_misuse(ctx.clause, "aggregate functions"));
@@ -1277,9 +1290,9 @@ impl Binder<'_> {
             return Err(window_misuse(ctx.clause));
         }
         let spec = resolve_window_spec(over, &ctx.windows)?;
-        let inner = ctx.with_clause(Clause::Other);
+        let inner = ctx.with_clause(Clause::WindowArg);
         let agg_call = match agg {
-            Some(k) => Some(self.make_agg(name, k, f, ctx)?),
+            Some(k) => Some(self.make_agg(name, k, f, &inner)?),
             None => None,
         };
         let (args, ty) = match &agg_call {
@@ -1321,33 +1334,82 @@ impl Binder<'_> {
             .collect::<SqlResult<Vec<_>>>()?;
         let frame = match &spec.frame {
             None => Frame::default_frame(),
-            Some(fr) => {
-                let bound = |b: &ir::FrameBound| -> SqlResult<FrameBound> {
-                    Ok(match b {
-                        ir::FrameBound::UnboundedPreceding => FrameBound::UnboundedPreceding,
-                        ir::FrameBound::Preceding(e) => FrameBound::Preceding(self.bind_expr(e, &inner)?.0),
-                        ir::FrameBound::CurrentRow => FrameBound::CurrentRow,
-                        ir::FrameBound::Following(e) => FrameBound::Following(self.bind_expr(e, &inner)?.0),
-                        ir::FrameBound::UnboundedFollowing => FrameBound::UnboundedFollowing,
-                    })
-                };
-                Frame {
-                    units: match fr.units {
-                        ir::FrameUnits::Rows => FrameUnits::Rows,
-                        ir::FrameUnits::Range => FrameUnits::Range,
-                        ir::FrameUnits::Groups => FrameUnits::Groups,
-                    },
-                    start: bound(&fr.start)?,
-                    end: bound(&fr.end)?,
-                }
-            }
+            Some(fr) => self.bind_frame(fr, &spec.order_by, &order_by, &ctx.with_clause(Clause::Other))?,
         };
         let call = WinCall { kind, args, partition_by, order_by, frame, ty: ty.clone(), agg: agg_call };
         ctx.current().windows.borrow_mut().push(call.clone());
         Ok((Expr::WindowCall(Box::new(call)), ty))
     }
 
+    /// A window frame. ROWS / GROUPS offsets are counts; a RANGE offset becomes the bound
+    /// value `key - offset` or `key + offset` (by direction and sort order), which needs
+    /// exactly one ORDER BY key of a type with `in_range` support.
+    fn bind_frame(&self, fr: &ir::WindowFrame, order_ir: &[ir::OrderByExpr], order_by: &[SortKey], ctx: &Ctx) -> SqlResult<Frame> {
+        let units = match fr.units {
+            ir::FrameUnits::Rows => FrameUnits::Rows,
+            ir::FrameUnits::Range => FrameUnits::Range,
+            ir::FrameUnits::Groups => FrameUnits::Groups,
+        };
+        let mut range_offsets = Vec::new();
+        let mut range_key: Option<(Expr, Type)> = None;
+        let mut bound = |b: &ir::FrameBound| -> SqlResult<FrameBound> {
+            let (e, preceding) = match b {
+                ir::FrameBound::UnboundedPreceding => return Ok(FrameBound::UnboundedPreceding),
+                ir::FrameBound::CurrentRow => return Ok(FrameBound::CurrentRow),
+                ir::FrameBound::UnboundedFollowing => return Ok(FrameBound::UnboundedFollowing),
+                ir::FrameBound::Preceding(e) => (e, true),
+                ir::FrameBound::Following(e) => (e, false),
+            };
+            if units != FrameUnits::Range {
+                let (x, t) = self.bind_expr(e, ctx)?;
+                let x = coerce(self, x, &t, &Type::Int8, CoercionContext::Implicit)?;
+                return Ok(if preceding { FrameBound::Preceding(x) } else { FrameBound::Following(x) });
+            }
+            let [key] = order_ir else {
+                return Err(SqlError::new(
+                    code::WINDOWING_ERROR,
+                    "RANGE with offset PRECEDING/FOLLOWING requires exactly one ORDER BY column",
+                ));
+            };
+            let (_, kt) = self.bind_expr(&key.expr, ctx)?;
+            let supported = kt.is_numeric()
+                || matches!(kt, Type::Date | Type::Time | Type::TimeTz | Type::Timestamp | Type::Timestamptz | Type::Interval);
+            if !supported {
+                return Err(SqlError::feature_not_supported(format!(
+                    "RANGE with offset PRECEDING/FOLLOWING is not supported for column type {}",
+                    kt.name()
+                )));
+            }
+            range_offsets.push(self.bind_expr(e, ctx)?.0);
+            let minus = preceding != order_by[0].desc;
+            let value = ir::Expr::Binary { op: if minus { "-" } else { "+" }.into(), left: Box::new(key.expr.clone()), right: e.clone() };
+            let (x, xt) = self.bind_expr(&value, ctx)?;
+            // Compare in the bound's type (`date - interval` is a timestamp).
+            let (k, kt) = self.bind_expr(&key.expr, ctx)?;
+            let target = common_type(&kt, &xt).unwrap_or(xt.clone());
+            let x = coerce(self, x, &xt, &target, CoercionContext::Implicit)?;
+            if range_key.is_none() {
+                range_key = Some((coerce(self, k, &kt, &target, CoercionContext::Implicit)?, target));
+            }
+            Ok(if preceding { FrameBound::Preceding(x) } else { FrameBound::Following(x) })
+        };
+        let start = bound(&fr.start)?;
+        let end = bound(&fr.end)?;
+        Ok(Frame { units, start, end, exclude: fr.exclude, range_offsets, range_key: range_key.map(|(k, _)| k) })
+    }
+
     /// Binds a subquery and returns its plan and whether it references enclosing rows.
+    /// A subquery yielding one row as a record (`SET (a, b) = (SELECT ...)`), with its column types.
+    pub fn bind_row_subquery(&self, q: &ir::Query, ctx: &Ctx) -> SqlResult<(Expr, Vec<Type>)> {
+        let level = Level::new(super::Scope::default());
+        let nested = ctx.nested(&level);
+        let bound = self.bind_query(q, &nested)?;
+        let types = bound.columns.iter().map(|c| c.ty.clone()).collect();
+        let e =
+            Expr::Subquery { id: self.fresh_id(), plan: Box::new(bound.rel), kind: SubqueryKind::Row, correlated: level.correlated.get() };
+        Ok((e, types))
+    }
+
     pub fn bind_subquery_plan(&self, q: &ir::Query, ctx: &Ctx) -> SqlResult<(crate::plan::Rel, bool)> {
         let level = Level::new(super::Scope::default());
         let nested = ctx.nested(&level);

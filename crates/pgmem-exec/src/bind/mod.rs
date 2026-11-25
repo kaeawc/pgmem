@@ -5,11 +5,13 @@
 pub mod ddl;
 pub mod dml;
 mod expr;
+pub mod merge;
 mod select;
 
 pub use ddl::{bind_alter_table, bind_create_index, bind_create_sequence, bind_create_table, bind_create_view};
 pub use dml::{DeletePlan, InsertPlan, InsertRows, OnConflictPlan, UpdatePlan, bind_delete, bind_insert, bind_update};
 pub use select::BoundQuery;
+pub(crate) use select::{dml_not_top_level, rename_columns, select_contains_window};
 
 use crate::plan::{AggCall, Expr, WinCall};
 use pgmem_catalog::{Catalog, Oid};
@@ -73,6 +75,8 @@ pub struct CteBinding {
     pub name: String,
     pub id: usize,
     pub columns: Vec<(String, Type)>,
+    /// A data-modifying WITH query without RETURNING (it cannot be read).
+    pub no_returning: bool,
 }
 
 /// Which clause is being bound; decides whether aggregates and window functions are allowed
@@ -95,16 +99,21 @@ pub enum Clause {
     SetOperand,
     /// An aggregate's FILTER (WHERE ...).
     Filter,
+    /// A window function's arguments, PARTITION BY and ORDER BY (aggregates of the query
+    /// level are allowed, other window calls are not).
+    WindowArg,
+    /// An aggregate's arguments.
+    AggArg,
     Other,
 }
 
 impl Clause {
     fn agg_allowed(self) -> bool {
-        matches!(self, Clause::SelectList | Clause::Having | Clause::OrderBy)
+        matches!(self, Clause::SelectList | Clause::Having | Clause::OrderBy | Clause::WindowArg)
     }
 
     fn window_allowed(self) -> bool {
-        matches!(self, Clause::SelectList | Clause::OrderBy)
+        matches!(self, Clause::SelectList | Clause::OrderBy | Clause::AggArg)
     }
 
     fn name(self) -> &'static str {
@@ -121,7 +130,7 @@ impl Clause {
             Clause::Check => "check constraints",
             Clause::Default => "DEFAULT expressions",
             Clause::Filter => "FILTER",
-            Clause::SetOperand | Clause::Other => "this context",
+            Clause::SetOperand | Clause::WindowArg | Clause::AggArg | Clause::Other => "this context",
         }
     }
 }
@@ -397,6 +406,9 @@ pub(crate) fn agg_misuse(clause: Clause, what: &str) -> SqlError {
 }
 
 pub(crate) fn window_misuse(clause: Clause) -> SqlError {
+    if clause == Clause::WindowArg {
+        return SqlError::new(code::WINDOWING_ERROR, "window function calls cannot be nested");
+    }
     SqlError::new(code::WINDOWING_ERROR, format!("window functions are not allowed in {}", clause.name()))
 }
 

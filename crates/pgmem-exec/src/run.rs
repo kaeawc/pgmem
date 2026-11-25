@@ -78,7 +78,8 @@ pub fn run(rel: &Rel, ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         Rel::Join { kind, left, right, on, lateral, left_width, right_width } => {
             run_join(*kind, left, right, on.as_ref(), *lateral, *left_width, *right_width, ctx)
         }
-        Rel::Aggregate { input, group, aggs } => run_aggregate(&run(input, ctx)?, group, aggs, ctx),
+        Rel::Aggregate { input, group, aggs, sets: None } => run_aggregate(&run(input, ctx)?, group, aggs, ctx),
+        Rel::Aggregate { input, group, aggs, sets: Some(sets) } => crate::agg::run_grouping_sets(&run(input, ctx)?, group, sets, aggs, ctx),
         Rel::Window { input, calls } => run_window(run(input, ctx)?, calls, ctx),
         Rel::Sort { input, keys } => {
             let mut rows = run(input, ctx)?;
@@ -227,6 +228,14 @@ fn run_join(
         }
     }
     Ok(out)
+}
+
+/// Computes a WITH query's rows.
+pub(crate) fn materialize_cte(cte: &crate::plan::CtePlan, ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    match &cte.recursive {
+        None => run(&cte.plan, ctx),
+        Some((step, union_all)) => run_recursive(cte.id, &cte.plan, step, *union_all, ctx),
+    }
 }
 
 fn run_recursive(id: usize, base: &Rel, step: &Rel, union_all: bool, ctx: &EvalCtx) -> SqlResult<Vec<Row>> {

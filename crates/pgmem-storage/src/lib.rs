@@ -122,6 +122,7 @@ impl Database {
             catalog: None,
             catalog_base_version: 0,
             changes: HashMap::new(),
+            frozen: None,
             savepoints: Vec::new(),
             seq_undo: SeqUndo { db: Arc::clone(self), entries: Vec::new() },
         }
@@ -260,11 +261,33 @@ pub struct Txn {
     catalog: Option<Catalog>,
     catalog_base_version: u64,
     changes: HashMap<Oid, TableChanges>,
+    /// The changes reads see while a statement with data-modifying WITH queries runs: all its
+    /// parts read the snapshot from the statement's start ([`Txn::freeze_reads`]).
+    frozen: Option<HashMap<Oid, TableChanges>>,
     savepoints: Vec<Savepoint>,
     seq_undo: SeqUndo,
 }
 
 impl Txn {
+    /// Until [`Txn::thaw_reads`], reads see this transaction's changes as of now; writes and
+    /// the `*_latest` reads (constraint checks) see everything.
+    pub fn freeze_reads(&mut self) {
+        self.frozen = Some(self.changes.clone());
+    }
+
+    pub fn thaw_reads(&mut self) {
+        self.frozen = None;
+    }
+
+    fn read_changes(&self) -> &HashMap<Oid, TableChanges> {
+        self.frozen.as_ref().unwrap_or(&self.changes)
+    }
+
+    /// [`Txn::scan`] ignoring [`Txn::freeze_reads`]: every change made so far.
+    pub fn scan_latest(&self, table: Oid) -> Vec<(RowId, Row)> {
+        scan_with(&self.base, &self.changes, table)
+    }
+
     /// Resets a sequence to its start, undone if the transaction (or the enclosing savepoint)
     /// rolls back.
     pub fn reset_sequence(&mut self, seq: &SequenceDef) {
@@ -321,29 +344,12 @@ impl Txn {
 
     /// The rows of a table visible to this transaction, in row-id (heap) order.
     pub fn scan(&self, table: Oid) -> Vec<(RowId, Row)> {
-        let changes = self.changes.get(&table);
-        let mut out = Vec::new();
-        let truncated = changes.is_some_and(|c| c.truncated);
-        if !truncated && let Some(data) = self.base.tables.get(&table) {
-            for (id, row) in &data.rows {
-                if changes.is_some_and(|c| c.deleted.contains(id)) {
-                    continue;
-                }
-                out.push((*id, row.clone()));
-            }
-        }
-        if let Some(c) = changes {
-            out.extend(c.inserted.iter().map(|(id, r)| (*id, r.clone())));
-            if !truncated && !c.inserted.is_empty() {
-                out.sort_by_key(|(id, _)| *id);
-            }
-        }
-        out
+        scan_with(&self.base, self.read_changes(), table)
     }
 
     /// Fetches one visible row.
     pub fn get(&self, table: Oid, id: RowId) -> Option<Row> {
-        let changes = self.changes.get(&table);
+        let changes = self.read_changes().get(&table);
         if let Some(r) = changes.and_then(|c| c.inserted.get(&id)) {
             return Some(r.clone());
         }
@@ -484,6 +490,27 @@ impl Txn {
 
     /// Discards this transaction's effects.
     pub fn rollback(self) {}
+}
+
+fn scan_with(base: &DbState, changes: &HashMap<Oid, TableChanges>, table: Oid) -> Vec<(RowId, Row)> {
+    let changes = changes.get(&table);
+    let mut out = Vec::new();
+    let truncated = changes.is_some_and(|c| c.truncated);
+    if !truncated && let Some(data) = base.tables.get(&table) {
+        for (id, row) in &data.rows {
+            if changes.is_some_and(|c| c.deleted.contains(id)) {
+                continue;
+            }
+            out.push((*id, row.clone()));
+        }
+    }
+    if let Some(c) = changes {
+        out.extend(c.inserted.iter().map(|(id, r)| (*id, r.clone())));
+        if !truncated && !c.inserted.is_empty() {
+            out.sort_by_key(|(id, _)| *id);
+        }
+    }
+    out
 }
 
 /// Re-validates plain-column unique indexes for rows inserted by a committing transaction

@@ -16,6 +16,10 @@ use pgmem_types::{GroupKey, SqlError, SqlResult, Value, code, text};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+mod merge;
+
+pub use merge::exec_merge;
+
 /// Output of a DML statement: affected-row count and RETURNING rows.
 pub struct DmlResult {
     pub count: u64,
@@ -146,11 +150,11 @@ fn check_foreign_keys(table: &TableDef, rows: &[&Row], txn: &Txn, own_final: Opt
         let parent = txn.catalog().table_q(ref_table).cloned().ok_or_else(|| SqlError::undefined_table(&ref_table.name))?;
         let parent_rows: Vec<Row> = if parent.oid == table.oid {
             own_final.map_or_else(
-                || txn.scan(parent.oid).into_iter().map(|(_, r)| r).collect(),
+                || txn.scan_latest(parent.oid).into_iter().map(|(_, r)| r).collect(),
                 |rows| rows.iter().map(|(_, r)| r.clone()).collect(),
             )
         } else {
-            txn.scan(parent.oid)
+            txn.scan_latest(parent.oid)
                 .into_iter()
                 .map(|(_, mut r)| {
                     pad(&mut r, &parent);
@@ -192,7 +196,7 @@ fn referential_actions(txn: &mut Txn, table: &TableDef, removed: &[Row], is_dele
         return Err(SqlError::new("54001", "stack depth limit exceeded in cascading foreign key actions"));
     }
     let children: Vec<Arc<TableDef>> = txn.catalog().tables().cloned().collect();
-    let parent_now: Vec<Row> = txn.scan(table.oid).into_iter().map(|(_, r)| r).collect();
+    let parent_now: Vec<Row> = txn.scan_latest(table.oid).into_iter().map(|(_, r)| r).collect();
     for child in children {
         for con in &child.constraints {
             let ConstraintKind::ForeignKey { columns, ref_table, ref_columns, on_delete, on_update } = &con.kind else { continue };
@@ -215,7 +219,7 @@ fn referential_actions(txn: &mut Txn, table: &TableDef, removed: &[Row], is_dele
                 continue;
             }
             let referencing: Vec<(RowId, Row)> = txn
-                .scan(child.oid)
+                .scan_latest(child.oid)
                 .into_iter()
                 .filter(|(_, r)| {
                     let k: Vec<Value> = columns.iter().map(|c| r.get(*c).cloned().unwrap_or(Value::Null)).collect();
@@ -311,7 +315,7 @@ fn referential_actions(txn: &mut Txn, table: &TableDef, removed: &[Row], is_dele
                         old_versions.push(row);
                     }
                     if action == FkAction::SetDefault {
-                        let rows: Vec<Row> = txn.scan(child.oid).into_iter().map(|(_, r)| r).collect();
+                        let rows: Vec<Row> = txn.scan_latest(child.oid).into_iter().map(|(_, r)| r).collect();
                         check_foreign_keys(&child, &rows.iter().collect::<Vec<_>>(), txn, None)?;
                     }
                     referential_actions(txn, &child, &old_versions, false, depth + 1)?;
@@ -320,6 +324,22 @@ fn referential_actions(txn: &mut Txn, table: &TableDef, removed: &[Row], is_dele
         }
     }
     Ok(())
+}
+
+/// The row RETURNING is evaluated over: the statement's row, then the old and the new
+/// version of the target row (all NULL when there is none).
+fn returning_row(current: &[Value], old: Option<&Row>, new: Option<&Row>, width: usize) -> Row {
+    let mut out = current.to_vec();
+    for version in [old, new] {
+        match version {
+            Some(r) => {
+                out.extend(r.iter().take(width).cloned());
+                out.extend(std::iter::repeat_n(Value::Null, width.saturating_sub(r.len())));
+            }
+            None => out.extend(std::iter::repeat_n(Value::Null, width)),
+        }
+    }
+    out
 }
 
 fn identity_always_error(col: &str) -> SqlError {
@@ -349,7 +369,7 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
             InsertRows::Query(rel) => run(rel, &ctx)?.into_iter().map(|r| r.into_iter().map(Some).collect()).collect(),
         };
         let existing: Vec<(RowId, Row)> = txn
-            .scan(table.oid)
+            .scan_latest(table.oid)
             .into_iter()
             .map(|(id, mut r)| {
                 pad(&mut r, &table);
@@ -463,7 +483,8 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
                                 }
                             }
                             if !plan.returning.is_empty() {
-                                returning_rows.push(plan.returning.iter().map(|e| eval(e, &new_row, &ctx)).collect::<SqlResult<Vec<_>>>()?);
+                                let r = returning_row(&new_row, Some(&existing_row), Some(&new_row), width);
+                                returning_rows.push(plan.returning.iter().map(|e| eval(e, &r, &ctx)).collect::<SqlResult<Vec<_>>>()?);
                             }
                             effects.push(Effect::Update(id, existing_row, new_row));
                             continue;
@@ -474,7 +495,8 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
             check_not_null(&table, &row)?;
             check_checks(&plan.rules, &row, &ctx)?;
             if !plan.returning.is_empty() {
-                returning_rows.push(plan.returning.iter().map(|e| eval(e, &row, &ctx)).collect::<SqlResult<Vec<_>>>()?);
+                let r = returning_row(&row, None, Some(&row), width);
+                returning_rows.push(plan.returning.iter().map(|e| eval(e, &r, &ctx)).collect::<SqlResult<Vec<_>>>()?);
             }
             pending.push(row.clone());
             effects.push(Effect::Insert(row));
@@ -508,7 +530,7 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
         count += 1;
     }
     let final_rows: Vec<(RowId, Row)> = txn
-        .scan(table.oid)
+        .scan_latest(table.oid)
         .into_iter()
         .map(|(id, mut r)| {
             pad(&mut r, &table);
@@ -589,6 +611,7 @@ pub fn exec_update(plan: &UpdatePlan, txn: &mut Txn, params: &[Value], env: &Ses
             if !plan.returning.is_empty() {
                 let mut out_row = new_row.clone();
                 out_row.extend(combined.iter().skip(width).cloned());
+                let out_row = returning_row(&out_row, Some(&old), Some(&new_row), width);
                 returning_rows.push(plan.returning.iter().map(|e| eval(e, &out_row, &ctx)).collect::<SqlResult<Vec<_>>>()?);
             }
             changes.push((id, old, new_row));
@@ -597,7 +620,7 @@ pub fn exec_update(plan: &UpdatePlan, txn: &mut Txn, params: &[Value], env: &Ses
         let changed_ids: HashSet<RowId> = changes.iter().map(|(id, _, _)| *id).collect();
         let mut final_rows: Vec<(RowId, Row)> = ctx
             .txn
-            .scan(table.oid)
+            .scan_latest(table.oid)
             .into_iter()
             .filter(|(id, _)| !changed_ids.contains(id))
             .map(|(id, mut r)| {
@@ -617,7 +640,7 @@ pub fn exec_update(plan: &UpdatePlan, txn: &mut Txn, params: &[Value], env: &Ses
         txn.update(table.oid, id, new);
     }
     let final_rows: Vec<(RowId, Row)> = txn
-        .scan(table.oid)
+        .scan_latest(table.oid)
         .into_iter()
         .map(|(id, mut r)| {
             pad(&mut r, &table);
@@ -637,7 +660,8 @@ pub fn exec_delete(plan: &DeletePlan, txn: &mut Txn, params: &[Value], env: &Ses
         let ctx = EvalCtx::new(txn, params, env, state);
         for (id, row, combined) in matching_rows(&table, plan.using.as_ref(), plan.filter.as_ref(), &ctx)? {
             if !plan.returning.is_empty() {
-                returning_rows.push(plan.returning.iter().map(|e| eval(e, &combined, &ctx)).collect::<SqlResult<Vec<_>>>()?);
+                let r = returning_row(&combined, Some(&row), None, table.columns.len());
+                returning_rows.push(plan.returning.iter().map(|e| eval(e, &r, &ctx)).collect::<SqlResult<Vec<_>>>()?);
             }
             targets.push((id, row));
         }

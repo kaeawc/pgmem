@@ -82,12 +82,14 @@ fn lower_with(w: sq::With) -> SqlResult<With> {
         .cte_tables
         .into_iter()
         .map(|cte| {
-            Ok(Cte {
+            let mut c = Cte {
                 name: ident(&cte.alias.name),
                 columns: cte.alias.columns.iter().map(|c| ident(&c.name)).collect(),
                 query: Box::new(lower_query(*cte.query)?),
                 materialized: cte.materialized.map(|m| matches!(m, sq::CteAsMaterialized::Materialized)),
-            })
+            };
+            crate::search_cycle::apply(&mut c)?;
+            Ok(c)
         })
         .collect::<SqlResult<Vec<_>>>()?;
     Ok(With { recursive: w.recursive, ctes })
@@ -98,6 +100,9 @@ fn lower_set_expr(body: sq::SetExpr) -> SqlResult<SetExpr> {
         sq::SetExpr::Select(s) => SetExpr::Select(Box::new(lower_select(*s)?)),
         sq::SetExpr::Query(q) => SetExpr::Query(Box::new(lower_query(*q)?)),
         sq::SetExpr::Values(v) => SetExpr::Values(v.rows.into_iter().map(|row| lower_exprs(row.content)).collect::<SqlResult<Vec<_>>>()?),
+        sq::SetExpr::Insert(st) | sq::SetExpr::Update(st) | sq::SetExpr::Delete(st) | sq::SetExpr::Merge(st) => {
+            SetExpr::Dml(Box::new(crate::lower_statement(st)?))
+        }
         sq::SetExpr::SetOperation { left, op, set_quantifier, right } => SetExpr::SetOp {
             op: match op {
                 sq::SetOperator::Union => SetOperator::Union,
@@ -125,11 +130,11 @@ fn lower_set_expr(body: sq::SetExpr) -> SqlResult<SetExpr> {
                 from: vec![TableRef::Table { name: pgmem_ir::ObjectName(parts), alias: None }],
                 selection: None,
                 group_by: Vec::new(),
+                grouping_sets: None,
                 having: None,
                 windows: Vec::new(),
             }))
         }
-        _ => return Err(unsupported("data-modifying statements in WITH")),
     })
 }
 
@@ -145,12 +150,12 @@ fn lower_select(s: sq::Select) -> SqlResult<Select> {
     let projection = s.projection.into_iter().map(lower_select_item).collect::<SqlResult<Vec<_>>>()?;
     let from = s.from.into_iter().map(lower_table_with_joins).collect::<SqlResult<Vec<_>>>()?;
     let selection = s.selection.map(lower_expr).transpose()?;
-    let group_by = match s.group_by {
+    let (group_by, grouping_sets) = match s.group_by {
         sq::GroupByExpr::Expressions(exprs, modifiers) => {
             if !modifiers.is_empty() {
                 return Err(unsupported("GROUP BY modifiers"));
             }
-            lower_exprs(exprs)?
+            lower_group_by(exprs)?
         }
         sq::GroupByExpr::All(_) => return Err(unsupported("GROUP BY ALL")),
     };
@@ -166,7 +171,95 @@ fn lower_select(s: sq::Select) -> SqlResult<Select> {
             Ok(NamedWindow { name: ident(&w.0), spec })
         })
         .collect::<SqlResult<Vec<_>>>()?;
-    Ok(Select { distinct, projection, from, selection, group_by, having, windows })
+    Ok(Select { distinct, projection, from, selection, group_by, grouping_sets, having, windows })
+}
+
+/// A GROUP BY list: plain expressions, or (with GROUPING SETS / ROLLUP / CUBE) the distinct
+/// grouping expressions and the expanded sets over them, in Postgres' order
+/// (`expand_grouping_sets`): the cross product of the items' sets, ROLLUP from longest to
+/// empty, CUBE as every subset.
+fn lower_group_by(exprs: Vec<sq::Expr>) -> SqlResult<(Vec<Expr>, Option<pgmem_ir::GroupingSets>)> {
+    let grouped = |e: &sq::Expr| matches!(e, sq::Expr::Rollup(_) | sq::Expr::Cube(_) | sq::Expr::GroupingSets(_));
+    if !exprs.iter().any(grouped) {
+        return Ok((lower_exprs(exprs)?, None));
+    }
+    let mut distinct: Vec<Expr> = Vec::new();
+    let mut sets: Vec<Vec<usize>> = vec![Vec::new()];
+    for item in exprs {
+        let item_sets = group_item_sets(item, &mut distinct)?;
+        sets = sets
+            .iter()
+            .flat_map(|prefix| {
+                item_sets.iter().map(move |s| {
+                    let mut out = prefix.clone();
+                    out.extend(s.iter().filter(|i| !prefix.contains(i)));
+                    out
+                })
+            })
+            .collect();
+    }
+    Ok((distinct, Some(sets)))
+}
+
+/// The index of `e` among the distinct grouping expressions.
+fn group_index(e: sq::Expr, distinct: &mut Vec<Expr>) -> SqlResult<usize> {
+    let e = lower_expr(e)?;
+    Ok(match distinct.iter().position(|d| *d == e) {
+        Some(i) => i,
+        None => {
+            distinct.push(e);
+            distinct.len() - 1
+        }
+    })
+}
+
+/// A parenthesized element of ROLLUP / CUBE / GROUPING SETS: its expressions' indexes.
+fn group_list(list: Vec<sq::Expr>, distinct: &mut Vec<Expr>) -> SqlResult<Vec<Vec<usize>>> {
+    let mut sets: Vec<Vec<usize>> = vec![Vec::new()];
+    for e in list {
+        let item = group_item_sets(e, distinct)?;
+        sets = sets
+            .iter()
+            .flat_map(|p| {
+                item.iter().map(move |s| {
+                    let mut out = p.clone();
+                    out.extend(s.iter().filter(|i| !p.contains(i)));
+                    out
+                })
+            })
+            .collect();
+    }
+    Ok(sets)
+}
+
+fn group_item_sets(item: sq::Expr, distinct: &mut Vec<Expr>) -> SqlResult<Vec<Vec<usize>>> {
+    let flat = |lists: Vec<Vec<sq::Expr>>, distinct: &mut Vec<Expr>| -> SqlResult<Vec<Vec<usize>>> {
+        lists.into_iter().map(|l| l.into_iter().map(|e| group_index(e, distinct)).collect()).collect()
+    };
+    Ok(match item {
+        sq::Expr::Rollup(lists) => {
+            let parts = flat(lists, distinct)?;
+            (0..=parts.len()).rev().map(|n| parts[..n].concat()).collect()
+        }
+        sq::Expr::Cube(lists) => {
+            let parts = flat(lists, distinct)?;
+            let n = parts.len();
+            (0..1u64 << n)
+                .rev()
+                .map(|mask| (0..n).filter(|i| mask & (1 << (n - 1 - i)) != 0).flat_map(|i| parts[i].clone()).collect())
+                .collect()
+        }
+        sq::Expr::GroupingSets(lists) => {
+            let mut out = Vec::new();
+            for l in lists {
+                out.extend(group_list(l, distinct)?);
+            }
+            out
+        }
+        sq::Expr::Nested(inner) if !matches!(*inner, sq::Expr::Tuple(_)) => vec![vec![group_index(*inner, distinct)?]],
+        sq::Expr::Tuple(list) => group_list(list, distinct)?,
+        e => vec![vec![group_index(e, distinct)?]],
+    })
 }
 
 fn lower_select_item(item: sq::SelectItem) -> SqlResult<SelectItem> {
@@ -241,7 +334,7 @@ fn lower_alias(a: Option<sq::TableAlias>) -> Option<TableAlias> {
     Some(TableAlias { name: ident(&a.name), columns: a.columns.iter().map(|c| ident(&c.name)).collect(), column_types })
 }
 
-fn lower_table_factor(f: sq::TableFactor) -> SqlResult<TableRef> {
+pub(crate) fn lower_table_factor(f: sq::TableFactor) -> SqlResult<TableRef> {
     Ok(match f {
         sq::TableFactor::Table { name, alias, args, with_ordinality, .. } => {
             let name = object_name(&name)?;
@@ -351,9 +444,26 @@ pub(crate) fn lower_window_spec(spec: sq::WindowSpec) -> SqlResult<WindowSpec> {
             Ok(WindowFrame { units, start, end, exclude: FrameExclude::NoOthers })
         })
         .transpose()?;
+    let mut frame = frame;
+    let mut partition_by = lower_exprs(spec.partition_by)?;
+    // The frame's EXCLUDE clause, carried as a marker in PARTITION BY (see `rewrite_unsupported`).
+    if let Some(i) = partition_by.iter().position(|e| matches!(e, Expr::Function(f) if f.name.base() == crate::FRAME_EXCLUDE_MARKER)) {
+        let Expr::Function(f) = partition_by.remove(i) else { unreachable!() };
+        let kind = match f.args.first() {
+            Some(Expr::Literal(pgmem_ir::Literal::String(k))) => k.clone(),
+            _ => String::new(),
+        };
+        let fr = frame.as_mut().ok_or_else(|| SqlError::syntax("syntax error at or near \"EXCLUDE\""))?;
+        fr.exclude = match kind.as_str() {
+            "current row" => FrameExclude::CurrentRow,
+            "group" => FrameExclude::Group,
+            "ties" => FrameExclude::Ties,
+            _ => FrameExclude::NoOthers,
+        };
+    }
     Ok(WindowSpec {
         base: spec.window_name.as_ref().map(ident),
-        partition_by: lower_exprs(spec.partition_by)?,
+        partition_by,
         order_by: spec.order_by.into_iter().map(lower_order_by_expr).collect::<SqlResult<Vec<_>>>()?,
         frame,
     })

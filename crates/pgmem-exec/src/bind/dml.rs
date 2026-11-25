@@ -104,7 +104,7 @@ pub fn physical_scope(table: &TableDef, qualifier: &str) -> Scope {
     Scope::from_cols(cols)
 }
 
-fn lookup_table(b: &Binder, name: &ir::ObjectName) -> SqlResult<Arc<TableDef>> {
+pub(crate) fn lookup_table(b: &Binder, name: &ir::ObjectName) -> SqlResult<Arc<TableDef>> {
     let base = name.base();
     match b.catalog.find_relation(name)? {
         Some(pgmem_catalog::Relation::Table(t)) => Ok(t),
@@ -187,9 +187,34 @@ impl Binder<'_> {
         Ok(Some(coerce_assignment(self, Expr::null(), &Type::Unknown, ty, typmod, column)?))
     }
 
-    fn bind_returning(&self, items: &[ir::SelectItem], ctx: &Ctx) -> SqlResult<(Vec<Expr>, Vec<OutCol>)> {
-        let scope = &ctx.current().scope;
-        let rctx = ctx.with_clause(Clause::Returning);
+    /// Binds RETURNING over the statement's row followed by the old and the new version of
+    /// the target row (Postgres 18's `old.col` / `new.col`, renamed by
+    /// `RETURNING WITH (OLD AS o, NEW AS n)`), as the executor evaluates it.
+    pub(crate) fn bind_returning(&self, items: &[ir::SelectItem], ctx: &Ctx, table: &TableDef) -> SqlResult<(Vec<Expr>, Vec<OutCol>)> {
+        let (aliases, items) = match items.first() {
+            Some(ir::SelectItem::Expr { expr: ir::Expr::Function(f), .. }) if f.name.base() == RETURNING_ALIASES => {
+                let name = |i: usize| match f.args.get(i) {
+                    Some(ir::Expr::Literal(ir::Literal::String(s))) => s.clone(),
+                    _ => String::new(),
+                };
+                ((name(0), name(1)), &items[1..])
+            }
+            _ => (("old".to_owned(), "new".to_owned()), items),
+        };
+        if items.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let current = &ctx.current().scope;
+        let mut cols = current.cols.clone();
+        for alias in [&aliases.0, &aliases.1] {
+            cols.extend(physical_scope(table, alias).cols.into_iter().map(|mut c| {
+                c.hidden_unqualified = true;
+                c
+            }));
+        }
+        let level = Level::new(Scope { cols, star: current.star.clone() });
+        let rctx = ctx.nested_same_level(&level).with_clause(Clause::Returning);
+        let scope = &level.scope;
         let mut exprs = Vec::new();
         let mut cols = Vec::new();
         for item in items {
@@ -293,12 +318,20 @@ fn arbiter_for(b: &Binder, rules: &RowRules, table: &Arc<TableDef>, target: &ir:
     }
 }
 
+/// The first RETURNING item `RETURNING WITH (OLD AS o, NEW AS n)` is parsed into.
+const RETURNING_ALIASES: &str = "__pgmem_returning_aliases";
+
 pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<InsertPlan> {
     let table = lookup_table(b, &ins.table)?;
     let qualifier = ins.alias.clone().unwrap_or_else(|| table.name.clone());
     let rules = b.bind_row_rules(&table)?;
     let columns: Vec<usize> = if ins.columns.is_empty() {
-        table.live_columns().map(|(i, _)| i).collect()
+        // Without a column list, the source fills the leading columns (the rest get defaults).
+        let n = match &ins.source {
+            ir::InsertSource::Values(rows) => rows.first().map_or(usize::MAX, Vec::len),
+            _ => usize::MAX,
+        };
+        table.live_columns().map(|(i, _)| i).take(n).collect()
     } else {
         let mut out = Vec::new();
         for c in &ins.columns {
@@ -345,6 +378,8 @@ pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<Inser
         }
         ir::InsertSource::Query(q) => {
             let bound = b.bind_query(q, &vctx)?;
+            let columns =
+                if ins.columns.is_empty() { columns.iter().copied().take(bound.columns.len()).collect() } else { columns.clone() };
             if bound.columns.len() > columns.len() {
                 return Err(SqlError::syntax("INSERT has more expressions than target columns"));
             }
@@ -389,16 +424,38 @@ pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<Inser
             Some(OnConflictPlan { arbiter, update })
         }
     };
-    let (returning, returning_cols) = b.bind_returning(&ins.returning, &row_ctx)?;
+    let (returning, returning_cols) = b.bind_returning(&ins.returning, &row_ctx, &table)?;
     Ok(InsertPlan { rules, columns, rows, overriding_system_value: ins.overriding_system_value, on_conflict, returning, returning_cols })
 }
 
-fn bind_assignments(b: &Binder, table: &TableDef, assignments: &[ir::Assignment], ctx: &Ctx) -> SqlResult<Vec<(usize, Option<Expr>)>> {
+pub(crate) fn bind_assignments(
+    b: &Binder,
+    table: &TableDef,
+    assignments: &[ir::Assignment],
+    ctx: &Ctx,
+) -> SqlResult<Vec<(usize, Option<Expr>)>> {
     let mut out: Vec<(usize, Option<Expr>)> = Vec::new();
     for a in assignments {
-        if a.columns.len() > 1 {
+        if a.columns.len() > 1
+            && let ir::Expr::Subquery(q) = &a.value
+        {
+            // SET (a, b) = (SELECT x, y ...): one record, its fields assigned in order.
+            let (sub, types) = b.bind_row_subquery(q, &ctx.with_clause(Clause::Other))?;
+            if types.len() != a.columns.len() {
+                return Err(SqlError::syntax("number of columns does not match number of values"));
+            }
+            for (i, (target, ty)) in a.columns.iter().zip(&types).enumerate() {
+                let column = target.last().map_or("", String::as_str);
+                let slot = table
+                    .column_index(column)
+                    .ok_or_else(|| SqlError::undefined_column(&format!("\"{column}\" of relation \"{}\"", table.name)))?;
+                let col = &table.columns[slot];
+                let field = Expr::Field { expr: Box::new(sub.clone()), idx: i };
+                out.push((slot, Some(coerce_assignment(b, field, ty, &col.ty, col.typmod, &col.name)?)));
+            }
+        } else if a.columns.len() > 1 {
             // SET (a, b) = (x, y)
-            let ir::Expr::Row(values) = &a.value else { return Err(super::feature("SET (columns) = (subquery)")) };
+            let ir::Expr::Row(values) = &a.value else { return Err(super::feature("SET (columns) = (this expression)")) };
             if values.len() != a.columns.len() {
                 return Err(SqlError::syntax("number of columns does not match number of values"));
             }
@@ -422,9 +479,10 @@ fn bind_assignments(b: &Binder, table: &TableDef, assignments: &[ir::Assignment]
 /// first part is not a column is taken as `table.col` (pgmem accepts that; Postgres reads it
 /// as a field of a column named like the table and fails).
 fn bind_one_assignment(b: &Binder, table: &TableDef, target: &[String], value: &ir::Expr, ctx: &Ctx) -> SqlResult<(usize, Option<Expr>)> {
+    // `SET a.b = v` assigns field b of column a; Postgres reads a table qualifier the same way.
     let (column, fields): (&str, &[String]) = match target {
-        [first, rest @ ..] if !rest.is_empty() && table.column_index(first).is_some() => (first, rest),
-        _ => (target.last().map_or("", String::as_str), &[]),
+        [first, rest @ ..] => (first, rest),
+        [] => ("", &[]),
     };
     let slot =
         table.column_index(column).ok_or_else(|| SqlError::undefined_column(&format!("\"{column}\" of relation \"{}\"", table.name)))?;
@@ -505,7 +563,7 @@ pub fn bind_update(b: &Binder, upd: &ir::Update, outer: &Ctx) -> SqlResult<Updat
     let ctx = outer.from_item(&[&level]);
     let assignments = bind_assignments(b, &table, &upd.assignments, &ctx)?;
     let filter = upd.selection.as_ref().map(|s| b.bind_predicate(s, "WHERE", &ctx.with_clause(Clause::Where))).transpose()?;
-    let (returning, returning_cols) = b.bind_returning(&upd.returning, &ctx)?;
+    let (returning, returning_cols) = b.bind_returning(&upd.returning, &ctx, &table)?;
     Ok(UpdatePlan { rules, assignments, from, filter, returning, returning_cols })
 }
 
@@ -530,6 +588,6 @@ pub fn bind_delete(b: &Binder, del: &ir::Delete, outer: &Ctx) -> SqlResult<Delet
     let level = Level::new(scope);
     let ctx = outer.from_item(&[&level]);
     let filter = del.selection.as_ref().map(|s| b.bind_predicate(s, "WHERE", &ctx.with_clause(Clause::Where))).transpose()?;
-    let (returning, returning_cols) = b.bind_returning(&del.returning, &ctx)?;
+    let (returning, returning_cols) = b.bind_returning(&del.returning, &ctx, &table)?;
     Ok(DeletePlan { table, using, filter, returning, returning_cols })
 }

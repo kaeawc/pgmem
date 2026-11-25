@@ -7,16 +7,16 @@ PostgreSQL 18; CI re-verifies every record against PostgreSQL and runs it agains
 A record passes when pgmem returns the same column names, column types and text values, or
 the same SQLSTATE and error message.
 
-pgmem passes **2809 / 3309 records (84.9%)**.
+pgmem passes **2880 / 3309 records (87.0%)**.
 
 | Area | Records | Pass | Rate |
 |---|---:|---:|---:|
 | catalog | 226 | 190 | 84.1% |
 | constraints | 171 | 101 | 59.1% |
 | ddl | 386 | 233 | 60.4% |
-| dml | 282 | 220 | 78.0% |
+| dml | 282 | 267 | 94.7% |
 | functions | 445 | 439 | 98.7% |
-| queries | 440 | 415 | 94.3% |
+| queries | 440 | 439 | 99.8% |
 | session | 419 | 368 | 87.8% |
 | smoke | 7 | 7 | 100.0% |
 | transactions | 522 | 448 | 85.8% |
@@ -49,14 +49,14 @@ pgmem passes **2809 / 3309 records (84.9%)**.
 | ddl/sequences.slt | 34 | 21 | 61.8% |
 | ddl/truncate_comment.slt | 14 | 12 | 85.7% |
 | ddl/views.slt | 33 | 5 | 15.2% |
-| dml/delete.slt | 32 | 29 | 90.6% |
+| dml/delete.slt | 32 | 30 | 93.8% |
 | dml/insert.slt | 45 | 45 | 100.0% |
-| dml/merge.slt | 25 | 7 | 28.0% |
+| dml/merge.slt | 25 | 25 | 100.0% |
 | dml/on_conflict.slt | 45 | 40 | 88.9% |
-| dml/orm_patterns.slt | 29 | 20 | 69.0% |
+| dml/orm_patterns.slt | 29 | 23 | 79.3% |
 | dml/truncate.slt | 37 | 37 | 100.0% |
-| dml/update.slt | 48 | 37 | 77.1% |
-| dml/writable_cte.slt | 21 | 5 | 23.8% |
+| dml/update.slt | 48 | 46 | 95.8% |
+| dml/writable_cte.slt | 21 | 21 | 100.0% |
 | functions/arrays.slt | 49 | 45 | 91.8% |
 | functions/conditional_misc.slt | 49 | 47 | 95.9% |
 | functions/datetime.slt | 99 | 99 | 100.0% |
@@ -64,8 +64,8 @@ pgmem passes **2809 / 3309 records (84.9%)**.
 | functions/math.slt | 61 | 61 | 100.0% |
 | functions/regex.slt | 34 | 34 | 100.0% |
 | functions/string.slt | 68 | 68 | 100.0% |
-| queries/aggregates.slt | 53 | 46 | 86.8% |
-| queries/cte.slt | 36 | 28 | 77.8% |
+| queries/aggregates.slt | 53 | 53 | 100.0% |
+| queries/cte.slt | 36 | 36 | 100.0% |
 | queries/errors.slt | 60 | 60 | 100.0% |
 | queries/joins.slt | 45 | 45 | 100.0% |
 | queries/ordering_limits.slt | 44 | 44 | 100.0% |
@@ -73,7 +73,7 @@ pgmem passes **2809 / 3309 records (84.9%)**.
 | queries/set_operations.slt | 36 | 35 | 97.2% |
 | queries/subqueries.slt | 39 | 39 | 100.0% |
 | queries/where_operators.slt | 51 | 51 | 100.0% |
-| queries/windows.slt | 39 | 30 | 76.9% |
+| queries/windows.slt | 39 | 39 | 100.0% |
 | session/config_functions.slt | 45 | 45 | 100.0% |
 | session/extensions.slt | 46 | 23 | 50.0% |
 | session/listen_notify.slt | 24 | 24 | 100.0% |

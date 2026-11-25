@@ -62,7 +62,7 @@ impl Binder<'_> {
         Ok(bound)
     }
 
-    fn bind_cte(&self, cte: &ir::Cte, recursive: bool, ctx: &Ctx) -> SqlResult<(CtePlan, CteBinding)> {
+    pub(crate) fn bind_cte(&self, cte: &ir::Cte, recursive: bool, ctx: &Ctx) -> SqlResult<(CtePlan, CteBinding)> {
         let id = self.fresh_id();
         let self_ref = recursive && query_references(&cte.query, &cte.name);
         if self_ref {
@@ -85,7 +85,7 @@ impl Binder<'_> {
             rename_columns(&mut columns, &cte.columns, &cte.name)?;
             let step_level = Level::new(Scope::default());
             let mut inner_ctx = ctx.from_item(&[&step_level]);
-            let binding = CteBinding { name: cte.name.clone(), id, columns: columns.clone() };
+            let binding = CteBinding { name: cte.name.clone(), id, columns: columns.clone(), no_returning: false };
             inner_ctx.ctes.push(binding.clone());
             let step = self.bind_set_expr(right, &inner_ctx)?;
             if has_aggregate(&step.rel) {
@@ -118,11 +118,14 @@ impl Binder<'_> {
             )?;
             return Ok((CtePlan { id, plan: base.rel, recursive: Some((step_rel, *all)) }, binding));
         }
+        if let ir::SetExpr::Dml(_) = cte.query.body {
+            return Err(dml_not_top_level());
+        }
         let level = Level::new(Scope::default());
         let bound = self.bind_query(&cte.query, &ctx.from_item(&[&level]))?;
         let mut columns: Vec<(String, Type)> = bound.columns.iter().map(|c| (c.name.clone(), c.ty.clone())).collect();
         rename_columns(&mut columns, &cte.columns, &cte.name)?;
-        Ok((CtePlan { id, plan: bound.rel, recursive: None }, CteBinding { name: cte.name.clone(), id, columns }))
+        Ok((CtePlan { id, plan: bound.rel, recursive: None }, CteBinding { name: cte.name.clone(), id, columns, no_returning: false }))
     }
 
     /// Binds a set-expression operand (SELECT, VALUES, nested set op, parenthesized query).
@@ -130,6 +133,7 @@ impl Binder<'_> {
         match body {
             ir::SetExpr::Select(s) => self.bind_select(s, &[], ctx),
             ir::SetExpr::Query(q) => self.bind_query(q, ctx),
+            ir::SetExpr::Dml(_) => Err(dml_not_top_level()),
             ir::SetExpr::Values(rows) => self.bind_values(rows, ctx),
             ir::SetExpr::SetOp { op, all, left, right } => {
                 let octx = ctx.with_clause(Clause::SetOperand);
@@ -380,14 +384,34 @@ impl Binder<'_> {
         }
         let grouped = !group.is_empty() || !all_aggs.is_empty() || having.is_some();
         if grouped {
-            let pk_groups = functional_dependencies(&group, &level.scope, self.catalog);
-            let mut grouping = Grouping { group: group.clone(), aggs: all_aggs, scope: &level.scope, pk_tables: pk_groups };
+            let sets = s.grouping_sets.clone();
+            let pk_groups = if sets.is_some() { Vec::new() } else { functional_dependencies(&group, &level.scope, self.catalog) };
+            let mut grouping = Grouping { group: group.clone(), aggs: all_aggs, scope: &level.scope, pk_tables: pk_groups, sets };
             exprs = exprs.into_iter().map(|e| grouping.rewrite(e)).collect::<SqlResult<Vec<_>>>()?;
             order_exprs = order_exprs.into_iter().map(|(e, d, n)| Ok((grouping.rewrite(e)?, d, n))).collect::<SqlResult<Vec<_>>>()?;
             let having = having.map(|h| grouping.rewrite(h)).transpose()?;
             let distinct_rw =
                 distinct_on.clone().map(|d| d.into_iter().map(|e| grouping.rewrite(e)).collect::<SqlResult<Vec<_>>>()).transpose()?;
-            rel = Rel::Aggregate { input: Box::new(rel), group: grouping.group.clone(), aggs: grouping.aggs.clone() };
+            rel = Rel::Aggregate {
+                input: Box::new(rel),
+                group: grouping.group.clone(),
+                aggs: grouping.aggs.clone(),
+                sets: grouping.sets.clone(),
+            };
+            // GROUPING() reads the set index, which follows the aggregates.
+            let set_col = grouping.group.len() + grouping.aggs.len();
+            let fix = |e: Expr| {
+                e.transform(&mut |x| {
+                    Ok(match x {
+                        Expr::Grouping { col: usize::MAX, values, args } => Expr::Grouping { args, col: set_col, values },
+                        other => other,
+                    })
+                })
+            };
+            exprs = exprs.into_iter().map(&fix).collect::<SqlResult<Vec<_>>>()?;
+            order_exprs = order_exprs.into_iter().map(|(e, d, n)| Ok((fix(e)?, d, n))).collect::<SqlResult<Vec<_>>>()?;
+            let having = having.map(&fix).transpose()?;
+            let distinct_rw = distinct_rw.map(|d| d.into_iter().map(&fix).collect::<SqlResult<Vec<_>>>()).transpose()?;
             if let Some(h) = having {
                 rel = Rel::Filter { input: Box::new(rel), pred: h };
             }
@@ -398,7 +422,7 @@ impl Binder<'_> {
                 order_exprs,
                 distinct_rw,
                 &s.distinct,
-                grouping.group.len() + grouping.aggs.len(),
+                set_col + usize::from(grouping.sets.is_some()),
             );
         }
         let width = level.scope.width();
@@ -890,6 +914,9 @@ impl Binder<'_> {
         if name.0.len() == 1
             && let Some(cte) = ctx.ctes.iter().rev().find(|c| c.name == name.base())
         {
+            if cte.no_returning {
+                return Err(SqlError::feature_not_supported(format!("WITH query \"{}\" does not have a RETURNING clause", cte.name)));
+            }
             let mut cols: Vec<ScopeCol> =
                 cte.columns.iter().map(|(n, t)| ScopeCol::new(Some(qualifier.clone()), n.clone(), t.clone())).collect();
             if let Some(a) = alias {
@@ -1121,7 +1148,7 @@ fn apply_column_aliases(cols: &mut [ScopeCol], aliases: &[String], table: &str) 
     Ok(())
 }
 
-fn rename_columns(columns: &mut [(String, Type)], names: &[String], cte: &str) -> SqlResult<()> {
+pub(crate) fn rename_columns(columns: &mut [(String, Type)], names: &[String], cte: &str) -> SqlResult<()> {
     if names.len() > columns.len() {
         return Err(SqlError::new(
             code::INVALID_COLUMN_REFERENCE,
@@ -1162,13 +1189,24 @@ fn coerce_columns(b: &Binder, rel: Rel, from: &[Type], to: &[Type]) -> SqlResult
 }
 
 fn collect_aggs(e: &Expr, out: &mut Vec<AggCall>) {
-    e.walk(&mut |x| {
-        if let Expr::AggCall(a) = x
-            && !out.contains(a)
-        {
-            out.push((**a).clone());
+    e.walk(&mut |x| match x {
+        Expr::AggCall(a) if !out.contains(a) => out.push((**a).clone()),
+        // A window call's arguments may hold the query's aggregates.
+        Expr::WindowCall(w) => {
+            let agg_args = w.agg.iter().flat_map(|a| a.args.iter());
+            for inner in w.args.iter().chain(&w.partition_by).chain(w.order_by.iter().map(|k| &k.expr)).chain(agg_args) {
+                collect_aggs(inner, out);
+            }
         }
+        _ => {}
     });
+}
+
+/// Whether `e` holds a window function call.
+pub(crate) fn select_contains_window(e: &Expr) -> bool {
+    let mut found = false;
+    e.walk(&mut |x| found |= matches!(x, Expr::WindowCall(_)));
+    found
 }
 
 fn collect_windows(e: &Expr, out: &mut Vec<WinCall>) {
@@ -1214,6 +1252,7 @@ struct Grouping<'s> {
     aggs: Vec<AggCall>,
     scope: &'s Scope,
     pk_tables: Vec<pgmem_catalog::Oid>,
+    sets: Option<Vec<Vec<usize>>>,
 }
 
 impl Grouping<'_> {
@@ -1222,6 +1261,22 @@ impl Grouping<'_> {
             return Ok(Expr::Col(i));
         }
         match e {
+            Expr::Grouping { args, .. } => {
+                // Bit n (from the right, for the last argument) is set when that argument is
+                // not grouped by the row's set.
+                let mut idx = Vec::with_capacity(args.len());
+                for a in &args {
+                    idx.push(self.group.iter().position(|g| g == a).ok_or_else(|| {
+                        SqlError::new(
+                            code::GROUPING_ERROR,
+                            "arguments to GROUPING must be grouping expressions of the associated query level",
+                        )
+                    })?);
+                }
+                let sets = self.sets.clone().unwrap_or_else(|| vec![(0..self.group.len()).collect()]);
+                let values = sets.iter().map(|set| idx.iter().fold(0i32, |acc, i| (acc << 1) | i32::from(!set.contains(i)))).collect();
+                Ok(Expr::Grouping { args: Vec::new(), col: usize::MAX, values })
+            }
             Expr::AggCall(a) => {
                 let pos = match self.aggs.iter().position(|x| *x == *a) {
                     Some(p) => p,
@@ -1281,6 +1336,9 @@ fn map_children(e: Expr, f: &mut dyn FnMut(Expr) -> SqlResult<Expr>) -> SqlResul
             else_result: else_result.map(|x| b(x, f)).transpose()?,
         },
         Expr::Coalesce(v) => Expr::Coalesce(v.into_iter().map(&mut *f).collect::<SqlResult<Vec<_>>>()?),
+        Expr::Grouping { args, col, values } => {
+            Expr::Grouping { args: args.into_iter().map(&mut *f).collect::<SqlResult<Vec<_>>>()?, col, values }
+        }
         Expr::MinMax { args, greatest } => Expr::MinMax { args: args.into_iter().map(&mut *f).collect::<SqlResult<Vec<_>>>()?, greatest },
         Expr::NullIf(x, y) => Expr::NullIf(b(x, f)?, b(y, f)?),
         Expr::InList { probe, list, cmp, negated } => {
@@ -1361,7 +1419,13 @@ fn in_set(s: &ir::SetExpr, name: &str) -> bool {
         ir::SetExpr::Values(_) => false,
         ir::SetExpr::SetOp { left, right, .. } => in_set(left, name) || in_set(right, name),
         ir::SetExpr::Query(q) => query_references(q, name),
+        ir::SetExpr::Dml(_) => false,
     }
+}
+
+/// A data-modifying WITH query below the statement's own WITH.
+pub(crate) fn dml_not_top_level() -> SqlError {
+    SqlError::feature_not_supported("WITH clause containing a data-modifying statement must be at the top level")
 }
 
 #[allow(dead_code)]
