@@ -202,17 +202,17 @@ fn recursive_search_and_cycle() {
     let cycle = rows(
         &mut c,
         "WITH RECURSIVE g(src, dst) AS (SELECT src, dst FROM edges WHERE src = 1 UNION ALL SELECT e.src, e.dst FROM edges e JOIN g ON e.src = g.dst) \
-         CYCLE src SET looped TO 'Y' DEFAULT 'N' USING p SELECT src, dst, looped, p::text FROM g ORDER BY p::text, dst",
+         CYCLE src SET looped TO 'Y' DEFAULT 'N' USING p SELECT src, dst, looped, p::text FROM g ORDER BY array_length(g.p, 1), dst",
     );
     assert_eq!(
         cycle,
         [
-            ["1", "2", "Y", "{(1),(2),(3),(1)}"],
-            ["1", "4", "Y", "{(1),(2),(3),(1)}"],
-            ["3", "1", "N", "{(1),(2),(3)}"],
-            ["2", "3", "N", "{(1),(2)}"],
             ["1", "2", "N", "{(1)}"],
-            ["1", "4", "N", "{(1)}"]
+            ["1", "4", "N", "{(1)}"],
+            ["2", "3", "N", "{(1),(2)}"],
+            ["3", "1", "N", "{(1),(2),(3)}"],
+            ["1", "2", "Y", "{(1),(2),(3),(1)}"],
+            ["1", "4", "Y", "{(1),(2),(3),(1)}"]
         ]
     );
 }
