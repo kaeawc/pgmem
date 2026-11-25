@@ -46,7 +46,7 @@ and what comes next. Updated with every PR.
 | 2026-11-25 | #132 SQL and PL/pgSQL functions and procedures, DO, CALL, triggers | 564/564 | 3240/3309 (97.9%) |
 | 2026-11-25 | #133 roles, memberships, GRANT / REVOKE with enforcement, default privileges, owners | 564/564 | 3265/3309 (98.7%) |
 | 2026-11-25 | #134 extensions: pgcrypto, uuid-ossp, citext, pg_trgm, hstore; range catalog rows | 564/564 | 3292/3309 (99.5%) |
-| 2026-11-25 | COPY (text, CSV, binary; STDIN / STDOUT / files), regproc / regprocedure over builtins, ON CONFLICT on expressions, UPDATE pg_settings, column collations, element_types, system view definitions | 565/565 | 3305/3309 (99.9%) |
+| 2026-11-25 | #135 COPY (text, CSV, binary; STDIN / STDOUT / files), regproc / regprocedure over builtins, ON CONFLICT on expressions, UPDATE pg_settings, column collations, element_types, system view definitions | 565/565 | 3305/3309 (99.9%) |
 
 ## Supported
 
