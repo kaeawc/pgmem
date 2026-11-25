@@ -196,6 +196,9 @@ impl Session {
         let rel = catalog.find_relation(name)?.ok_or_else(|| SqlError::undefined_table(&name.to_string()))?;
         let base = name.base();
         Ok(match rel {
+            Relation::Table(t) if !from && catalog.is_partitioned(t.oid) => {
+                Err(wrong_type(format!("cannot copy from partitioned table \"{base}\"")).with_hint("Try the COPY (SELECT ...) TO variant."))
+            }
             Relation::Table(t) => match &t.matview {
                 None => Ok((*t).clone()),
                 Some(_) if from => Err(wrong_type(format!("cannot copy to materialized view \"{base}\""))),

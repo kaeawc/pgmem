@@ -1,6 +1,3 @@
 # Corpus records pgmem fails today, by key (file:hash of the SQL); the first line of the SQL
 # follows for reading. Regenerate with `cargo run -p pgmem-conformance -- --update`.
-catalog/pg_catalog.slt:a085ef479946ad0c  # CREATE TABLE events_2024 PARTITION OF events FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
-catalog/pg_catalog.slt:d26d4fea085e04ff  # SELECT c.relname, c.relkind, c.relispartition, pg_get_expr(c.relpartbound, c.oid)
-catalog/pg_catalog.slt:48122fca8c801c55  # SELECT pg_get_partkeydef('events'::regclass)
 queries/set_operations.slt:6680237cbd789fd6  # SELECT NULL UNION SELECT 1

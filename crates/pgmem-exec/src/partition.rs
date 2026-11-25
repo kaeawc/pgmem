@@ -314,9 +314,10 @@ pub(crate) fn bind_bound(
             if key.strategy != PartitionStrategy::Hash {
                 return Err(wrong());
             }
-            let modulus = u32::try_from(*modulus).ok().filter(|m| *m > 0).ok_or_else(|| {
-                bad_bound("modulus for hash partition must be an integer value greater than zero")
-            })?;
+            let modulus = u32::try_from(*modulus)
+                .ok()
+                .filter(|m| *m > 0)
+                .ok_or_else(|| bad_bound("modulus for hash partition must be an integer value greater than zero"))?;
             let remainder = u32::try_from(*remainder).unwrap_or(u32::MAX);
             if remainder >= modulus {
                 return Err(bad_bound("remainder for hash partition must be less than modulus"));
@@ -340,10 +341,7 @@ pub(crate) fn check_overlap(catalog: &Catalog, parent: &TableDef, bound: &Partit
     for (sibling, of) in catalog.partitions(parent.oid) {
         match (bound, &of.bound) {
             (PartitionBound::Default, PartitionBound::Default) => {
-                return Err(bad_definition(format!(
-                    "partition \"{name}\" conflicts with existing default partition \"{}\"",
-                    sibling.name
-                )));
+                return Err(bad_definition(format!("partition \"{name}\" conflicts with existing default partition \"{}\"", sibling.name)));
             }
             (PartitionBound::List(new), PartitionBound::List(old)) if new.iter().any(|v| old.iter().any(|o| same_value(v, o))) => {
                 return Err(overlap(&sibling.name));
@@ -359,9 +357,14 @@ pub(crate) fn check_overlap(catalog: &Catalog, parent: &TableDef, bound: &Partit
                     let detail = if modulus < m {
                         format!("The new modulus {modulus} is not a factor of {m}, the modulus of existing partition \"{}\".", sibling.name)
                     } else {
-                        format!("The new modulus {modulus} is not divisible by {m}, the modulus of existing partition \"{}\".", sibling.name)
+                        format!(
+                            "The new modulus {modulus} is not divisible by {m}, the modulus of existing partition \"{}\".",
+                            sibling.name
+                        )
                     };
-                    return Err(bad_definition("every hash partition modulus must be a factor of the next larger modulus").with_detail(detail));
+                    return Err(
+                        bad_definition("every hash partition modulus must be a factor of the next larger modulus").with_detail(detail)
+                    );
                 }
                 if remainder % small == r % small {
                     return Err(overlap(&sibling.name));
@@ -396,8 +399,21 @@ const HASH_PARTITION_SEED: u64 = 0x7A5B_2236_7996_DCFD;
 fn hashable(t: &Type) -> bool {
     matches!(
         t.base(),
-        Type::Int2 | Type::Int4 | Type::Int8 | Type::Text | Type::Varchar | Type::Bpchar | Type::Name | Type::Bool | Type::Date
-            | Type::Timestamp | Type::Timestamptz | Type::Uuid | Type::Bytea | Type::Oid | Type::Char
+        Type::Int2
+            | Type::Int4
+            | Type::Int8
+            | Type::Text
+            | Type::Varchar
+            | Type::Bpchar
+            | Type::Name
+            | Type::Bool
+            | Type::Date
+            | Type::Timestamp
+            | Type::Timestamptz
+            | Type::Uuid
+            | Type::Bytea
+            | Type::Oid
+            | Type::Char
     )
 }
 
@@ -440,7 +456,9 @@ fn row_hash(values: &[Value]) -> u64 {
 
 /// A row of `from` in `to`'s physical layout (columns matched by name).
 pub(crate) fn remap(row: &Row, from: &TableDef, to: &TableDef) -> Row {
-    if from.columns.len() == to.columns.len() && from.columns.iter().zip(&to.columns).all(|(a, b)| a.name == b.name && a.dropped == b.dropped) {
+    if from.columns.len() == to.columns.len()
+        && from.columns.iter().zip(&to.columns).all(|(a, b)| a.name == b.name && a.dropped == b.dropped)
+    {
         return row.clone();
     }
     to.columns
@@ -475,7 +493,9 @@ fn routing_error(catalog: &Catalog, table: &TableDef, key: &PartitionKey, values
 
 /// The direct partition of `parent` a row (in `parent`'s layout) belongs to.
 fn choose_partition(catalog: &Catalog, b: &Binder, parent: &TableDef, row: &Row, ectx: &EvalCtx) -> SqlResult<Arc<TableDef>> {
-    let Some(key) = catalog.partition_key(parent.oid) else { return Err(SqlError::internal("routing into a table that is not partitioned")) };
+    let Some(key) = catalog.partition_key(parent.oid) else {
+        return Err(SqlError::internal("routing into a table that is not partitioned"));
+    };
     let values = key_values(b, parent, key, row, ectx)?;
     let parts = catalog.partitions(parent.oid);
     if let Some((t, _)) = parts.iter().find(|(_, of)| accepts(&of.bound, &values)) {
@@ -596,13 +616,15 @@ fn partitioned_parent(catalog: &Catalog, name: &ir::ObjectName) -> SqlResult<(Ar
         Some(r) => return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{}\" is not a table", r.name()))),
         None => return Err(SqlError::undefined_table(&name.to_string())),
     };
-    let key = catalog.partition_key(parent.oid).cloned().ok_or_else(|| bad_definition(format!("\"{}\" is not partitioned", parent.name)))?;
+    let key =
+        catalog.partition_key(parent.oid).cloned().ok_or_else(|| bad_definition(format!("\"{}\" is not partitioned", parent.name)))?;
     Ok((parent, key))
 }
 
 /// Index name for a partition's copy of a parent index (`<partition>_pkey`, `_key`, `_idx`).
 fn partition_index_name(catalog: &Catalog, table: &TableDef, idx: &IndexDef, taken: &[String]) -> String {
-    let cols: Vec<&str> = if idx.columns.is_empty() { vec!["expr"] } else { idx.columns.iter().map(|c| table.columns[*c].name.as_str()).collect() };
+    let cols: Vec<&str> =
+        if idx.columns.is_empty() { vec!["expr"] } else { idx.columns.iter().map(|c| table.columns[*c].name.as_str()).collect() };
     let base = if idx.primary {
         format!("{}_pkey", table.name)
     } else if idx.unique {
@@ -631,7 +653,9 @@ fn clone_indexes(catalog: &Catalog, parent: &TableDef, part: &mut TableDef, slot
             c.oid = 0;
             c.kind = match c.kind {
                 ConstraintKind::PrimaryKey { .. } => ConstraintKind::PrimaryKey { columns: columns.clone() },
-                ConstraintKind::Unique { nulls_not_distinct, .. } => ConstraintKind::Unique { columns: columns.clone(), nulls_not_distinct },
+                ConstraintKind::Unique { nulls_not_distinct, .. } => {
+                    ConstraintKind::Unique { columns: columns.clone(), nulls_not_distinct }
+                }
                 other => other,
             };
             part.constraints.push(c);
@@ -711,9 +735,7 @@ pub(crate) fn create_partition(
 
 /// Column options in `PARTITION OF parent (col WITH OPTIONS ...)`: defaults and NOT NULL.
 fn apply_column_options(table: &mut TableDef, c: &ir::ColumnDef) -> SqlResult<()> {
-    let slot = table
-        .column_index(&c.name)
-        .ok_or_else(|| SqlError::undefined_column(&format!("\"{}\"", c.name)))?;
+    let slot = table.column_index(&c.name).ok_or_else(|| SqlError::undefined_column(&format!("\"{}\"", c.name)))?;
     let col: &mut ColumnDef = &mut table.columns[slot];
     for con in &c.constraints {
         match &con.kind {
@@ -749,10 +771,8 @@ pub(crate) fn attach(
         return Err(bad_definition(format!("\"{}\" is already a partition", part.name)));
     }
     if part.oid == parent.oid || catalog.partition_ancestors(parent.oid).contains(&part.oid) {
-        return Err(SqlError::new(code::DUPLICATE_TABLE, "circular inheritance not allowed").with_detail(format!(
-            "\"{}\" is already a child of \"{}\".",
-            parent.name, part.name
-        )));
+        return Err(SqlError::new(code::DUPLICATE_TABLE, "circular inheritance not allowed")
+            .with_detail(format!("\"{}\" is already a child of \"{}\".", parent.name, part.name)));
     }
     check_attach_columns(&parent, &part)?;
     let b = Binder::new(&catalog, &[]);
@@ -770,8 +790,11 @@ pub(crate) fn attach(
         let ectx = EvalCtx::new(txn, &[], env, state);
         for row in table_rows(txn, &part) {
             if !satisfies_constraint(&probe, &part, &row, &ectx)? {
-                return Err(SqlError::new(code::CHECK_VIOLATION, format!("partition constraint of relation \"{}\" is violated by some row", part.name))
-                    .with_table(part.name.clone()));
+                return Err(SqlError::new(
+                    code::CHECK_VIOLATION,
+                    format!("partition constraint of relation \"{}\" is violated by some row", part.name),
+                )
+                .with_table(part.name.clone()));
             }
         }
     }
@@ -797,8 +820,11 @@ fn check_attach_columns(parent: &TableDef, part: &TableDef) -> SqlResult<()> {
     let mismatch = |msg: String| SqlError::new(code::DATATYPE_MISMATCH, msg);
     for (_, c) in part.live_columns() {
         if parent.live_columns().all(|(_, p)| p.name != c.name) {
-            return Err(mismatch(format!("table \"{}\" contains column \"{}\" not found in parent \"{}\"", part.name, c.name, parent.name))
-                .with_detail("The new partition may contain only the columns present in parent."));
+            return Err(mismatch(format!(
+                "table \"{}\" contains column \"{}\" not found in parent \"{}\"",
+                part.name, c.name, parent.name
+            ))
+            .with_detail("The new partition may contain only the columns present in parent."));
         }
     }
     for (_, p) in parent.live_columns() {
@@ -824,7 +850,10 @@ pub(crate) fn detach(parent_name: &pgmem_catalog::QualName, partition: &ir::Obje
         _ => return Err(SqlError::undefined_table(&partition.to_string())),
     };
     if catalog.partition_of(part.oid).is_none_or(|of| of.parent != parent.oid) {
-        return Err(SqlError::new(code::UNDEFINED_TABLE, format!("relation \"{}\" is not a partition of relation \"{}\"", part.name, parent.name)));
+        return Err(SqlError::new(
+            code::UNDEFINED_TABLE,
+            format!("relation \"{}\" is not a partition of relation \"{}\"", part.name, parent.name),
+        ));
     }
     txn.catalog_mut().set_partition_of(part.oid, None);
     Ok(())
@@ -855,6 +884,7 @@ fn param_type(ty: &Type) -> Type {
 
 /// INSERT of concrete rows (in `leaf`'s layout) into a partition, with the original
 /// statement's ON CONFLICT and RETURNING.
+#[allow(clippy::too_many_arguments)]
 fn insert_into(
     leaf: &TableDef,
     rows: Vec<Row>,
@@ -907,6 +937,7 @@ fn combine(results: Vec<QueryResult>, verb: &str, columns: Vec<crate::plan::OutC
 
 /// INSERT into a partitioned table: the rows are built with the parent's defaults, then
 /// inserted into the partitions they route to.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_insert(
     i: &ir::Insert,
     root: &TableDef,
@@ -946,6 +977,7 @@ pub(crate) fn exec_insert(
 
 /// UPDATE of a partitioned table: run on each leaf partition; rows whose new partition key
 /// belongs elsewhere move there (deleted, then inserted through the root).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_update(
     u: &ir::Update,
     root: &TableDef,
@@ -1000,6 +1032,7 @@ pub(crate) fn exec_update(
 }
 
 /// DELETE from a partitioned table: run on each leaf partition.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_delete(
     d: &ir::Delete,
     root: &TableDef,
@@ -1034,11 +1067,13 @@ pub(crate) fn check_unique_keys(table: &TableDef, key: &PartitionKey) -> SqlResu
                         .with_detail(format!("{what} constraints cannot be used when partition keys include expressions.")));
                 }
                 PartitionKeyPart::Column(slot) if !idx.columns.contains(slot) => {
-                    return Err(SqlError::feature_not_supported("unique constraint on partitioned table must include all partitioning columns")
-                        .with_detail(format!(
-                            "{what} constraint on table \"{}\" lacks column \"{}\" which is part of the partition key.",
-                            table.name, table.columns[*slot].name
-                        )));
+                    return Err(SqlError::feature_not_supported(
+                        "unique constraint on partitioned table must include all partitioning columns",
+                    )
+                    .with_detail(format!(
+                        "{what} constraint on table \"{}\" lacks column \"{}\" which is part of the partition key.",
+                        table.name, table.columns[*slot].name
+                    )));
                 }
                 PartitionKeyPart::Column(_) => {}
             }
@@ -1069,4 +1104,80 @@ pub(crate) fn recurses(action: &ir::AlterTableAction) -> Option<ir::AlterTableAc
         }
         _ => return None,
     })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Functions
+
+fn reg_class(catalog: &Catalog, oid: pgmem_catalog::Oid) -> Value {
+    Value::Reg(pgmem_types::RegKind::Class, oid, crate::reg::reg_name(pgmem_types::RegKind::Class, oid, catalog))
+}
+
+fn arg_oid(v: &Value) -> Option<pgmem_catalog::Oid> {
+    match v {
+        Value::Reg(_, o, _) | Value::Oid(o) => Some(*o),
+        _ => None,
+    }
+}
+
+/// `pg_partition_ancestors(rel)`: the relation and its ancestors (no rows for a relation that is
+/// neither a partition nor partitioned).
+pub(crate) fn ancestors_srf(a: &[Value], ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let catalog = ctx.txn.catalog();
+    let Some(oid) = arg_oid(&a[0]) else { return Ok(Vec::new()) };
+    if catalog.partition_of(oid).is_none() && !catalog.is_partitioned(oid) {
+        return Ok(Vec::new());
+    }
+    let mut out = vec![vec![reg_class(catalog, oid)]];
+    out.extend(catalog.partition_ancestors(oid).into_iter().map(|o| vec![reg_class(catalog, o)]));
+    Ok(out)
+}
+
+/// `pg_partition_tree(rel)`: (relid, parentrelid, isleaf, level) for the tree under `rel`.
+pub(crate) fn tree_srf(a: &[Value], ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let catalog = ctx.txn.catalog();
+    let Some(oid) = arg_oid(&a[0]) else { return Ok(Vec::new()) };
+    if catalog.partition_of(oid).is_none() && !catalog.is_partitioned(oid) {
+        return Ok(Vec::new());
+    }
+    fn walk(catalog: &Catalog, oid: pgmem_catalog::Oid, parent: Option<pgmem_catalog::Oid>, level: i32, out: &mut Vec<Row>) {
+        out.push(vec![
+            reg_class(catalog, oid),
+            parent.map_or(Value::Null, |p| reg_class(catalog, p)),
+            Value::Bool(!catalog.is_partitioned(oid)),
+            Value::Int4(level),
+        ]);
+        for (child, _) in catalog.partitions(oid) {
+            walk(catalog, child.oid, Some(oid), level + 1, out);
+        }
+    }
+    let mut out = Vec::new();
+    let parent = catalog.partition_of(oid).map(|p| p.parent);
+    walk(catalog, oid, parent, 0, &mut out);
+    Ok(out)
+}
+
+/// `pg_partition_root(rel)`.
+pub(crate) fn root_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
+    let catalog = ctx.txn.catalog();
+    let Some(oid) = arg_oid(&a[0]) else { return Ok(Value::Null) };
+    if catalog.partition_of(oid).is_none() && !catalog.is_partitioned(oid) {
+        return Ok(Value::Null);
+    }
+    Ok(reg_class(catalog, catalog.partition_ancestors(oid).last().copied().unwrap_or(oid)))
+}
+
+/// The latest rows of a table (a partitioned one's from its leaves, in its layout), as
+/// foreign key checks see them.
+pub(crate) fn latest_rows(txn: &Txn, table: &TableDef) -> Vec<Row> {
+    let catalog = txn.catalog();
+    let leaves = if catalog.is_partitioned(table.oid) { catalog.partition_leaves(table.oid) } else { vec![Arc::new(table.clone())] };
+    let mut out = Vec::new();
+    for leaf in leaves {
+        for (_, mut row) in txn.scan_latest(leaf.oid) {
+            crate::dml::pad(&mut row, &leaf);
+            out.push(remap(&row, &leaf, table));
+        }
+    }
+    out
 }

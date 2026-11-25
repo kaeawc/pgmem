@@ -843,8 +843,11 @@ impl Binder<'_> {
         let (out_cols, targets, srf): (Vec<(String, Type)>, Vec<Type>, crate::plan::SrfFn) = if let Some((outs, targets, f)) =
             crate::funcs::array::resolve_srf(name, &types)?
         {
-            let names: Vec<String> =
-                if outs.len() == 1 { vec![name.to_owned()] } else { (0..outs.len()).map(|_| name.to_owned()).collect() };
+            let names: Vec<String> = match crate::funcs::array::srf_column_names(name) {
+                Some(cols) => cols.iter().map(|c| (*c).to_owned()).collect(),
+                None if outs.len() == 1 => vec![name.to_owned()],
+                None => (0..outs.len()).map(|_| name.to_owned()).collect(),
+            };
             (names.into_iter().zip(outs).collect(), targets, f)
         } else if let Some((cols, f)) = crate::funcs::json::resolve_srf(name, &types) {
             (cols.into_iter().map(|(n, t)| (n.to_owned(), t)).collect(), vec![crate::funcs::json::srf_arg_type(name)], f)

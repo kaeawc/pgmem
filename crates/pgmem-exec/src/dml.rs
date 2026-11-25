@@ -308,13 +308,7 @@ fn check_foreign_keys(table: &TableDef, rows: &[&Row], txn: &Txn, own_final: Opt
                 |rows| rows.iter().map(|(_, r)| r.clone()).collect(),
             )
         } else {
-            txn.scan_latest(parent.oid)
-                .into_iter()
-                .map(|(_, mut r)| {
-                    pad(&mut r, &parent);
-                    r
-                })
-                .collect()
+            crate::partition::latest_rows(txn, &parent)
         };
         for row in rows {
             let key: Vec<Value> = columns.iter().map(|c| row.get(*c).cloned().unwrap_or(Value::Null)).collect();
@@ -331,7 +325,7 @@ fn check_foreign_keys(table: &TableDef, rows: &[&Row], txn: &Txn, own_final: Opt
                     code::FOREIGN_KEY_VIOLATION,
                     format!("insert or update on table \"{}\" violates foreign key constraint \"{}\"", table.name, con.name),
                 )
-                .with_detail(format!("Key ({})=({}) is not present in table \"{ref_table}\".", names.join(", "), vals.join(", ")))
+                .with_detail(format!("Key ({})=({}) is not present in table \"{}\".", names.join(", "), vals.join(", "), ref_table.name))
                 .with_table(&table.name)
                 .with_constraint(&con.name));
             }
@@ -359,8 +353,16 @@ fn referential_actions(
     if depth > 64 {
         return Err(SqlError::new("54001", "stack depth limit exceeded in cascading foreign key actions"));
     }
+    // Rows of a partition are rows of its ancestors, which foreign keys may reference.
+    if let Some(of) = txn.catalog().partition_of(table.oid).cloned()
+        && let Some(parent) = txn.catalog().table_by_oid(of.parent).cloned()
+    {
+        let up = |rows: &[Row]| rows.iter().map(|r| crate::partition::remap(r, table, &parent)).collect::<Vec<_>>();
+        let (removed_up, replaced_up) = (up(removed), up(replaced));
+        referential_actions(txn, &parent, &removed_up, &replaced_up, is_delete, depth + 1, ck)?;
+    }
     let children: Vec<Arc<TableDef>> = txn.catalog().tables().cloned().collect();
-    let parent_now: Vec<Row> = txn.scan_latest(table.oid).into_iter().map(|(_, r)| r).collect();
+    let parent_now: Vec<Row> = crate::partition::latest_rows(txn, table);
     for child in children {
         for con in &child.constraints {
             let ConstraintKind::ForeignKey { columns, ref_table, ref_columns, on_delete, on_update, delete_set_columns, .. } = &con.kind
@@ -568,8 +570,11 @@ fn source_row(plan: &InsertPlan, table: &TableDef, src: Vec<Option<Value>>, ctx:
         if let Some(v) = v {
             let col = &table.columns[slot];
             if col.generated.is_some() {
-                return Err(SqlError::new(code::GENERATED_ALWAYS, format!("cannot insert a non-DEFAULT value into column \"{}\"", col.name))
-                    .with_detail(format!("Column \"{}\" is a generated column.", col.name)));
+                return Err(SqlError::new(
+                    code::GENERATED_ALWAYS,
+                    format!("cannot insert a non-DEFAULT value into column \"{}\"", col.name),
+                )
+                .with_detail(format!("Column \"{}\" is a generated column.", col.name)));
             }
             if col.identity == Some(Identity::Always) && !plan.overriding_system_value && !plan.overriding_user_value {
                 return Err(identity_always_error(&col.name));
@@ -606,7 +611,13 @@ fn insert_sources(plan: &InsertPlan, ctx: &EvalCtx) -> SqlResult<Vec<Vec<Option<
 
 /// The rows an INSERT would add (explicit values and defaults; generated columns left NULL),
 /// without adding them: INSERT into a partitioned table routes them to its partitions.
-pub(crate) fn insert_preview(plan: &InsertPlan, txn: &Txn, params: &[Value], env: &SessionEnv, state: &StatementState) -> SqlResult<Vec<Row>> {
+pub(crate) fn insert_preview(
+    plan: &InsertPlan,
+    txn: &Txn,
+    params: &[Value],
+    env: &SessionEnv,
+    state: &StatementState,
+) -> SqlResult<Vec<Row>> {
     let ctx = EvalCtx::new(txn, params, env, state);
     let table = Arc::clone(&plan.rules.table);
     let mut rows = Vec::new();

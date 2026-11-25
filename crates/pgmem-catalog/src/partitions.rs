@@ -58,8 +58,14 @@ pub enum PartitionBound {
     Default,
     /// `FOR VALUES IN (...)` (NULL allowed).
     List(Vec<Value>),
-    Range { from: Vec<RangeDatum>, to: Vec<RangeDatum> },
-    Hash { modulus: u32, remainder: u32 },
+    Range {
+        from: Vec<RangeDatum>,
+        to: Vec<RangeDatum>,
+    },
+    Hash {
+        modulus: u32,
+        remainder: u32,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]

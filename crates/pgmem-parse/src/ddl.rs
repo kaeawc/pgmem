@@ -384,7 +384,8 @@ pub(crate) fn lower_alter_table(at: sq::AlterTable) -> SqlResult<AlterTable> {
         use sq::AlterTableOperation as O;
         match op {
             O::AttachPartitionOf { partition, for_values } => {
-                actions.push(AlterTableAction::AttachPartition { partition: object_name(&partition)?, bound: partition_bound(for_values)? });
+                actions
+                    .push(AlterTableAction::AttachPartition { partition: object_name(&partition)?, bound: partition_bound(for_values)? });
             }
             O::DetachPartitionOf { partition, .. } => {
                 actions.push(AlterTableAction::DetachPartition { partition: object_name(&partition)? });
