@@ -18,6 +18,46 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 mod exclusion;
+
+use crate::functions::Exec;
+use crate::triggers::{self, Event};
+use pgmem_catalog::TriggerTiming;
+
+/// A statement's triggers on its target table, loaded once.
+struct Triggers {
+    before_row: Vec<(Arc<pgmem_catalog::TriggerDef>, Arc<pgmem_catalog::FunctionDef>)>,
+    after_row: Vec<(Arc<pgmem_catalog::TriggerDef>, Arc<pgmem_catalog::FunctionDef>)>,
+    before_stmt: Vec<(Arc<pgmem_catalog::TriggerDef>, Arc<pgmem_catalog::FunctionDef>)>,
+    after_stmt: Vec<(Arc<pgmem_catalog::TriggerDef>, Arc<pgmem_catalog::FunctionDef>)>,
+}
+
+impl Triggers {
+    fn load(txn: &Txn, table: &TableDef, event: Event, updated: Option<&[String]>) -> Triggers {
+        Triggers {
+            before_row: triggers::load(txn, table, event, TriggerTiming::Before, true, updated),
+            after_row: triggers::load(txn, table, event, TriggerTiming::After, true, updated),
+            before_stmt: triggers::load(txn, table, event, TriggerTiming::Before, false, updated),
+            after_stmt: triggers::load(txn, table, event, TriggerTiming::After, false, updated),
+        }
+    }
+
+    fn statement(
+        &self,
+        when: TriggerTiming,
+        table: &TableDef,
+        event: Event,
+        txn: &mut Txn,
+        env: &SessionEnv,
+        state: &StatementState,
+    ) -> SqlResult<()> {
+        let list = if when == TriggerTiming::Before { &self.before_stmt } else { &self.after_stmt };
+        if list.is_empty() {
+            return Ok(());
+        }
+        let mut exec = Exec::Write { txn, env, state };
+        triggers::fire_statement(list, table, event, &mut exec)
+    }
+}
 mod merge;
 
 pub(crate) use exclusion::validate as validate_exclusion;
@@ -520,6 +560,8 @@ fn identity_always_error(col: &str) -> SqlError {
 pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &SessionEnv, state: &StatementState) -> SqlResult<DmlResult> {
     let table = Arc::clone(&plan.rules.table);
     let width = table.columns.len();
+    let trig = Triggers::load(txn, &table, Event::Insert, None);
+    trig.statement(TriggerTiming::Before, &table, Event::Insert, txn, env, state)?;
     // Phase 1: compute rows (reads only).
     enum Effect {
         Insert(Row),
@@ -579,6 +621,13 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
                     && let Some(d) = &plan.rules.defaults[i]
                 {
                     row[i] = eval(d, &[], &ctx)?;
+                }
+            }
+            if !trig.before_row.is_empty() {
+                let mut exec = Exec::Read(&ctx);
+                match triggers::fire_row(&trig.before_row, &table, Event::Insert, Some(row), None, &mut exec)? {
+                    Some(r) => row = r,
+                    None => continue,
                 }
             }
             apply_generated(&plan.rules, &mut row, &ctx)?;
@@ -720,6 +769,11 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
     let ck = Checks { env, state };
     check_foreign_keys(&table, &changed_rows.iter().collect::<Vec<_>>(), txn, Some(&final_rows), ck)?;
     referential_actions(txn, &table, &old_versions, &updated_new, false, 0, ck)?;
+    for row in changed_rows.iter().filter(|_| !trig.after_row.is_empty()) {
+        let mut exec = Exec::Write { txn, env, state };
+        triggers::fire_row(&trig.after_row, &table, Event::Insert, Some(row.clone()), None, &mut exec)?;
+    }
+    trig.statement(TriggerTiming::After, &table, Event::Insert, txn, env, state)?;
     Ok(DmlResult { count, rows: returning_rows })
 }
 
@@ -772,6 +826,9 @@ fn matching_rows(
 
 pub fn exec_update(plan: &UpdatePlan, txn: &mut Txn, params: &[Value], env: &SessionEnv, state: &StatementState) -> SqlResult<DmlResult> {
     let table = Arc::clone(&plan.rules.table);
+    let set_columns: Vec<String> = plan.assignments.iter().map(|(slot, _)| table.columns[*slot].name.clone()).collect();
+    let trig = Triggers::load(txn, &table, Event::Update, Some(&set_columns));
+    trig.statement(TriggerTiming::Before, &table, Event::Update, txn, env, state)?;
     let mut changes: Vec<(RowId, Row, Row)> = Vec::new();
     let mut returning_rows = Vec::new();
     {
@@ -788,6 +845,13 @@ pub fn exec_update(plan: &UpdatePlan, txn: &mut Txn, params: &[Value], env: &Ses
                         None => Value::Null,
                     },
                 };
+            }
+            if !trig.before_row.is_empty() {
+                let mut exec = Exec::Read(&ctx);
+                match triggers::fire_row(&trig.before_row, &table, Event::Update, Some(new_row), Some(&old), &mut exec)? {
+                    Some(r) => new_row = r,
+                    None => continue,
+                }
             }
             apply_generated(&plan.rules, &mut new_row, &ctx)?;
             check_not_null(&table, &new_row)?;
@@ -843,16 +907,29 @@ pub fn exec_update(plan: &UpdatePlan, txn: &mut Txn, params: &[Value], env: &Ses
     let ck = Checks { env, state };
     check_foreign_keys(&table, &new_versions.iter().collect::<Vec<_>>(), txn, Some(&final_rows), ck)?;
     referential_actions(txn, &table, &old_versions, &new_versions, false, 0, ck)?;
+    for (old, new) in old_versions.iter().zip(&new_versions).filter(|_| !trig.after_row.is_empty()) {
+        let mut exec = Exec::Write { txn, env, state };
+        triggers::fire_row(&trig.after_row, &table, Event::Update, Some(new.clone()), Some(old), &mut exec)?;
+    }
+    trig.statement(TriggerTiming::After, &table, Event::Update, txn, env, state)?;
     Ok(DmlResult { count, rows: returning_rows })
 }
 
 pub fn exec_delete(plan: &DeletePlan, txn: &mut Txn, params: &[Value], env: &SessionEnv, state: &StatementState) -> SqlResult<DmlResult> {
     let table = Arc::clone(&plan.table);
+    let trig = Triggers::load(txn, &table, Event::Delete, None);
+    trig.statement(TriggerTiming::Before, &table, Event::Delete, txn, env, state)?;
     let mut targets = Vec::new();
     let mut returning_rows = Vec::new();
     {
         let ctx = EvalCtx::new(txn, params, env, state);
         for (id, row, combined) in matching_rows(&table, plan.using.as_ref(), plan.filter.as_ref(), &ctx)? {
+            if !trig.before_row.is_empty() {
+                let mut exec = Exec::Read(&ctx);
+                if triggers::fire_row(&trig.before_row, &table, Event::Delete, None, Some(&row), &mut exec)?.is_none() {
+                    continue;
+                }
+            }
             if !plan.returning.is_empty() {
                 let r = returning_row(&combined, Some(&row), None, table.columns.len());
                 returning_rows.push(plan.returning.iter().map(|e| eval(e, &r, &ctx)).collect::<SqlResult<Vec<_>>>()?);
@@ -870,5 +947,10 @@ pub fn exec_delete(plan: &DeletePlan, txn: &mut Txn, params: &[Value], env: &Ses
         removed.push(row);
     }
     referential_actions(txn, &table, &removed, &[], true, 0, Checks { env, state })?;
+    for row in removed.iter().filter(|_| !trig.after_row.is_empty()) {
+        let mut exec = Exec::Write { txn, env, state };
+        triggers::fire_row(&trig.after_row, &table, Event::Delete, None, Some(row), &mut exec)?;
+    }
+    trig.statement(TriggerTiming::After, &table, Event::Delete, txn, env, state)?;
     Ok(DmlResult { count, rows: returning_rows })
 }

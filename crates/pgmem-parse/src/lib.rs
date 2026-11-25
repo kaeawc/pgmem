@@ -12,6 +12,7 @@
 mod ddl;
 mod dml;
 mod expr;
+mod funcddl;
 mod query;
 mod search_cycle;
 mod sqljson;
@@ -269,6 +270,7 @@ fn lower_parsed(p: Parsed) -> SqlResult<Statement> {
     match p {
         Parsed::Sql(s) => lower_statement(*s),
         Parsed::TypeDdl(t) => typeddl::lower(*t),
+        Parsed::FuncDdl(f) => funcddl::lower(*f),
         Parsed::Utility(u) => utility::lower(*u),
         Parsed::Schema(s, elements) => {
             let sq::Statement::CreateSchema { schema_name, if_not_exists, .. } = *s else {
@@ -316,6 +318,7 @@ pub(crate) const SYMMETRIC_MARKER: &str = "__pgmem_symmetric";
 enum Parsed {
     Sql(Box<sq::Statement>),
     TypeDdl(Box<typeddl::TypeDdl>),
+    FuncDdl(Box<funcddl::FuncDdl>),
     Utility(Box<utility::Utility>),
     /// `CREATE SCHEMA ...` followed by its schema elements.
     Schema(Box<sq::Statement>, Vec<Parsed>),
@@ -341,6 +344,11 @@ fn parse_statements(sql: &str) -> Result<Vec<Parsed>, ParserError> {
         }
         if let Some(u) = utility::try_parse(&mut p)? {
             out.push(Parsed::Utility(Box::new(u)));
+            expecting_delimiter = true;
+            continue;
+        }
+        if let Some(f) = funcddl::try_parse(&mut p)? {
+            out.push(Parsed::FuncDdl(Box::new(f)));
             expecting_delimiter = true;
             continue;
         }

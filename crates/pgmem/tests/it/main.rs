@@ -139,6 +139,7 @@ mod union;
 mod unique;
 mod update;
 mod update_from;
+mod user_functions;
 mod user_types;
 mod uuid;
 mod view;

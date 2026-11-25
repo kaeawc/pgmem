@@ -61,6 +61,53 @@ fn model<'a>(ctx: &'a EvalCtx) -> Model<'a> {
     Model::new(ctx.txn.catalog(), ctx.env)
 }
 
+#[derive(Clone, Copy)]
+enum FnText {
+    Arguments,
+    Identity,
+    Result,
+    Definition,
+}
+
+/// `pg_get_function_arguments` and friends for a user function (NULL for unknown OIDs).
+fn function_text(a: &[Value], ctx: &EvalCtx, what: FnText) -> SqlResult<Value> {
+    use crate::catalog_views::routines::{function_arguments, function_result};
+    let Some(o) = oid_arg(&a[0]) else { return Ok(Value::Null) };
+    let cat = ctx.txn.catalog();
+    let Some(f) = cat.function_by_oid(o) else { return Ok(Value::Null) };
+    Ok(match what {
+        FnText::Arguments => Value::Text(function_arguments(cat, f, true)),
+        FnText::Identity => Value::Text(function_arguments(cat, f, false)),
+        FnText::Result => function_result(f).map_or(Value::Null, Value::Text),
+        FnText::Definition => {
+            let kind = if f.procedure { "PROCEDURE" } else { "FUNCTION" };
+            let mut s = format!(
+                "CREATE OR REPLACE {kind} {}.{}({})\n",
+                quote_ident(&f.schema),
+                quote_ident(&f.name),
+                function_arguments(cat, f, true)
+            );
+            if let Some(r) = function_result(f) {
+                s.push_str(&format!(" RETURNS {r}\n"));
+            }
+            s.push_str(&format!(" LANGUAGE {}\n", f.language));
+            match f.volatility {
+                'i' => s.push_str(" IMMUTABLE"),
+                's' => s.push_str(" STABLE"),
+                _ => {}
+            }
+            if f.strict {
+                s.push_str(" STRICT");
+            }
+            if f.volatility != 'v' || f.strict {
+                s.push('\n');
+            }
+            s.push_str(&format!("AS $function${}$function$\n", f.body));
+            Value::Text(s)
+        }
+    })
+}
+
 fn constraintdef_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
     let m = model(ctx);
     let Some(o) = oid_arg(&a[0]) else { return Ok(Value::Null) };
@@ -202,6 +249,29 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
     let name_arg = Type::Name;
     match name {
         "format_type" if n == 2 => resolved(lenient("format_type", format_type_fn), vec![Oid, Int4], Text),
+        "pg_get_function_arguments" | "pg_get_function_identity_arguments" | "pg_get_function_result" | "pg_get_functiondef" if n == 1 => {
+            let f = match name {
+                "pg_get_function_arguments" => strict("pg_get_function_arguments", |a, c| function_text(a, c, FnText::Arguments)),
+                "pg_get_function_identity_arguments" => {
+                    strict("pg_get_function_identity_arguments", |a, c| function_text(a, c, FnText::Identity))
+                }
+                "pg_get_function_result" => strict("pg_get_function_result", |a, c| function_text(a, c, FnText::Result)),
+                _ => strict("pg_get_functiondef", |a, c| function_text(a, c, FnText::Definition)),
+            };
+            resolved(f, vec![Oid], Text)
+        }
+        "pg_get_triggerdef" if n == 1 || n == 2 => resolved(
+            strict("pg_get_triggerdef", |a, c| {
+                let Some(o) = oid_arg(&a[0]) else { return Ok(Value::Null) };
+                let cat = c.txn.catalog();
+                Ok(cat
+                    .triggers()
+                    .find(|t| t.oid == o)
+                    .map_or(Value::Null, |t| Value::Text(crate::catalog_views::routines::trigger_def(cat, t))))
+            }),
+            [Oid, Bool][..n].to_vec(),
+            Text,
+        ),
         "pg_get_constraintdef" if n == 1 || n == 2 => {
             resolved(strict("pg_get_constraintdef", constraintdef_fn), [Oid, Bool][..n].to_vec(), Text)
         }

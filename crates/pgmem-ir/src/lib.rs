@@ -157,6 +157,31 @@ pub enum Statement {
         materialized: bool,
         if_exists: bool,
     },
+    CreateFunction(Box<CreateFunction>),
+    /// `DROP {FUNCTION | PROCEDURE | ROUTINE} [IF EXISTS] name [(types)], ... [CASCADE]`.
+    DropFunction {
+        items: Vec<(ObjectName, Option<Vec<TypeName>>)>,
+        if_exists: bool,
+        cascade: bool,
+        kind: RoutineKind,
+    },
+    /// `CALL name(args)`.
+    Call {
+        name: ObjectName,
+        args: Vec<Expr>,
+    },
+    /// `DO [LANGUAGE lang] body`.
+    Do {
+        language: String,
+        body: String,
+    },
+    CreateTrigger(Box<CreateTrigger>),
+    DropTrigger {
+        name: String,
+        table: ObjectName,
+        if_exists: bool,
+        cascade: bool,
+    },
     /// `ALTER SEQUENCE [IF EXISTS] name options | RENAME TO new_name`.
     AlterSequence {
         name: ObjectName,
@@ -266,8 +291,14 @@ pub enum CommentTarget {
     Schema,
     Type,
     Domain,
-    /// Object kinds pgmem has no catalog entry for (functions, types, extensions, roles,
-    /// databases, ...): accepted without effect.
+    /// A function or procedure, with its argument types when given.
+    Function(Option<Vec<TypeName>>),
+    /// `CONSTRAINT name ON table`.
+    Constraint(ObjectName),
+    /// `TRIGGER name ON table`.
+    Trigger(ObjectName),
+    /// Object kinds pgmem has no catalog entry for (extensions, roles, databases, ...):
+    /// accepted without effect.
     Other,
 }
 
@@ -367,7 +398,7 @@ pub enum SetOperator {
     Except,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct Select {
     pub distinct: Distinct,
     pub projection: Vec<SelectItem>,
@@ -1048,6 +1079,80 @@ pub struct CreateSequence {
     pub options: SequenceOptions,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoutineKind {
+    Function,
+    Procedure,
+    Routine,
+}
+
+/// `[IN | OUT | INOUT | VARIADIC] [name] type [DEFAULT expr]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FunctionArg {
+    pub mode: FunctionArgMode,
+    pub name: Option<String>,
+    pub ty: TypeName,
+    pub default: Option<Expr>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FunctionArgMode {
+    In,
+    Out,
+    InOut,
+    Variadic,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum FunctionReturns {
+    Type(TypeName),
+    SetOf(TypeName),
+    Table(Vec<(String, TypeName)>),
+}
+
+/// `CREATE [OR REPLACE] {FUNCTION | PROCEDURE} ...`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateFunction {
+    pub name: ObjectName,
+    pub or_replace: bool,
+    pub procedure: bool,
+    pub args: Vec<FunctionArg>,
+    pub returns: Option<FunctionReturns>,
+    pub language: Option<String>,
+    /// The body text: `AS '...'` / `AS $$...$$`, or a SQL-standard `RETURN expr` as
+    /// `SELECT expr` / `BEGIN ATOMIC ... END` as its statements.
+    pub body: Option<String>,
+    pub volatility: Option<char>,
+    pub strict: bool,
+    pub security_definer: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TriggerTiming {
+    Before,
+    After,
+    InsteadOf,
+}
+
+/// `CREATE [OR REPLACE] TRIGGER name {BEFORE | AFTER | INSTEAD OF} events ON table ...`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateTrigger {
+    pub name: String,
+    pub or_replace: bool,
+    pub timing: TriggerTiming,
+    pub insert: bool,
+    pub delete: bool,
+    pub truncate: bool,
+    /// `UPDATE [OF cols]`.
+    pub update: Option<Vec<String>>,
+    pub table: ObjectName,
+    pub for_each_row: bool,
+    /// The WHEN condition's SQL text (it reads `NEW` / `OLD`).
+    pub when: Option<String>,
+    pub function: ObjectName,
+    pub args: Vec<String>,
+}
+
 /// CREATE / ALTER SEQUENCE and identity column options; None where not given.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct SequenceOptions {
@@ -1118,6 +1223,11 @@ pub enum AlterTableAction {
     DropExpression {
         column: String,
         if_exists: bool,
+    },
+    /// `ENABLE / DISABLE TRIGGER {name | ALL | USER}` (None: all).
+    EnableTrigger {
+        name: Option<String>,
+        enabled: bool,
     },
     SetNotNull {
         column: String,

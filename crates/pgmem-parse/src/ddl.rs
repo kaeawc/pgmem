@@ -324,6 +324,13 @@ pub(crate) fn lower_sequence_options(opts: &[sq::SequenceOptions]) -> SqlResult<
     Ok(out)
 }
 
+/// `ENABLE / DISABLE TRIGGER {name | ALL | USER}`.
+fn trigger_toggle(name: &sq::Ident, enabled: bool) -> AlterTableAction {
+    let n = ident(name);
+    let all = name.quote_style.is_none() && (n == "all" || n == "user");
+    AlterTableAction::EnableTrigger { name: (!all).then_some(n), enabled }
+}
+
 pub(crate) fn lower_alter_table(at: sq::AlterTable) -> SqlResult<AlterTable> {
     let mut actions = Vec::new();
     for op in at.operations {
@@ -382,6 +389,8 @@ pub(crate) fn lower_alter_table(at: sq::AlterTable) -> SqlResult<AlterTable> {
                 if_exists,
                 cascade: matches!(drop_behavior, Some(sq::DropBehavior::Cascade)),
             }),
+            O::EnableTrigger { name } => actions.push(trigger_toggle(&name, true)),
+            O::DisableTrigger { name } => actions.push(trigger_toggle(&name, false)),
             O::OwnerTo { .. } | O::EnableRowLevelSecurity | O::DisableRowLevelSecurity | O::SetLogged | O::SetUnlogged => {}
             other => return Err(unsupported(&format!("ALTER TABLE {other}"))),
         }

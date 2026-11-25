@@ -840,29 +840,48 @@ impl Binder<'_> {
             let (rel, scope) = self.bind_json_record_scan(kind, name, bound, alias, ordinality)?;
             return Ok((rel, scope, correlated));
         }
-        let (out_cols, targets, srf): (Vec<(String, Type)>, Vec<Type>, crate::plan::SrfFn) =
-            if let Some((outs, targets, f)) = crate::funcs::array::resolve_srf(name, &types)? {
-                let names: Vec<String> =
-                    if outs.len() == 1 { vec![name.to_owned()] } else { (0..outs.len()).map(|_| name.to_owned()).collect() };
-                (names.into_iter().zip(outs).collect(), targets, f)
-            } else if let Some((cols, f)) = crate::funcs::json::resolve_srf(name, &types) {
-                (cols.into_iter().map(|(n, t)| (n.to_owned(), t)).collect(), vec![crate::funcs::json::srf_arg_type(name)], f)
-            } else if let Some((cols, targets, f)) = crate::funcs::json::resolve_path_srf(name, &types) {
-                (cols.into_iter().map(|(n, t)| (n.to_owned(), t)).collect(), targets, f)
-            } else {
-                // A scalar function in FROM yields one row with one column.
-                let (e, t) = self.bind_expr(&ir::Expr::Function(Box::new(call.clone())), &fctx)?;
-                let alias_name = alias.map_or_else(|| name.to_owned(), |a| a.name.clone());
-                let mut cols = vec![ScopeCol::new(Some(alias_name.clone()), name.to_owned(), t)];
-                if let Some(a) = alias {
-                    apply_column_aliases(&mut cols, &a.columns, &a.name)?;
-                    if a.columns.is_empty() {
-                        cols[0].name = a.name.clone();
-                    }
+        let (out_cols, targets, srf): (Vec<(String, Type)>, Vec<Type>, crate::plan::SrfFn) = if let Some((outs, targets, f)) =
+            crate::funcs::array::resolve_srf(name, &types)?
+        {
+            let names: Vec<String> =
+                if outs.len() == 1 { vec![name.to_owned()] } else { (0..outs.len()).map(|_| name.to_owned()).collect() };
+            (names.into_iter().zip(outs).collect(), targets, f)
+        } else if let Some((cols, f)) = crate::funcs::json::resolve_srf(name, &types) {
+            (cols.into_iter().map(|(n, t)| (n.to_owned(), t)).collect(), vec![crate::funcs::json::srf_arg_type(name)], f)
+        } else if let Some((cols, targets, f)) = crate::funcs::json::resolve_path_srf(name, &types) {
+            (cols.into_iter().map(|(n, t)| (n.to_owned(), t)).collect(), targets, f)
+        } else if let Some((def, uargs)) = self.user_call_args(call, bound.clone(), &fctx)?
+            && def.returns_set()
+        {
+            let alias_name = alias.map_or_else(|| name.to_owned(), |a| a.name.clone());
+            let mut cols: Vec<ScopeCol> =
+                crate::functions::result_columns(&def).into_iter().map(|(n, t)| ScopeCol::new(Some(alias_name.clone()), n, t)).collect();
+            if ordinality {
+                cols.push(ScopeCol::new(Some(alias_name.clone()), "ordinality", Type::Int8));
+            }
+            if let Some(a) = alias {
+                if a.columns.is_empty() && cols.len() == 1 + usize::from(ordinality) {
+                    cols[0].name = a.name.clone();
                 }
-                let correlated = !left.cols.is_empty() && own_level.correlated.get();
-                return Ok((Rel::Values { rows: vec![vec![e]] }, Scope::from_cols(cols), correlated));
-            };
+                apply_column_aliases(&mut cols, &a.columns, &a.name)?;
+            }
+            let correlated = !left.cols.is_empty() && own_level.correlated.get();
+            let srf = crate::plan::Srf { name: "user function", f: crate::functions::call_set };
+            return Ok((Rel::FuncScan { srf, args: uargs, ordinality }, Scope::from_cols(cols), correlated));
+        } else {
+            // A scalar function in FROM yields one row with one column.
+            let (e, t) = self.bind_expr(&ir::Expr::Function(Box::new(call.clone())), &fctx)?;
+            let alias_name = alias.map_or_else(|| name.to_owned(), |a| a.name.clone());
+            let mut cols = vec![ScopeCol::new(Some(alias_name.clone()), name.to_owned(), t)];
+            if let Some(a) = alias {
+                apply_column_aliases(&mut cols, &a.columns, &a.name)?;
+                if a.columns.is_empty() {
+                    cols[0].name = a.name.clone();
+                }
+            }
+            let correlated = !left.cols.is_empty() && own_level.correlated.get();
+            return Ok((Rel::Values { rows: vec![vec![e]] }, Scope::from_cols(cols), correlated));
+        };
         let args = bound
             .into_iter()
             .zip(&targets)
