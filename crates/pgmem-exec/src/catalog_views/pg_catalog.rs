@@ -203,7 +203,8 @@ pub fn type_storage(t: &Type) -> (i16, bool, char, char, u32) {
 }
 
 fn regproc(name: &str) -> Value {
-    if name == "-" { Value::Reg(RegKind::Proc, 0, "-".into()) } else { Value::Reg(RegKind::Proc, 0, name.to_owned()) }
+    let oid = super::builtin_procs().iter().find(|p| p.name == name).map_or(0, |p| p.oid);
+    Value::Reg(RegKind::Proc, oid, name.to_owned())
 }
 
 fn pg_namespace(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {

@@ -122,6 +122,8 @@ pub enum RegKind {
     Type,
     Proc,
     Namespace,
+    /// `regprocedure`: a function with its argument types.
+    Procedure,
 }
 
 impl RegKind {
@@ -131,6 +133,7 @@ impl RegKind {
             RegKind::Type => "regtype",
             RegKind::Proc => "regproc",
             RegKind::Namespace => "regnamespace",
+            RegKind::Procedure => "regprocedure",
         }
     }
 }
@@ -175,6 +178,7 @@ impl Type {
             Type::Reg(RegKind::Type) => 2206,
             Type::Reg(RegKind::Proc) => 24,
             Type::Reg(RegKind::Namespace) => 4089,
+            Type::Reg(RegKind::Procedure) => 2202,
             Type::Void => 2278,
             Type::Int2Vector => 22,
             Type::OidVector => 30,
@@ -223,6 +227,7 @@ impl Type {
                 Type::Reg(RegKind::Type) => 2211,
                 Type::Reg(RegKind::Proc) => 1008,
                 Type::Reg(RegKind::Namespace) => 4090,
+                Type::Reg(RegKind::Procedure) => 2207,
                 Type::Enum(o) | Type::Domain(o) | Type::Composite(o) => usertype::array_oid(*o),
                 Type::Record => usertype::RECORD_ARRAY_OID,
                 Type::Bit => 1561,
@@ -263,6 +268,7 @@ impl Type {
             2206 => Some(Type::Reg(RegKind::Type)),
             24 => Some(Type::Reg(RegKind::Proc)),
             4089 => Some(Type::Reg(RegKind::Namespace)),
+            2202 => Some(Type::Reg(RegKind::Procedure)),
             2278 => Some(Type::Void),
             22 => Some(Type::Int2Vector),
             30 => Some(Type::OidVector),
@@ -323,6 +329,7 @@ impl Type {
             2211 => Type::Reg(RegKind::Type),
             1008 => Type::Reg(RegKind::Proc),
             4090 => Type::Reg(RegKind::Namespace),
+            2207 => Type::Reg(RegKind::Procedure),
             1016 => Type::Int8,
             1021 => Type::Float4,
             1022 => Type::Float8,
@@ -541,6 +548,7 @@ impl Type {
             "regtype" => Type::Reg(RegKind::Type),
             "regproc" => Type::Reg(RegKind::Proc),
             "regnamespace" => Type::Reg(RegKind::Namespace),
+            "regprocedure" => Type::Reg(RegKind::Procedure),
             "void" => Type::Void,
             "int2vector" => Type::Int2Vector,
             "oidvector" => Type::OidVector,
