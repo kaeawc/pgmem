@@ -16,14 +16,17 @@ pub fn run(rel: &Rel, ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         Rel::Virtual { rows } => (rows.0)(ctx),
         Rel::Scan { table, slots, missing, system } => Ok({
             ctx.txn.note_read(*table);
-            ctx.txn
-                .scan(*table)
+            // A partitioned table's rows are its leaf partitions' (each row's tableoid is its
+            // partition's).
+            let stored = crate::partition::scan(ctx.txn, *table)
+                .unwrap_or_else(|| ctx.txn.scan(*table).into_iter().map(|(id, r)| (*table, id, r)).collect());
+            stored
                 .into_iter()
-                .map(|(id, stored)| {
+                .map(|(oid, id, stored)| {
                     let mut row: Row =
                         slots.iter().zip(missing).map(|(s, m)| stored.get(*s).cloned().unwrap_or_else(|| m.clone())).collect();
                     if *system {
-                        row.extend(crate::dml::system_values(*table, Some(id), 0));
+                        row.extend(crate::dml::system_values(oid, Some(id), 0));
                     }
                     row
                 })

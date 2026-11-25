@@ -188,8 +188,8 @@ fn lower_table_constraint(c: sq::TableConstraint) -> SqlResult<TableConstraint> 
 }
 
 pub(crate) fn lower_create_table(ct: sq::CreateTable) -> SqlResult<CreateTable> {
-    if ct.clone.is_some() || ct.partition_of.is_some() || ct.inherits.is_some() {
-        return Err(unsupported("CREATE TABLE ... PARTITION OF / INHERITS"));
+    if ct.clone.is_some() || ct.inherits.is_some() {
+        return Err(unsupported("CREATE TABLE ... INHERITS"));
     }
     let name = object_name(&ct.name)?;
     let mut options = pgmem_ir::CreateTableOptions {
@@ -202,6 +202,12 @@ pub(crate) fn lower_create_table(ct: sq::CreateTable) -> SqlResult<CreateTable> 
         },
         likes: Vec::new(),
         column_names: crate::take_ctas_columns(name.base()),
+        partition_by: ct.partition_by.map(|e| partition_spec(*e)).transpose()?,
+        partition_of: match (&ct.partition_of, ct.for_values) {
+            (Some(parent), Some(bound)) => Some((object_name(parent)?, partition_bound(bound)?)),
+            (Some(_), None) => return Err(SqlError::syntax("syntax error at end of input")),
+            _ => None,
+        },
     };
     if let Some(sq::CreateTableLikeKind::Parenthesized(l) | sq::CreateTableLikeKind::Plain(l)) = &ct.like {
         let defaults = matches!(l.defaults, Some(sq::CreateTableLikeDefaults::Including));
@@ -332,11 +338,57 @@ fn trigger_toggle(name: &sq::Ident, enabled: bool) -> AlterTableAction {
     AlterTableAction::EnableTrigger { name: (!all).then_some(n), enabled }
 }
 
+/// `PARTITION BY RANGE (a, (expr))` arrives as the function call `RANGE(a, (expr))`.
+fn partition_spec(e: sq::Expr) -> SqlResult<pgmem_ir::PartitionSpec> {
+    let bad = || SqlError::syntax("syntax error at or near \"PARTITION\"");
+    let sq::Expr::Function(f) = e else { return Err(bad()) };
+    let strategy = object_name(&f.name)?.base().to_ascii_lowercase();
+    if !matches!(strategy.as_str(), "range" | "list" | "hash") {
+        return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, format!("unrecognized partitioning strategy \"{strategy}\"")));
+    }
+    let sq::FunctionArguments::List(list) = f.args else { return Err(bad()) };
+    let mut keys = Vec::new();
+    for a in list.args {
+        match a {
+            sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Expr(e)) => keys.push(lower_expr(e)?),
+            _ => return Err(bad()),
+        }
+    }
+    Ok(pgmem_ir::PartitionSpec { strategy, keys })
+}
+
+fn range_datum(v: sq::PartitionBoundValue) -> SqlResult<pgmem_ir::RangeBoundSpec> {
+    Ok(match v {
+        sq::PartitionBoundValue::MinValue => pgmem_ir::RangeBoundSpec::MinValue,
+        sq::PartitionBoundValue::MaxValue => pgmem_ir::RangeBoundSpec::MaxValue,
+        sq::PartitionBoundValue::Expr(e) => pgmem_ir::RangeBoundSpec::Expr(lower_expr(e)?),
+    })
+}
+
+fn partition_bound(b: sq::ForValues) -> SqlResult<pgmem_ir::PartitionBoundSpec> {
+    use pgmem_ir::PartitionBoundSpec as B;
+    Ok(match b {
+        sq::ForValues::Default => B::Default,
+        sq::ForValues::In(values) => B::In(values.into_iter().map(lower_expr).collect::<SqlResult<Vec<_>>>()?),
+        sq::ForValues::From { from, to } => B::Range {
+            from: from.into_iter().map(range_datum).collect::<SqlResult<Vec<_>>>()?,
+            to: to.into_iter().map(range_datum).collect::<SqlResult<Vec<_>>>()?,
+        },
+        sq::ForValues::With { modulus, remainder } => B::Hash { modulus, remainder },
+    })
+}
+
 pub(crate) fn lower_alter_table(at: sq::AlterTable) -> SqlResult<AlterTable> {
     let mut actions = Vec::new();
     for op in at.operations {
         use sq::AlterTableOperation as O;
         match op {
+            O::AttachPartitionOf { partition, for_values } => {
+                actions.push(AlterTableAction::AttachPartition { partition: object_name(&partition)?, bound: partition_bound(for_values)? });
+            }
+            O::DetachPartitionOf { partition, .. } => {
+                actions.push(AlterTableAction::DetachPartition { partition: object_name(&partition)? });
+            }
             O::AddColumn { if_not_exists, column_def, .. } => {
                 actions.push(AlterTableAction::AddColumn { if_not_exists, column: lower_column_def(column_def)? });
             }

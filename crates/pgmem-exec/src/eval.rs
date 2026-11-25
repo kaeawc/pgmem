@@ -30,6 +30,9 @@ pub struct StatementState {
     pub deferred: RefCell<Vec<(Oid, String)>>,
     /// Notices raised while the statement ran (PL/pgSQL `RAISE NOTICE`, ...).
     pub notices: RefCell<Vec<crate::session::Notice>>,
+    /// While an UPDATE of a partitioned table runs on its partitions: rows whose new partition
+    /// key belongs to another partition (partition OID, row id, new row), moved afterwards.
+    pub moved_rows: RefCell<Option<Vec<(Oid, pgmem_storage::RowId, Row)>>>,
 }
 
 impl StatementState {

@@ -1007,6 +1007,33 @@ pub struct CreateTableOptions {
     pub likes: Vec<LikeClause>,
     /// `CREATE TABLE t (a, b) AS ...`: names for the query's columns.
     pub column_names: Vec<String>,
+    /// `PARTITION BY strategy (key, ...)`.
+    pub partition_by: Option<PartitionSpec>,
+    /// `PARTITION OF parent FOR VALUES ... | DEFAULT`.
+    pub partition_of: Option<(ObjectName, PartitionBoundSpec)>,
+}
+
+/// `PARTITION BY RANGE | LIST | HASH (key, ...)`: each key a column or an expression.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PartitionSpec {
+    /// `range`, `list` or `hash` (lower case).
+    pub strategy: String,
+    pub keys: Vec<Expr>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PartitionBoundSpec {
+    Default,
+    In(Vec<Expr>),
+    Range { from: Vec<RangeBoundSpec>, to: Vec<RangeBoundSpec> },
+    Hash { modulus: u64, remainder: u64 },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum RangeBoundSpec {
+    MinValue,
+    MaxValue,
+    Expr(Expr),
 }
 
 impl Default for CreateTableOptions {
@@ -1017,6 +1044,8 @@ impl Default for CreateTableOptions {
             unlogged: false,
             likes: Vec::new(),
             column_names: Vec::new(),
+            partition_by: None,
+            partition_of: None,
         }
     }
 }
@@ -1355,6 +1384,15 @@ pub struct AlterTable {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum AlterTableAction {
+    /// `ATTACH PARTITION name FOR VALUES ... | DEFAULT`.
+    AttachPartition {
+        partition: ObjectName,
+        bound: PartitionBoundSpec,
+    },
+    /// `DETACH PARTITION name [CONCURRENTLY | FINALIZE]`.
+    DetachPartition {
+        partition: ObjectName,
+    },
     AddColumn {
         if_not_exists: bool,
         column: ColumnDef,
