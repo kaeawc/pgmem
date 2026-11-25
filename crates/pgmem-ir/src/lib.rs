@@ -10,7 +10,7 @@
 //! `SUBSTRING(x FROM a FOR b)` is `substring(x, a, b)`, `TRIM(BOTH c FROM x)` is `btrim(x, c)`.
 
 /// A possibly schema-qualified name (`public.users` → `["public", "users"]`).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub struct ObjectName(pub Vec<String>);
 
 impl ObjectName {
@@ -143,6 +143,25 @@ pub enum Statement {
         tag: String,
         tables: Vec<ObjectName>,
         in_block_ok: bool,
+    },
+    /// `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]`.
+    RefreshMatview {
+        name: ObjectName,
+        concurrently: bool,
+        with_data: bool,
+    },
+    /// `ALTER [MATERIALIZED] VIEW name RENAME TO new`.
+    RenameView {
+        name: ObjectName,
+        new_name: String,
+        materialized: bool,
+        if_exists: bool,
+    },
+    /// `ALTER INDEX [IF EXISTS] name RENAME TO new_name`.
+    RenameIndex {
+        name: ObjectName,
+        new_name: String,
+        if_exists: bool,
     },
     /// `SET CONSTRAINTS {ALL | name, ...} {DEFERRED | IMMEDIATE}` (`names` empty = ALL).
     SetConstraints {
@@ -833,6 +852,54 @@ pub struct CreateTable {
     pub constraints: Vec<TableConstraint>,
     /// `CREATE TABLE t AS SELECT ...`.
     pub as_query: Option<Box<Query>>,
+    pub options: CreateTableOptions,
+}
+
+/// The less common parts of CREATE TABLE.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateTableOptions {
+    /// `AS ... WITH [NO] DATA`.
+    pub with_data: bool,
+    pub on_commit: OnCommit,
+    pub unlogged: bool,
+    /// `LIKE source [INCLUDING ...]` elements, each before the column at `position`.
+    pub likes: Vec<LikeClause>,
+    /// `CREATE TABLE t (a, b) AS ...`: names for the query's columns.
+    pub column_names: Vec<String>,
+}
+
+impl Default for CreateTableOptions {
+    fn default() -> Self {
+        CreateTableOptions {
+            with_data: true,
+            on_commit: OnCommit::PreserveRows,
+            unlogged: false,
+            likes: Vec::new(),
+            column_names: Vec::new(),
+        }
+    }
+}
+
+/// A temporary table's `ON COMMIT` action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnCommit {
+    PreserveRows,
+    DeleteRows,
+    Drop,
+}
+
+/// `LIKE source [INCLUDING | EXCLUDING {DEFAULTS | CONSTRAINTS | INDEXES | IDENTITY |
+/// GENERATED | COMMENTS | STORAGE | STATISTICS | COMPRESSION | ALL}] ...`.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct LikeClause {
+    pub position: usize,
+    pub table: ObjectName,
+    pub defaults: bool,
+    pub constraints: bool,
+    pub indexes: bool,
+    pub identity: bool,
+    pub generated: bool,
+    pub comments: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -909,9 +976,20 @@ pub struct TableConstraint {
 #[derive(Clone, Debug, PartialEq)]
 pub enum TableConstraintKind {
     PrimaryKey(Vec<String>),
-    Unique { columns: Vec<String>, nulls_not_distinct: bool },
+    Unique {
+        columns: Vec<String>,
+        nulls_not_distinct: bool,
+    },
     Check(Expr),
-    ForeignKey { columns: Vec<String>, references: ForeignKeyRef },
+    ForeignKey {
+        columns: Vec<String>,
+        references: ForeignKeyRef,
+    },
+    /// `{PRIMARY KEY | UNIQUE} USING INDEX index`: adopts an existing unique index.
+    UsingIndex {
+        primary: bool,
+        index: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -921,6 +999,10 @@ pub struct CreateView {
     pub columns: Vec<String>,
     pub query: Box<Query>,
     pub materialized: bool,
+    /// `WITH [CASCADED | LOCAL] CHECK OPTION`.
+    pub check_option: bool,
+    /// A materialized view's `WITH [NO] DATA` (default WITH DATA).
+    pub with_data: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -932,6 +1014,9 @@ pub struct CreateIndex {
     pub if_not_exists: bool,
     pub concurrently: bool,
     pub predicate: Option<Expr>,
+    pub nulls_not_distinct: bool,
+    /// `USING method` (lowercase), if given.
+    pub method: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -965,6 +1050,10 @@ pub enum AlterTableAction {
         new: String,
     },
     RenameTable {
+        new: String,
+    },
+    RenameConstraint {
+        old: String,
         new: String,
     },
     SetNotNull {
@@ -1085,6 +1174,7 @@ pub enum AlterDomainAction {
 pub enum ObjectType {
     Table,
     View,
+    MaterializedView,
     Index,
     Sequence,
     Schema,

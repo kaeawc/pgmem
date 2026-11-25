@@ -86,6 +86,18 @@ fn check_checks(rules: &RowRules, row: &Row, ctx: &EvalCtx) -> SqlResult<()> {
     Ok(())
 }
 
+/// WITH CHECK OPTION: a row written through a view must satisfy its WHERE.
+fn check_view_options(table: &TableDef, checks: &[(String, crate::plan::Expr)], row: &Row, ctx: &EvalCtx) -> SqlResult<()> {
+    for (view, pred) in checks {
+        if !eval_pred(pred, row, ctx)? {
+            return Err(
+                SqlError::new("44000", format!("new row violates check option for view \"{view}\"")).with_detail(failing_row(table, row))
+            );
+        }
+    }
+    Ok(())
+}
+
 fn apply_generated(rules: &RowRules, row: &mut Row, ctx: &EvalCtx) -> SqlResult<()> {
     for (i, g) in rules.generated.iter().enumerate() {
         if let Some(g) = g {
@@ -651,6 +663,7 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
             }
             check_not_null(&table, &row)?;
             check_checks(&plan.rules, &row, &ctx)?;
+            check_view_options(&table, &plan.view_checks, &row, &ctx)?;
             if !plan.returning.is_empty() {
                 let mut current = row.clone();
                 current.extend(system_values(table.oid, None, 0));
@@ -773,6 +786,7 @@ pub fn exec_update(plan: &UpdatePlan, txn: &mut Txn, params: &[Value], env: &Ses
             apply_generated(&plan.rules, &mut new_row, &ctx)?;
             check_not_null(&table, &new_row)?;
             check_checks(&plan.rules, &new_row, &ctx)?;
+            check_view_options(&table, &plan.view_checks, &new_row, &ctx)?;
             if !plan.returning.is_empty() {
                 let mut out_row = new_row.clone();
                 out_row.extend(combined.iter().skip(width).cloned());

@@ -5,6 +5,7 @@
 pub mod ddl;
 pub mod dml;
 mod expr;
+mod like;
 pub mod merge;
 mod select;
 

@@ -8,10 +8,10 @@ and what comes next. Updated with every PR.
 | Metric | Value | How it is measured |
 |---|---|---|
 | pgmem-go parity | **564 / 564** Go tests ported | `scripts/parity.py check` ([PARITY.md](PARITY.md)) |
-| Integration suite on pgmem | **615 / 615** pass | `cargo nextest run -p pgmem --test it` |
-| Integration suite on real PostgreSQL 18 | **615 / 615** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
+| Integration suite on pgmem | **621 / 621** pass | `cargo nextest run -p pgmem --test it` |
+| Integration suite on real PostgreSQL 18 | **621 / 621** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
 | Go pgx example suites (sqlc) against the Rust binary | **27 / 27** pass | `make examples` (CI `pgx-examples`) |
-| **SQL conformance corpus** (3309 records, 9 areas) | **3022 / 3309 (91.3%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
+| **SQL conformance corpus** (3309 records, 9 areas) | **3089 / 3309 (93.4%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
 
 ### Conformance history
 
@@ -38,7 +38,8 @@ and what comes next. Updated with every PR.
 | 2026-11-25 | #124 session statements: PREPARE/EXECUTE, cursors, LISTEN/NOTIFY, DISCARD, utility statements, transactions per Sync | 564/564 | 2809/3309 (84.9%) |
 | 2026-11-25 | #125 query statements: MERGE, writable CTEs, RETURNING old/new, GROUPING SETS, window RANGE offsets / EXCLUDE, SEARCH / CYCLE | 564/564 | 2880/3309 (87.0%) |
 | 2026-11-25 | #126 system columns, row / table / advisory locks, READ ONLY, AND CHAIN, WHERE CURRENT OF | 564/564 | 2944/3309 (89.0%) |
-| 2026-11-25 | deferrable constraints, SET CONSTRAINTS, NOT VALID, FK fidelity, SERIALIZABLE write skew | 564/564 | 3022/3309 (91.3%) |
+| 2026-11-25 | #127 deferrable constraints, SET CONSTRAINTS, NOT VALID, FK fidelity, SERIALIZABLE write skew | 564/564 | 3022/3309 (91.3%) |
+| 2026-11-25 | updatable views, materialized views, DROP / ALTER dependencies, CREATE TABLE AS / LIKE, ON COMMIT, index and constraint renames | 564/564 | 3089/3309 (93.4%) |
 
 ## Supported
 
@@ -96,10 +97,20 @@ and what comes next. Updated with every PR.
   schema (3F000 when none); views resolve names as at creation; session-private temporary
   tables in `pg_temp_N` that shadow permanent ones and go away with the session; catalogs,
   `regclass`/`regtype` output and deparsed definitions qualify names not on the search path.
-- **DDL**: CREATE/DROP TABLE, VIEW, INDEX (unique and partial unique indexes are enforced),
-  SEQUENCE; ALTER TABLE (add/drop/rename column, set/drop default and NOT NULL, alter type, add/
-  drop constraint, rename table); no-op acceptance of COMMENT, extensions, schemas, GRANT, VACUUM,
-  ANALYZE. DDL is transactional.
+- **DDL**: CREATE/DROP TABLE, VIEW, INDEX (unique and partial unique indexes are enforced,
+  NULLS NOT DISTINCT, access methods checked, CONCURRENTLY outside blocks only), SEQUENCE;
+  CREATE TABLE AS / SELECT INTO (column lists, WITH NO DATA), `LIKE source [INCLUDING ...]`
+  (defaults, constraints, indexes, identity, generated, comments), UNLOGGED, temporary tables'
+  ON COMMIT DELETE ROWS / DROP; ALTER TABLE (add/drop/rename column, set/drop default and NOT
+  NULL, alter type (42804 without an assignment cast), add/drop/rename constraint, `UNIQUE /
+  PRIMARY KEY USING INDEX`, rename table), ALTER INDEX RENAME; DROP checks dependents (views on
+  tables, views and columns, defaults on sequences, constraints on indexes: 2BP01, CASCADE drops
+  them); no-op acceptance of extensions, GRANT. DDL is transactional.
+- **Views**: automatically updatable simple views (INSERT / UPDATE / DELETE rewritten to the
+  base table, nested views, Postgres' "not automatically updatable" details), WITH [CASCADED |
+  LOCAL] CHECK OPTION (44000), CREATE OR REPLACE rules (42P16), ALTER VIEW RENAME; materialized
+  views (WITH [NO] DATA, REFRESH [CONCURRENTLY] with its unique-index rule, 55000 when not
+  populated, `pg_matviews`, relkind `m`).
 - **Constraints**: NOT NULL (named, Postgres 18 style), CHECK, PRIMARY KEY, UNIQUE (NULLS NOT
   DISTINCT), FOREIGN KEY (multi-column, MATCH SIMPLE / FULL; NO ACTION / RESTRICT (23001) /
   CASCADE / SET NULL / SET DEFAULT on delete and update, `SET NULL (cols)`), serial and identity
@@ -159,6 +170,8 @@ and what comes next. Updated with every PR.
 
 ## Known gaps
 
+- WITH LOCAL CHECK OPTION checks like CASCADED; views with INSTEAD OF triggers or rules are not
+  supported (no triggers yet).
 - `pg_proc` and `pg_trigger` have no user rows (no user functions or triggers yet). Deparsed
   definitions follow ruleutils' non-pretty mode; pretty mode (`pg_get_viewdef(v, true)`) does not
   drop redundant parentheses yet.
@@ -185,9 +198,9 @@ and what comes next. Updated with every PR.
 Hill-climb, ordered by conformance records recovered per unit of work and by what blocks real
 clients. Each item names the corpus area it moves (see CONFORMANCE.md for per-file rates).
 
-1. **Types and DDL**: range types (and EXCLUDE constraints), network types, bit strings, array
-   lower bounds, CREATE TABLE LIKE/AS, temp ON COMMIT, DROP dependency errors (2BP01), pretty
-   deparse.
+1. **Types and DDL**: identity / generated column and sequence fidelity (ddl/identity,
+   ddl/generated, ddl/sequences), range types (and EXCLUDE constraints), network types, bit
+   strings, array lower bounds, pretty deparse.
 2. **Functions/procedures/triggers** (SQL and PL/pgSQL), `DO` blocks — large; most of ddl/migrations.
 3. Roles, extensions (pgcrypto, uuid-ossp, citext), COPY, collations, catalog remainder.
 4. Client matrix in CI: psql, tokio-postgres and sqlx (Go pgx is covered by `examples/`).

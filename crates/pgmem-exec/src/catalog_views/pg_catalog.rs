@@ -132,7 +132,7 @@ pub static DEFS: &[Def] = &[
     def!("pg_user", 12_002, 'v', PG_USER, pg_user),
     def!("pg_tables", 12_003, 'v', PG_TABLES, pg_tables),
     def!("pg_views", 12_004, 'v', PG_VIEWS, pg_views),
-    def!("pg_matviews", 12_005, 'v', PG_MATVIEWS, empty),
+    def!("pg_matviews", 12_005, 'v', PG_MATVIEWS, pg_matviews),
     def!("pg_indexes", 12_006, 'v', PG_INDEXES, pg_indexes),
     def!("pg_sequences", 12_007, 'v', PG_SEQUENCES, pg_sequences),
     def!("pg_settings", 12_008, 'v', PG_SETTINGS, pg_settings),
@@ -242,7 +242,7 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             t.oid,
             &t.name,
             m.namespace(&t.schema),
-            'r',
+            if t.matview.is_some() { 'm' } else { 'r' },
             t.columns.len(),
             vec![
                 ("reltype", oid(rowtype_oid(t.oid))),
@@ -252,7 +252,16 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("relchecks", int2(checks)),
                 ("relhastriggers", boolean(triggers.contains(&t.oid))),
                 ("relreplident", ch('d')),
-                ("relpersistence", ch(if t.schema.starts_with("pg_temp_") { 't' } else { 'p' })),
+                (
+                    "relpersistence",
+                    ch(if t.schema.starts_with("pg_temp_") {
+                        't'
+                    } else if t.unlogged {
+                        'u'
+                    } else {
+                        'p'
+                    }),
+                ),
             ],
         ));
     }
@@ -515,6 +524,8 @@ fn user_type_rows(s: &Spec, catalog: &pgmem_catalog::Catalog, t: &pgmem_catalog:
                     columns: vec![],
                     constraints: vec![],
                     indexes: vec![],
+                    matview: None,
+                    unlogged: false,
                 };
                 let mut col = pgmem_catalog::ColumnDef::new("value", base.clone());
                 col.typmod = *typmod;
@@ -1012,6 +1023,7 @@ fn pg_tables(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let s = Spec::parse(PG_TABLES);
     Ok(m.tables()
         .into_iter()
+        .filter(|t| t.matview.is_none())
         .map(|t| {
             s.row(vec![
                 ("schemaname", name(&t.schema)),
@@ -1035,6 +1047,34 @@ fn pg_views(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("viewname", name(&v.name)),
                 ("viewowner", name(&ctx.env.user)),
                 ("definition", txt(crate::deparse::deparse_view(m.catalog, v).unwrap_or_default())),
+            ])
+        })
+        .collect())
+}
+
+fn pg_matviews(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let m = snapshot(ctx);
+    let s = Spec::parse(PG_MATVIEWS);
+    Ok(m.tables()
+        .into_iter()
+        .filter_map(|t| t.matview.as_ref().map(|mv| (t, mv)))
+        .map(|(t, mv)| {
+            let as_view = pgmem_catalog::ViewDef {
+                oid: t.oid,
+                schema: t.schema.clone(),
+                name: t.name.clone(),
+                columns: t.live_columns().map(|(_, c)| c.name.clone()).collect(),
+                query: mv.query.clone(),
+                search_path: mv.search_path.clone(),
+                check_option: false,
+            };
+            s.row(vec![
+                ("schemaname", name(&t.schema)),
+                ("matviewname", name(&t.name)),
+                ("matviewowner", name(&ctx.env.user)),
+                ("hasindexes", boolean(!t.indexes.is_empty())),
+                ("ispopulated", boolean(mv.populated)),
+                ("definition", txt(crate::deparse::deparse_view(m.catalog, &as_view).unwrap_or_default())),
             ])
         })
         .collect())

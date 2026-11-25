@@ -14,6 +14,7 @@ pub(crate) enum Utility {
     Maintenance { tag: &'static str, tables: Vec<sqlparser::ast::ObjectName>, in_block_ok: bool },
     SetConstraints { names: Vec<sqlparser::ast::ObjectName>, deferred: bool },
     AlterConstraint { table: sqlparser::ast::ObjectName, if_exists: bool, name: sqlparser::ast::Ident, timing: pgmem_ir::ConstraintTiming },
+    RenameIndex { name: sqlparser::ast::ObjectName, new_name: sqlparser::ast::Ident, if_exists: bool },
 }
 
 pub(crate) fn lower(u: Utility) -> SqlResult<Statement> {
@@ -26,6 +27,9 @@ pub(crate) fn lower(u: Utility) -> SqlResult<Statement> {
         },
         Utility::SetConstraints { names, deferred } => {
             Statement::SetConstraints { names: names.iter().map(object_name).collect::<SqlResult<Vec<_>>>()?, deferred }
+        }
+        Utility::RenameIndex { name, new_name, if_exists } => {
+            Statement::RenameIndex { name: object_name(&name)?, new_name: crate::ident(&new_name), if_exists }
         }
         Utility::AlterConstraint { table, if_exists, name, timing } => Statement::AlterTable(Box::new(pgmem_ir::AlterTable {
             name: object_name(&table)?,
@@ -58,6 +62,24 @@ pub(crate) fn try_parse(p: &mut Parser) -> Result<Option<Utility>, ParserError> 
         p.next_token();
         p.next_token();
         return alter_constraint(p).map(Some);
+    }
+    if word_at(p, 0, "ALTER") && word_at(p, 1, "INDEX") {
+        let n = if word_at(p, 2, "IF") { 4 } else { 2 };
+        // ALTER INDEX [IF EXISTS] name [. name] RENAME TO new
+        let mut k = n + 1;
+        while p.peek_nth_token(k).token == Token::Period {
+            k += 2;
+        }
+        if word_at(p, k, "RENAME") && word_at(p, k + 1, "TO") {
+            p.next_token();
+            p.next_token();
+            let if_exists = eat_word(p, "IF") && eat_word(p, "EXISTS");
+            let name = p.parse_object_name(false)?;
+            p.next_token();
+            p.next_token();
+            let new_name = p.parse_identifier()?;
+            return Ok(Some(Utility::RenameIndex { name, new_name, if_exists }));
+        }
     }
     if word_at(p, 0, "FETCH") || word_at(p, 0, "MOVE") {
         let is_move = word_at(p, 0, "MOVE");

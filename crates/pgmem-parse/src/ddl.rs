@@ -7,7 +7,7 @@ use pgmem_ir::{
     AlterTable, AlterTableAction, ColumnConstraint, ColumnConstraintKind, ColumnDef, ConstraintTiming, CreateIndex, CreateSequence,
     CreateTable, CreateView, ForeignKeyRef, ReferentialAction, TableConstraint, TableConstraintKind,
 };
-use pgmem_types::{SqlError, SqlResult};
+use pgmem_types::{SqlError, SqlResult, code};
 use sqlparser::ast as sq;
 
 fn referential(a: Option<sq::ReferentialAction>) -> ReferentialAction {
@@ -122,6 +122,16 @@ fn lower_table_constraint(c: sq::TableConstraint) -> SqlResult<TableConstraint> 
             },
             timing: timing(u.characteristics.as_ref(), "UNIQUE")?,
         },
+        sq::TableConstraint::PrimaryKeyUsingIndex(u) => TableConstraint {
+            name: u.name.as_ref().map(ident),
+            kind: TableConstraintKind::UsingIndex { primary: true, index: ident(&u.index_name) },
+            timing: timing(u.characteristics.as_ref(), "PRIMARY KEY")?,
+        },
+        sq::TableConstraint::UniqueUsingIndex(u) => TableConstraint {
+            name: u.name.as_ref().map(ident),
+            kind: TableConstraintKind::UsingIndex { primary: false, index: ident(&u.index_name) },
+            timing: timing(u.characteristics.as_ref(), "UNIQUE")?,
+        },
         sq::TableConstraint::Check(chk) => TableConstraint {
             name: chk.name.as_ref().map(ident),
             kind: TableConstraintKind::Check(lower_expr(*chk.expr)?),
@@ -147,22 +157,87 @@ fn lower_table_constraint(c: sq::TableConstraint) -> SqlResult<TableConstraint> 
 }
 
 pub(crate) fn lower_create_table(ct: sq::CreateTable) -> SqlResult<CreateTable> {
-    if ct.like.is_some() || ct.clone.is_some() || ct.partition_of.is_some() || ct.inherits.is_some() {
-        return Err(unsupported("CREATE TABLE ... LIKE / PARTITION OF / INHERITS"));
+    if ct.clone.is_some() || ct.partition_of.is_some() || ct.inherits.is_some() {
+        return Err(unsupported("CREATE TABLE ... PARTITION OF / INHERITS"));
+    }
+    let name = object_name(&ct.name)?;
+    let mut options = pgmem_ir::CreateTableOptions {
+        with_data: ct.with_data.is_none_or(|w| w.data),
+        unlogged: ct.unlogged,
+        on_commit: match ct.on_commit {
+            Some(sq::OnCommit::DeleteRows) => pgmem_ir::OnCommit::DeleteRows,
+            Some(sq::OnCommit::Drop) => pgmem_ir::OnCommit::Drop,
+            _ => pgmem_ir::OnCommit::PreserveRows,
+        },
+        likes: Vec::new(),
+        column_names: crate::take_ctas_columns(name.base()),
+    };
+    if let Some(sq::CreateTableLikeKind::Parenthesized(l) | sq::CreateTableLikeKind::Plain(l)) = &ct.like {
+        let defaults = matches!(l.defaults, Some(sq::CreateTableLikeDefaults::Including));
+        options.likes.push(pgmem_ir::LikeClause { position: 0, table: object_name(&l.name)?, defaults, ..Default::default() });
+    }
+    // `LIKE` elements among columns arrive as marker columns (see `rewrite_like`).
+    let mut columns = Vec::new();
+    for c in ct.columns {
+        if let Some(spec) = c.name.value.strip_prefix(crate::LIKE_MARKER) {
+            options.likes.push(like_clause(spec, columns.len())?);
+        } else {
+            columns.push(lower_column_def(c)?);
+        }
+    }
+    if ct.on_commit.is_some() && !ct.temporary {
+        return Err(SqlError::new(code::INVALID_TABLE_DEFINITION, "ON COMMIT can only be used on temporary tables"));
     }
     Ok(CreateTable {
-        name: object_name(&ct.name)?,
+        name,
         if_not_exists: ct.if_not_exists,
         temporary: ct.temporary,
-        columns: ct.columns.into_iter().map(lower_column_def).collect::<SqlResult<Vec<_>>>()?,
+        columns,
         constraints: ct.constraints.into_iter().map(lower_table_constraint).collect::<SqlResult<Vec<_>>>()?,
         as_query: ct.query.map(|q| lower_query(*q).map(Box::new)).transpose()?,
+        options,
     })
 }
 
+/// A `LIKE` element: "source [INCLUDING | EXCLUDING option] ..." as the rewrite recorded it.
+fn like_clause(spec: &str, position: usize) -> SqlResult<pgmem_ir::LikeClause> {
+    let mut words = spec.split_whitespace();
+    let table = words.next().unwrap_or_default();
+    let name = pgmem_ir::ObjectName(table.split('.').map(str::to_owned).collect());
+    let mut like = pgmem_ir::LikeClause { position, table: name, ..Default::default() };
+    let words: Vec<String> = words.map(str::to_ascii_uppercase).collect();
+    for pair in words.chunks(2) {
+        let [mode, what] = pair else { return Err(SqlError::syntax("syntax error at end of input")) };
+        let on = mode == "INCLUDING";
+        match what.as_str() {
+            "DEFAULTS" => like.defaults = on,
+            "CONSTRAINTS" => like.constraints = on,
+            "INDEXES" => like.indexes = on,
+            "IDENTITY" => like.identity = on,
+            "GENERATED" => like.generated = on,
+            "COMMENTS" => like.comments = on,
+            "ALL" => {
+                like.defaults = on;
+                like.constraints = on;
+                like.indexes = on;
+                like.identity = on;
+                like.generated = on;
+                like.comments = on;
+            }
+            "STORAGE" | "STATISTICS" | "COMPRESSION" => {}
+            other => return Err(SqlError::syntax(format!("syntax error at or near \"{other}\""))),
+        }
+    }
+    Ok(like)
+}
+
 pub(crate) fn lower_create_view(cv: sq::CreateView) -> SqlResult<CreateView> {
+    let name = object_name(&cv.name)?;
+    let (check_option, with_data) = crate::take_view_options(name.base());
     Ok(CreateView {
-        name: object_name(&cv.name)?,
+        check_option,
+        with_data,
+        name,
         or_replace: cv.or_replace,
         columns: cv.columns.iter().map(|c| ident(&c.name)).collect(),
         query: Box::new(lower_query(*cv.query)?),
@@ -179,6 +254,11 @@ pub(crate) fn lower_create_index(ci: sq::CreateIndex) -> SqlResult<CreateIndex> 
         if_not_exists: ci.if_not_exists,
         concurrently: ci.concurrently,
         predicate: ci.predicate.map(lower_expr).transpose()?,
+        nulls_not_distinct: ci.nulls_distinct == Some(false),
+        method: ci.using.map(|u| match u {
+            sq::IndexType::Custom(i) => ident(&i),
+            other => other.to_string().to_lowercase(),
+        }),
     })
 }
 
@@ -224,6 +304,9 @@ pub(crate) fn lower_alter_table(at: sq::AlterTable) -> SqlResult<AlterTable> {
             }
             O::RenameColumn { old_column_name, new_column_name } => {
                 actions.push(AlterTableAction::RenameColumn { old: ident(&old_column_name), new: ident(&new_column_name) });
+            }
+            O::RenameConstraint { old_name, new_name } => {
+                actions.push(AlterTableAction::RenameConstraint { old: ident(&old_name), new: ident(&new_name) });
             }
             O::RenameTable { table_name } => {
                 let n = match table_name {

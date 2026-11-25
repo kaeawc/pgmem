@@ -101,8 +101,9 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
             }
             Ok(tag("COMMENT"))
         }
+        Statement::CreateTable(ct) if ct.as_query.is_some() => crate::ddl_views::create_table_as(ct, txn, binder, env, state),
         Statement::CreateTable(ct) => {
-            let Some(CreateTablePlan { mut table, sequences }) = bind::bind_create_table(binder, ct)? else {
+            let Some(CreateTablePlan { mut table, sequences, comments }) = bind::bind_create_table(binder, ct)? else {
                 let name = ct.name.base();
                 return Ok(notice("CREATE TABLE", format!("relation \"{name}\" already exists, skipping")));
             };
@@ -113,16 +114,23 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
             }
             assign_oids(cat, &mut table);
             let oid = table.oid;
+            for (column, text) in comments {
+                if let Some(i) = table.column_index(&column) {
+                    cat.set_comment(crate::catalog_views::CLASS_CLASS_OID, oid, i32::try_from(i + 1).unwrap_or(i32::MAX), Some(text));
+                }
+            }
             cat.create_table(table)?;
             txn.created_table(oid);
             Ok(tag("CREATE TABLE"))
         }
-        Statement::CreateView(cv) => {
-            let mut def = bind::bind_create_view(binder, cv)?;
-            let cat = txn.catalog_mut();
-            def.oid = cat.alloc_oid();
-            cat.create_view(def, cv.or_replace)?;
-            Ok(tag("CREATE VIEW"))
+        Statement::CreateView(cv) if cv.materialized => crate::ddl_views::create_matview(cv, txn, binder, env, state),
+        Statement::CreateView(cv) => crate::ddl_views::create_view(cv, txn, binder),
+        Statement::RefreshMatview { name, concurrently, with_data } => {
+            crate::ddl_views::refresh_matview(name, *concurrently, *with_data, txn, env, state)
+        }
+        Statement::RenameIndex { name, new_name, if_exists } => rename_index(name, new_name, *if_exists, txn),
+        Statement::RenameView { name, new_name, materialized, if_exists } => {
+            crate::ddl_views::rename_view(name, new_name, *materialized, *if_exists, txn)
         }
         Statement::CreateSequence(cs) => {
             let Some(mut seq) = bind::bind_create_sequence(binder, cs)? else {
@@ -192,6 +200,7 @@ pub(crate) fn alter_table_action(
     state: &StatementState,
 ) -> SqlResult<QualName> {
     let table = txn.catalog().table_q(current).cloned().ok_or_else(|| SqlError::undefined_table(&current.name))?;
+    column_view_dependencies(txn, &table, action)?;
     let has_rows = !txn.scan(table.oid).is_empty();
     let snapshot = txn.catalog().clone();
     let b = Binder::new(&snapshot, &[]);
@@ -219,6 +228,68 @@ pub(crate) fn alter_table_action(
             txn.catalog_mut().replace_table(rename_from.as_ref().unwrap_or(current), def);
             Ok(new_name)
         }
+    }
+}
+
+/// ALTER INDEX [IF EXISTS] name RENAME TO new_name (a constraint's index renames the
+/// constraint too).
+fn rename_index(name: &ir::ObjectName, new_name: &str, if_exists: bool, txn: &mut Txn) -> SqlResult<QueryResult> {
+    let rel = txn.catalog().find_relation(name)?;
+    let Some(Relation::Index { table, .. }) = rel else {
+        return match rel {
+            None if if_exists => Ok(notice("ALTER INDEX", format!("relation \"{}\" does not exist, skipping", name.base()))),
+            None => Err(SqlError::undefined_table(&name.to_string())),
+            Some(r) => Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{}\" is not an index", r.name()))),
+        };
+    };
+    if txn.catalog().relation(&table.schema, new_name).is_some() {
+        return Err(SqlError::new(code::DUPLICATE_TABLE, format!("relation \"{new_name}\" already exists")));
+    }
+    let old = name.base();
+    let Some(t) = txn.catalog().table_q(&table).cloned() else { return Err(SqlError::undefined_table(&table.name)) };
+    let mut def = (*t).clone();
+    for i in def.indexes.iter_mut().filter(|i| i.name == old) {
+        new_name.clone_into(&mut i.name);
+    }
+    for c in def.constraints.iter_mut().filter(|c| {
+        c.name == old && matches!(c.kind, pgmem_catalog::ConstraintKind::PrimaryKey { .. } | pgmem_catalog::ConstraintKind::Unique { .. })
+    }) {
+        new_name.clone_into(&mut c.name);
+    }
+    txn.catalog_mut().replace_table(&table, def);
+    Ok(tag("ALTER INDEX"))
+}
+
+/// Views reading a column block DROP COLUMN (CASCADE drops them) and ALTER COLUMN TYPE.
+fn column_view_dependencies(txn: &mut Txn, table: &TableDef, action: &ir::AlterTableAction) -> SqlResult<()> {
+    match action {
+        ir::AlterTableAction::DropColumn { name, cascade, .. } if table.column_index(name).is_some() => {
+            let views = crate::deps::views_using_column(txn.catalog(), table.oid, name);
+            if views.is_empty() {
+                return Ok(());
+            }
+            if !cascade {
+                let lines: Vec<String> =
+                    views.iter().map(|v| format!("view {} depends on column {name} of table {}", v.name, table.name)).collect();
+                return Err(dependents_error("column", &format!("{name} of table {}", table.name), lines.join("\n")));
+            }
+            let mut all = Vec::new();
+            for v in views {
+                for d in crate::deps::dependent_views_transitive(txn.catalog(), v.oid).into_iter().chain([v]) {
+                    if !all.iter().any(|x: &Arc<pgmem_catalog::ViewDef>| x.oid == d.oid) {
+                        all.push(d);
+                    }
+                }
+            }
+            drop_views_cascade(txn, &all, &mut Vec::new());
+            Ok(())
+        }
+        ir::AlterTableAction::AlterType { column, .. } => match crate::deps::views_using_column(txn.catalog(), table.oid, column).first() {
+            Some(v) => Err(SqlError::feature_not_supported("cannot alter type of a column used by a view or rule")
+                .with_detail(format!("rule _RETURN on view {} depends on column \"{column}\"", v.name))),
+            None => Ok(()),
+        },
+        _ => Ok(()),
     }
 }
 
@@ -527,6 +598,7 @@ fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> 
     let kind = match d.object_type {
         ObjectType::Table => "TABLE",
         ObjectType::View => "VIEW",
+        ObjectType::MaterializedView => "MATERIALIZED VIEW",
         ObjectType::Index => "INDEX",
         ObjectType::Sequence => "SEQUENCE",
         ObjectType::Schema => return drop_schemas(d, txn),
@@ -549,14 +621,31 @@ fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> 
             if d.if_exists { Ok(()) } else { Err(SqlError::new(code::UNDEFINED_TABLE, format!("{what} \"{base}\" does not exist"))) }
         };
         match (d.object_type, rel) {
+            (ObjectType::MaterializedView, Some(Relation::Table(t))) if t.matview.is_some() => {
+                txn.catalog_mut().drop_table(&t.qualified());
+            }
+            (ObjectType::MaterializedView, Some(_)) => {
+                return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{base}\" is not a materialized view")));
+            }
+            (ObjectType::Table | ObjectType::View, Some(Relation::Table(t))) if t.matview.is_some() => {
+                return Err(SqlError::new(
+                    code::WRONG_OBJECT_TYPE,
+                    format!("\"{base}\" is not a {}", if d.object_type == ObjectType::View { "view" } else { "table" }),
+                )
+                .with_hint("Use DROP MATERIALIZED VIEW to remove a materialized view."));
+            }
             (ObjectType::Table, Some(Relation::Table(t))) => {
                 let referencing = referencing_fks(txn.catalog(), &t);
-                if !referencing.is_empty() {
-                    if !d.cascade {
-                        let (child, con) = &referencing[0];
-                        let child = display_name(txn.catalog(), child);
-                        return Err(dependents_error("table", &base, format!("constraint {con} on table {child} depends on table {base}")));
+                let views = crate::deps::dependent_views_transitive(txn.catalog(), t.oid);
+                if !d.cascade && (!referencing.is_empty() || !views.is_empty()) {
+                    let mut lines: Vec<String> = views.iter().map(|v| format!("view {} depends on table {base}", v.name)).collect();
+                    for (child, con) in &referencing {
+                        lines.push(format!("constraint {con} on table {} depends on table {base}", display_name(txn.catalog(), child)));
                     }
+                    return Err(dependents_error("table", &base, lines.join("\n")));
+                }
+                drop_views_cascade(txn, &views, &mut notices);
+                if !referencing.is_empty() {
                     for (child, con) in &referencing {
                         drop_fk(txn, child, con);
                         let child = display_name(txn.catalog(), child);
@@ -577,10 +666,40 @@ fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> 
                 )));
             }
             (ObjectType::View, Some(Relation::View(v))) => {
+                let views = crate::deps::dependent_views_transitive(txn.catalog(), v.oid);
+                if !views.is_empty() && !d.cascade {
+                    let lines: Vec<String> = views.iter().map(|x| format!("view {} depends on view {base}", x.name)).collect();
+                    return Err(dependents_error("view", &base, lines.join("\n")));
+                }
+                drop_views_cascade(txn, &views, &mut notices);
                 txn.catalog_mut().drop_view(&QualName::new(&v.schema, &v.name));
             }
             (ObjectType::View, Some(_)) => return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{base}\" is not a view"))),
             (ObjectType::Sequence, Some(Relation::Sequence(s))) => {
+                let defaults = crate::deps::defaults_using_sequence(txn.catalog(), s.oid);
+                if !defaults.is_empty() {
+                    let describe = |(t, slot): &(QualName, usize), cat: &Catalog| {
+                        let col = cat.table_q(t).map(|d| d.columns[*slot].name.clone()).unwrap_or_default();
+                        format!("default value for column {col} of table {}", display_name(cat, t))
+                    };
+                    if !d.cascade {
+                        let lines: Vec<String> =
+                            defaults.iter().map(|x| format!("{} depends on sequence {base}", describe(x, txn.catalog()))).collect();
+                        return Err(dependents_error("sequence", &base, lines.join("\n")));
+                    }
+                    for x in &defaults {
+                        notices.push(Notice {
+                            severity: "NOTICE",
+                            code: "00000",
+                            message: format!("drop cascades to {}", describe(x, txn.catalog())),
+                        });
+                        if let Some(t) = txn.catalog().table_q(&x.0).cloned() {
+                            let mut def = (*t).clone();
+                            def.columns[x.1].default = None;
+                            txn.catalog_mut().replace_table(&x.0, def);
+                        }
+                    }
+                }
                 txn.catalog_mut().drop_sequence(&QualName::new(&s.schema, &s.name));
             }
             (ObjectType::Sequence, Some(_)) => return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{base}\" is not a sequence"))),
@@ -588,10 +707,9 @@ fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> 
                 let t = txn.catalog().table_q(&table).cloned().ok_or_else(|| SqlError::undefined_table(&table.name))?;
                 if t.has_constraint(&index.name) {
                     let tname = display_name(txn.catalog(), &table);
-                    return Err(dependents_error(
-                        "index",
-                        &base,
-                        format!("constraint {} on table {tname} requires index {}", index.name, index.name),
+                    return Err(SqlError::new(
+                        code::DEPENDENT_OBJECTS_STILL_EXIST,
+                        format!("cannot drop index {base} because constraint {} on table {tname} requires it", index.name),
                     )
                     .with_hint(format!("You can drop constraint {} on table {tname} instead.", index.name)));
                 }
@@ -604,9 +722,13 @@ fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> 
                 let what = match d.object_type {
                     ObjectType::Table => "table",
                     ObjectType::View => "view",
+                    ObjectType::MaterializedView => "materialized view",
                     ObjectType::Index => "index",
                     _ => "sequence",
                 };
+                if d.object_type == ObjectType::Index && !d.if_exists {
+                    return Err(SqlError::new(code::UNDEFINED_OBJECT, format!("index \"{base}\" does not exist")));
+                }
                 missing(what)?;
                 notices.push(Notice { severity: "NOTICE", code: "00000", message: format!("{what} \"{base}\" does not exist, skipping") });
             }
@@ -614,6 +736,14 @@ fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> 
         }
     }
     Ok(QueryResult { tag: format!("DROP {kind}"), notices, ..Default::default() })
+}
+
+/// DROP ... CASCADE of the views depending on the dropped object.
+fn drop_views_cascade(txn: &mut Txn, views: &[Arc<pgmem_catalog::ViewDef>], notices: &mut Vec<Notice>) {
+    for v in views {
+        notices.push(Notice { severity: "NOTICE", code: "00000", message: format!("drop cascades to view {}", v.name) });
+        txn.catalog_mut().drop_view(&QualName::new(&v.schema, &v.name));
+    }
 }
 
 fn truncate(t: &ir::Truncate, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> {

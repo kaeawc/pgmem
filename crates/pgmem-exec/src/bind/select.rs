@@ -1017,6 +1017,11 @@ impl Binder<'_> {
             None => None,
         };
         match rel {
+            Some(Relation::Table(def)) if def.matview.as_ref().is_some_and(|m| !m.populated) => Err(SqlError::new(
+                code::OBJECT_NOT_IN_PREREQUISITE_STATE,
+                format!("materialized view \"{}\" has not been populated", def.name),
+            )
+            .with_hint("Use the REFRESH MATERIALIZED VIEW command.")),
             Some(Relation::Table(def)) => {
                 let mut cols = Vec::new();
                 let mut slots = Vec::new();

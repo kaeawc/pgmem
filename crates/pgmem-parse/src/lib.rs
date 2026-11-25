@@ -30,12 +30,17 @@ pub fn parse(sql: &str) -> SqlResult<Vec<Statement>> {
     let original = sql;
     search_cycle::clear();
     FK_SET_COLUMNS.with(|c| c.borrow_mut().clear());
+    VIEW_OPTIONS.with(|c| c.borrow_mut().clear());
+    CTAS_COLUMNS.with(|c| c.borrow_mut().clear());
     if sql.trim().trim_matches(';').trim().is_empty() {
         return Ok(vec![Statement::Empty]);
     }
     // SQL/JSON query functions are rewritten up front (sqlparser can't parse their clauses).
     let json_rewritten = sqljson::rewrite(sql);
     let sql = json_rewritten.as_deref().unwrap_or(sql);
+    // So are CREATE TABLE's LIKE elements (sqlparser keeps one, without its position).
+    let like_rewritten = rewrite_like(sql);
+    let sql = like_rewritten.as_deref().unwrap_or(sql);
     let parsed = parse_statements(sql).map(|s| (s, sql.to_owned())).or_else(|err| match rewrite_unsupported(sql) {
         // Retry Postgres syntax sqlparser lacks after rewriting it to an equivalent form.
         Some(rewritten) => parse_statements(&rewritten).map(|s| (s, rewritten)).map_err(|_| err),
@@ -66,6 +71,11 @@ pub fn parse(sql: &str) -> SqlResult<Vec<Statement>> {
 }
 
 thread_local! {
+    /// Trailing `WITH CHECK OPTION` / `WITH [NO] DATA` of CREATE VIEW statements, by view name:
+    /// (check option, with data).
+    static VIEW_OPTIONS: std::cell::RefCell<Vec<(String, bool, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// `CREATE TABLE name (a, b) AS ...` column name lists, by table name.
+    static CTAS_COLUMNS: std::cell::RefCell<Vec<(String, Vec<String>)>> = const { std::cell::RefCell::new(Vec::new()) };
     /// `ON DELETE SET NULL / SET DEFAULT [(cols)]` column lists in statement order (empty
     /// when there is none), stripped by the rewrite and taken by the lowering.
     static FK_SET_COLUMNS: std::cell::RefCell<std::collections::VecDeque<Vec<String>>> = const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
@@ -76,6 +86,122 @@ thread_local! {
 /// Postgres' `syntax error at or near "X"` for the first token at or after `at` in the text
 /// being lowered (`at end of input` when there is none): for syntax sqlparser accepts but
 /// Postgres' grammar rejects.
+/// The options the rewrite stripped from CREATE VIEW `name`: (check option, with data).
+pub(crate) fn take_view_options(name: &str) -> (bool, bool) {
+    VIEW_OPTIONS.with(|v| {
+        let mut v = v.borrow_mut();
+        match v.iter().position(|(n, _, _)| n == name) {
+            Some(i) => {
+                let (_, c, d) = v.remove(i);
+                (c, d)
+            }
+            None => (false, true),
+        }
+    })
+}
+
+/// Marker column name prefix for a `LIKE` element among CREATE TABLE columns:
+/// `"__pgmem_like source INCLUDING ..."` (see `rewrite_like`).
+pub(crate) const LIKE_MARKER: &str = "__pgmem_like ";
+
+/// `CREATE TABLE t (a int, LIKE s INCLUDING ALL, ...)`: each LIKE element becomes a marker
+/// column `"__pgmem_like s INCLUDING ALL" int` the lowering turns back into a LIKE clause.
+fn rewrite_like(sql: &str) -> Option<String> {
+    use sqlparser::tokenizer::{Token, Tokenizer};
+    if !sql.to_ascii_lowercase().contains("like") {
+        return None;
+    }
+    let tokens = Tokenizer::new(&PostgreSqlDialect {}, sql).tokenize().ok()?;
+    let sig: Vec<usize> = tokens.iter().enumerate().filter(|(_, t)| !matches!(t, Token::Whitespace(_))).map(|(i, _)| i).collect();
+    let mut replace: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+    let mut drop = vec![false; tokens.len()];
+    let mut depth = 0usize;
+    let mut in_create_table = false;
+    for (k, &i) in sig.iter().enumerate() {
+        match &tokens[i] {
+            Token::SemiColon => in_create_table = false,
+            Token::LParen => depth += 1,
+            Token::RParen => depth = depth.saturating_sub(1),
+            _ if is_word(&tokens, &sig, k, "CREATE") => {
+                // CREATE [GLOBAL | LOCAL] [TEMP | TEMPORARY | UNLOGGED] TABLE
+                in_create_table = (1..=3).any(|o| is_word(&tokens, &sig, k + o, "TABLE"));
+            }
+            _ if in_create_table
+                && depth == 1
+                && is_word(&tokens, &sig, k, "LIKE")
+                && k > 0
+                && matches!(tokens[sig[k - 1]], Token::LParen | Token::Comma) =>
+            {
+                let mut spec = String::new();
+                let mut n = k + 1;
+                while let Some(&j) = sig.get(n) {
+                    match &tokens[j] {
+                        Token::Comma | Token::RParen => break,
+                        Token::Period => spec.push('.'),
+                        Token::Word(w) => {
+                            if !spec.is_empty() && !spec.ends_with('.') {
+                                spec.push(' ');
+                            }
+                            spec.push_str(&if w.quote_style.is_some() { w.value.clone() } else { w.value.to_lowercase() });
+                        }
+                        _ => return None,
+                    }
+                    drop[j] = true;
+                    n += 1;
+                }
+                replace.insert(i, format!("\"{LIKE_MARKER}{}\" int", spec.replace('"', "\"\"")));
+            }
+            _ => {}
+        }
+    }
+    if replace.is_empty() {
+        return None;
+    }
+    Some(tokens.iter().enumerate().filter(|(i, _)| !drop[*i]).map(|(i, t)| replace.remove(&i).unwrap_or_else(|| t.to_string())).collect())
+}
+
+/// The column names the rewrite stripped from `CREATE TABLE name (a, b) AS`.
+pub(crate) fn take_ctas_columns(name: &str) -> Vec<String> {
+    CTAS_COLUMNS.with(|v| {
+        let mut v = v.borrow_mut();
+        v.iter().position(|(n, _)| n == name).map(|i| v.remove(i).1).unwrap_or_default()
+    })
+}
+
+/// `CREATE TABLE name (a, b) AS query`: the name list is recorded and stripped.
+fn rewrite_ctas_columns(tokens: &Tokens, sig: &[usize], k: usize, drop: &mut [bool]) {
+    use sqlparser::tokenizer::Token;
+    if tokens[sig[k]] != Token::LParen || k == 0 {
+        return;
+    }
+    let Some(close) = matching_paren(tokens, sig, k) else { return };
+    if !is_word(tokens, sig, close + 1, "AS") {
+        return;
+    }
+    let start = sig[..k].iter().rposition(|&j| tokens[j] == Token::SemiColon).map_or(0, |p| p + 1);
+    // The list follows the table name: `TABLE [IF NOT EXISTS] [schema.]name (`.
+    let before_name = if k >= 2 && tokens[sig[k - 2]] == Token::Period { k.wrapping_sub(4) } else { k.wrapping_sub(2) };
+    if !is_word(tokens, sig, start, "CREATE")
+        || !(is_word(tokens, sig, before_name, "TABLE") || is_word(tokens, sig, before_name, "EXISTS"))
+    {
+        return;
+    }
+    let Token::Word(w) = &tokens[sig[k - 1]] else { return };
+    let name = if w.quote_style.is_some() { w.value.clone() } else { w.value.to_lowercase() };
+    let mut cols = Vec::new();
+    for (n, &j) in sig[k + 1..close].iter().enumerate() {
+        match &tokens[j] {
+            Token::Word(c) if n % 2 == 0 => cols.push(if c.quote_style.is_some() { c.value.clone() } else { c.value.to_lowercase() }),
+            Token::Comma if n % 2 == 1 => {}
+            _ => return,
+        }
+    }
+    for &j in &sig[k..=close] {
+        drop[j] = true;
+    }
+    CTAS_COLUMNS.with(|c| c.borrow_mut().push((name, cols)));
+}
+
 /// The next recorded `SET NULL / SET DEFAULT (cols)` list.
 pub(crate) fn take_fk_set_columns() -> Vec<String> {
     FK_SET_COLUMNS.with(|c| c.borrow_mut().pop_front().unwrap_or_default())
@@ -292,6 +418,51 @@ fn lock_marker(insert_after: &mut std::collections::HashMap<usize, String>, sig:
     if k > 0 {
         insert_after.insert(sig[k - 1], format!(" FOR SHARE OF {marker}"));
     }
+}
+
+/// CREATE [OR REPLACE] [MATERIALIZED] VIEW name ... `WITH [CASCADED | LOCAL] CHECK OPTION` /
+/// `WITH [NO] DATA` at the end of the statement: recorded by view name and stripped.
+fn rewrite_view_options(tokens: &Tokens, sig: &[usize], k: usize, drop: &mut [bool]) {
+    use sqlparser::tokenizer::Token;
+    if !is_word(tokens, sig, k, "WITH") {
+        return;
+    }
+    let end = |o: usize| sig.get(k + o).is_none_or(|&j| matches!(tokens[j], Token::SemiColon | Token::EOF));
+    let (len, check, data) = if is_word(tokens, sig, k + 1, "CHECK") && is_word(tokens, sig, k + 2, "OPTION") && end(3) {
+        (3, true, true)
+    } else if (is_word(tokens, sig, k + 1, "CASCADED") || is_word(tokens, sig, k + 1, "LOCAL"))
+        && is_word(tokens, sig, k + 2, "CHECK")
+        && is_word(tokens, sig, k + 3, "OPTION")
+        && end(4)
+    {
+        (4, true, true)
+    } else if is_word(tokens, sig, k + 1, "DATA") && end(2) {
+        (2, false, true)
+    } else if is_word(tokens, sig, k + 1, "NO") && is_word(tokens, sig, k + 2, "DATA") && end(3) {
+        (3, false, false)
+    } else {
+        return;
+    };
+    // The statement's CREATE ... VIEW name.
+    let start = sig[..k].iter().rposition(|&j| tokens[j] == Token::SemiColon).map_or(0, |p| p + 1);
+    let Some(v) = (start..k).find(|&n| is_word(tokens, sig, n, "VIEW")) else { return };
+    if !is_word(tokens, sig, start, "CREATE") {
+        return;
+    }
+    let Some(Token::Word(w)) = sig.get(v + 1).map(|&j| &tokens[j]) else { return };
+    let mut name = if w.quote_style.is_some() { w.value.clone() } else { w.value.to_lowercase() };
+    // A qualified name: the last part.
+    let mut n = v + 2;
+    while sig.get(n).is_some_and(|&j| tokens[j] == Token::Period) {
+        if let Some(Token::Word(w)) = sig.get(n + 1).map(|&j| &tokens[j]) {
+            name = if w.quote_style.is_some() { w.value.clone() } else { w.value.to_lowercase() };
+        }
+        n += 2;
+    }
+    for o in 0..len {
+        drop[sig[k + o]] = true;
+    }
+    VIEW_OPTIONS.with(|c| c.borrow_mut().push((name, check, data)));
 }
 
 /// `ON DELETE SET NULL (cols)` / `SET DEFAULT (cols)`: records every such action's column list
@@ -553,6 +724,8 @@ fn rewrite_unsupported(sql: &str) -> Option<String> {
         rewrite_frame_exclude(&tokens, &sig, k, &mut drop, &mut insert_after);
         rewrite_current_of(&tokens, &sig, k, &mut drop, &mut insert_after);
         rewrite_fk_set_columns(&tokens, &sig, k, &mut drop);
+        rewrite_view_options(&tokens, &sig, k, &mut drop);
+        rewrite_ctas_columns(&tokens, &sig, k, &mut drop);
         // MERGE's `THEN INSERT DEFAULT VALUES` → `THEN INSERT VALUES (__pgmem_default_values())`.
         if word(&tokens[i], "THEN") && at(1, "INSERT") && at(2, "DEFAULT") && at(3, "VALUES") {
             drop[sig[k + 2]] = true;
@@ -876,7 +1049,27 @@ pub(crate) fn unsupported(what: &str) -> SqlError {
 pub(crate) fn lower_statement(stmt: sq::Statement) -> SqlResult<Statement> {
     use sq::Statement as S;
     Ok(match stmt {
-        S::Query(q) => {
+        S::Query(mut q) => {
+            // `SELECT ... INTO [TEMP | UNLOGGED] [TABLE] t ...` is CREATE TABLE t AS.
+            if let sq::SetExpr::Select(s) = q.body.as_mut()
+                && let Some(into) = s.into.take()
+            {
+                let name = match into.targets.as_slice() {
+                    [sq::Expr::Identifier(i)] => pgmem_ir::ObjectName(vec![ident(i)]),
+                    [sq::Expr::CompoundIdentifier(parts)] => pgmem_ir::ObjectName(parts.iter().map(ident).collect()),
+                    _ => return Err(SqlError::syntax("syntax error at or near \"INTO\"")),
+                };
+                let query = query::lower_query(*q)?;
+                return Ok(Statement::CreateTable(Box::new(pgmem_ir::CreateTable {
+                    name,
+                    if_not_exists: false,
+                    temporary: into.temporary,
+                    columns: Vec::new(),
+                    constraints: Vec::new(),
+                    as_query: Some(Box::new(query)),
+                    options: pgmem_ir::CreateTableOptions { unlogged: into.unlogged, ..Default::default() },
+                })));
+            }
             let mut q = query::lower_query(*q)?;
             // `WITH ... INSERT / UPDATE / DELETE`: the WITH belongs to the statement.
             if let pgmem_ir::SetExpr::Dml(_) = q.body {
@@ -899,6 +1092,20 @@ pub(crate) fn lower_statement(stmt: sq::Statement) -> SqlResult<Statement> {
         S::Merge(m) => Statement::Merge(Box::new(dml::lower_merge(m)?)),
         S::CreateTable(ct) => Statement::CreateTable(Box::new(ddl::lower_create_table(ct)?)),
         S::CreateView(cv) => Statement::CreateView(Box::new(ddl::lower_create_view(cv)?)),
+        S::RefreshMaterializedView(r) => Statement::RefreshMatview {
+            name: object_name(&r.name)?,
+            concurrently: r.concurrently,
+            with_data: r.with_data.is_none_or(|d| d),
+        },
+        S::AlterView(av) => match av.operation {
+            sq::AlterViewOperation::RenameTo { new_name } => Statement::RenameView {
+                name: object_name(&av.name)?,
+                new_name: object_name(&new_name)?.base().to_owned(),
+                materialized: av.materialized,
+                if_exists: av.if_exists,
+            },
+            _ => return Err(unsupported("this ALTER VIEW action")),
+        },
         S::CreateIndex(ci) => Statement::CreateIndex(Box::new(ddl::lower_create_index(ci)?)),
         S::AlterTable(at) => Statement::AlterTable(Box::new(ddl::lower_alter_table(at)?)),
         S::CreateSequence { name, if_not_exists, sequence_options, .. } => {
@@ -907,7 +1114,8 @@ pub(crate) fn lower_statement(stmt: sq::Statement) -> SqlResult<Statement> {
         S::Drop { object_type, if_exists, names, cascade, .. } => {
             let object_type = match object_type {
                 sq::ObjectType::Table => ObjectType::Table,
-                sq::ObjectType::View | sq::ObjectType::MaterializedView => ObjectType::View,
+                sq::ObjectType::View => ObjectType::View,
+                sq::ObjectType::MaterializedView => ObjectType::MaterializedView,
                 sq::ObjectType::Index => ObjectType::Index,
                 sq::ObjectType::Sequence => ObjectType::Sequence,
                 sq::ObjectType::Schema => ObjectType::Schema,

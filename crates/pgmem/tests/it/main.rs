@@ -35,6 +35,7 @@ mod current_timestamp;
 mod date_trunc;
 mod datetime_fidelity;
 mod datetime_funcs;
+mod ddl_fidelity;
 mod delete;
 mod derived_table;
 mod distinct;

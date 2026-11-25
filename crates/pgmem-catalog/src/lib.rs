@@ -169,6 +169,10 @@ pub struct TableDef {
     pub columns: Vec<ColumnDef>,
     pub constraints: Vec<Constraint>,
     pub indexes: Vec<IndexDef>,
+    /// Set for a materialized view (stored like a table, refreshed from its query).
+    pub matview: Option<Box<MatView>>,
+    /// `CREATE UNLOGGED TABLE` (`relpersistence = 'u'`).
+    pub unlogged: bool,
 }
 
 impl TableDef {
@@ -212,6 +216,16 @@ pub struct ViewDef {
     /// The effective search path when the view was created: its names resolve against it,
     /// as Postgres binds a view's relations at creation.
     pub search_path: Vec<String>,
+    /// `WITH CHECK OPTION`: rows written through the view must stay visible in it.
+    pub check_option: bool,
+}
+
+/// What makes a table a materialized view: its defining query and whether it holds data.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MatView {
+    pub query: pgmem_ir::Query,
+    pub search_path: Vec<String>,
+    pub populated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1010,6 +1024,8 @@ mod tests {
             columns: vec![ColumnDef::new("id", Type::Int4)],
             constraints: vec![],
             indexes: vec![],
+            matview: None,
+            unlogged: false,
         }
     }
 

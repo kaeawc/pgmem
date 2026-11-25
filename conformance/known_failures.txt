@@ -12,11 +12,8 @@ catalog/orm_reflection.slt:8a89934c4b7330b3  # SELECT c.relname,
 catalog/orm_reflection.slt:63a6c813bc48d939  # SELECT indexname, array_agg(attname ORDER BY arridx), indisunique, indisprimary, amname
 catalog/orm_reflection.slt:b4efb73737c9ebd0  # SELECT ns.nspname, typ.typname, typ.typtype, typ.typcategory,
 catalog/orm_reflection.slt:ee468900ba31ee71  # SELECT r.rngsubtype::regtype::text FROM pg_range r WHERE r.rngtypid = 'int4range'::regtype
-catalog/pg_catalog.slt:a46a24d5a4ee97c4  # CREATE MATERIALIZED VIEW totals AS SELECT from_id, sum(amount) AS total FROM transfers GROUP BY from_id
-catalog/pg_catalog.slt:3ae94af5d92c31f6  # SELECT c.relname, c.relkind
 catalog/pg_catalog.slt:11ba6aa684a25920  # SELECT sequencename, data_type::text, start_value, min_value, max_value, increment_by, cycle, cache_size, last_value
 catalog/pg_catalog.slt:41f2057bee0e6dd5  # SELECT pg_get_viewdef('rich'::regclass, true)
-catalog/pg_catalog.slt:eceff294cfbb8e20  # SELECT matviewname, ispopulated FROM pg_matviews WHERE schemaname = 'public'
 catalog/pg_catalog.slt:7d01c52404c34822  # CREATE FUNCTION double_it(n int) RETURNS int LANGUAGE sql IMMUTABLE AS $$ SELECT n * 2 $$
 catalog/pg_catalog.slt:8a7afb8930dc40b5  # SELECT proname, pronargs, provolatile, prorettype::regtype::text, pg_get_function_arguments(oid), pg_get_function_result(oid)
 catalog/pg_catalog.slt:a085ef479946ad0c  # CREATE TABLE events_2024 PARTITION OF events FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
@@ -55,40 +52,6 @@ constraints/exclude.slt:c5dcb59dcd0f1d91  # SELECT r FROM dex ORDER BY r
 constraints/exclude.slt:b68c916968d7b6da  # CREATE TABLE temporal (id int, valid daterange, PRIMARY KEY (id, valid WITHOUT OVERLAPS))
 constraints/exclude.slt:c5c4b2a15d6e3e8b  # CREATE TABLE temporal_r (id int4range, valid daterange, PRIMARY KEY (id, valid WITHOUT OVERLAPS)); INSERT INTO temporal_r VALUES ('[1,2)', '[2024-01-01,2024-02-01)'), ('[1,2)', '[2024-02-01,2024-03-01)')
 constraints/exclude.slt:8b82178e368cd681  # INSERT INTO temporal_r VALUES ('[1,2)', '[2024-01-15,2024-01-20)')
-ddl/alter_table.slt:2a30c0766251ab31  # ALTER TABLE ty ALTER COLUMN b TYPE int
-ddl/alter_table.slt:9b74524baf76d354  # ALTER TABLE t ADD CONSTRAINT score_nonneg CHECK (score >= 0); ALTER TABLE t RENAME CONSTRAINT score_nonneg TO score_positive
-ddl/alter_table.slt:a4b9f6bf5b64c464  # INSERT INTO t (id, name, score) VALUES (6, 'f', -1)
-ddl/alter_table.slt:e64072280b8f5593  # ALTER TABLE t DROP CONSTRAINT score_positive
-ddl/alter_table.slt:ba4ef31783d25d08  # ALTER TABLE t DROP COLUMN x
-ddl/alter_table.slt:7a42530afe8921d2  # ALTER TABLE t ALTER COLUMN x TYPE bigint
-ddl/alter_table.slt:6d0f23952e0e494a  # ALTER TABLE t DROP COLUMN x CASCADE
-ddl/alter_table.slt:09949ffdf5745d33  # SELECT * FROM tv
-ddl/create_table.slt:8c071cc6414a59d3  # CREATE TABLE src (id int PRIMARY KEY, name text NOT NULL DEFAULT 'anon', note varchar(20)); INSERT INTO src VALUES (1, 'a', 'x'), (2, 'b', NULL), (3, 'c', 'z'); CREATE TABLE copy_plain (LIKE src)
-ddl/create_table.slt:10db5eb05d4b25c6  # INSERT INTO copy_plain (id) VALUES (1)
-ddl/create_table.slt:61e631d7c2af4d0a  # INSERT INTO copy_plain (id, name) VALUES (1, 'n'), (1, 'dup ok'); CREATE TABLE copy_all (LIKE src INCLUDING ALL, extra int); INSERT INTO copy_all (id) VALUES (1)
-ddl/create_table.slt:89c626a6c49feead  # INSERT INTO copy_all (id) VALUES (1)
-ddl/create_table.slt:4ee74a537ecfb9da  # SELECT id, name, note, extra FROM copy_all
-ddl/create_table.slt:af467a789c60fae2  # CREATE TABLE ctas AS SELECT id, upper(name) AS uname FROM src WHERE id < 3
-ddl/create_table.slt:1569fe0205989b95  # SELECT id, uname FROM ctas ORDER BY id
-ddl/create_table.slt:1eb6e59a5bdd508a  # CREATE TABLE ctas_empty AS SELECT * FROM src WITH NO DATA; CREATE TABLE ctas_cols (a, b) AS VALUES (1, 'one'), (2, 'two')
-ddl/create_table.slt:e50070c21a471da9  # SELECT a, b FROM ctas_cols ORDER BY a
-ddl/create_table.slt:148890edabdc9695  # CREATE TABLE ctas AS SELECT 1
-ddl/create_table.slt:af47f381e22fee81  # SELECT id, name INTO selinto FROM src WHERE id = 3
-ddl/create_table.slt:efd3ec5485c89293  # SELECT id, name FROM selinto
-ddl/create_table.slt:5bbd1a0375e44100  # SELECT (SELECT count(*) FROM tmp1), (SELECT count(*) FROM unl), (SELECT count(*) FROM tmp2)
-ddl/create_table.slt:f00debd5b36659ce  # SELECT relname, relpersistence FROM pg_class WHERE relname IN ('tmp1', 'unl', 'src') ORDER BY relname
-ddl/create_table.slt:d5c9cceca396a9e8  # SELECT (SELECT count(*) FROM src), (SELECT count(*) FROM public.src)
-ddl/create_table.slt:094e9270eb3d0521  # SELECT count(*) FROM src
-ddl/drop.slt:4e010ef3b228f453  # SELECT (SELECT count(*) FROM pg_constraint WHERE conrelid = 'child'::regclass AND contype = 'f'), (SELECT count(*) FROM pg_views WHERE viewname = 'parent_v')
-ddl/drop.slt:66a0712b7d0a934c  # DROP VIEW v1
-ddl/drop.slt:b70ebd911aa82dbe  # DROP VIEW v1 CASCADE
-ddl/drop.slt:099bf3fdf57b0a9d  # SELECT * FROM v2
-ddl/drop.slt:809451c722fbbc02  # DROP SEQUENCE s_id_seq
-ddl/drop.slt:4b62fa7fe746c4df  # DROP SEQUENCE free_seq
-ddl/drop.slt:aeb97bafdccaabcd  # DROP SEQUENCE free_seq CASCADE
-ddl/drop.slt:12c68d0f99ec1e86  # SELECT column_default FROM information_schema.columns WHERE table_name = 'uses_seq'
-ddl/drop.slt:b354b3ca9bb230dd  # DROP INDEX u_a_key
-ddl/drop.slt:7285d1fb9342cf1a  # DROP INDEX u_plain
 ddl/drop.slt:1cfa7e5ee05f912c  # CREATE FUNCTION f_one() RETURNS int LANGUAGE sql AS 'SELECT 1'; CREATE TABLE fdep (a int DEFAULT f_one())
 ddl/drop.slt:f80b330da34f9678  # DROP FUNCTION f_one()
 ddl/drop.slt:f44dea9466d1bb76  # DROP FUNCTION f_one() CASCADE; INSERT INTO fdep DEFAULT VALUES
@@ -125,13 +88,6 @@ ddl/identity.slt:5eeae3f3a1d54d04  # ALTER TABLE idd ALTER COLUMN id DROP IDENTI
 ddl/identity.slt:b3928a96f5b70be3  # INSERT INTO idd (v) VALUES ('noid')
 ddl/identity.slt:e5c4fdadc77719b7  # CREATE TABLE addid (id int NOT NULL, v text); ALTER TABLE addid ALTER COLUMN id ADD GENERATED BY DEFAULT AS IDENTITY; INSERT INTO addid (v) VALUES ('x'); ALTER TABLE addid ADD COLUMN id2 int GENERATED ALWAYS AS IDENTITY
 ddl/identity.slt:cff34436aed6c5a9  # SELECT id, id2, v FROM addid
-ddl/indexes.slt:3a05b0740db02512  # INSERT INTO nn VALUES (NULL)
-ddl/indexes.slt:2338be0289d070b4  # CREATE INDEX bad ON accounts USING nosuchmethod (id)
-ddl/indexes.slt:7eba0e995fec370e  # CREATE INDEX CONCURRENTLY accounts_conc2 ON accounts (deleted_at)
-ddl/indexes.slt:4c6e700a408aabc9  # ALTER INDEX accounts_org_idx RENAME TO accounts_org_ix; ALTER INDEX IF EXISTS nosuch RENAME TO other; DROP INDEX accounts_email_hash, accounts_brin
-ddl/indexes.slt:9e875ec61d297af5#2  # SELECT indexname FROM pg_indexes WHERE tablename = 'accounts' ORDER BY indexname
-ddl/indexes.slt:f05601fa90c15cdd  # CREATE TABLE ui (a int); CREATE UNIQUE INDEX ui_a_idx ON ui (a); ALTER TABLE ui ADD CONSTRAINT ui_a_unique UNIQUE USING INDEX ui_a_idx
-ddl/indexes.slt:cc9b2bc18077ba1f  # SELECT conname, contype FROM pg_constraint WHERE conrelid = 'ui'::regclass
 ddl/migrations.slt:57bc92a514011689  # DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'status') THEN CREATE TYPE status AS ENUM ('a', 'b'); END IF; END $$; DO $$ BEGIN CREATE TYPE status AS ENUM ('a'); EXCEPTION WHEN duplicate_object THEN null; END $$
 ddl/migrations.slt:751b49cfc21be4f7  # DO $$ DECLARE i int; BEGIN FOR i IN 1..3 LOOP INSERT INTO schema_migrations VALUES ('do_' || i); END LOOP; END $$; DO $$ BEGIN EXECUTE 'ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS dirty boolean NOT NULL DEFAULT false'; END $$
 ddl/migrations.slt:d6fca8810f9b16fb  # SELECT version, dirty FROM schema_migrations ORDER BY version
@@ -177,34 +133,11 @@ ddl/sequences.slt:14b63fe6bd155b0c  # SELECT sequence_name, data_type, start_val
 ddl/sequences.slt:7d3d03566d8d9933  # SELECT nextval('owned_seq')
 ddl/truncate_comment.slt:524dc53c8360ddd6  # CREATE SCHEMA s; COMMENT ON SCHEMA s IS 'a schema'; CREATE INDEX child_pid ON child (pid); COMMENT ON INDEX child_pid IS 'fk index'; COMMENT ON CONSTRAINT child_pid_fkey ON child IS 'fk'; CREATE VIEW pv AS SELECT * FROM parent; COMMENT ON VIEW pv IS 'view'; CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1'; COMMENT ON FUNCTION f() IS 'fn'
 ddl/truncate_comment.slt:dfb1c8121b9e9f5f  # SELECT obj_description('child_pid'::regclass, 'pg_class'), obj_description('pv'::regclass, 'pg_class'), obj_description('f'::regproc, 'pg_proc'), (SELECT obj_description(oid, 'pg_namespace') FROM pg_namespace WHERE nspname = 's')
-ddl/views.slt:f563b8c239029a8f  # CREATE OR REPLACE VIEW paid AS SELECT id, amount FROM orders
-ddl/views.slt:8a6c0bb6526cdde4  # CREATE OR REPLACE VIEW paid AS SELECT id, customer::varchar AS customer, amount, status FROM orders
-ddl/views.slt:218924e79c24263a  # INSERT INTO paid (id, customer, amount, status) VALUES (5, 'dan', 50, 'paid'); UPDATE paid SET amount = amount + 1 WHERE id = 2; DELETE FROM paid WHERE id = 3
-ddl/views.slt:e951e1a9b45de279  # SELECT id, customer, amount, status FROM orders ORDER BY id
-ddl/views.slt:906b97d5d84bd117  # CREATE VIEW paid_checked AS SELECT id, customer, amount, status FROM orders WHERE status = 'paid' WITH CHECK OPTION
-ddl/views.slt:269aefebadcda307  # INSERT INTO paid_checked VALUES (7, 'fay', 70, 'open')
-ddl/views.slt:af51b554a2c17bb4  # UPDATE paid_checked SET status = 'open' WHERE id = 2
-ddl/views.slt:c59e53f4bb036741  # INSERT INTO paid_checked VALUES (7, 'fay', 70, 'paid')
-ddl/views.slt:1ee5496b0295f6cf  # INSERT INTO totals VALUES ('x', 1)
 ddl/views.slt:d13b76c4e1838ecd  # CREATE FUNCTION totals_ins() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO orders (id, customer, amount) VALUES (100, NEW.who, NEW.total); RETURN NEW; END $$; CREATE TRIGGER totals_ins INSTEAD OF INSERT ON totals FOR EACH ROW EXECUTE FUNCTION totals_ins(); INSERT INTO totals VALUES ('zed', 5)
 ddl/views.slt:990ab71232e8c679  # SELECT id, customer, amount, status FROM orders WHERE id = 100
-ddl/views.slt:46951373f09a90ab  # CREATE VIEW big_paid AS SELECT * FROM paid WHERE amount > 25; ALTER VIEW big_paid RENAME TO large_paid
-ddl/views.slt:8dcea775761ed2b0  # SELECT id FROM large_paid ORDER BY id
-ddl/views.slt:df7f7d0f149cf399  # SELECT table_name, is_updatable, is_insertable_into FROM information_schema.views WHERE table_schema = 'public' ORDER BY table_name
-ddl/views.slt:0ca6611819fd5547  # CREATE MATERIALIZED VIEW mv_totals AS SELECT customer, sum(amount) AS total FROM orders GROUP BY customer; INSERT INTO orders VALUES (200, 'ann', 1000, 'open')
 ddl/views.slt:5f6865c2c4faf673  # SELECT customer, total FROM mv_totals ORDER BY customer
-ddl/views.slt:fefb757378766021  # REFRESH MATERIALIZED VIEW mv_totals
 ddl/views.slt:5f6865c2c4faf673#2  # SELECT customer, total FROM mv_totals ORDER BY customer
-ddl/views.slt:b054481aa24bc92b  # INSERT INTO mv_totals VALUES ('x', 1)
-ddl/views.slt:53f3b8809e851543  # REFRESH MATERIALIZED VIEW CONCURRENTLY mv_totals
-ddl/views.slt:07dd01140bc21023  # CREATE UNIQUE INDEX mv_totals_customer ON mv_totals (customer)
-ddl/views.slt:53f3b8809e851543#2  # REFRESH MATERIALIZED VIEW CONCURRENTLY mv_totals
-ddl/views.slt:abc09a153dcfb3d1  # CREATE MATERIALIZED VIEW mv_empty AS SELECT id FROM orders WITH NO DATA
-ddl/views.slt:2a2c9ef0ca31e280  # SELECT * FROM mv_empty
-ddl/views.slt:9988938598b9534b  # REFRESH MATERIALIZED VIEW mv_empty
 ddl/views.slt:fb8c7c353fbd2694  # SELECT count(*) FROM mv_empty
-ddl/views.slt:ee61cccb4f6b2ca5  # DROP MATERIALIZED VIEW mv_totals
-ddl/views.slt:c7c87224f956484a  # SELECT matviewname, ispopulated FROM pg_matviews WHERE schemaname = 'public' ORDER BY 1
 dml/on_conflict.slt:8ce9ce1dd7ed5cb8  # INSERT INTO accounts VALUES (2, 'ALICE@example.COM') ON CONFLICT (lower(email)) DO UPDATE SET email = EXCLUDED.email RETURNING id, email
 functions/arrays.slt:32e8f695cdf0b645  # SELECT array_dims(ARRAY[1, 2, 3]), array_dims(ARRAY[[1, 2], [3, 4]]), array_dims('[2:4]={1,2,3}'::int[]), array_dims(ARRAY[]::int[])
 functions/arrays.slt:2dfed30613a3235b  # SELECT array_lower('[2:4]={1,2,3}'::int[], 1), array_upper('[2:4]={1,2,3}'::int[], 1), array_upper(ARRAY[1, 2], 1), array_lower(ARRAY[]::int[], 1)
