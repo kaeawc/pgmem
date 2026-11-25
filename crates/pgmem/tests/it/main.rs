@@ -102,6 +102,7 @@ mod position;
 mod qualified_star;
 mod query_fidelity;
 mod query_statements;
+mod range_types;
 mod recursive_cte;
 mod regex;
 mod regexp_funcs;

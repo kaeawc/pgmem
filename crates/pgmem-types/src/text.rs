@@ -37,6 +37,14 @@ pub fn encode(v: &Value, ty: &Type) -> SqlResult<String> {
         (Value::Reg(_, _, name), _) => name.clone(),
         (Value::Enum(t, label), _) => crate::usertype::enum_label(*t, *label)?,
         (Value::Record(t, fields), _) => crate::usertype::format_record(*t, fields)?,
+        (Value::Range(r), ty) => {
+            let sub = range_subtype(ty, v);
+            crate::range::format(r, &|b| encode(b, &sub))?
+        }
+        (Value::Multirange(_, rs), ty) => {
+            let sub = range_subtype(ty, v);
+            crate::range::format_multi(rs, &|b| encode(b, &sub))?
+        }
         (Value::Array(items), Type::Int2Vector | Type::OidVector) => {
             items.iter().map(|i| encode(i, &i.natural_type())).collect::<SqlResult<Vec<_>>>()?.join(" ")
         }
@@ -102,6 +110,19 @@ pub fn decode(s: &str, ty: &Type) -> SqlResult<Value> {
         // Domain input is the base type's; the executor checks the constraints.
         Type::Domain(_) => decode(s, &ty.base()),
         Type::Record => Err(SqlError::feature_not_supported("input of anonymous composite types is not implemented")),
+        Type::Range(sub) => crate::range::parse(s, sub, &|b| decode(b, sub)).map(|r| Value::Range(Box::new(r))),
+        Type::Multirange(sub) => crate::range::parse_multi(s, sub, &|b| decode(b, sub)).map(|rs| Value::Multirange((**sub).clone(), rs)),
+    }
+}
+
+/// The subtype a range value's bounds print as.
+fn range_subtype(ty: &Type, v: &Value) -> Type {
+    match ty {
+        Type::Range(s) | Type::Multirange(s) => (**s).clone(),
+        _ => match v.natural_type() {
+            Type::Range(s) | Type::Multirange(s) => *s,
+            _ => Type::Text,
+        },
     }
 }
 

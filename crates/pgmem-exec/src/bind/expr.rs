@@ -252,6 +252,8 @@ fn aggregate_kind(name: &str) -> Option<AggKind> {
         "bool_or" => AggKind::BoolOr,
         "string_agg" => AggKind::StringAgg,
         "array_agg" => AggKind::ArrayAgg,
+        "range_agg" => AggKind::RangeAgg,
+        "range_intersect_agg" => AggKind::RangeIntersectAgg,
         "jsonb_agg" => AggKind::JsonbAgg,
         "json_agg" | "__pgmem_json_arrayagg" => AggKind::JsonAgg,
         "jsonb_agg_strict" => AggKind::JsonbAggStrict,
@@ -343,6 +345,14 @@ fn aggregate_types(kind: AggKind, name: &str, args: &[Type]) -> SqlResult<(Vec<T
             (vec![t.clone()], t)
         }
         AggKind::BoolAnd | AggKind::BoolOr => (vec![Type::Bool], Type::Bool),
+        AggKind::RangeAgg | AggKind::RangeIntersectAgg => match &first {
+            Type::Range(s) => {
+                let ret = if kind == AggKind::RangeAgg { Type::Multirange(s.clone()) } else { first.clone() };
+                (vec![first.clone()], ret)
+            }
+            Type::Multirange(_) => (vec![first.clone()], first.clone()),
+            _ => return Err(err()),
+        },
         AggKind::StringAgg => match args {
             [Type::Bytea, _] => (vec![Type::Bytea, Type::Bytea], Type::Bytea),
             [_, _] => (vec![Type::Text, Type::Text], Type::Text),

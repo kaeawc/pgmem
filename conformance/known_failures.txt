@@ -30,26 +30,6 @@ catalog/regtypes.slt:4f75d112acc7d9bf  # SELECT to_regproc('upper')::text, to_re
 catalog/regtypes.slt:2fc6c49cbe03bde5  # SELECT pg_table_is_visible('t'::regclass), pg_table_is_visible('other.thing'::regclass)
 catalog/settings.slt:83a5425c178e720d  # UPDATE pg_settings SET setting = 'via_update' WHERE name = 'application_name'
 catalog/settings.slt:77a2ba0cde58e2c2  # SHOW application_name
-constraints/exclude.slt:45d84053fe80cee8  # CREATE TABLE bookings (room int, during tsrange, EXCLUDE USING gist (during WITH &&)); INSERT INTO bookings VALUES (1, '[2024-01-01 10:00, 2024-01-01 11:00)'), (1, '[2024-01-01 11:00, 2024-01-01 12:00)')
-constraints/exclude.slt:946c18beea9bcd21  # INSERT INTO bookings VALUES (2, '[2024-01-01 10:30, 2024-01-01 10:45)')
-constraints/exclude.slt:7027a6a7677e1821  # SELECT room, during FROM bookings ORDER BY during
-constraints/exclude.slt:21455cc9dc49af2c  # CREATE TABLE eq (a int, EXCLUDE (a WITH =)); INSERT INTO eq VALUES (1), (2), (NULL), (NULL)
-constraints/exclude.slt:a42e0ce4f587e8ee  # INSERT INTO eq VALUES (1)
-constraints/exclude.slt:6febde53cc35d80e  # UPDATE eq SET a = 1 WHERE a = 2
-constraints/exclude.slt:fc79ce16b857843c  # CREATE TABLE rooms (room int, during tsrange, EXCLUDE USING gist (room WITH =, during WITH &&))
-constraints/exclude.slt:89ef514a174c994a  # CREATE TABLE shifts (worker int, during int4range, active boolean, CONSTRAINT no_overlap EXCLUDE USING gist (during WITH &&) WHERE (active)); INSERT INTO shifts VALUES (1, '[1,5)', true), (2, '[3,8)', false)
-constraints/exclude.slt:a4b625a8a27275b5  # INSERT INTO shifts VALUES (3, '[4,6)', true)
-constraints/exclude.slt:409057f6a3916898  # INSERT INTO shifts VALUES (3, '[5,6)', true)
-constraints/exclude.slt:fdf724f9933c7b72  # CREATE TABLE later (r int4range); INSERT INTO later VALUES ('[1,3)'), ('[2,4)')
-constraints/exclude.slt:a7651552de190474  # ALTER TABLE later ADD EXCLUDE USING gist (r WITH &&)
-constraints/exclude.slt:c7ae5c2dc93f7ae8  # DELETE FROM later WHERE r = '[2,4)'; ALTER TABLE later ADD CONSTRAINT later_excl EXCLUDE USING gist (r WITH &&)
-constraints/exclude.slt:a10ae6a9ff0cd417  # SELECT conname, contype FROM pg_constraint WHERE conrelid = 'later'::regclass
-constraints/exclude.slt:50e864871a939857  # CREATE TABLE dex (r int4range, EXCLUDE USING gist (r WITH &&) DEFERRABLE INITIALLY DEFERRED)
-constraints/exclude.slt:9eb99ce26a1fcb75  # BEGIN; INSERT INTO dex VALUES ('[1,5)'), ('[3,7)'); UPDATE dex SET r = '[5,7)' WHERE r = '[3,7)'; COMMIT
-constraints/exclude.slt:c5dcb59dcd0f1d91  # SELECT r FROM dex ORDER BY r
-constraints/exclude.slt:b68c916968d7b6da  # CREATE TABLE temporal (id int, valid daterange, PRIMARY KEY (id, valid WITHOUT OVERLAPS))
-constraints/exclude.slt:c5c4b2a15d6e3e8b  # CREATE TABLE temporal_r (id int4range, valid daterange, PRIMARY KEY (id, valid WITHOUT OVERLAPS)); INSERT INTO temporal_r VALUES ('[1,2)', '[2024-01-01,2024-02-01)'), ('[1,2)', '[2024-02-01,2024-03-01)')
-constraints/exclude.slt:8b82178e368cd681  # INSERT INTO temporal_r VALUES ('[1,2)', '[2024-01-15,2024-01-20)')
 ddl/drop.slt:1cfa7e5ee05f912c  # CREATE FUNCTION f_one() RETURNS int LANGUAGE sql AS 'SELECT 1'; CREATE TABLE fdep (a int DEFAULT f_one())
 ddl/drop.slt:f80b330da34f9678  # DROP FUNCTION f_one()
 ddl/drop.slt:f44dea9466d1bb76  # DROP FUNCTION f_one() CASCADE; INSERT INTO fdep DEFAULT VALUES
@@ -164,18 +144,3 @@ types/casts.slt:f8b08fc4c17fd1b3  # SELECT B'1010', B'1010'::bit(6), 'x0F'::bit(
 types/casts.slt:93c53cd1f7e466c8  # SELECT B'102'
 types/casts.slt:377d6b8c0e00c1b0  # SELECT B'10101'::bit(3), x'1'::bit(8)
 types/casts.slt:fc3868fddb298ef7  # INSERT INTO c (v) VALUES (B'1'::text || 'abcd')
-types/enums_domains.slt:b5e57415a34a43d3  # SELECT int4range(1, 10), int4range(1, 10, '[]'), '[1,5)'::int4range, '(1,5]'::int4range, 'empty'::int4range
-types/enums_domains.slt:041be401fd87f6b4  # SELECT numrange(1.5, 2.5), int8range(NULL, 5), '[2024-01-01,2024-02-01)'::daterange, daterange('2024-01-01', '2024-01-31', '[]')
-types/enums_domains.slt:bfd7281f2d9528f4  # SELECT tsrange('2024-01-01 00:00', '2024-01-02 00:00'), tstzrange('2024-01-01 00:00+00', NULL)
-types/enums_domains.slt:3e918ce474e7e9bc  # SELECT int4range(1, 10) @> 5, int4range(1, 10) @> int4range(2, 3), int4range(1, 5) && int4range(4, 8), 3 <@ int4range(1, 3)
-types/enums_domains.slt:f98a1667b9a0f4a9  # SELECT lower(int4range(1, 10)), upper(int4range(1, 10)), isempty(int4range(5, 5)), lower_inc('(1,5]'::int4range), upper_inf(int4range(1, NULL))
-types/enums_domains.slt:760fd91c900c174c  # SELECT int4range(1, 5) + int4range(3, 8), int4range(1, 10) * int4range(5, 15), int4range(1, 10) - int4range(5, 15), int4range(1, 3) -|- int4range(3, 5)
-types/enums_domains.slt:f4523415c91febfe  # SELECT int4range(5, 1)
-types/enums_domains.slt:b7fd4f00e7398361  # SELECT int4range(1, 3) + int4range(5, 8)
-types/enums_domains.slt:62394734e5d24c8a  # SELECT r FROM (VALUES ('[5,6)'::int4range), ('empty'), ('[1,9)'), ('(,3)')) v(r) ORDER BY r
-types/enums_domains.slt:8bda2452da2a6bf9  # SELECT '{[1,3), [5,7)}'::int4multirange, int4multirange(int4range(1, 3), int4range(2, 5)), range_agg(r) FROM (VALUES (int4range(1, 2)), (int4range(4, 5))) v(r)
-types/enums_domains.slt:c8d8d7c620331697  # CREATE TABLE booking (room int, during tsrange, EXCLUDE USING gist (during WITH &&))
-types/enums_domains.slt:20d1a46f867c4ae1  # INSERT INTO booking VALUES (1, '[2024-01-01 10:00, 2024-01-01 12:00)')
-types/enums_domains.slt:2d88abba11666041  # INSERT INTO booking VALUES (1, '[2024-01-01 11:00, 2024-01-01 13:00)')
-types/enums_domains.slt:5f4686a99eb6a2f4  # INSERT INTO booking VALUES (1, '[2024-01-01 12:00, 2024-01-01 13:00)')
-types/enums_domains.slt:e1c54ea571fc5d65  # SELECT during FROM booking ORDER BY during

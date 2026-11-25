@@ -1000,6 +1000,18 @@ pub enum TableConstraintKind {
         primary: bool,
         index: String,
     },
+    /// `EXCLUDE [USING method] (element WITH operator, ...) [WHERE (predicate)]`.
+    Exclude {
+        method: Option<String>,
+        elements: Vec<(Expr, String)>,
+        predicate: Option<Expr>,
+    },
+    /// `{PRIMARY KEY | UNIQUE} (a, ..., b WITHOUT OVERLAPS)`: equal on the leading columns,
+    /// overlapping on the last.
+    Temporal {
+        primary: bool,
+        columns: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]

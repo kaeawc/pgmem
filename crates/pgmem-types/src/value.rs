@@ -46,6 +46,9 @@ pub enum Value {
     Enum(u32, u32),
     /// A composite value: its type's OID (`record` for anonymous rows) and the fields.
     Record(u32, Vec<Value>),
+    Range(Box<crate::range::Range>),
+    /// A multirange: canonical (sorted, non-overlapping, no empty ranges).
+    Multirange(Type, Vec<crate::range::Range>),
 }
 
 impl Value {
@@ -121,6 +124,8 @@ impl Value {
             Value::Array(_) => "array",
             Value::Enum(..) => "enum",
             Value::Record(..) => "record",
+            Value::Range(_) => "range",
+            Value::Multirange(..) => "multirange",
         }
     }
 
@@ -159,8 +164,21 @@ impl Value {
             Value::Tid(b, i) => GroupKey::Int((i64::from(*b) << 16) | i64::from(*i)),
             Value::Array(items) | Value::Record(_, items) => GroupKey::Array(items.iter().map(Value::group_key).collect()),
             Value::Enum(_, label) => GroupKey::Int(i64::from(*label)),
+            Value::Range(r) => range_key(r),
+            Value::Multirange(_, rs) => GroupKey::Array(rs.iter().map(range_key).collect()),
         }
     }
+}
+
+fn range_key(r: &crate::range::Range) -> GroupKey {
+    let bound = |b: &Option<Value>| b.as_ref().map_or(GroupKey::Null, Value::group_key);
+    GroupKey::Array(vec![
+        GroupKey::Bool(r.empty),
+        bound(&r.lower),
+        GroupKey::Bool(r.lower_inc),
+        bound(&r.upper),
+        GroupKey::Bool(r.upper_inc),
+    ])
 }
 
 /// See [`Value::group_key`].
@@ -206,6 +224,8 @@ pub fn compare_values(a: &Value, b: &Value) -> SqlResult<Ordering> {
         (Oid(x) | Reg(_, x, _), Oid(y) | Reg(_, y, _)) => x.cmp(y),
         (Tid(xb, xi), Tid(yb, yi)) => (xb, xi).cmp(&(yb, yi)),
         (Enum(t, x), Enum(u, y)) if t == u => crate::usertype::compare_enum(*t, *x, *y),
+        (Range(x), Range(y)) => crate::range::compare(x, y)?,
+        (Multirange(_, x), Multirange(_, y)) => crate::range::compare_multi(x, y)?,
         // Composite values compare field by field; two NULL fields are equal and NULL sorts
         // above non-NULL (btree record_cmp semantics).
         (Record(_, x), Record(_, y)) => {
@@ -281,6 +301,8 @@ impl Value {
             Value::Record(crate::usertype::RECORD_OID, _) => Type::Record,
             Value::Record(t, _) if crate::usertype::is_blessed(*t) => Type::Record,
             Value::Record(t, _) => Type::Composite(*t),
+            Value::Range(r) => Type::Range(Box::new(r.sub.clone())),
+            Value::Multirange(sub, _) => Type::Multirange(Box::new(sub.clone())),
         }
     }
 }

@@ -10,6 +10,7 @@ pub mod json;
 pub mod math;
 pub mod misc;
 pub mod numfmt;
+pub mod range;
 pub mod sqljson;
 pub mod string;
 
@@ -67,6 +68,9 @@ pub fn resolve_function(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>
     }
     let args: Vec<Type> = args.iter().map(lookup_type).collect();
     let args = args.as_slice();
+    if let Some(r) = range::resolve(name, args)? {
+        return Ok(Some(r));
+    }
     if let Some(r) = math::resolve(name, args)? {
         return Ok(Some(r));
     }
@@ -442,6 +446,9 @@ pub fn resolve_binary(op: &str, l: &Type, r: &Type) -> SqlResult<Resolved> {
         return Err(no_operator(op, Some(l), r));
     }
     let (l, r) = (&lookup_type(l), &lookup_type(r));
+    if let Some(r) = range::resolve_operator(op, l, r)? {
+        return Ok(r);
+    }
     // Date/time arithmetic first: those operators mix types on purpose.
     if let Some(r) = datetime::resolve_operator(op, l, r)? {
         return Ok(r);

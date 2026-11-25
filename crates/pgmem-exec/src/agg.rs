@@ -54,9 +54,13 @@ impl Accumulator {
             AggKind::Min | AggKind::Max => Accumulator::MinMax(None),
             AggKind::BoolAnd | AggKind::BoolOr => Accumulator::Bool(None),
             AggKind::StringAgg => Accumulator::StringAgg(None),
-            AggKind::ArrayAgg | AggKind::JsonbAgg | AggKind::JsonAgg | AggKind::JsonbAggStrict | AggKind::JsonAggStrict => {
-                Accumulator::Values(Vec::new())
-            }
+            AggKind::ArrayAgg
+            | AggKind::JsonbAgg
+            | AggKind::JsonAgg
+            | AggKind::JsonbAggStrict
+            | AggKind::JsonAggStrict
+            | AggKind::RangeAgg
+            | AggKind::RangeIntersectAgg => Accumulator::Values(Vec::new()),
             AggKind::JsonbObjectAgg | AggKind::JsonObjectAgg | AggKind::JsonbObjectAggStrict | AggKind::JsonObjectAggStrict => {
                 Accumulator::Pairs(Vec::new())
             }
@@ -249,6 +253,7 @@ impl Accumulator {
                         Value::Jsonb(Jsonb::from_value(serde_json::Value::Array(arr)))
                     }
                     AggKind::JsonAgg | AggKind::JsonAggStrict => Value::Json(crate::funcs::json::json_agg_text(items)?),
+                    AggKind::RangeAgg | AggKind::RangeIntersectAgg => return range_agg_finish(call.kind, items),
                     _ => Value::Array(items.clone()),
                 }
             }
@@ -323,6 +328,31 @@ fn stats_finish(call: &AggCall, floats: &[f64], nums: &[Numeric]) -> SqlResult<V
     let var = numer.div(&denom)?;
     // The square root keeps the variance's scale.
     Ok(Value::Numeric(if sqrt { var.sqrt_to_scale(var.scale())? } else { var }))
+}
+
+/// `range_agg` (the union of the non-NULL inputs, as a multirange) and `range_intersect_agg`.
+fn range_agg_finish(kind: AggKind, items: &[Value]) -> SqlResult<Value> {
+    use pgmem_types::range;
+    let mut ranges: Vec<range::Range> = Vec::new();
+    for v in items {
+        match v {
+            Value::Range(r) => ranges.push((**r).clone()),
+            Value::Multirange(_, rs) => ranges.extend(rs.iter().cloned()),
+            _ => {}
+        }
+    }
+    if ranges.is_empty() {
+        return Ok(Value::Null);
+    }
+    if kind == AggKind::RangeAgg {
+        let sub = ranges[0].sub.clone();
+        return Ok(Value::Multirange(sub, range::normalize(ranges)?));
+    }
+    let mut acc = ranges[0].clone();
+    for r in &ranges[1..] {
+        acc = range::intersect(&acc, r)?;
+    }
+    Ok(Value::Range(Box::new(acc)))
 }
 
 /// `array_agg` / `json[b]_agg` input: checks for array inputs, then collects the value.

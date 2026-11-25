@@ -308,6 +308,34 @@ pub fn add_constraint(
         return Err(SqlError::new(code::DUPLICATE_OBJECT, format!("constraint \"{n}\" for relation \"{tname}\" already exists")));
     }
     match kind {
+        ir::TableConstraintKind::Exclude { method, elements, predicate } => {
+            let method = method.clone().unwrap_or_else(|| "btree".into());
+            add_exclusion(b, table, cname, &method, elements.clone(), predicate.clone(), None, taken, &used, timing)?;
+        }
+        ir::TableConstraintKind::Temporal { primary, columns } => {
+            let n = columns.len();
+            let elements: Vec<(ir::Expr, String)> = columns
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (ir::Expr::Column(vec![c.clone()]), if i + 1 == n { "&&" } else { "=" }.to_owned()))
+                .collect();
+            for c in columns {
+                col_index(table, c)?;
+            }
+            if *primary {
+                if table.primary_key().is_some() || table.constraints.iter().any(|c| c.contype() == 'p') {
+                    return Err(SqlError::new(
+                        code::INVALID_TABLE_DEFINITION,
+                        format!("multiple primary keys for table \"{tname}\" are not allowed"),
+                    ));
+                }
+                for c in columns {
+                    let slot = col_index(table, c)?;
+                    table.columns[slot].not_null = true;
+                }
+            }
+            add_exclusion(b, table, cname, "gist", elements, None, Some(*primary), taken, &used, timing)?;
+        }
         ir::TableConstraintKind::UsingIndex { primary, index } => {
             let pos = table
                 .indexes
@@ -786,7 +814,7 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
             // Constraints and indexes over the column go with it (Postgres requires CASCADE
             // only for objects in other tables, e.g. views; those are not tracked here).
             let _ = cascade;
-            def.constraints.retain(|c| !constraint_uses(c, slot));
+            def.constraints.retain(|c| !constraint_uses(c, slot, name));
             def.indexes.retain(|i| !i.columns.contains(&slot));
             let col = &mut def.columns[slot];
             col.dropped = true;
@@ -1001,13 +1029,101 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
     }
 }
 
-fn constraint_uses(c: &Constraint, slot: usize) -> bool {
+fn constraint_uses(c: &Constraint, slot: usize, name: &str) -> bool {
     match &c.kind {
         ConstraintKind::PrimaryKey { columns } | ConstraintKind::Unique { columns, .. } | ConstraintKind::ForeignKey { columns, .. } => {
             columns.contains(&slot)
         }
         ConstraintKind::Check { .. } => false,
+        ConstraintKind::Exclude { elements, predicate, .. } => {
+            elements.iter().map(|(e, _)| e).chain(predicate.iter()).any(|e| expr_mentions(e, name))
+        }
     }
+}
+
+/// Adds an exclusion constraint (and the index Postgres builds for it) to `table`, after
+/// checking the access method has an operator class for every key and the operators exist.
+#[allow(clippy::too_many_arguments)]
+fn add_exclusion(
+    b: &Binder,
+    table: &mut TableDef,
+    cname: Option<String>,
+    method: &str,
+    elements: Vec<(ir::Expr, String)>,
+    predicate: Option<ir::Expr>,
+    temporal: Option<bool>,
+    taken: &mut Vec<String>,
+    used: &[String],
+    timing: ir::ConstraintTiming,
+) -> SqlResult<()> {
+    if !["btree", "hash", "gist", "spgist", "gin", "brin"].contains(&method) {
+        return Err(SqlError::new(code::UNDEFINED_OBJECT, format!("access method \"{method}\" does not exist")));
+    }
+    let level = Level::new(physical_scope(table, &table.name));
+    let ctx = Ctx::new(&level).with_clause(Clause::Check);
+    for (e, op) in &elements {
+        let (_, ty) = b.bind_expr(e, &ctx)?;
+        let base = ty.base();
+        // gist has default operator classes for ranges and multiranges only (no btree_gist).
+        let has_opclass = match method {
+            "gist" | "spgist" => matches!(base, Type::Range(_) | Type::Multirange(_)),
+            _ => !matches!(base, Type::Json),
+        };
+        if !has_opclass {
+            return Err(SqlError::new(
+                code::UNDEFINED_OBJECT,
+                format!("data type {} has no default operator class for access method \"{method}\"", base.name()),
+            )
+            .with_hint("You must specify an operator class for the index or define a default operator class for the data type."));
+        }
+        crate::funcs::resolve_binary(op, &base, &base)?;
+    }
+    if let Some(p) = &predicate {
+        check_expr_binds(b, table, p, Clause::Where)?;
+    }
+    let tname = table.name.clone();
+    let key_names: Vec<String> = elements.iter().map(|(e, _)| super::like::index_key_name(e)).collect();
+    let refs: Vec<&str> = key_names.iter().map(String::as_str).collect();
+    let suffix = match temporal {
+        Some(true) => "pkey",
+        Some(false) => "key",
+        None => "excl",
+    };
+    let base_name =
+        if temporal == Some(true) { default_constraint_name(&tname, &[], suffix) } else { default_constraint_name(&tname, &refs, suffix) };
+    let mut all_used = used.to_vec();
+    all_used.extend(taken.iter().cloned());
+    let name = cname.unwrap_or_else(|| choose_name(b.catalog, &table.schema, &all_used, base_name));
+    if table.indexes.iter().any(|i| i.name == name) || b.catalog.relation(&table.schema, &name).is_some() {
+        return Err(SqlError::new(code::DUPLICATE_TABLE, format!("relation \"{name}\" already exists")));
+    }
+    taken.push(name.clone());
+    let plain: Option<Vec<usize>> = elements
+        .iter()
+        .map(|(e, _)| match e {
+            ir::Expr::Column(p) if p.len() == 1 => table.column_index(&p[0]),
+            _ => None,
+        })
+        .collect();
+    table.indexes.push(IndexDef {
+        oid: 0,
+        name: name.clone(),
+        columns: plain.clone().unwrap_or_default(),
+        exprs: if plain.is_some() { Vec::new() } else { elements.iter().map(|(e, _)| e.clone()).collect() },
+        unique: false,
+        primary: false,
+        nulls_not_distinct: false,
+        predicate: predicate.clone(),
+    });
+    table.constraints.push(Constraint {
+        oid: 0,
+        name,
+        kind: ConstraintKind::Exclude { method: method.to_owned(), elements, predicate, temporal },
+        deferrable: timing.deferrable,
+        initially_deferred: timing.initially_deferred,
+        validated: true,
+    });
+    Ok(())
 }
 
 /// True for literal-only expressions (no function calls), which can serve as fast defaults.

@@ -8,10 +8,10 @@ and what comes next. Updated with every PR.
 | Metric | Value | How it is measured |
 |---|---|---|
 | pgmem-go parity | **564 / 564** Go tests ported | `scripts/parity.py check` ([PARITY.md](PARITY.md)) |
-| Integration suite on pgmem | **624 / 624** pass | `cargo nextest run -p pgmem --test it` |
-| Integration suite on real PostgreSQL 18 | **624 / 624** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
+| Integration suite on pgmem | **627 / 627** pass | `cargo nextest run -p pgmem --test it` |
+| Integration suite on real PostgreSQL 18 | **627 / 627** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
 | Go pgx example suites (sqlc) against the Rust binary | **27 / 27** pass | `make examples` (CI `pgx-examples`) |
-| **SQL conformance corpus** (3309 records, 9 areas) | **3130 / 3309 (94.6%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
+| **SQL conformance corpus** (3309 records, 9 areas) | **3165 / 3309 (95.6%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
 
 ### Conformance history
 
@@ -40,7 +40,8 @@ and what comes next. Updated with every PR.
 | 2026-11-25 | #126 system columns, row / table / advisory locks, READ ONLY, AND CHAIN, WHERE CURRENT OF | 564/564 | 2944/3309 (89.0%) |
 | 2026-11-25 | #127 deferrable constraints, SET CONSTRAINTS, NOT VALID, FK fidelity, SERIALIZABLE write skew | 564/564 | 3022/3309 (91.3%) |
 | 2026-11-25 | #128 updatable views, materialized views, DROP / ALTER dependencies, CREATE TABLE AS / LIKE, ON COMMIT, index and constraint renames | 564/564 | 3089/3309 (93.4%) |
-| 2026-11-25 | sequence parameters and ALTER SEQUENCE, identity options and ALTER ... IDENTITY, generated column rules | 564/564 | 3130/3309 (94.6%) |
+| 2026-11-25 | #129 sequence parameters and ALTER SEQUENCE, identity options and ALTER ... IDENTITY, generated column rules | 564/564 | 3130/3309 (94.6%) |
+| 2026-11-25 | range and multirange types, EXCLUDE constraints, WITHOUT OVERLAPS keys | 564/564 | 3165/3309 (95.6%) |
 
 ## Supported
 
@@ -64,7 +65,10 @@ and what comes next. Updated with every PR.
   uuid, date, time, timetz, timestamp, timestamptz, interval, json (input text kept as written;
   operators return pieces of it verbatim), jsonb (numbers normalized as numeric), jsonpath
   (canonical text form), oid, regclass/regtype/regnamespace/regproc (name ↔ OID through the catalog), void,
-  enums, domains (NOT NULL / CHECK), composite types and table row types, multidimensional
+  enums, domains (NOT NULL / CHECK), composite types and table row types, the builtin range and
+  multirange types (int4/int8/num/date/ts/tstz; discrete ranges canonical, text and binary I/O,
+  ordering, `@>` `<@` `&&` `<<` `>>` `&<` `&>` `-|-` `+` `*` `-`, lower/upper/isempty/..._inc/
+  ..._inf, range_merge, range_agg, range_intersect_agg), multidimensional
   arrays (subscripts, slices, element and slice assignment in UPDATE); text and binary formats; Postgres' result-column naming for casts. numeric has NaN
   and ±Infinity and accepts negative / large scales (`numeric(5,-2)`); `bytea_output` hex or
   escape.
@@ -126,7 +130,9 @@ and what comes next. Updated with every PR.
   foreign keys and unique constraints with `SET CONSTRAINTS` (checked at commit or `...
   IMMEDIATE`; a failed COMMIT rolls back), non-deferrable unique checks row by row (UPDATE in
   scan order), deferrable ones at statement end; `ADD CONSTRAINT ... NOT VALID`, `VALIDATE
-  CONSTRAINT`, `ALTER CONSTRAINT ... DEFERRABLE`; `pg_constraint` / `information_schema` /
+  CONSTRAINT`, `ALTER CONSTRAINT ... DEFERRABLE`; EXCLUDE constraints (any operator, WHERE,
+  DEFERRABLE, gist operator-class checks) and Postgres 18 `PRIMARY KEY / UNIQUE (..., c WITHOUT
+  OVERLAPS)`; `pg_constraint` / `information_schema` /
   `pg_get_constraintdef` report all of it.
 - **Transactions**: BEGIN/COMMIT/ROLLBACK [AND [NO] CHAIN], savepoints, failed-transaction state
   (25P02), READ COMMITTED (per-statement snapshots) and REPEATABLE READ/SERIALIZABLE
@@ -185,7 +191,9 @@ and what comes next. Updated with every PR.
 - `pg_proc` and `pg_trigger` have no user rows (no user functions or triggers yet). Deparsed
   definitions follow ruleutils' non-pretty mode; pretty mode (`pg_get_viewdef(v, true)`) does not
   drop redundant parentheses yet.
-- No COPY, stored procedures, triggers, range types, network types (inet, cidr, macaddr), bit strings,
+- Multiranges have I/O, constructors, `@>`, `&&`, lower/upper and range_agg, not the full
+  operator set. No user-defined range types.
+- No COPY, stored procedures, triggers, network types (inet, cidr, macaddr), bit strings,
   money. Arrays always have lower bound 1 (`'[2:4]={...}'` input is read as `{...}`). Unicode
   normalization (`normalize`, `IS NORMALIZED`) covers ASCII text only. `VARIADIC` needs an
   array known when the statement is bound. Comparison is bytewise, which is what the corpus' `C.UTF-8`
@@ -208,8 +216,8 @@ and what comes next. Updated with every PR.
 Hill-climb, ordered by conformance records recovered per unit of work and by what blocks real
 clients. Each item names the corpus area it moves (see CONFORMANCE.md for per-file rates).
 
-1. **Types**: range and multirange types (and EXCLUDE constraints), network types, bit
-   strings, money, array lower bounds, `regprocedure`, pretty deparse.
+1. **Types**: network types, bit strings, money, array lower bounds, `regprocedure`, pretty
+   deparse.
 2. **Functions/procedures/triggers** (SQL and PL/pgSQL), `DO` blocks — large; most of ddl/migrations.
 3. Roles, extensions (pgcrypto, uuid-ossp, citext), COPY, collations, catalog remainder.
 4. Client matrix in CI: psql, tokio-postgres and sqlx (Go pgx is covered by `examples/`).
