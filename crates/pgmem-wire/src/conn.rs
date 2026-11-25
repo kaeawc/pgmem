@@ -4,9 +4,10 @@ use crate::Shared;
 use crate::codec::{Message, Reader, StartupMessage, Writer, read_message, read_startup};
 use pgmem_exec::portal::PreparedStatement;
 use pgmem_exec::session::{is_reported, setting_display_name};
-use pgmem_exec::{OutCol, QueryResult, Session};
+use pgmem_exec::{CopyIn, CopyOut, OutCol, QueryResult, Session};
+use pgmem_ir::Statement;
 use pgmem_types::{Format, SqlError, SqlResult, Type, Value, code};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::Arc;
 use tokio::io::{AsyncWriteExt, BufReader, BufWriter};
@@ -27,6 +28,15 @@ struct Conn {
     portals: HashMap<String, Portal>,
     /// After an error in extended-query mode, messages are discarded until Sync.
     skipping: bool,
+    /// A COPY FROM STDIN receiving CopyData.
+    copy: Option<CopyState>,
+}
+
+struct CopyState {
+    pending: Box<CopyIn>,
+    data: Vec<u8>,
+    /// From a simple Query: the statements after the COPY, run once it completes.
+    rest: Option<VecDeque<Statement>>,
 }
 
 fn format_for(codes: &[i16], i: usize) -> Format {
@@ -109,7 +119,7 @@ pub async fn handle(stream: TcpStream, shared: Arc<Shared>) -> io::Result<()> {
             }
         }
     });
-    let mut conn = Conn { session, out: Writer::default(), portals: HashMap::new(), skipping: false };
+    let mut conn = Conn { session, out: Writer::default(), portals: HashMap::new(), skipping: false, copy: None };
     let result = conn.serve(&mut rx, &wake, &mut wr).await;
     reader.abort();
     result
@@ -196,6 +206,9 @@ enum Flow {
 
 impl Conn {
     fn dispatch(&mut self, msg: Message) -> Flow {
+        if self.copy.is_some() {
+            return self.copy_message(msg);
+        }
         let extended = matches!(msg.tag, b'P' | b'B' | b'D' | b'E' | b'C');
         if self.skipping && extended {
             return Flow::Continue;
@@ -222,7 +235,8 @@ impl Conn {
             }
             b'H' => return Flow::Flush,
             b'X' => return Flow::Terminate,
-            b'd' | b'c' | b'f' => Err(SqlError::feature_not_supported("COPY is not supported by pgmem")),
+            // Data for a COPY that already failed: ignored, as Postgres does.
+            b'd' | b'c' | b'f' => return Flow::Continue,
             b'F' => Err(SqlError::feature_not_supported("the fastpath function call protocol is not supported by pgmem")),
             other => {
                 self.out.fatal(code::PROTOCOL_VIOLATION, &format!("invalid frontend message type {other}"));
@@ -304,32 +318,27 @@ impl Conn {
             }
         };
         self.session.begin_implicit_block(stmts.len());
+        self.run_statements(stmts.into_iter().collect());
+    }
+
+    /// Runs a simple Query's statements. A COPY FROM STDIN suspends the batch until the
+    /// client's CopyDone (`finish_copy` resumes it).
+    fn run_statements(&mut self, mut stmts: VecDeque<Statement>) {
         let mut failed = false;
-        for stmt in &stmts {
-            match self.session.execute(stmt, &[], &[]) {
-                Ok(r) => {
+        while let Some(stmt) = stmts.pop_front() {
+            match self.session.execute(&stmt, &[], &[]) {
+                Ok(mut r) => {
                     self.send_result_preamble(&r);
-                    if r.empty {
-                        self.out.empty_query();
-                        continue;
+                    if let Some(pending) = r.copy_in.take() {
+                        self.out.copy_response(b'G', pending.binary, pending.columns);
+                        self.copy = Some(CopyState { pending, data: Vec::new(), rest: Some(stmts) });
+                        return;
                     }
-                    if r.returns_rows {
-                        let formats: &[i16] = if r.binary { &[1] } else { &[] };
-                        self.row_description(&r.columns, formats);
-                        let mut err = None;
-                        for row in &r.rows {
-                            if let Err(e) = self.data_row(&r.columns, row, formats) {
-                                err = Some(e);
-                                break;
-                            }
-                        }
-                        if let Some(e) = err {
-                            self.out.error(&e);
-                            failed = true;
-                            break;
-                        }
+                    if let Err(e) = self.send_simple_result(&r) {
+                        self.out.error(&e);
+                        failed = true;
+                        break;
                     }
-                    self.out.command_complete(&r.tag);
                 }
                 Err(e) => {
                     self.out.error(&e);
@@ -342,6 +351,90 @@ impl Conn {
             self.out.error(&e);
         }
         self.ready();
+    }
+
+    fn send_simple_result(&mut self, r: &QueryResult) -> SqlResult<()> {
+        if r.empty {
+            self.out.empty_query();
+            return Ok(());
+        }
+        if let Some(out) = &r.copy_out {
+            self.send_copy_out(out);
+        } else if r.returns_rows {
+            let formats: &[i16] = if r.binary { &[1] } else { &[] };
+            self.row_description(&r.columns, formats);
+            for row in &r.rows {
+                self.data_row(&r.columns, row, formats)?;
+            }
+        }
+        self.out.command_complete(&r.tag);
+        Ok(())
+    }
+
+    fn send_copy_out(&mut self, out: &CopyOut) {
+        self.out.copy_response(b'H', out.binary, out.columns);
+        for chunk in &out.data {
+            self.out.copy_data(chunk);
+        }
+        self.out.copy_done();
+    }
+
+    /// A message during COPY FROM STDIN.
+    fn copy_message(&mut self, msg: Message) -> Flow {
+        match msg.tag {
+            b'd' => {
+                if let Some(c) = self.copy.as_mut() {
+                    c.data.extend_from_slice(&msg.body);
+                }
+                Flow::Continue
+            }
+            b'c' => {
+                let data = self.copy.as_mut().map(|c| std::mem::take(&mut c.data)).unwrap_or_default();
+                self.finish_copy(Ok(data))
+            }
+            b'f' => {
+                let reason = Reader::new(&msg.body).cstr().unwrap_or_default();
+                self.finish_copy(Err(reason))
+            }
+            // Flush and Sync are ignored during COPY IN (clients send them right after the
+            // COPY statement), but the CopyInResponse must reach the client.
+            b'H' | b'S' => Flow::Flush,
+            b'X' => Flow::Terminate,
+            other => {
+                let e = SqlError::new(code::PROTOCOL_VIOLATION, format!("unexpected message type 0x{other:02X} during COPY from stdin"));
+                self.out.error(&e);
+                self.finish_copy(Err(String::new()));
+                Flow::Flush
+            }
+        }
+    }
+
+    fn finish_copy(&mut self, data: Result<Vec<u8>, String>) -> Flow {
+        let Some(state) = self.copy.take() else { return Flow::Continue };
+        let result = self.session.copy_from(&state.pending, data);
+        let ok = match result {
+            Ok(r) => {
+                self.send_result_preamble(&r);
+                self.out.command_complete(&r.tag);
+                true
+            }
+            Err(e) => {
+                self.out.error(&e);
+                false
+            }
+        };
+        match state.rest {
+            Some(rest) if ok => self.run_statements(rest),
+            Some(_) => {
+                if let Err(e) = self.session.end_implicit_block(true) {
+                    self.out.error(&e);
+                }
+                self.ready();
+            }
+            // Extended protocol: the client's Sync ends the transaction.
+            None => self.skipping = !ok,
+        }
+        Flow::Flush
     }
 
     fn parse(&mut self, body: &[u8]) -> SqlResult<()> {
@@ -471,6 +564,19 @@ impl Conn {
                 self.send_result_preamble(&res);
                 portal.result = Some(res);
             }
+        }
+        if let Some(pending) = portal.result.as_mut().and_then(|r| r.copy_in.take()) {
+            self.out.copy_response(b'G', pending.binary, pending.columns);
+            self.copy = Some(CopyState { pending, data: Vec::new(), rest: None });
+            self.portals.insert(name, portal);
+            return Ok(());
+        }
+        if let Some(out) = portal.result.as_mut().and_then(|r| r.copy_out.take()) {
+            let tag = portal.result.as_ref().map(|r| r.tag.clone()).unwrap_or_default();
+            self.send_copy_out(&out);
+            self.out.command_complete(&tag);
+            self.portals.insert(name, portal);
+            return Ok(());
         }
         let res = portal.result.as_ref().ok_or_else(|| SqlError::internal("portal without result"))?;
         if res.empty {

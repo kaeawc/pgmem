@@ -17,6 +17,7 @@ pub(crate) enum Utility {
     RenameIndex { name: sqlparser::ast::ObjectName, new_name: sqlparser::ast::Ident, if_exists: bool },
     AlterSequence { name: sqlparser::ast::ObjectName, if_exists: bool, options: RawSeqOptions, rename_to: Option<sqlparser::ast::Ident> },
     AlterColumn { table: sqlparser::ast::ObjectName, if_exists: bool, column: sqlparser::ast::Ident, action: ColumnAction },
+    Copy(Box<crate::copy::RawCopy>),
 }
 
 /// Sequence options as parsed (the type still a sqlparser type).
@@ -44,6 +45,7 @@ fn lower_seq_options(raw: RawSeqOptions) -> SqlResult<pgmem_ir::SequenceOptions>
 
 pub(crate) fn lower(u: Utility) -> SqlResult<Statement> {
     Ok(match u {
+        Utility::Copy(c) => return crate::copy::lower(*c),
         Utility::Fetch { name, direction, is_move } => Statement::Fetch { name: crate::ident(&name), direction, is_move },
         Utility::Maintenance { tag, tables, in_block_ok } => Statement::Maintenance {
             tag: tag.to_owned(),
@@ -96,6 +98,10 @@ fn eat_word(p: &mut Parser, w: &str) -> bool {
 }
 
 pub(crate) fn try_parse(p: &mut Parser) -> Result<Option<Utility>, ParserError> {
+    if word_at(p, 0, "COPY") {
+        p.next_token();
+        return crate::copy::parse(p).map(|c| Some(Utility::Copy(Box::new(c))));
+    }
     if word_at(p, 0, "SET") && word_at(p, 1, "CONSTRAINTS") {
         p.next_token();
         p.next_token();

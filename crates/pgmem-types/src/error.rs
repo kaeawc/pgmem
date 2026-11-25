@@ -227,5 +227,9 @@ pub mod code {
     pub const FEATURE_NOT_SUPPORTED: &str = "0A000";
     pub const OBJECT_NOT_IN_PREREQUISITE_STATE: &str = "55000";
     pub const QUERY_CANCELED: &str = "57014";
+    pub const BAD_COPY_FILE_FORMAT: &str = "22P04";
+    pub const CHARACTER_NOT_IN_REPERTOIRE: &str = "22021";
+    pub const UNDEFINED_FILE: &str = "58P01";
+    pub const IO_ERROR: &str = "58030";
     pub const INTERNAL_ERROR: &str = "XX000";
 }

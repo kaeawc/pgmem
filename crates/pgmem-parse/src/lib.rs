@@ -9,6 +9,7 @@
 //! migration tools routinely send (`SET` variants, `COMMENT ON`, `CREATE EXTENSION`, ...) are
 //! recognized by prefix as a fallback and become no-ops, so connection setup never fails.
 
+mod copy;
 mod ddl;
 mod dml;
 mod expr;

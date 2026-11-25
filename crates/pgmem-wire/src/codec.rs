@@ -334,6 +334,28 @@ impl Writer {
         self.finish(at);
     }
 
+    /// CopyInResponse ('G') / CopyOutResponse ('H'): the overall format and one per column.
+    pub fn copy_response(&mut self, tag: u8, binary: bool, columns: usize) {
+        let at = self.begin(tag);
+        self.buf.push(u8::from(binary));
+        self.i16(i16::try_from(columns).unwrap_or(i16::MAX));
+        for _ in 0..columns {
+            self.i16(i16::from(binary));
+        }
+        self.finish(at);
+    }
+
+    pub fn copy_data(&mut self, data: &[u8]) {
+        let at = self.begin(b'd');
+        self.buf.extend_from_slice(data);
+        self.finish(at);
+    }
+
+    pub fn copy_done(&mut self) {
+        let at = self.begin(b'c');
+        self.finish(at);
+    }
+
     pub fn parameter_description(&mut self, oids: &[u32]) {
         let at = self.begin(b't');
         self.i16(i16::try_from(oids.len()).unwrap_or(i16::MAX));

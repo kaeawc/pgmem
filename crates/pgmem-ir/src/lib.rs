@@ -144,6 +144,9 @@ pub enum Statement {
         tables: Vec<ObjectName>,
         in_block_ok: bool,
     },
+    /// `COPY table [(columns)] | (query) {FROM | TO} {STDIN | STDOUT | 'file' | PROGRAM 'cmd'}
+    /// [WITH] (options) [WHERE condition]`.
+    Copy(Box<Copy>),
     /// `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]`.
     RefreshMatview {
         name: ObjectName,
@@ -817,6 +820,46 @@ impl FunctionCall {
 // ---------------------------------------------------------------------------------------------
 // DML
 // ---------------------------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Copy {
+    /// The table (with an optional column list), or None for `COPY (query) TO`.
+    pub table: Option<ObjectName>,
+    pub columns: Vec<String>,
+    /// `COPY (SELECT ... | INSERT/UPDATE/DELETE ... RETURNING ...) TO`.
+    pub query: Option<Box<Statement>>,
+    /// COPY FROM (true) or COPY TO.
+    pub from: bool,
+    pub target: CopyTarget,
+    /// Options in the order written (legacy options are mapped to their generic names).
+    pub options: Vec<CopyOption>,
+    pub where_clause: Option<Expr>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CopyTarget {
+    /// STDIN / STDOUT (the CopyIn / CopyOut sub-protocol).
+    Stdio,
+    File(String),
+    Program(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CopyOption {
+    pub name: String,
+    pub value: CopyOptionValue,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CopyOptionValue {
+    None,
+    /// A string, number or word argument.
+    Str(String),
+    /// `*` (FORCE_QUOTE * / FORCE_NOT_NULL * / FORCE_NULL *).
+    Star,
+    /// A parenthesized column list.
+    List(Vec<String>),
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Insert {

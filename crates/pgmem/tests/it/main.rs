@@ -28,6 +28,7 @@ mod coalesce_nullif;
 mod column_default;
 mod concat;
 mod constraint_timing;
+mod copy;
 mod correlated;
 mod cte;
 mod current_setting;

@@ -10,8 +10,10 @@ use pgmem_types::{SqlError, SqlResult, Type, Value, code};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 
+mod copy;
 mod objects;
 
+pub use copy::{CopyIn, CopyOut};
 pub use objects::SessionObjects;
 
 /// The version pgmem reports (`server_version`, `version()`): the Postgres release it targets.
@@ -198,6 +200,10 @@ pub struct QueryResult {
     pub changed_settings: Vec<(String, String)>,
     /// Rows are sent in binary (a FETCH from a BINARY cursor).
     pub binary: bool,
+    /// COPY FROM STDIN: the client sends the data next (CopyInResponse).
+    pub copy_in: Option<Box<CopyIn>>,
+    /// COPY TO STDOUT: the data to send (CopyOutResponse, CopyData..., CopyDone).
+    pub copy_out: Option<Box<CopyOut>>,
 }
 
 /// What a statement will return, known before execution (Describe).
@@ -251,6 +257,9 @@ pub struct Session {
     pending_checks: Vec<(Oid, String)>,
     /// Temporary tables created `ON COMMIT DELETE ROWS` / `ON COMMIT DROP`.
     on_commit: Vec<(Oid, ir::OnCommit)>,
+    /// The data of a COPY FROM STDIN being finished (`copy_from`), or the client's CopyFail
+    /// message.
+    copy_data: Option<Result<Vec<u8>, String>>,
 }
 
 /// A savepoint's marks into the transaction's undo and queues.
@@ -294,6 +303,7 @@ impl Session {
             constraint_modes: ConstraintModes::default(),
             pending_checks: Vec::new(),
             on_commit: Vec::new(),
+            copy_data: None,
         }
     }
 
@@ -568,6 +578,7 @@ impl Session {
             Statement::DeclareCursor(d) => return self.declare_cursor(d),
             Statement::Explain(e) => return self.explain(e, param_types, params),
             Statement::Discard(k) => return self.discard(*k),
+            Statement::Copy(c) => return self.copy(c),
             _ => {}
         }
         let env = self.env();
@@ -665,6 +676,7 @@ impl Session {
         };
         Some(match stmt {
             Statement::Insert(i) if !temp(&i.table) => "INSERT",
+            Statement::Copy(c) if c.from && !c.table.as_ref().is_some_and(temp) => "COPY FROM",
             Statement::Update(u) if !temp(&u.table) => "UPDATE",
             Statement::Delete(d) if !temp(&d.table) => "DELETE",
             Statement::Merge(m) if !temp(&m.table) => "MERGE",
