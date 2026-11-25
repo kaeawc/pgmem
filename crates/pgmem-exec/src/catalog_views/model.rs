@@ -85,6 +85,18 @@ pub struct Con<'a> {
     pub kind: Option<&'a ConstraintKind>,
 }
 
+impl Con<'_> {
+    /// `(condeferrable, condeferred, convalidated)` of the catalog constraint (NOT NULL
+    /// constraints: not deferrable, valid).
+    pub fn flags(&self) -> (bool, bool, bool) {
+        self.table
+            .constraints
+            .iter()
+            .find(|c| c.oid == self.oid && self.kind.is_some())
+            .map_or((false, false, true), |c| (c.deferrable, c.initially_deferred, c.validated))
+    }
+}
+
 pub struct Model<'a> {
     pub catalog: &'a Catalog,
     pub env: &'a SessionEnv,
@@ -209,7 +221,7 @@ impl<'a> Model<'a> {
                 if col.not_null {
                     out.push(Con {
                         oid: not_null_oid(t.oid, i + 1),
-                        name: not_null_constraint_name(&t.name, &col.name),
+                        name: col.not_null_name.clone().unwrap_or_else(|| not_null_constraint_name(&t.name, &col.name)),
                         contype: 'n',
                         table: t,
                         conkey: vec![i + 1],
@@ -250,7 +262,7 @@ impl<'a> Model<'a> {
             ConstraintKind::Check { expr } => {
                 con.conkey = check_columns(t, expr);
             }
-            ConstraintKind::ForeignKey { columns, ref_table, ref_columns, on_delete, on_update } => {
+            ConstraintKind::ForeignKey { columns, ref_table, ref_columns, on_delete, on_update, .. } => {
                 con.conkey = attnums(columns);
                 con.confkey = attnums(ref_columns);
                 if let Some(rt) = self.catalog.table_q(ref_table) {
@@ -301,6 +313,21 @@ fn column_list(t: &TableDef, attnums: &[usize]) -> String {
 
 /// `pg_get_constraintdef`.
 pub fn constraint_def(model: &Model, con: &Con) -> String {
+    let (deferrable, deferred, validated) = con.flags();
+    let mut def = constraint_def_body(model, con);
+    if deferrable {
+        def.push_str(" DEFERRABLE");
+    }
+    if deferred {
+        def.push_str(" INITIALLY DEFERRED");
+    }
+    if !validated {
+        def.push_str(" NOT VALID");
+    }
+    def
+}
+
+fn constraint_def_body(model: &Model, con: &Con) -> String {
     match (con.contype, con.kind) {
         ('n', _) => format!("NOT NULL {}", column_list(con.table, &con.conkey)),
         ('p', _) => format!("PRIMARY KEY ({})", column_list(con.table, &con.conkey)),

@@ -12,6 +12,8 @@ use sqlparser::tokenizer::Token;
 pub(crate) enum Utility {
     Fetch { name: sqlparser::ast::Ident, direction: FetchDirection, is_move: bool },
     Maintenance { tag: &'static str, tables: Vec<sqlparser::ast::ObjectName>, in_block_ok: bool },
+    SetConstraints { names: Vec<sqlparser::ast::ObjectName>, deferred: bool },
+    AlterConstraint { table: sqlparser::ast::ObjectName, if_exists: bool, name: sqlparser::ast::Ident, timing: pgmem_ir::ConstraintTiming },
 }
 
 pub(crate) fn lower(u: Utility) -> SqlResult<Statement> {
@@ -22,6 +24,14 @@ pub(crate) fn lower(u: Utility) -> SqlResult<Statement> {
             tables: tables.iter().map(object_name).collect::<SqlResult<Vec<ObjectName>>>()?,
             in_block_ok,
         },
+        Utility::SetConstraints { names, deferred } => {
+            Statement::SetConstraints { names: names.iter().map(object_name).collect::<SqlResult<Vec<_>>>()?, deferred }
+        }
+        Utility::AlterConstraint { table, if_exists, name, timing } => Statement::AlterTable(Box::new(pgmem_ir::AlterTable {
+            name: object_name(&table)?,
+            if_exists,
+            actions: vec![pgmem_ir::AlterTableAction::AlterConstraint { name: crate::ident(&name), timing }],
+        })),
     })
 }
 
@@ -39,6 +49,16 @@ fn eat_word(p: &mut Parser, w: &str) -> bool {
 }
 
 pub(crate) fn try_parse(p: &mut Parser) -> Result<Option<Utility>, ParserError> {
+    if word_at(p, 0, "SET") && word_at(p, 1, "CONSTRAINTS") {
+        p.next_token();
+        p.next_token();
+        return set_constraints(p).map(Some);
+    }
+    if word_at(p, 0, "ALTER") && word_at(p, 1, "TABLE") && alter_constraint_ahead(p) {
+        p.next_token();
+        p.next_token();
+        return alter_constraint(p).map(Some);
+    }
     if word_at(p, 0, "FETCH") || word_at(p, 0, "MOVE") {
         let is_move = word_at(p, 0, "MOVE");
         p.next_token();
@@ -203,4 +223,70 @@ fn cluster(p: &mut Parser) -> Result<Utility, ParserError> {
     }
     let in_block_ok = !tables.is_empty();
     Ok(Utility::Maintenance { tag: "CLUSTER", tables, in_block_ok })
+}
+
+/// `SET CONSTRAINTS {ALL | name [, ...]} {DEFERRED | IMMEDIATE}`.
+fn set_constraints(p: &mut Parser) -> Result<Utility, ParserError> {
+    let mut names = Vec::new();
+    if !eat_word(p, "ALL") {
+        loop {
+            names.push(p.parse_object_name(false)?);
+            if !p.consume_token(&Token::Comma) {
+                break;
+            }
+        }
+    }
+    let deferred = if eat_word(p, "DEFERRED") {
+        true
+    } else if eat_word(p, "IMMEDIATE") {
+        false
+    } else {
+        return p.expected("DEFERRED or IMMEDIATE", p.peek_token());
+    };
+    Ok(Utility::SetConstraints { names, deferred })
+}
+
+/// Whether `ALTER TABLE [IF EXISTS] [ONLY] name ALTER CONSTRAINT` comes next.
+fn alter_constraint_ahead(p: &Parser) -> bool {
+    let mut n = 2;
+    if word_at(p, n, "IF") && word_at(p, n + 1, "EXISTS") {
+        n += 2;
+    }
+    if word_at(p, n, "ONLY") {
+        n += 1;
+    }
+    // The (possibly qualified) table name.
+    n += 1;
+    while p.peek_nth_token(n).token == Token::Period {
+        n += 2;
+    }
+    word_at(p, n, "ALTER") && word_at(p, n + 1, "CONSTRAINT")
+}
+
+/// `... name ALTER CONSTRAINT cname [[NOT] DEFERRABLE] [INITIALLY {DEFERRED | IMMEDIATE}]`.
+fn alter_constraint(p: &mut Parser) -> Result<Utility, ParserError> {
+    let if_exists = eat_word(p, "IF") && eat_word(p, "EXISTS");
+    let _ = eat_word(p, "ONLY");
+    let table = p.parse_object_name(false)?;
+    let _ = eat_word(p, "ALTER") && eat_word(p, "CONSTRAINT");
+    let name = p.parse_identifier()?;
+    let mut timing = pgmem_ir::ConstraintTiming::default();
+    loop {
+        if eat_word(p, "NOT") {
+            if !eat_word(p, "DEFERRABLE") {
+                return p.expected("DEFERRABLE", p.peek_token());
+            }
+            timing.deferrable = false;
+        } else if eat_word(p, "DEFERRABLE") {
+            timing.deferrable = true;
+        } else if eat_word(p, "INITIALLY") {
+            timing.initially_deferred = eat_word(p, "DEFERRED");
+            if !timing.initially_deferred && !eat_word(p, "IMMEDIATE") {
+                return p.expected("DEFERRED or IMMEDIATE", p.peek_token());
+            }
+        } else {
+            break;
+        }
+    }
+    Ok(Utility::AlterConstraint { table, if_exists, name, timing })
 }

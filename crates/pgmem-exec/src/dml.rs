@@ -130,7 +130,55 @@ fn unique_violation(table: &TableDef, u: &UniqueCheck, row: &Row, ctx: &EvalCtx)
 /// Validates every unique index over a table's final row set. Only rows in `changed` can be
 /// the source of a violation (existing data is already consistent).
 fn check_uniques(rules: &RowRules, final_rows: &[(RowId, Row)], changed: &HashSet<RowId>, ctx: &EvalCtx) -> SqlResult<()> {
-    for u in &rules.uniques {
+    check_uniques_where(rules, final_rows, changed, ctx, |_| true)
+}
+
+/// Whether a unique index enforces a DEFERRABLE constraint (checked at statement end or
+/// commit rather than row by row).
+fn deferrable(rules: &RowRules, u: &UniqueCheck) -> bool {
+    rules.table.constraints.iter().any(|c| c.name == u.name && c.deferrable)
+}
+
+/// Non-deferrable unique indexes are checked as each row is updated, in scan order, as
+/// Postgres' index insertions are: `SET pos = pos + 1` fails on the transient duplicate.
+fn check_uniques_per_row(rules: &RowRules, untouched: &[(RowId, Row)], changes: &[(RowId, Row, Row)], ctx: &EvalCtx) -> SqlResult<()> {
+    for u in rules.uniques.iter().filter(|u| !deferrable(rules, u)) {
+        let mut keys: HashMap<Vec<GroupKey>, usize> = HashMap::new();
+        for row in untouched.iter().map(|(_, r)| r).chain(changes.iter().map(|(_, old, _)| old)) {
+            if let Some(k) = unique_key(u, row, ctx)? {
+                *keys.entry(k).or_default() += 1;
+            }
+        }
+        for (_, old, new) in changes {
+            if let Some(k) = unique_key(u, old, ctx)?
+                && let Some(n) = keys.get_mut(&k)
+            {
+                *n = n.saturating_sub(1);
+            }
+            if let Some(k) = unique_key(u, new, ctx)? {
+                let n = keys.entry(k).or_default();
+                if *n > 0 {
+                    return Err(unique_violation(&rules.table, u, new, ctx));
+                }
+                *n += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_uniques_where(
+    rules: &RowRules,
+    final_rows: &[(RowId, Row)],
+    changed: &HashSet<RowId>,
+    ctx: &EvalCtx,
+    include: impl Fn(&UniqueCheck) -> bool,
+) -> SqlResult<()> {
+    let ck = Checks { env: ctx.env, state: ctx.state };
+    for u in rules.uniques.iter().filter(|u| include(u)) {
+        if rules.table.constraints.iter().any(|c| c.name == u.name && ck.defer(&rules.table, c)) {
+            continue;
+        }
         let mut seen: HashMap<Vec<GroupKey>, RowId> = HashMap::new();
         // Unchanged rows first, so the error reports the new row's key.
         for (id, row) in final_rows.iter().filter(|(id, _)| !changed.contains(id)) {
@@ -155,10 +203,49 @@ fn key_equal(a: &[Value], b: &[Value]) -> bool {
         && a.iter().zip(b).all(|(x, y)| !x.is_null() && !y.is_null() && pgmem_types::compare_values(x, y).is_ok_and(|o| o.is_eq()))
 }
 
+/// The statement's view of constraint timing: deferred checks are queued, not run.
+#[derive(Clone, Copy)]
+pub(crate) struct Checks<'a> {
+    pub env: &'a SessionEnv,
+    pub state: &'a StatementState,
+}
+
+impl Checks<'_> {
+    /// True (and the check queued for commit) when `con` of `table` is deferred.
+    fn defer(&self, table: &TableDef, con: &pgmem_catalog::Constraint) -> bool {
+        if !self.env.constraint_modes.deferred(con) {
+            return false;
+        }
+        let key = (table.oid, con.name.clone());
+        let mut d = self.state.deferred.borrow_mut();
+        if !d.contains(&key) {
+            d.push(key);
+        }
+        true
+    }
+}
+
 /// Child-side foreign key check: every non-NULL key in `rows` must exist in the parent.
-fn check_foreign_keys(table: &TableDef, rows: &[&Row], txn: &Txn, own_final: Option<&[(RowId, Row)]>) -> SqlResult<()> {
+fn check_foreign_keys(table: &TableDef, rows: &[&Row], txn: &Txn, own_final: Option<&[(RowId, Row)]>, ck: Checks) -> SqlResult<()> {
     for con in &table.constraints {
-        let ConstraintKind::ForeignKey { columns, ref_table, ref_columns, .. } = &con.kind else { continue };
+        let ConstraintKind::ForeignKey { columns, ref_table, ref_columns, match_full, .. } = &con.kind else { continue };
+        if rows.is_empty() || ck.defer(table, con) {
+            continue;
+        }
+        if *match_full {
+            for row in rows {
+                let nulls = columns.iter().filter(|c| row.get(**c).is_none_or(Value::is_null)).count();
+                if nulls > 0 && nulls < columns.len() {
+                    return Err(SqlError::new(
+                        code::FOREIGN_KEY_VIOLATION,
+                        format!("insert or update on table \"{}\" violates foreign key constraint \"{}\"", table.name, con.name),
+                    )
+                    .with_detail("MATCH FULL does not allow mixing of null and nonnull key values.")
+                    .with_table(&table.name)
+                    .with_constraint(&con.name));
+                }
+            }
+        }
         let parent = txn.catalog().table_q(ref_table).cloned().ok_or_else(|| SqlError::undefined_table(&ref_table.name))?;
         let parent_rows: Vec<Row> = if parent.oid == table.oid {
             own_final.map_or_else(
@@ -200,7 +287,17 @@ fn check_foreign_keys(table: &TableDef, rows: &[&Row], txn: &Txn, own_final: Opt
 
 /// Parent-side referential actions after rows of `table` were deleted or had referenced
 /// keys changed. `removed` holds the old versions of those rows.
-fn referential_actions(txn: &mut Txn, table: &TableDef, removed: &[Row], is_delete: bool, depth: usize) -> SqlResult<()> {
+/// `replaced` holds the new versions of updated rows, aligned with `removed` (empty for a
+/// delete).
+fn referential_actions(
+    txn: &mut Txn,
+    table: &TableDef,
+    removed: &[Row],
+    replaced: &[Row],
+    is_delete: bool,
+    depth: usize,
+    ck: Checks,
+) -> SqlResult<()> {
     if removed.is_empty() {
         return Ok(());
     }
@@ -211,7 +308,10 @@ fn referential_actions(txn: &mut Txn, table: &TableDef, removed: &[Row], is_dele
     let parent_now: Vec<Row> = txn.scan_latest(table.oid).into_iter().map(|(_, r)| r).collect();
     for child in children {
         for con in &child.constraints {
-            let ConstraintKind::ForeignKey { columns, ref_table, ref_columns, on_delete, on_update } = &con.kind else { continue };
+            let ConstraintKind::ForeignKey { columns, ref_table, ref_columns, on_delete, on_update, delete_set_columns, .. } = &con.kind
+            else {
+                continue;
+            };
             if *ref_table != table.qualified() {
                 continue;
             }
@@ -242,7 +342,23 @@ fn referential_actions(txn: &mut Txn, table: &TableDef, removed: &[Row], is_dele
                 continue;
             }
             match action {
-                FkAction::NoAction | FkAction::Restrict => {
+                // NO ACTION of a deferred constraint is checked at commit (RESTRICT never is).
+                FkAction::NoAction if ck.defer(&child, con) => {}
+                FkAction::Restrict => {
+                    let names: Vec<&str> = ref_columns.iter().map(|c| table.columns[*c].name.as_str()).collect();
+                    let vals: Vec<String> = gone[0].iter().map(display).collect();
+                    return Err(SqlError::new(
+                        "23001",
+                        format!(
+                            "update or delete on table \"{}\" violates RESTRICT setting of foreign key constraint \"{}\" on table \"{}\"",
+                            table.name, con.name, child.name
+                        ),
+                    )
+                    .with_detail(format!("Key ({})=({}) is referenced from table \"{}\".", names.join(", "), vals.join(", "), child.name))
+                    .with_table(&child.name)
+                    .with_constraint(&con.name));
+                }
+                FkAction::NoAction => {
                     let key = &gone[0];
                     let names: Vec<&str> = ref_columns.iter().map(|c| table.columns[*c].name.as_str()).collect();
                     let vals: Vec<String> = key.iter().map(display).collect();
@@ -268,11 +384,12 @@ fn referential_actions(txn: &mut Txn, table: &TableDef, removed: &[Row], is_dele
                         txn.delete(child.oid, id);
                         removed_children.push(row);
                     }
-                    referential_actions(txn, &child, &removed_children, true, depth + 1)?;
+                    referential_actions(txn, &child, &removed_children, &[], true, depth + 1, ck)?;
                 }
                 FkAction::Cascade => {
                     // ON UPDATE CASCADE: copy the parent's new key into the children.
                     let mut old_versions = Vec::new();
+                    let mut new_versions = Vec::new();
                     for (id, row) in referencing {
                         let old_key: Vec<Value> = columns.iter().map(|c| row.get(*c).cloned().unwrap_or(Value::Null)).collect();
                         let Some(pos) = removed.iter().position(|r| {
@@ -280,26 +397,28 @@ fn referential_actions(txn: &mut Txn, table: &TableDef, removed: &[Row], is_dele
                         }) else {
                             continue;
                         };
-                        let _ = pos;
-                        // The new parent version is the one whose other columns match; use the
-                        // most recent parent rows to find a key not present before.
-                        let new_parent = parent_now.iter().find(|p| {
-                            !removed.iter().any(|r| {
-                                key_equal(
-                                    &ref_columns.iter().map(|c| r.get(*c).cloned().unwrap_or(Value::Null)).collect::<Vec<_>>(),
-                                    &ref_columns.iter().map(|c| p.get(*c).cloned().unwrap_or(Value::Null)).collect::<Vec<_>>(),
-                                )
+                        // The parent's own new version when known; otherwise a parent row with a
+                        // key that was not there before.
+                        let new_parent = replaced.get(pos).or_else(|| {
+                            parent_now.iter().find(|p| {
+                                !removed.iter().any(|r| {
+                                    key_equal(
+                                        &ref_columns.iter().map(|c| r.get(*c).cloned().unwrap_or(Value::Null)).collect::<Vec<_>>(),
+                                        &ref_columns.iter().map(|c| p.get(*c).cloned().unwrap_or(Value::Null)).collect::<Vec<_>>(),
+                                    )
+                                })
                             })
                         });
-                        let Some(np) = new_parent else { continue };
+                        let Some(np) = new_parent.cloned() else { continue };
                         let mut new_row = row.clone();
                         for (c, rc) in columns.iter().zip(ref_columns) {
                             new_row[*c] = np.get(*rc).cloned().unwrap_or(Value::Null);
                         }
-                        txn.update(child.oid, id, new_row);
+                        txn.update(child.oid, id, new_row.clone());
                         old_versions.push(row);
+                        new_versions.push(new_row);
                     }
-                    referential_actions(txn, &child, &old_versions, false, depth + 1)?;
+                    referential_actions(txn, &child, &old_versions, &new_versions, false, depth + 1, ck)?;
                 }
                 FkAction::SetNull | FkAction::SetDefault => {
                     let defaults: Vec<Option<Value>> = if action == FkAction::SetDefault {
@@ -317,20 +436,43 @@ fn referential_actions(txn: &mut Txn, table: &TableDef, removed: &[Row], is_dele
                         vec![None; columns.len()]
                     };
                     let mut old_versions = Vec::new();
+                    let mut new_versions = Vec::new();
                     for (id, row) in referencing {
                         let mut new_row = row.clone();
                         for (i, c) in columns.iter().enumerate() {
+                            // `ON DELETE SET NULL (cols)` sets only those columns.
+                            if is_delete && !delete_set_columns.is_empty() && !delete_set_columns.contains(c) {
+                                continue;
+                            }
                             new_row[*c] = defaults[i].clone().unwrap_or(Value::Null);
                         }
                         check_not_null(&child, &new_row)?;
-                        txn.update(child.oid, id, new_row);
+                        txn.update(child.oid, id, new_row.clone());
                         old_versions.push(row);
+                        new_versions.push(new_row);
                     }
                     if action == FkAction::SetDefault {
+                        // A default with no parent row fails as the parent's update / delete.
                         let rows: Vec<Row> = txn.scan_latest(child.oid).into_iter().map(|(_, r)| r).collect();
-                        check_foreign_keys(&child, &rows.iter().collect::<Vec<_>>(), txn, None)?;
+                        if check_foreign_keys(&child, &rows.iter().collect::<Vec<_>>(), txn, None, ck).is_err() {
+                            let names: Vec<&str> = ref_columns.iter().map(|c| table.columns[*c].name.as_str()).collect();
+                            let vals: Vec<String> = gone[0].iter().map(display).collect();
+                            return Err(SqlError::new(
+                                code::FOREIGN_KEY_VIOLATION,
+                                format!(
+                                    "update or delete on table \"{}\" violates foreign key constraint \"{}\" on table \"{}\"",
+                                    table.name, con.name, child.name
+                                ),
+                            )
+                            .with_detail(format!(
+                                "Key ({})=({}) is still referenced from table \"{}\".",
+                                names.join(", "),
+                                vals.join(", "),
+                                child.name
+                            )));
+                        }
                     }
-                    referential_actions(txn, &child, &old_versions, false, depth + 1)?;
+                    referential_actions(txn, &child, &old_versions, &new_versions, false, depth + 1, ck)?;
                 }
             }
         }
@@ -532,6 +674,7 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
     let mut count = 0u64;
     let mut changed_rows: Vec<Row> = Vec::new();
     let mut old_versions: Vec<Row> = Vec::new();
+    let mut updated_new: Vec<Row> = Vec::new();
     for e in effects {
         match e {
             Effect::Insert(row) => {
@@ -540,6 +683,7 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
             }
             Effect::Update(id, old, new) => {
                 changed_rows.push(new.clone());
+                updated_new.push(new.clone());
                 old_versions.push(old);
                 txn.update(table.oid, id, new);
             }
@@ -554,8 +698,9 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
             (id, r)
         })
         .collect();
-    check_foreign_keys(&table, &changed_rows.iter().collect::<Vec<_>>(), txn, Some(&final_rows))?;
-    referential_actions(txn, &table, &old_versions, false, 0)?;
+    let ck = Checks { env, state };
+    check_foreign_keys(&table, &changed_rows.iter().collect::<Vec<_>>(), txn, Some(&final_rows), ck)?;
+    referential_actions(txn, &table, &old_versions, &updated_new, false, 0, ck)?;
     Ok(DmlResult { count, rows: returning_rows })
 }
 
@@ -636,7 +781,8 @@ pub fn exec_update(plan: &UpdatePlan, txn: &mut Txn, params: &[Value], env: &Ses
             }
             changes.push((id, old, new_row));
         }
-        // Unique validation over the post-update table.
+        // Unique validation: non-deferrable indexes row by row, deferrable ones over the
+        // post-update table (or at commit).
         let changed_ids: HashSet<RowId> = changes.iter().map(|(id, _, _)| *id).collect();
         let mut final_rows: Vec<(RowId, Row)> = ctx
             .txn
@@ -648,8 +794,9 @@ pub fn exec_update(plan: &UpdatePlan, txn: &mut Txn, params: &[Value], env: &Ses
                 (id, r)
             })
             .collect();
+        check_uniques_per_row(&plan.rules, &final_rows, &changes, &ctx)?;
         final_rows.extend(changes.iter().map(|(id, _, n)| (*id, n.clone())));
-        check_uniques(&plan.rules, &final_rows, &changed_ids, &ctx)?;
+        check_uniques_where(&plan.rules, &final_rows, &changed_ids, &ctx, |u| deferrable(&plan.rules, u))?;
     }
     let count = changes.len() as u64;
     let mut old_versions = Vec::new();
@@ -673,8 +820,9 @@ pub fn exec_update(plan: &UpdatePlan, txn: &mut Txn, params: &[Value], env: &Ses
             (id, r)
         })
         .collect();
-    check_foreign_keys(&table, &new_versions.iter().collect::<Vec<_>>(), txn, Some(&final_rows))?;
-    referential_actions(txn, &table, &old_versions, false, 0)?;
+    let ck = Checks { env, state };
+    check_foreign_keys(&table, &new_versions.iter().collect::<Vec<_>>(), txn, Some(&final_rows), ck)?;
+    referential_actions(txn, &table, &old_versions, &new_versions, false, 0, ck)?;
     Ok(DmlResult { count, rows: returning_rows })
 }
 
@@ -701,6 +849,6 @@ pub fn exec_delete(plan: &DeletePlan, txn: &mut Txn, params: &[Value], env: &Ses
         txn.delete(table.oid, id);
         removed.push(row);
     }
-    referential_actions(txn, &table, &removed, true, 0)?;
+    referential_actions(txn, &table, &removed, &[], true, 0, Checks { env, state })?;
     Ok(DmlResult { count, rows: returning_rows })
 }

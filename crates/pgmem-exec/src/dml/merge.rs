@@ -3,7 +3,7 @@
 //! action. Effects are computed against the statement's snapshot, validated, then applied.
 
 use super::{
-    DmlResult, apply_generated, check_checks, check_foreign_keys, check_not_null, check_uniques, identity_always_error, pad,
+    Checks, DmlResult, apply_generated, check_checks, check_foreign_keys, check_not_null, check_uniques, identity_always_error, pad,
     referential_actions, returning_row,
 };
 use crate::bind::merge::{MergeActionPlan, MergeClausePlan, MergePlan};
@@ -210,7 +210,7 @@ pub fn exec_merge(plan: &MergePlan, txn: &mut Txn, params: &[Value], env: &Sessi
     };
     let (effects, returning) = effects;
     let count = effects.len() as u64;
-    let (mut new_versions, mut updated_old, mut deleted) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut new_versions, mut updated_old, mut updated_new, mut deleted) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for e in effects {
         match e {
             Effect::Insert(row) => {
@@ -219,6 +219,7 @@ pub fn exec_merge(plan: &MergePlan, txn: &mut Txn, params: &[Value], env: &Sessi
             }
             Effect::Update(id, old, new) => {
                 new_versions.push(new.clone());
+                updated_new.push(new.clone());
                 updated_old.push(old);
                 txn.update(table.oid, id, new);
             }
@@ -236,8 +237,9 @@ pub fn exec_merge(plan: &MergePlan, txn: &mut Txn, params: &[Value], env: &Sessi
             (id, r)
         })
         .collect();
-    check_foreign_keys(&table, &new_versions.iter().collect::<Vec<_>>(), txn, Some(&final_rows))?;
-    referential_actions(txn, &table, &updated_old, false, 0)?;
-    referential_actions(txn, &table, &deleted, true, 0)?;
+    let ck = Checks { env, state };
+    check_foreign_keys(&table, &new_versions.iter().collect::<Vec<_>>(), txn, Some(&final_rows), ck)?;
+    referential_actions(txn, &table, &updated_old, &updated_new, false, 0, ck)?;
+    referential_actions(txn, &table, &deleted, &[], true, 0, ck)?;
     Ok(DmlResult { count, rows: returning })
 }

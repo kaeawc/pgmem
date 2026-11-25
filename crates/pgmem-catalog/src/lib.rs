@@ -32,6 +32,9 @@ pub struct ColumnDef {
     /// Declared type modifier (`varchar(20)` → 20); -1 when absent.
     pub typmod: i32,
     pub not_null: bool,
+    /// The name given to the NOT NULL constraint (`CONSTRAINT a_required NOT NULL`); None
+    /// for the default `<table>_<column>_not_null`.
+    pub not_null_name: Option<String>,
     pub default: Option<Expr>,
     /// `GENERATED ALWAYS AS (expr) STORED`.
     pub generated: Option<Expr>,
@@ -51,6 +54,7 @@ impl ColumnDef {
             ty,
             typmod: -1,
             not_null: false,
+            not_null_name: None,
             default: None,
             generated: None,
             identity: None,
@@ -90,10 +94,27 @@ impl FkAction {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConstraintKind {
-    PrimaryKey { columns: Vec<usize> },
-    Unique { columns: Vec<usize>, nulls_not_distinct: bool },
-    Check { expr: Expr },
-    ForeignKey { columns: Vec<usize>, ref_table: QualName, ref_columns: Vec<usize>, on_delete: FkAction, on_update: FkAction },
+    PrimaryKey {
+        columns: Vec<usize>,
+    },
+    Unique {
+        columns: Vec<usize>,
+        nulls_not_distinct: bool,
+    },
+    Check {
+        expr: Expr,
+    },
+    ForeignKey {
+        columns: Vec<usize>,
+        ref_table: QualName,
+        ref_columns: Vec<usize>,
+        on_delete: FkAction,
+        on_update: FkAction,
+        /// `MATCH FULL`: either every key column is NULL or none is.
+        match_full: bool,
+        /// `ON DELETE SET NULL / SET DEFAULT (cols)`: the referencing columns set (empty = all).
+        delete_set_columns: Vec<usize>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -101,6 +122,12 @@ pub struct Constraint {
     pub oid: Oid,
     pub name: String,
     pub kind: ConstraintKind,
+    /// `DEFERRABLE` (`pg_constraint.condeferrable`).
+    pub deferrable: bool,
+    /// `INITIALLY DEFERRED` (`condeferred`).
+    pub initially_deferred: bool,
+    /// False for a constraint added `NOT VALID` and not validated since (`convalidated`).
+    pub validated: bool,
 }
 
 impl Constraint {

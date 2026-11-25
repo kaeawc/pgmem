@@ -9,7 +9,7 @@ use pgmem_catalog::{
     default_constraint_name, truncate_identifier,
 };
 use pgmem_ir as ir;
-use pgmem_types::{SqlError, SqlResult, Type, Value, code};
+use pgmem_types::{SqlError, SqlResult, Type, code};
 
 fn fk_action(a: ir::ReferentialAction) -> FkAction {
     match a {
@@ -126,7 +126,10 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
         };
         for con in &c.constraints {
             match &con.kind {
-                ir::ColumnConstraintKind::NotNull => col.not_null = true,
+                ir::ColumnConstraintKind::NotNull => {
+                    col.not_null = true;
+                    col.not_null_name.clone_from(&con.name);
+                }
                 ir::ColumnConstraintKind::Null => {}
                 ir::ColumnConstraintKind::Default(e) => col.default = Some(e.clone()),
                 ir::ColumnConstraintKind::Generated(e) => col.generated = Some(e.clone()),
@@ -197,7 +200,7 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
         }
     }
     // Constraints, column-level first (in column order), then table-level.
-    let mut pending: Vec<(Option<String>, ir::TableConstraintKind, bool)> = Vec::new();
+    let mut pending: Vec<(Option<String>, ir::TableConstraintKind, bool, ir::ConstraintTiming)> = Vec::new();
     for c in &ct.columns {
         for con in &c.constraints {
             let kind = match &con.kind {
@@ -211,14 +214,14 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
                 }
                 _ => continue,
             };
-            pending.push((con.name.clone(), kind, true));
+            pending.push((con.name.clone(), kind, true, con.timing));
         }
     }
     for con in &ct.constraints {
-        pending.push((con.name.clone(), con.kind.clone(), false));
+        pending.push((con.name.clone(), con.kind.clone(), false, con.timing));
     }
-    for (cname, kind, column_level) in pending {
-        add_constraint(b, &mut table, cname, &kind, column_level, &mut taken, None)?;
+    for (cname, kind, column_level, timing) in pending {
+        add_constraint(b, &mut table, cname, &kind, column_level, &mut taken, timing)?;
     }
     Ok(Some(CreateTablePlan { table, sequences }))
 }
@@ -236,7 +239,7 @@ pub fn add_constraint(
     kind: &ir::TableConstraintKind,
     column_level: bool,
     taken: &mut Vec<String>,
-    _rows: Option<&[Vec<Value>]>,
+    timing: ir::ConstraintTiming,
 ) -> SqlResult<()> {
     let catalog = b.catalog;
     let tname = table.name.clone();
@@ -247,6 +250,13 @@ pub fn add_constraint(
     let mut used: Vec<String> = taken.clone();
     used.extend(table.constraints.iter().map(|c| c.name.clone()));
     used.extend(table.indexes.iter().map(|i| i.name.clone()));
+    // A key constraint's index is a relation: its name clashes with any relation first.
+    if let Some(n) = &cname
+        && matches!(kind, ir::TableConstraintKind::PrimaryKey(_) | ir::TableConstraintKind::Unique { .. })
+        && (table.indexes.iter().any(|i| &i.name == n) || catalog.relation(&schema, n).is_some())
+    {
+        return Err(SqlError::new(code::DUPLICATE_TABLE, format!("relation \"{n}\" already exists")));
+    }
     if let Some(n) = &cname
         && table.has_constraint(n)
     {
@@ -300,7 +310,14 @@ pub fn add_constraint(
             } else {
                 ConstraintKind::Unique { columns: idx_cols, nulls_not_distinct }
             };
-            table.constraints.push(Constraint { oid: 0, name, kind: ckind });
+            table.constraints.push(Constraint {
+                oid: 0,
+                name,
+                kind: ckind,
+                deferrable: timing.deferrable,
+                initially_deferred: timing.initially_deferred,
+                validated: true,
+            });
         }
         ir::TableConstraintKind::Check(e) => {
             check_expr_binds(b, table, e, Clause::Check)?;
@@ -314,7 +331,14 @@ pub fn add_constraint(
             };
             let name = cname.unwrap_or_else(|| choose_name(catalog, &schema, &used, base));
             taken.push(name.clone());
-            table.constraints.push(Constraint { oid: 0, name, kind: ConstraintKind::Check { expr: e.clone() } });
+            table.constraints.push(Constraint {
+                oid: 0,
+                name,
+                kind: ConstraintKind::Check { expr: e.clone() },
+                deferrable: false,
+                initially_deferred: false,
+                validated: !timing.not_valid,
+            });
         }
         ir::TableConstraintKind::ForeignKey { columns, references } => {
             let local = columns.iter().map(|c| col_index(table, c)).collect::<SqlResult<Vec<_>>>()?;
@@ -343,12 +367,6 @@ pub fn add_constraint(
                     })
                     .collect::<SqlResult<Vec<_>>>()?
             };
-            if ref_cols.len() != local.len() {
-                return Err(SqlError::new(
-                    code::INVALID_FOREIGN_KEY,
-                    "number of referencing and referenced columns for foreign key disagree",
-                ));
-            }
             let mut sorted = ref_cols.clone();
             sorted.sort_unstable();
             let has_unique = parent.indexes.iter().any(|i| {
@@ -362,11 +380,19 @@ pub fn add_constraint(
                     format!("there is no unique constraint matching given keys for referenced table \"{ref_name}\""),
                 ));
             }
+            if ref_cols.len() != local.len() {
+                return Err(SqlError::new(
+                    code::INVALID_FOREIGN_KEY,
+                    "number of referencing and referenced columns for foreign key disagree",
+                ));
+            }
+            let names: Vec<&str> = columns.iter().map(String::as_str).collect();
+            let name = cname.unwrap_or_else(|| choose_name(catalog, &schema, &used, default_constraint_name(&tname, &names, "fkey")));
             for (l, r) in local.iter().zip(&ref_cols) {
                 let (lt, rt) = (&table.columns[*l].ty, &parent.columns[*r].ty);
                 if crate::funcs::common_type(lt, rt).is_none() {
-                    return Err(SqlError::datatype_mismatch(format!(
-                        "foreign key constraint cannot be implemented: Key columns \"{}\" of the referencing table and \"{}\" of the referenced table are of incompatible types: {} and {}.",
+                    return Err(SqlError::datatype_mismatch(format!("foreign key constraint \"{name}\" cannot be implemented")).with_detail(format!(
+                        "Key columns \"{}\" of the referencing table and \"{}\" of the referenced table are of incompatible types: {} and {}.",
                         table.columns[*l].name,
                         parent.columns[*r].name,
                         lt.name(),
@@ -374,8 +400,18 @@ pub fn add_constraint(
                     )));
                 }
             }
-            let names: Vec<&str> = columns.iter().map(String::as_str).collect();
-            let name = cname.unwrap_or_else(|| choose_name(catalog, &schema, &used, default_constraint_name(&tname, &names, "fkey")));
+            let delete_set_columns = references
+                .delete_set_columns
+                .iter()
+                .map(|c| {
+                    table.column_index(c).filter(|i| local.contains(i)).ok_or_else(|| {
+                        SqlError::new(
+                            code::INVALID_COLUMN_REFERENCE,
+                            format!("column \"{c}\" referenced in ON DELETE SET action must be part of foreign key"),
+                        )
+                    })
+                })
+                .collect::<SqlResult<Vec<_>>>()?;
             taken.push(name.clone());
             table.constraints.push(Constraint {
                 oid: 0,
@@ -386,7 +422,12 @@ pub fn add_constraint(
                     ref_columns: ref_cols,
                     on_delete: fk_action(references.on_delete),
                     on_update: fk_action(references.on_update),
+                    match_full: references.match_full,
+                    delete_set_columns,
                 },
+                deferrable: timing.deferrable,
+                initially_deferred: timing.initially_deferred,
+                validated: !timing.not_valid,
             });
         }
     }
@@ -589,7 +630,7 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
                     }
                     _ => continue,
                 };
-                add_constraint(b, &mut def, con.name.clone(), &kind, true, &mut taken, None)?;
+                add_constraint(b, &mut def, con.name.clone(), &kind, true, &mut taken, con.timing)?;
             }
             let validate = if needs_rewrite { Validation::ConvertColumn { slot, using: None } } else { Validation::None };
             Ok(AlterOutcome::Replace { def: Box::new(def), rename_from: None, sequences, validate })
@@ -675,13 +716,78 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
             })
         }
         ir::AlterTableAction::AddConstraint(con) => {
+            if con.timing.not_valid {
+                let what = match con.kind {
+                    ir::TableConstraintKind::PrimaryKey(_) => Some("PRIMARY KEY"),
+                    ir::TableConstraintKind::Unique { .. } => Some("UNIQUE"),
+                    _ => None,
+                };
+                if let Some(what) = what {
+                    return Err(SqlError::feature_not_supported(format!("{what} constraints cannot be marked NOT VALID")));
+                }
+            }
             let mut taken = Vec::new();
             let before = def.constraints.len();
-            add_constraint(b, &mut def, con.name.clone(), &con.kind, false, &mut taken, None)?;
-            let validate = def.constraints.get(before).map_or(Validation::None, |c| Validation::Constraint(c.name.clone()));
+            add_constraint(b, &mut def, con.name.clone(), &con.kind, false, &mut taken, con.timing)?;
+            // NOT VALID skips the existing rows (new ones are checked).
+            let validate = match def.constraints.get(before) {
+                Some(c) if !con.timing.not_valid => Validation::Constraint(c.name.clone()),
+                _ => Validation::None,
+            };
             Ok(AlterOutcome::Replace { def: Box::new(def), rename_from: None, sequences: vec![], validate })
         }
+        ir::AlterTableAction::ValidateConstraint { name } => {
+            let con = def.constraints.iter_mut().find(|c| &c.name == name).ok_or_else(|| {
+                SqlError::new(code::UNDEFINED_OBJECT, format!("constraint \"{name}\" of relation \"{tname}\" does not exist"))
+            })?;
+            if con.validated {
+                return Ok(AlterOutcome::Nothing);
+            }
+            con.validated = true;
+            Ok(AlterOutcome::Replace {
+                def: Box::new(def),
+                rename_from: None,
+                sequences: vec![],
+                validate: Validation::Constraint(name.clone()),
+            })
+        }
+        ir::AlterTableAction::AlterConstraint { name, timing } => {
+            let con = def.constraints.iter_mut().find(|c| &c.name == name).ok_or_else(|| {
+                SqlError::new(code::UNDEFINED_OBJECT, format!("constraint \"{name}\" of relation \"{tname}\" does not exist"))
+            })?;
+            if !matches!(con.kind, ConstraintKind::ForeignKey { .. }) {
+                return Err(SqlError::new(
+                    code::WRONG_OBJECT_TYPE,
+                    format!("constraint \"{name}\" of relation \"{tname}\" is not a foreign key constraint"),
+                ));
+            }
+            if timing.initially_deferred && !timing.deferrable {
+                return Err(SqlError::syntax("constraint declared INITIALLY DEFERRED must be DEFERRABLE"));
+            }
+            con.deferrable = timing.deferrable;
+            con.initially_deferred = timing.initially_deferred;
+            Ok(AlterOutcome::Replace { def: Box::new(def), rename_from: None, sequences: vec![], validate: Validation::None })
+        }
         ir::AlterTableAction::DropConstraint { name, if_exists, .. } => {
+            // A NOT NULL constraint (Postgres 18 names them).
+            let not_null = def.columns.iter().position(|c| {
+                c.not_null
+                    && !c.dropped
+                    && c.not_null_name.clone().unwrap_or_else(|| crate::catalog_views::not_null_constraint_name(&tname, &c.name)) == *name
+            });
+            if let Some(slot) = not_null
+                && !def.has_constraint(name)
+            {
+                if def.primary_key().is_some_and(|pk| pk.contains(&slot)) {
+                    return Err(SqlError::new(
+                        code::INVALID_TABLE_DEFINITION,
+                        format!("column \"{}\" is in a primary key", def.columns[slot].name),
+                    ));
+                }
+                def.columns[slot].not_null = false;
+                def.columns[slot].not_null_name = None;
+                return Ok(AlterOutcome::Replace { def: Box::new(def), rename_from: None, sequences: vec![], validate: Validation::None });
+            }
             if !def.has_constraint(name) {
                 if *if_exists {
                     return Ok(AlterOutcome::Nothing);

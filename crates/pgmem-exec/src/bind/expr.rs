@@ -406,6 +406,16 @@ fn aggregate_types(kind: AggKind, name: &str, args: &[Type]) -> SqlResult<(Vec<T
 
 impl Binder<'_> {
     pub fn bind_expr(&self, e: &ir::Expr, ctx: &Ctx) -> SqlResult<Bound> {
+        if matches!(e, ir::Expr::Subquery(_) | ir::Expr::Exists { .. } | ir::Expr::InSubquery { .. } | ir::Expr::ArraySubquery(_)) {
+            let place = match ctx.clause {
+                Clause::Check => Some("check constraint"),
+                Clause::Default => Some("DEFAULT expression"),
+                _ => None,
+            };
+            if let Some(place) = place {
+                return Err(SqlError::feature_not_supported(format!("cannot use subquery in {place}")));
+            }
+        }
         match e {
             ir::Expr::Literal(l) => literal(l),
             ir::Expr::Column(parts) => self.bind_column(parts, ctx),

@@ -119,18 +119,24 @@ pub fn deparse_constraint(catalog: &Catalog, table: &TableDef, constraint: &Cons
         ConstraintKind::Unique { columns, nulls_not_distinct } => {
             format!("UNIQUE {}({})", if *nulls_not_distinct { "NULLS NOT DISTINCT " } else { "" }, column_list(table, columns))
         }
-        ConstraintKind::ForeignKey { columns, ref_table, ref_columns, on_delete, on_update } => {
+        ConstraintKind::ForeignKey { columns, ref_table, ref_columns, on_delete, on_update, match_full, delete_set_columns } => {
             let ref_cols = match catalog.table_q(ref_table) {
                 Some(t) if *ref_table != table.qualified() => column_list(t, ref_columns),
                 _ => column_list(table, ref_columns),
             };
             let target = relation_name(catalog, &ref_table.schema, &ref_table.name);
             let mut s = format!("FOREIGN KEY ({}) REFERENCES {target}({ref_cols})", column_list(table, columns));
+            if *match_full {
+                s.push_str(" MATCH FULL");
+            }
             if *on_update != FkAction::NoAction {
                 s.push_str(&format!(" ON UPDATE {}", fk_action(*on_update)));
             }
             if *on_delete != FkAction::NoAction {
                 s.push_str(&format!(" ON DELETE {}", fk_action(*on_delete)));
+                if !delete_set_columns.is_empty() {
+                    s.push_str(&format!(" ({})", column_list(table, delete_set_columns)));
+                }
             }
             s
         }
