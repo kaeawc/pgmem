@@ -43,6 +43,8 @@ python3 scripts/parity.py check
 cargo run -p pgmem-conformance       # corpus vs pgmem (--update after fixes; -v shows failures)
 cargo run -p pgmem-conformance -- --dsn "host=127.0.0.1 port=5432 user=postgres" [--record] [area/]
 (cd examples && go test ./...)       # pgx suites against target/release/pgmem
+clients/psql/compare.sh target/release/pgmem postgres://postgres@127.0.0.1:5432/postgres  # psql output vs PG
+cargo test --manifest-path clients/rust/Cargo.toml   # tokio-postgres + sqlx (PGMEM_CLIENT_DSN=<PG URL> for PG)
 PGMEM_TEST_DSN="host=127.0.0.1 port=5432 user=postgres" cargo nextest run -p pgmem --test it
 ```
 
@@ -67,3 +69,6 @@ After any change: `cargo c && cargo lint && cargo t`.
 - `crates/pgmem` — public `Server` API, the `pgmem` binary, integration tests.
 - `crates/pgmem-conformance` — corpus runner (records from Postgres, ratchets pgmem's pass rate).
 - `examples/` — Go sqlc + pgx projects; `examples/internal/pgmemtest` starts the Rust binary.
+- `clients/` — client matrix (CI job `clients`): psql scripts whose output must equal PostgreSQL's,
+  and tokio-postgres / sqlx suites in a crate outside the workspace (its own lockfile; the
+  workspace dependency policy does not apply).

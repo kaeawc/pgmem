@@ -84,6 +84,12 @@ const PG_POLICY: &str = "oid:oid, polname:name, polrelid:oid, polcmd:\"char\", p
     polqual:pg_node_tree, polwithcheck:pg_node_tree";
 const PG_PARTITIONED_TABLE: &str = "partrelid:oid, partstrat:\"char\", partnatts:int2, partdefid:oid, partattrs:int2vector, \
     partclass:oidvector, partcollation:oidvector, partexprs:pg_node_tree";
+const PG_STATISTIC_EXT: &str = "oid:oid, stxrelid:oid, stxname:name, stxnamespace:oid, stxowner:oid, stxkeys:int2vector, \
+    stxstattarget:int2, stxkind:\"char\"[], stxexprs:pg_node_tree";
+const PG_PUBLICATION: &str = "oid:oid, pubname:name, pubowner:oid, puballtables:bool, pubinsert:bool, pubupdate:bool, pubdelete:bool, \
+    pubtruncate:bool, pubviaroot:bool, pubgencols:\"char\"";
+const PG_PUBLICATION_NAMESPACE: &str = "oid:oid, pnpubid:oid, pnnspid:oid";
+const PG_PUBLICATION_REL: &str = "oid:oid, prpubid:oid, prrelid:oid, prqual:pg_node_tree, prattrs:int2vector";
 const PG_INHERITS: &str = "inhrelid:oid, inhparent:oid, inhseqno:int4, inhdetachpending:bool";
 pub(super) const PG_TRIGGER: &str = "oid:oid, tgrelid:oid, tgparentid:oid, tgname:name, tgfoid:oid, tgtype:int2, tgenabled:\"char\", \
     tgisinternal:bool, tgconstrrelid:oid, tgconstrindid:oid, tgconstraint:oid, tgdeferrable:bool, tginitdeferred:bool, tgnargs:int2, \
@@ -130,6 +136,10 @@ pub static DEFS: &[Def] = &[
     def!("pg_depend", 2608, 'r', PG_DEPEND, pg_depend),
     def!("pg_inherits", 2611, 'r', PG_INHERITS, pg_inherits),
     def!("pg_policy", 3256, 'r', PG_POLICY, empty),
+    def!("pg_statistic_ext", 3381, 'r', PG_STATISTIC_EXT, empty),
+    def!("pg_publication", 6104, 'r', PG_PUBLICATION, empty),
+    def!("pg_publication_namespace", 6237, 'r', PG_PUBLICATION_NAMESPACE, empty),
+    def!("pg_publication_rel", 6106, 'r', PG_PUBLICATION_REL, empty),
     def!("pg_partitioned_table", 3350, 'r', PG_PARTITIONED_TABLE, pg_partitioned_table),
     def!("pg_trigger", 2620, 'r', PG_TRIGGER, super::routines::pg_trigger),
     def!("pg_range", 3541, 'r', PG_RANGE, pg_range),
@@ -352,6 +362,13 @@ fn pg_namespace(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     }))
 }
 
+/// A relation's `relacl` (NULL while it has its default privileges).
+fn acl(ctx: &EvalCtx, m: &Model, rel: u32, sequence: bool) -> Value {
+    let object = pgmem_catalog::GrantObject::Relation(rel);
+    crate::roles::acl_items(m.catalog, ctx.env, &object, rel, sequence)
+        .map_or(Value::Null, |items| Value::Array(items.into_iter().map(Value::Text).collect()))
+}
+
 fn class_row(s: &Spec, o: u32, relname: &str, ns: u32, kind: char, natts: usize, extra: Vec<(&'static str, Value)>) -> Row {
     let mut vals =
         vec![("oid", oid(o)), ("relname", name(relname)), ("relnamespace", oid(ns)), ("relkind", ch(kind)), ("relnatts", int2(natts))];
@@ -385,6 +402,7 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("reltype", oid(rowtype_oid(t.oid))),
                 ("relam", oid(if partitioned { 0 } else { 2 })),
                 ("relfilenode", oid(if partitioned { 0 } else { t.oid })),
+                ("relacl", acl(ctx, &m, t.oid, false)),
                 ("relispartition", boolean(bound.is_some())),
                 ("relpartbound", bound.map_or(Value::Null, txt)),
                 ("relhasindex", boolean(!t.indexes.is_empty())),
@@ -405,10 +423,26 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         ));
     }
     for v in m.views() {
-        rows.push(class_row(&s, v.oid, &v.name, m.namespace(&v.schema), 'v', v.columns.len(), vec![("reltype", oid(rowtype_oid(v.oid)))]));
+        rows.push(class_row(
+            &s,
+            v.oid,
+            &v.name,
+            m.namespace(&v.schema),
+            'v',
+            v.columns.len(),
+            vec![("reltype", oid(rowtype_oid(v.oid))), ("relacl", acl(ctx, &m, v.oid, false))],
+        ));
     }
     for seq in m.sequences() {
-        rows.push(class_row(&s, seq.oid, &seq.name, m.namespace(&seq.schema), 'S', 3, vec![("relfilenode", oid(seq.oid))]));
+        rows.push(class_row(
+            &s,
+            seq.oid,
+            &seq.name,
+            m.namespace(&seq.schema),
+            'S',
+            3,
+            vec![("relfilenode", oid(seq.oid)), ("relacl", acl(ctx, &m, seq.oid, true))],
+        ));
     }
     for t in m.catalog.types() {
         if let pgmem_catalog::TypeDefKind::Composite { fields, relid } = &t.kind {

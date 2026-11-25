@@ -22,3 +22,4 @@ go.work.sum
 .idea/
 .vscode/
 /target
+/clients/rust/target

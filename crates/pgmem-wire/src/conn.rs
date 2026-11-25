@@ -438,6 +438,8 @@ impl Conn {
     }
 
     fn parse(&mut self, body: &[u8]) -> SqlResult<()> {
+        // Declared parameter types may be user types (enums, domains, composites).
+        let _ctx = pgmem_types::context::enter(self.session.format_context());
         let mut r = Reader::new(body);
         let name = r.cstr()?;
         let sql = r.cstr()?;
@@ -448,7 +450,9 @@ impl Conn {
             declared.push(if oid == 0 {
                 Type::Unknown
             } else {
-                Type::from_oid(oid).ok_or_else(|| SqlError::new(code::UNDEFINED_OBJECT, format!("type with OID {oid} does not exist")))?
+                Type::from_oid(oid)
+                    .or_else(|| pgmem_types::usertype::type_for_oid(oid))
+                    .ok_or_else(|| SqlError::new(code::UNDEFINED_OBJECT, format!("type with OID {oid} does not exist")))?
             });
         }
         if !name.is_empty() && self.session.prepared(&name).is_some() {

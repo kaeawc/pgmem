@@ -72,10 +72,10 @@ fn routine_text_function(name: &str, n: usize) -> SqlResult<Option<Resolved>> {
             strict("pg_get_triggerdef", |a, c| {
                 let Some(o) = oid_arg(&a[0]) else { return Ok(Value::Null) };
                 let cat = c.txn.catalog();
-                Ok(cat
-                    .triggers()
-                    .find(|t| t.oid == o)
-                    .map_or(Value::Null, |t| Value::Text(crate::catalog_views::routines::trigger_def(cat, t))))
+                Ok(cat.triggers().find(|t| t.oid == o).map_or(Value::Null, |t| {
+                    let pretty = a.get(1).and_then(Value::as_bool) == Some(true);
+                    Value::Text(crate::catalog_views::routines::trigger_def(cat, t, pretty))
+                }))
             }),
             [Oid, Bool][..n].to_vec(),
             Text,
@@ -277,8 +277,11 @@ fn constraintdef_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
     if let Some(c) = m.constraint_by_oid(o) {
         return Ok(Value::Text(crate::deparse::with_pretty(pretty, || constraint_def(&m, &c))));
     }
-    let domain = m.catalog.types().flat_map(|t| crate::catalog_views::domain_constraints(m.catalog, t)).find(|c| c.oid == o);
-    Ok(domain.map_or(Value::Null, |c| Value::Text(c.def())))
+    // A domain CHECK, deparsed in pretty mode when asked (psql's \\dD).
+    let def = crate::deparse::with_pretty(pretty, || {
+        m.catalog.types().flat_map(|t| crate::catalog_views::domain_constraints(m.catalog, t)).find(|c| c.oid == o).map(|c| c.def())
+    });
+    Ok(def.map_or(Value::Null, Value::Text))
 }
 
 fn indexdef_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
@@ -417,7 +420,7 @@ fn always_false(_: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     Ok(Value::Bool(false))
 }
 
-/// `pg_get_partkeydef`, `pg_partition_root`.
+/// Partitioning, publication and statistics-object functions psql's \\d uses.
 fn partition_function(name: &str, n: usize) -> SqlResult<Option<Resolved>> {
     match name {
         "pg_get_partkeydef" if n == 1 => resolved(
@@ -429,6 +432,20 @@ fn partition_function(name: &str, n: usize) -> SqlResult<Option<Resolved>> {
             vec![Type::Oid],
             Type::Text,
         ),
+        // Tables (not partitioned ones, temporary or system relations) can be published.
+        "pg_relation_is_publishable" if n == 1 => resolved(
+            strict("pg_relation_is_publishable", |a, c| {
+                let catalog = c.txn.catalog();
+                let t = oid_arg(&a[0]).and_then(|o| catalog.table_by_oid(o));
+                Ok(Value::Bool(t.is_some_and(|t| t.matview.is_none() && !t.schema.starts_with("pg_temp_"))))
+            }),
+            vec![Type::Reg(RegKind::Class)],
+            Type::Bool,
+        ),
+        // pgmem has no extended statistics objects.
+        "pg_get_statisticsobjdef_columns" | "pg_get_statisticsobjdef" if n == 1 => {
+            resolved(strict("pg_get_statisticsobjdef", |_, _| Ok(Value::Null)), vec![Type::Oid], Type::Text)
+        }
         "pg_partition_root" if n == 1 => {
             resolved(strict("pg_partition_root", crate::partition::root_fn), vec![Type::Reg(RegKind::Class)], Type::Reg(RegKind::Class))
         }

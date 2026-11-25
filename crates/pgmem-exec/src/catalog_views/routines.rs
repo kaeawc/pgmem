@@ -208,7 +208,7 @@ fn timing_text(t: TriggerTiming) -> &'static str {
 }
 
 /// `pg_get_triggerdef`.
-pub fn trigger_def(catalog: &Catalog, t: &TriggerDef) -> String {
+pub fn trigger_def(catalog: &Catalog, t: &TriggerDef, pretty: bool) -> String {
     let mut events = Vec::new();
     if t.insert {
         events.push("INSERT".to_owned());
@@ -222,7 +222,17 @@ pub fn trigger_def(catalog: &Catalog, t: &TriggerDef) -> String {
     if t.truncate {
         events.push("TRUNCATE".to_owned());
     }
-    let table = catalog.relation_by_oid(t.table).map(|r| format!("{}.{}", r.schema(), r.name())).unwrap_or_default();
+    // Pretty mode leaves out the schema of a relation the search path finds.
+    let table = catalog
+        .relation_by_oid(t.table)
+        .map(|r| {
+            if pretty {
+                crate::deparse::relation_name(catalog, r.schema(), r.name())
+            } else {
+                format!("{}.{}", crate::funcs::string::quote_ident(r.schema()), crate::funcs::string::quote_ident(r.name()))
+            }
+        })
+        .unwrap_or_default();
     let func = catalog.function_by_oid(t.function).map(|f| f.name.clone()).unwrap_or_default();
     let mut s = format!(
         "CREATE TRIGGER {} {} {} ON {table} FOR EACH {}",
