@@ -73,9 +73,28 @@ fn utility_statements() {
             text: None
         }
     );
-    assert_eq!(one("DISCARD ALL"), Statement::NoOp { tag: "DISCARD ALL".into() });
+    assert_eq!(one("DISCARD ALL"), Statement::Discard(pgmem_ir::DiscardKind::All));
     assert!(matches!(one("SET search_path TO \"$user\", public"), Statement::Set { .. }));
     assert_eq!(one(""), Statement::Empty);
+}
+
+#[test]
+fn fetch_and_move_directions() {
+    use pgmem_ir::FetchDirection as D;
+    let dir = |sql: &str| match one(sql) {
+        Statement::Fetch { name, direction, is_move } => (name, direction, is_move),
+        other => panic!("{sql}: {other:?}"),
+    };
+    assert_eq!(dir("FETCH c"), ("c".into(), D::Forward(Some(1)), false));
+    assert_eq!(dir("FETCH 3 FROM c"), ("c".into(), D::Forward(Some(3)), false));
+    assert_eq!(dir("FETCH -2 IN c"), ("c".into(), D::Forward(Some(-2)), false));
+    assert_eq!(dir("FETCH PRIOR FROM c").1, D::Backward(Some(1)));
+    assert_eq!(dir("FETCH LAST c").1, D::Absolute(-1));
+    assert_eq!(dir("FETCH RELATIVE -2 FROM c").1, D::Relative(-2));
+    assert_eq!(dir("FETCH BACKWARD ALL FROM c").1, D::Backward(None));
+    assert_eq!(dir("FETCH FORWARD FROM c").1, D::Forward(Some(1)));
+    assert_eq!(dir("MOVE ALL IN \"Cur\""), ("Cur".into(), D::Forward(None), true));
+    assert_eq!(parse("FETCH ABSOLUTE FROM c").expect_err("count required").code, "42601");
 }
 
 #[test]

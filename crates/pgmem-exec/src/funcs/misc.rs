@@ -28,6 +28,10 @@ fn resolve_uuid_settings(name: &str, args: &[Type]) -> SqlResult<Option<Resolved
             resolved(strict("current_setting", current_setting), t, Type::Text)
         }
         "set_config" if n == 3 => resolved(lenient("set_config", set_config), vec![Type::Text, Type::Text, Type::Bool], Type::Text),
+        "pg_notify" if n == 2 => resolved(lenient("pg_notify", pg_notify), vec![Type::Text, Type::Text], Type::Void),
+        "pg_notification_queue_usage" if n == 0 => {
+            resolved(lenient("pg_notification_queue_usage", |_, _| Ok(Value::Float8(0.0))), vec![], Type::Float8)
+        }
         _ => Ok(None),
     }
 }
@@ -273,6 +277,15 @@ fn current_setting(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
         None if a.get(1).and_then(Value::as_bool) == Some(true) => Ok(Value::Null),
         None => Err(crate::settings::unrecognized(&name)),
     }
+}
+
+/// `pg_notify(channel, payload)`: queued for the transaction's commit.
+fn pg_notify(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
+    let channel = a[0].as_str().unwrap_or("");
+    let payload = a[1].as_str().unwrap_or("");
+    crate::portal::check_notify(channel, payload)?;
+    ctx.state.notifies.borrow_mut().push((channel.to_owned(), payload.to_owned()));
+    Ok(Value::Text(String::new()))
 }
 
 /// `set_config(name, value, is_local)`: validated now, applied to the session when the

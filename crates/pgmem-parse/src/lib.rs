@@ -15,6 +15,7 @@ mod expr;
 mod query;
 mod sqljson;
 mod typeddl;
+mod utility;
 
 use pgmem_ir::{IsolationLevel, ObjectName, ObjectType, Statement, TransactionStmt};
 use pgmem_types::{SqlError, SqlResult, code};
@@ -25,6 +26,7 @@ use sqlparser::parser::{Parser, ParserError};
 /// Parses a query string that may contain several `;`-separated statements (the simple-query
 /// protocol). An empty string yields `[Statement::Empty]`.
 pub fn parse(sql: &str) -> SqlResult<Vec<Statement>> {
+    let original = sql;
     if sql.trim().trim_matches(';').trim().is_empty() {
         return Ok(vec![Statement::Empty]);
     }
@@ -39,7 +41,16 @@ pub fn parse(sql: &str) -> SqlResult<Vec<Statement>> {
     match parsed {
         Ok((stmts, text)) => {
             PARSED_TEXT.with(|t| *t.borrow_mut() = text);
-            stmts.into_iter().map(lower_parsed).collect()
+            let mut lowered = stmts.into_iter().map(lower_parsed).collect::<SqlResult<Vec<_>>>()?;
+            // PREPARE and DECLARE remember the query string they came from, as Postgres does.
+            for s in &mut lowered {
+                match s {
+                    Statement::Prepare(p) => original.clone_into(&mut p.text),
+                    Statement::DeclareCursor(d) => original.clone_into(&mut d.text),
+                    _ => {}
+                }
+            }
+            Ok(lowered)
         }
         Err(err) => {
             // Fall back to per-statement prefix recognition for the utility statements
@@ -80,6 +91,7 @@ fn lower_parsed(p: Parsed) -> SqlResult<Statement> {
     match p {
         Parsed::Sql(s) => lower_statement(*s),
         Parsed::TypeDdl(t) => typeddl::lower(*t),
+        Parsed::Utility(u) => utility::lower(*u),
         Parsed::Schema(s, elements) => {
             let sq::Statement::CreateSchema { schema_name, if_not_exists, .. } = *s else {
                 return Err(SqlError::internal("schema elements without CREATE SCHEMA"));
@@ -109,6 +121,7 @@ pub(crate) const SYMMETRIC_MARKER: &str = "__pgmem_symmetric";
 enum Parsed {
     Sql(Box<sq::Statement>),
     TypeDdl(Box<typeddl::TypeDdl>),
+    Utility(Box<utility::Utility>),
     /// `CREATE SCHEMA ...` followed by its schema elements.
     Schema(Box<sq::Statement>, Vec<Parsed>),
 }
@@ -130,6 +143,11 @@ fn parse_statements(sql: &str) -> Result<Vec<Parsed>, ParserError> {
         }
         if expecting_delimiter {
             return p.expected("end of statement", p.peek_token());
+        }
+        if let Some(u) = utility::try_parse(&mut p)? {
+            out.push(Parsed::Utility(Box::new(u)));
+            expecting_delimiter = true;
+            continue;
         }
         match typeddl::try_parse(&mut p)? {
             Some(t) => out.push(Parsed::TypeDdl(Box::new(t))),
@@ -644,15 +662,65 @@ fn lower_statement(stmt: sq::Statement) -> SqlResult<Statement> {
             sq::Reset::SessionAuthorization => Statement::NoOp { tag: "RESET".into() },
         },
         S::ShowVariable { variable } => Statement::Show { name: show_name(&variable.iter().map(ident).collect::<Vec<_>>()) },
-        S::Discard { object_type } => Statement::NoOp {
-            tag: match object_type {
-                sq::DiscardObject::ALL => "DISCARD ALL",
-                sq::DiscardObject::PLANS => "DISCARD PLANS",
-                sq::DiscardObject::SEQUENCES => "DISCARD SEQUENCES",
-                sq::DiscardObject::TEMP => "DISCARD TEMP",
-            }
-            .into(),
+        S::Discard { object_type } => Statement::Discard(match object_type {
+            sq::DiscardObject::ALL => pgmem_ir::DiscardKind::All,
+            sq::DiscardObject::PLANS => pgmem_ir::DiscardKind::Plans,
+            sq::DiscardObject::SEQUENCES => pgmem_ir::DiscardKind::Sequences,
+            sq::DiscardObject::TEMP => pgmem_ir::DiscardKind::Temp,
+        }),
+        S::Prepare { name, data_types, statement } => Statement::Prepare(Box::new(pgmem_ir::Prepare {
+            name: ident(&name),
+            param_types: data_types.iter().map(expr::lower_type).collect::<SqlResult<Vec<_>>>()?,
+            statement: lower_statement(*statement)?,
+            text: String::new(),
+        })),
+        S::Execute { name: Some(name), parameters, immediate: false, .. } => {
+            Statement::Execute { name: object_name(&name)?.base().to_owned(), args: expr::lower_exprs(parameters)? }
+        }
+        S::Deallocate { name, .. } => {
+            let all = name.quote_style.is_none() && name.value.eq_ignore_ascii_case("all");
+            Statement::Deallocate { name: (!all).then(|| ident(&name)) }
+        }
+        S::Declare { mut stmts, .. } if stmts.len() == 1 && stmts[0].for_query.is_some() => {
+            let d = stmts.remove(0);
+            let [name] = d.names.as_slice() else { return Err(unsupported("DECLARE with several names")) };
+            let Some(query) = d.for_query else { return Err(unsupported("DECLARE without a query")) };
+            Statement::DeclareCursor(Box::new(pgmem_ir::DeclareCursor {
+                name: ident(name),
+                query: query::lower_query(*query)?,
+                binary: d.binary == Some(true),
+                scroll: d.scroll,
+                hold: d.hold == Some(true),
+                text: String::new(),
+            }))
+        }
+        S::Close { cursor } => Statement::CloseCursor {
+            name: match cursor {
+                sq::CloseCursor::All => None,
+                sq::CloseCursor::Specific { name } => Some(ident(&name)),
+            },
         },
+        S::LISTEN { channel } => Statement::Listen { channel: ident(&channel) },
+        S::UNLISTEN { channel } => {
+            Statement::Unlisten { channel: (channel.quote_style.is_some() || channel.value != "*").then(|| ident(&channel)) }
+        }
+        S::NOTIFY { channel, payload } => Statement::Notify { channel: ident(&channel), payload },
+        S::Explain { statement, analyze, options, format, .. } => {
+            let mut explain = pgmem_ir::Explain { statement: lower_statement(*statement)?, analyze, format: pgmem_ir::ExplainFormat::Text };
+            if let Some(f) = format {
+                explain.format = explain_format(&f.to_string());
+            }
+            for o in options.unwrap_or_default() {
+                let arg = o.arg.as_ref().map(set_value).unwrap_or_default();
+                match ident(&o.name).as_str() {
+                    "analyze" => explain.analyze = !matches!(arg.to_ascii_lowercase().as_str(), "false" | "off" | "0"),
+                    "format" => explain.format = explain_format(&arg),
+                    _ => {}
+                }
+            }
+            Statement::Explain(Box::new(explain))
+        }
+        S::Lock(l) => Statement::Lock { tables: l.tables.iter().map(|t| object_name(&t.name)).collect::<SqlResult<Vec<_>>>()? },
         S::Comment { object_type, object_name: target_name, comment, .. } => {
             use pgmem_ir::CommentTarget as T;
             let target = match object_type {
@@ -684,8 +752,6 @@ fn lower_statement(stmt: sq::Statement) -> SqlResult<Statement> {
         S::CreateExtension(_) => Statement::NoOp { tag: "CREATE EXTENSION".into() },
         S::DropExtension(_) => Statement::NoOp { tag: "DROP EXTENSION".into() },
         S::CreateSchema { schema_name, if_not_exists, .. } => lower_create_schema(schema_name, if_not_exists, Vec::new())?,
-        S::Analyze(_) => Statement::NoOp { tag: "ANALYZE".into() },
-        S::Vacuum(_) => Statement::NoOp { tag: "VACUUM".into() },
         S::Grant(_) | S::GrantRole(_) => Statement::NoOp { tag: "GRANT".into() },
         S::Revoke(_) | S::RevokeRole(_) => Statement::NoOp { tag: "REVOKE".into() },
         other => {
@@ -694,6 +760,15 @@ fn lower_statement(stmt: sq::Statement) -> SqlResult<Statement> {
             return Err(unsupported(&format!("statement {head}")));
         }
     })
+}
+
+fn explain_format(f: &str) -> pgmem_ir::ExplainFormat {
+    match f.to_ascii_lowercase().as_str() {
+        "json" => pgmem_ir::ExplainFormat::Json,
+        "yaml" => pgmem_ir::ExplainFormat::Yaml,
+        "xml" => pgmem_ir::ExplainFormat::Xml,
+        _ => pgmem_ir::ExplainFormat::Text,
+    }
 }
 
 fn transaction_modes(modes: &[sq::TransactionMode]) -> (Option<IsolationLevel>, Option<bool>) {

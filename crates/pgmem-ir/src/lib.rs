@@ -95,6 +95,114 @@ pub enum Statement {
     },
     /// Statements with no SQL content (`;` alone): Postgres answers EmptyQueryResponse.
     Empty,
+    /// `PREPARE name [(type, ...)] AS statement`. `text` is the query string it came from
+    /// (`pg_prepared_statements.statement`).
+    Prepare(Box<Prepare>),
+    /// `EXECUTE name [(arg, ...)]`.
+    Execute {
+        name: String,
+        args: Vec<Expr>,
+    },
+    /// `DEALLOCATE [PREPARE] name | ALL` (`None` = ALL).
+    Deallocate {
+        name: Option<String>,
+    },
+    /// `DECLARE name [BINARY] [NO] [SCROLL] CURSOR [WITH[OUT] HOLD] FOR query`.
+    DeclareCursor(Box<DeclareCursor>),
+    /// `FETCH` / `MOVE` (`is_move`).
+    Fetch {
+        name: String,
+        direction: FetchDirection,
+        is_move: bool,
+    },
+    /// `CLOSE name | ALL` (`None` = ALL).
+    CloseCursor {
+        name: Option<String>,
+    },
+    /// `LISTEN channel`.
+    Listen {
+        channel: String,
+    },
+    /// `UNLISTEN channel | *` (`None` = *).
+    Unlisten {
+        channel: Option<String>,
+    },
+    /// `NOTIFY channel [, 'payload']`.
+    Notify {
+        channel: String,
+        payload: Option<String>,
+    },
+    /// `DISCARD ALL | PLANS | SEQUENCES | TEMP`.
+    Discard(DiscardKind),
+    /// `EXPLAIN [ANALYZE] [(options)] statement`.
+    Explain(Box<Explain>),
+    /// `VACUUM` / `ANALYZE` / `CLUSTER` / `REINDEX TABLE` naming tables (checked to exist).
+    /// `in_block_ok` is false for the commands that refuse to run inside a transaction block.
+    Maintenance {
+        tag: String,
+        tables: Vec<ObjectName>,
+        in_block_ok: bool,
+    },
+    /// `LOCK [TABLE] name, ... [IN mode MODE] [NOWAIT]`.
+    Lock {
+        tables: Vec<ObjectName>,
+    },
+}
+
+/// `PREPARE`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Prepare {
+    pub name: String,
+    pub param_types: Vec<TypeName>,
+    pub statement: Statement,
+    pub text: String,
+}
+
+/// `DECLARE ... CURSOR`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeclareCursor {
+    pub name: String,
+    pub query: Query,
+    pub binary: bool,
+    /// `SCROLL` (true), `NO SCROLL` (false), or neither.
+    pub scroll: Option<bool>,
+    pub hold: bool,
+    pub text: String,
+}
+
+/// A FETCH / MOVE direction, normalized the way Postgres' grammar does: `NEXT` is
+/// `Forward(Some(1))`, `PRIOR` is `Backward(Some(1))`, `FIRST` / `LAST` are `Absolute(1)` /
+/// `Absolute(-1)`; `None` counts are `ALL`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FetchDirection {
+    Forward(Option<i64>),
+    Backward(Option<i64>),
+    Absolute(i64),
+    Relative(i64),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiscardKind {
+    All,
+    Plans,
+    Sequences,
+    Temp,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExplainFormat {
+    Text,
+    Json,
+    Yaml,
+    Xml,
+}
+
+/// `EXPLAIN`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Explain {
+    pub statement: Statement,
+    pub analyze: bool,
+    pub format: ExplainFormat,
 }
 
 /// `CREATE SCHEMA [IF NOT EXISTS] [name] [AUTHORIZATION role] [element ...]`.

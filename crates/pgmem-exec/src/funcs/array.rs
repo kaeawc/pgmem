@@ -242,6 +242,7 @@ pub fn resolve_srf(name: &str, args: &[Type]) -> SqlResult<Option<SrfResolution>
             let out = targets[0].clone();
             Ok(Some((vec![out], targets, generate_series)))
         }
+        "pg_listening_channels" if args.is_empty() => Ok(Some((vec![Type::Text], vec![], pg_listening_channels))),
         "string_to_table" if args.len() == 2 || args.len() == 3 => {
             Ok(Some((vec![Type::Text], vec![Type::Text; args.len()], string_to_table)))
         }
@@ -640,6 +641,10 @@ fn string_to_array(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
         Value::Text(d) => src.split(d.as_str()).map(to_val).collect(),
         _ => Vec::new(),
     }))
+}
+
+fn pg_listening_channels(_: &[Value], ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    Ok(ctx.env.objects.listening.iter().map(|c| vec![Value::Text(c.clone())]).collect())
 }
 
 fn string_to_table(a: &[Value], ctx: &EvalCtx) -> SqlResult<Vec<Row>> {

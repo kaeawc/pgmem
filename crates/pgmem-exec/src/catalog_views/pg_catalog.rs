@@ -137,8 +137,8 @@ pub static DEFS: &[Def] = &[
     def!("pg_sequences", 12_007, 'v', PG_SEQUENCES, pg_sequences),
     def!("pg_settings", 12_008, 'v', PG_SETTINGS, pg_settings),
     def!("pg_available_extensions", 12_009, 'v', PG_AVAILABLE_EXTENSIONS, pg_available_extensions),
-    def!("pg_prepared_statements", 12_010, 'v', PG_PREPARED_STATEMENTS, empty),
-    def!("pg_cursors", 12_011, 'v', PG_CURSORS, empty),
+    def!("pg_prepared_statements", 12_010, 'v', PG_PREPARED_STATEMENTS, pg_prepared_statements),
+    def!("pg_cursors", 12_011, 'v', PG_CURSORS, pg_cursors),
     def!("pg_locks", 12_012, 'v', PG_LOCKS, empty),
     def!("pg_stat_activity", 12_013, 'v', PG_STAT_ACTIVITY, pg_stat_activity),
 ];
@@ -1103,6 +1103,54 @@ fn pg_settings(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         ]));
     }
     Ok(rows)
+}
+
+fn regtypes(types: &[Type]) -> Value {
+    Value::Array(types.iter().map(|t| Value::Reg(RegKind::Type, t.oid(), t.name())).collect())
+}
+
+fn pg_prepared_statements(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    Ok(rows_of(PG_PREPARED_STATEMENTS, |s| {
+        ctx.env
+            .objects
+            .prepared
+            .iter()
+            .map(|(n, p)| {
+                let result_types =
+                    p.columns.as_ref().map_or(Value::Null, |cols| regtypes(&cols.iter().map(|c| c.ty.clone()).collect::<Vec<_>>()));
+                s.row(vec![
+                    ("name", txt(n)),
+                    ("statement", txt(&p.text)),
+                    ("prepare_time", Value::Timestamptz(p.prepare_time)),
+                    ("parameter_types", regtypes(&p.param_types)),
+                    ("result_types", result_types),
+                    ("from_sql", boolean(p.from_sql)),
+                    ("generic_plans", Value::Int8(0)),
+                    ("custom_plans", Value::Int8(0)),
+                ])
+            })
+            .collect()
+    }))
+}
+
+fn pg_cursors(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    Ok(rows_of(PG_CURSORS, |s| {
+        ctx.env
+            .objects
+            .cursors
+            .iter()
+            .map(|c| {
+                s.row(vec![
+                    ("name", txt(&c.name)),
+                    ("statement", txt(&c.text)),
+                    ("is_holdable", boolean(c.hold)),
+                    ("is_binary", boolean(c.binary)),
+                    ("is_scrollable", boolean(c.scroll)),
+                    ("creation_time", Value::Timestamptz(c.creation_time)),
+                ])
+            })
+            .collect()
+    }))
 }
 
 fn pg_stat_activity(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {

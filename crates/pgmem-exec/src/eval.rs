@@ -22,6 +22,8 @@ pub struct StatementState {
     pub currval: RefCell<HashMap<Oid, i64>>,
     /// `set_config` changes made during this statement: (name, stored value, is_local).
     pub settings: RefCell<Vec<(String, String, bool)>>,
+    /// `pg_notify` calls made during this statement: (channel, payload).
+    pub notifies: RefCell<Vec<(String, String)>>,
 }
 
 impl StatementState {
