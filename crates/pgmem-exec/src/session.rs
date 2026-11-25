@@ -1,9 +1,8 @@
 //! A client session: transaction state machine, settings, and statement execution.
 
 use crate::bind::{self, Binder, Ctx, Level, Scope};
-use crate::eval::{EvalCtx, StatementState};
+use crate::eval::StatementState;
 use crate::plan::{OutCol, Row};
-use crate::run::run;
 use pgmem_catalog::{ConstraintKind, Oid, Relation};
 use pgmem_ir::{self as ir, Statement, TransactionStmt};
 use pgmem_storage::{Database, Isolation, Txn};
@@ -415,10 +414,12 @@ impl Session {
         let top = Level::new(Scope::default());
         let ctx = Ctx::new(&top);
         let columns = match stmt {
+            _ if crate::statement::leading_with(stmt).is_some() => crate::statement::describe_with(stmt, &binder, &ctx)?,
             Statement::Query(q) => Some(binder.bind_query(q, &ctx)?.columns),
             Statement::Insert(i) => returning(bind::bind_insert(&binder, i, &ctx)?.returning_cols),
             Statement::Update(u) => returning(bind::bind_update(&binder, u, &ctx)?.returning_cols),
             Statement::Delete(d) => returning(bind::bind_delete(&binder, d, &ctx)?.returning_cols),
+            Statement::Merge(m) => returning(bind::merge::bind_merge(&binder, m, &ctx)?.returning_cols),
             Statement::Show { name } => Some(vec![OutCol::new(setting_display_name(&show_key(name)), Type::Text)]),
             Statement::Execute { name, .. } => self.prepared.get(name).and_then(|p| p.columns.clone()),
             Statement::Fetch { name, is_move: false, .. } => Some(self.cursor_columns(name)?),
@@ -560,36 +561,7 @@ impl Session {
         let binder = Binder::new(&catalog, param_types);
         let top = Level::new(Scope::default());
         let ctx = Ctx::new(&top);
-        let result = match stmt {
-            Statement::Query(q) => {
-                let bound = binder.bind_query(q, &ctx)?;
-                let ectx = EvalCtx::new(txn, params, &env, &state);
-                let rows = run(&bound.rel, &ectx)?;
-                QueryResult {
-                    tag: format!("SELECT {}", rows.len()),
-                    columns: bound.columns,
-                    returns_rows: true,
-                    rows,
-                    ..Default::default()
-                }
-            }
-            Statement::Insert(i) => {
-                let plan = bind::bind_insert(&binder, i, &ctx)?;
-                let r = crate::dml::exec_insert(&plan, txn, params, &env, &state)?;
-                dml_result(format!("INSERT 0 {}", r.count), plan.returning_cols, r)
-            }
-            Statement::Update(u) => {
-                let plan = bind::bind_update(&binder, u, &ctx)?;
-                let r = crate::dml::exec_update(&plan, txn, params, &env, &state)?;
-                dml_result(format!("UPDATE {}", r.count), plan.returning_cols, r)
-            }
-            Statement::Delete(d) => {
-                let plan = bind::bind_delete(&binder, d, &ctx)?;
-                let r = crate::dml::exec_delete(&plan, txn, params, &env, &state)?;
-                dml_result(format!("DELETE {}", r.count), plan.returning_cols, r)
-            }
-            other => crate::ddl::execute_ddl(other, txn, &binder, &env, &state)?,
-        };
+        let result = crate::statement::exec_statement(stmt, &binder, &ctx, txn, params, &env, &state)?;
         // Sequence values produced by this statement become visible to currval/lastval.
         let produced = state.currval.borrow();
         for (oid, v) in produced.iter() {
@@ -1113,11 +1085,6 @@ pub fn is_reported(name: &str) -> bool {
 
 fn returning(cols: Vec<OutCol>) -> Option<Vec<OutCol>> {
     if cols.is_empty() { None } else { Some(cols) }
-}
-
-fn dml_result(tag: String, cols: Vec<OutCol>, r: crate::dml::DmlResult) -> QueryResult {
-    let returns_rows = !cols.is_empty();
-    QueryResult { tag, columns: cols, returns_rows, rows: r.rows, ..Default::default() }
 }
 
 #[allow(dead_code)]

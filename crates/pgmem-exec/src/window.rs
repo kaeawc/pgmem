@@ -52,7 +52,7 @@ fn compute(rows: &[Row], call: &WinCall, ctx: &EvalCtx) -> SqlResult<Vec<Value>>
             end += 1;
         }
         let part = &idx[start..end];
-        compute_partition(rows, part, call, ctx, &cmp_order, &mut out)?;
+        compute_partition(rows, part, call, ctx, &cmp_order, &order_keys, &mut out)?;
         start = end;
     }
     Ok(out)
@@ -64,6 +64,7 @@ fn compute_partition(
     call: &WinCall,
     ctx: &EvalCtx,
     cmp_order: &dyn Fn(usize, usize) -> Ordering,
+    order_keys: &[Vec<Value>],
     out: &mut [Value],
 ) -> SqlResult<()> {
     let len = part.len();
@@ -86,7 +87,41 @@ fn compute_partition(
         groups += 1;
         i = j;
     }
-    let frame_for = |pos: usize| -> SqlResult<(usize, usize)> {
+    for o in &call.frame.range_offsets {
+        let v = eval(o, &[], ctx)?;
+        if pgmem_types::compare_values(&v, &Value::Int4(0)).is_ok_and(Ordering::is_lt)
+            || matches!(&v, Value::Interval(iv) if iv.months < 0 || iv.days < 0 || iv.micros < 0)
+        {
+            return Err(SqlError::new("22013", "invalid preceding or following size in window function"));
+        }
+    }
+    // RANGE offset bounds: the current row's key shifted by the offset (`bound`), compared with
+    // the keys in sort order. A NULL key's frame is its peers (None).
+    let range_keys: Vec<Value> = match &call.frame.range_key {
+        Some(k) => part.iter().map(|&r| eval(k, &rows[r], ctx)).collect::<SqlResult<Vec<_>>>()?,
+        None => Vec::new(),
+    };
+    let key = |p: usize| range_keys.get(p).unwrap_or(&order_keys[part[p]][0]);
+    let desc = call.order_by.first().is_some_and(|k| k.desc);
+    let before = |a: &Value, b: &Value| -> bool {
+        let o = pgmem_types::compare_values(a, b).unwrap_or(Ordering::Equal);
+        if desc { o.is_gt() } else { o.is_lt() }
+    };
+    let range_start = |pos: usize, bound: &crate::plan::Expr| -> SqlResult<Option<usize>> {
+        if key(pos).is_null() {
+            return Ok(None);
+        }
+        let b = eval(bound, &rows[part[pos]], ctx)?;
+        Ok(Some((0..len).find(|&k| !key(k).is_null() && !before(key(k), &b)).unwrap_or(len)))
+    };
+    let range_end = |pos: usize, bound: &crate::plan::Expr| -> SqlResult<Option<usize>> {
+        if key(pos).is_null() {
+            return Ok(None);
+        }
+        let b = eval(bound, &rows[part[pos]], ctx)?;
+        Ok(Some((0..len).rev().find(|&k| !key(k).is_null() && !before(&b, key(k))).map_or(0, |k| k + 1)))
+    };
+    let frame_range = |pos: usize| -> SqlResult<(usize, usize)> {
         let f = &call.frame;
         let offset = |e: &crate::plan::Expr| -> SqlResult<usize> {
             let v = eval(e, &[], ctx)?;
@@ -103,6 +138,7 @@ fn compute_partition(
             (FrameUnits::Rows, FrameBound::CurrentRow) => pos,
             (FrameUnits::Rows, FrameBound::Following(e)) => pos.saturating_add(offset(e)?),
             (_, FrameBound::CurrentRow) => peer_start[pos],
+            (FrameUnits::Range, FrameBound::Preceding(e) | FrameBound::Following(e)) => range_start(pos, e)?.unwrap_or(peer_start[pos]),
             (FrameUnits::Groups, FrameBound::Preceding(e)) => {
                 let g = group_of[pos].saturating_sub(offset(e)?);
                 group_of.iter().position(|x| *x == g).unwrap_or(0)
@@ -116,6 +152,7 @@ fn compute_partition(
             (FrameUnits::Rows, FrameBound::CurrentRow) => pos + 1,
             (FrameUnits::Rows, FrameBound::Preceding(e)) => (pos + 1).saturating_sub(offset(e)?),
             (_, FrameBound::CurrentRow) => peer_end[pos],
+            (FrameUnits::Range, FrameBound::Preceding(e) | FrameBound::Following(e)) => range_end(pos, e)?.unwrap_or(peer_end[pos]),
             (FrameUnits::Groups, FrameBound::Following(e)) => {
                 let g = group_of[pos].saturating_add(offset(e)?);
                 group_of.iter().rposition(|x| *x <= g).map_or(len, |p| p + 1)
@@ -124,6 +161,17 @@ fn compute_partition(
             _ => return Err(SqlError::feature_not_supported("RANGE frames with offsets are not supported by pgmem")),
         };
         Ok((lo.min(len), hi.min(len)))
+    };
+    // The frame's rows, without the EXCLUDEd ones.
+    let frame_for = |pos: usize| -> SqlResult<Vec<usize>> {
+        let (lo, hi) = frame_range(pos)?;
+        let excluded = |k: usize| match call.frame.exclude {
+            pgmem_ir::FrameExclude::NoOthers => false,
+            pgmem_ir::FrameExclude::CurrentRow => k == pos,
+            pgmem_ir::FrameExclude::Group => peer_start[pos] <= k && k < peer_end[pos],
+            pgmem_ir::FrameExclude::Ties => k != pos && peer_start[pos] <= k && k < peer_end[pos],
+        };
+        Ok((lo..hi.max(lo)).filter(|&k| !excluded(k)).collect())
     };
     let arg = |pos: usize, i: usize| -> SqlResult<Value> {
         match call.args.get(i) {
@@ -169,17 +217,16 @@ fn compute_partition(
                 }
             }
             WinKind::FirstValue | WinKind::LastValue | WinKind::NthValue => {
-                let (lo, hi) = frame_for(pos)?;
+                let members = frame_for(pos)?;
                 let target = match call.kind {
-                    WinKind::FirstValue => (lo < hi).then_some(lo),
-                    WinKind::LastValue => (lo < hi).then(|| hi - 1),
+                    WinKind::FirstValue => members.first().copied(),
+                    WinKind::LastValue => members.last().copied(),
                     _ => {
                         let nth = arg(pos, 1)?.as_i64().unwrap_or(0);
                         if nth <= 0 {
                             return Err(SqlError::new("22016", "argument of nth_value must be greater than zero"));
                         }
-                        let t = lo + usize::try_from(nth - 1).unwrap_or(usize::MAX);
-                        (t < hi).then_some(t)
+                        members.get(usize::try_from(nth - 1).unwrap_or(usize::MAX)).copied()
                     }
                 };
                 match target {
@@ -189,8 +236,7 @@ fn compute_partition(
             }
             WinKind::Agg(_) => {
                 let agg = call.agg.as_ref().ok_or_else(|| SqlError::internal("window aggregate without call"))?;
-                let (lo, hi) = frame_for(pos)?;
-                let members: Vec<&Row> = part[lo..hi.max(lo)].iter().map(|i| &rows[*i]).collect();
+                let members: Vec<&Row> = frame_for(pos)?.into_iter().map(|k| &rows[part[k]]).collect();
                 aggregate_rows(agg, &members, ctx)?
             }
         };

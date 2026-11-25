@@ -8,10 +8,10 @@ and what comes next. Updated with every PR.
 | Metric | Value | How it is measured |
 |---|---|---|
 | pgmem-go parity | **564 / 564** Go tests ported | `scripts/parity.py check` ([PARITY.md](PARITY.md)) |
-| Integration suite on pgmem | **596 / 596** pass | `cargo nextest run -p pgmem --test it` |
-| Integration suite on real PostgreSQL 18 | **596 / 596** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
+| Integration suite on pgmem | **603 / 603** pass | `cargo nextest run -p pgmem --test it` |
+| Integration suite on real PostgreSQL 18 | **603 / 603** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
 | Go pgx example suites (sqlc) against the Rust binary | **27 / 27** pass | `make examples` (CI `pgx-examples`) |
-| **SQL conformance corpus** (3309 records, 9 areas) | **2809 / 3309 (84.9%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
+| **SQL conformance corpus** (3309 records, 9 areas) | **2880 / 3309 (87.0%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
 
 ### Conformance history
 
@@ -35,7 +35,8 @@ and what comes next. Updated with every PR.
 | 2026-11-24 | schemas, search_path, temporary tables | 564/564 | 2467/3309 (74.6%) |
 | 2026-11-24 | #122 json fidelity, jsonpath, SQL/JSON | 564/564 | 2518/3309 (76.1%) |
 | 2026-11-24 | #123 arrays, select-list SRFs, settings, output styles, date/time input, function sweep | 564/564 | 2711/3309 (81.9%) |
-| 2026-11-25 | session statements: PREPARE/EXECUTE, cursors, LISTEN/NOTIFY, DISCARD, utility statements, transactions per Sync | 564/564 | 2809/3309 (84.9%) |
+| 2026-11-25 | #124 session statements: PREPARE/EXECUTE, cursors, LISTEN/NOTIFY, DISCARD, utility statements, transactions per Sync | 564/564 | 2809/3309 (84.9%) |
+| 2026-11-25 | query statements: MERGE, writable CTEs, RETURNING old/new, GROUPING SETS, window RANGE offsets / EXCLUDE, SEARCH / CYCLE | 564/564 | 2880/3309 (87.0%) |
 
 ## Supported
 
@@ -69,17 +70,24 @@ and what comes next. Updated with every PR.
   DISTINCT, DISTINCT ON, GROUP BY (ordinal, alias, functional dependency on the primary key),
   HAVING, ORDER BY (ordinal, alias, expression, NULLS FIRST/LAST), LIMIT/OFFSET/FETCH (WITH
   TIES), `TABLE t`, BETWEEN SYMMETRIC, VALUES, set-returning functions in FROM and in the select
-  list (run in lockstep, as Postgres 10+ does), views, `(a, b) OVERLAPS (c, d)`.
+  list (run in lockstep, as Postgres 10+ does), views, `(a, b) OVERLAPS (c, d)`, GROUPING SETS /
+  ROLLUP / CUBE with `GROUPING()`, recursive CTEs with SEARCH DEPTH / BREADTH FIRST and CYCLE.
 - **Aggregates & windows**: count/sum/avg/min/max/bool_and/bool_or/every/string_agg/array_agg/
   jsonb_agg/jsonb_object_agg/stddev/variance/bit_and/bit_or/bit_xor, corr/covar/regr_*
   (Postgres' Youngs-Cramer accumulation), ordered-set (`percentile_cont`, `percentile_disc`,
   `mode`) and hypothetical-set (`rank(..) WITHIN GROUP`, ...) aggregates, with DISTINCT, FILTER
   and ORDER BY;
   row_number/rank/dense_rank/percent_rank/cume_dist/ntile/lag/lead/first_value/last_value/
-  nth_value and aggregates over windows with ROWS/RANGE/GROUPS frames (RANGE without offsets).
+  nth_value and aggregates over windows with ROWS/RANGE/GROUPS frames (RANGE offsets over
+  numeric and date/time keys), EXCLUDE CURRENT ROW / GROUP / TIES, aggregates inside window
+  calls (`sum(sum(x)) OVER ()`).
 - **DML**: INSERT (VALUES, SELECT, DEFAULT VALUES, DEFAULT), ON CONFLICT DO NOTHING/DO UPDATE with
   arbiter inference (partial unique indexes need the matching WHERE), UPDATE ... FROM,
-  DELETE ... USING, RETURNING, TRUNCATE (CASCADE; RESTART IDENTITY is undone on rollback).
+  `SET (a, b) = (SELECT ...)`, DELETE ... USING, RETURNING with Postgres 18's `old` / `new`
+  (and `RETURNING WITH (OLD AS o, NEW AS n)`), MERGE (MATCHED / NOT MATCHED [BY SOURCE |
+  TARGET], DO NOTHING, RETURNING with `merge_action()`), data-modifying WITH queries (run
+  once, in order, all reading the statement's snapshot), TRUNCATE (CASCADE; RESTART IDENTITY is
+  undone on rollback).
 - **Schemas**: CREATE SCHEMA (with embedded elements, AUTHORIZATION), ALTER SCHEMA RENAME,
   DROP SCHEMA [CASCADE], `ALTER {TABLE|VIEW|SEQUENCE|TYPE|DOMAIN} ... SET SCHEMA`; qualified
   names everywhere; `search_path` resolution with `$user`, implicit pg_catalog and the creation
@@ -138,7 +146,9 @@ and what comes next. Updated with every PR.
   normalization (`normalize`, `IS NORMALIZED`) covers ASCII text only. `VARIADIC` needs an
   array known when the statement is bound. Comparison is bytewise, which is what the corpus' `C.UTF-8`
   database collation does; other collations are not supported.
-- No system columns (`ctid`, `xmin`, `xmax`, `tableoid`), so `RETURNING (xmax = 0)` fails.
+- No system columns (`ctid`, `xmin`, `xmax`, `tableoid`), so `RETURNING (xmax = 0)` fails; no
+  `WHERE CURRENT OF`; ON CONFLICT targets must be columns (not expressions). UNION without ORDER
+  BY returns rows in first-seen order where Postgres' hash order can differ.
 - Concurrent writers never block: where Postgres would wait on a row lock, pgmem detects the
   conflict at COMMIT (40001).
 - Cursors are materialized at DECLARE (volatile functions run then, not at FETCH); no
@@ -150,14 +160,12 @@ and what comes next. Updated with every PR.
 Hill-climb, ordered by conformance records recovered per unit of work and by what blocks real
 clients. Each item names the corpus area it moves (see CONFORMANCE.md for per-file rates).
 
-1. **Query statements**: MERGE, writable CTEs, `RETURNING old/new`, GROUPING SETS/ROLLUP/CUBE,
-   window `RANGE` offsets and `EXCLUDE`, CTE `SEARCH`/`CYCLE`, system columns
-   (`xmin`/`xmax`/`ctid`/`tableoid`).
-2. **Transactions and constraints**: deferred constraints, per-row unique checks, row locks with
+1. **Transactions and constraints**: system columns (`xmin`/`xmax`/`ctid`/`tableoid`, with
+   `WHERE CURRENT OF`), deferred constraints, per-row unique checks, row locks with
    NOWAIT/SKIP LOCKED between sessions, advisory locks shared across sessions, READ ONLY
    transactions, SERIALIZABLE write-skew detection, dependency errors (2BP01).
-3. **Types and DDL**: range types (and EXCLUDE constraints), network types, bit strings, array
+2. **Types and DDL**: range types (and EXCLUDE constraints), network types, bit strings, array
    lower bounds, CREATE TABLE LIKE/AS, temp ON COMMIT, pretty deparse.
-4. **Functions/procedures/triggers** (SQL and PL/pgSQL), `DO` blocks — large; most of ddl/migrations.
-5. Roles, extensions (pgcrypto, uuid-ossp, citext), COPY, collations, catalog remainder.
-6. Client matrix in CI: psql, tokio-postgres and sqlx (Go pgx is covered by `examples/`).
+3. **Functions/procedures/triggers** (SQL and PL/pgSQL), `DO` blocks — large; most of ddl/migrations.
+4. Roles, extensions (pgcrypto, uuid-ossp, citext), COPY, collations, catalog remainder.
+5. Client matrix in CI: psql, tokio-postgres and sqlx (Go pgx is covered by `examples/`).

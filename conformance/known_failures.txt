@@ -259,27 +259,8 @@ ddl/views.slt:9988938598b9534b  # REFRESH MATERIALIZED VIEW mv_empty
 ddl/views.slt:fb8c7c353fbd2694  # SELECT count(*) FROM mv_empty
 ddl/views.slt:ee61cccb4f6b2ca5  # DROP MATERIALIZED VIEW mv_totals
 ddl/views.slt:c7c87224f956484a  # SELECT matviewname, ispopulated FROM pg_matviews WHERE schemaname = 'public' ORDER BY 1
-dml/delete.slt:9b0637ba937fb2d5  # DELETE FROM book WHERE id = 11 RETURNING old.title, new.title
 dml/delete.slt:e1f0d2dfc7388255  # DELETE FROM book WHERE CURRENT OF cur RETURNING id
 dml/delete.slt:cc7500f6d2aed8f0  # DELETE FROM book RETURNING id
-dml/merge.slt:630021a9c37cd711  # MERGE INTO stock s USING delivery d ON s.sku = d.sku WHEN MATCHED THEN UPDATE SET qty = s.qty + d.qty WHEN NOT MATCHED THEN INSERT (sku, qty) VALUES (d.sku, d.qty)
-dml/merge.slt:e66d964e089cfa94  # SELECT sku, qty, note FROM stock ORDER BY sku
-dml/merge.slt:73a8656845b599be  # MERGE INTO stock s USING (VALUES ('a', 1), ('c', 0), ('d', 3), ('f', 0)) AS v(sku, qty) ON s.sku = v.sku WHEN MATCHED AND s.qty + v.qty <= 0 THEN DELETE WHEN MATCHED AND v.qty = 1 THEN UPDATE SET note = 'one' WHEN MATCHED THEN UPDATE SET qty = s.qty + v.qty WHEN NOT MATCHED AND v.qty = 0 THEN DO NOTHING WHEN NOT MATCHED THEN INSERT VALUES (v.sku, v.qty)
-dml/merge.slt:e66d964e089cfa94#2  # SELECT sku, qty, note FROM stock ORDER BY sku
-dml/merge.slt:4972c55b28d66fc0  # MERGE INTO stock s USING (VALUES ('a', 2), ('g', 4), ('b', -5)) AS v(sku, qty) ON s.sku = v.sku WHEN MATCHED AND s.qty + v.qty = 0 THEN DELETE WHEN MATCHED THEN UPDATE SET qty = s.qty + v.qty WHEN NOT MATCHED THEN INSERT (sku, qty) VALUES (v.sku, v.qty) RETURNING merge_action() AS action, s.sku, s.qty, v.qty AS delta
-dml/merge.slt:d9de94ff590be4dd  # MERGE INTO stock s USING (VALUES ('a', 1), ('h', 1)) AS v(sku, qty) ON s.sku = v.sku WHEN MATCHED THEN UPDATE SET qty = s.qty + v.qty WHEN NOT MATCHED THEN INSERT VALUES (v.sku, v.qty) RETURNING merge_action(), old.qty AS old_qty, new.qty AS new_qty
-dml/merge.slt:476fa2286eef90fc  # MERGE INTO mirror m USING (VALUES (2, 'TWO'), (4, 'four')) AS src(id, val) ON m.id = src.id WHEN MATCHED THEN UPDATE SET val = src.val WHEN NOT MATCHED BY TARGET THEN INSERT VALUES (src.id, src.val) WHEN NOT MATCHED BY SOURCE THEN DELETE RETURNING merge_action(), m.id
-dml/merge.slt:a5596b5433c3de3a  # SELECT id, val FROM mirror ORDER BY id
-dml/merge.slt:eefe779a66da9c4b  # MERGE INTO mirror m USING (SELECT 2 AS id) src ON m.id = src.id WHEN NOT MATCHED BY SOURCE AND m.id > 3 THEN UPDATE SET val = 'orphan' RETURNING m.id, m.val
-dml/merge.slt:43e10f1cb58c6a43  # MERGE INTO counter c USING (SELECT 1 AS id) src ON c.id = src.id WHEN MATCHED THEN UPDATE SET n = c.n + 1 WHEN NOT MATCHED THEN INSERT DEFAULT VALUES RETURNING c.id, c.n
-dml/merge.slt:43e10f1cb58c6a43#2  # MERGE INTO counter c USING (SELECT 1 AS id) src ON c.id = src.id WHEN MATCHED THEN UPDATE SET n = c.n + 1 WHEN NOT MATCHED THEN INSERT DEFAULT VALUES RETURNING c.id, c.n
-dml/merge.slt:305e1da38eb37b6c  # MERGE INTO mirror m USING (VALUES (2, 'x'), (2, 'y')) AS src(id, val) ON m.id = src.id WHEN MATCHED THEN UPDATE SET val = src.val
-dml/merge.slt:a5596b5433c3de3a#2  # SELECT id, val FROM mirror ORDER BY id
-dml/merge.slt:7a70fbc5d3614f7c  # MERGE INTO stock s USING (VALUES ('zz', NULL::int)) AS v(sku, qty) ON s.sku = v.sku WHEN NOT MATCHED THEN INSERT VALUES (v.sku, v.qty)
-dml/merge.slt:f35915ccf3f5e20d  # MERGE INTO stock s USING delivery d ON s.sku = d.sku WHEN MATCHED THEN UPDATE SET nope = 1
-dml/merge.slt:d9d4583631384f7a  # MERGE INTO stock s USING delivery d ON s.sku = d.sku WHEN NOT MATCHED THEN UPDATE SET qty = 1
-dml/merge.slt:05ba7d9ffb4f1771  # WITH m AS (MERGE INTO mirror t USING (VALUES (1, 'uno')) AS s(id, val) ON t.id = s.id WHEN MATCHED THEN UPDATE SET val = s.val WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.val) RETURNING merge_action() AS a, t.*) SELECT a, id, val FROM m
-dml/merge.slt:a5596b5433c3de3a#3  # SELECT id, val FROM mirror ORDER BY id
 dml/on_conflict.slt:4c55601137341f40  # INSERT INTO kv (k, v) VALUES ('d', 41), ('f', 7) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v RETURNING k, v, (xmax = 0) AS inserted
 dml/on_conflict.slt:e0386e843951fad8  # INSERT INTO kv (k, v) VALUES ('f', 0) ON CONFLICT (k) DO UPDATE SET k = 'f2' RETURNING k, v
 dml/on_conflict.slt:8af6d1dd260c17ba  # INSERT INTO kv (k, v) VALUES ('f2', 0) ON CONFLICT (k) DO UPDATE SET k = 'a'
@@ -290,68 +271,16 @@ dml/orm_patterns.slt:df1c5a2fc0c36afe  # INSERT INTO product (sku, name, price) 
 dml/orm_patterns.slt:63925db1c9f27f54  # SELECT sku FROM product WHERE deleted_at IS NULL ORDER BY sku
 dml/orm_patterns.slt:93413b6eeb285830  # DELETE FROM events WHERE ctid IN (SELECT ctid FROM events WHERE kind = 'odd' ORDER BY id LIMIT 2) RETURNING id
 dml/orm_patterns.slt:c7bec65a73bf3c3c  # DELETE FROM events WHERE ctid = ANY(ARRAY(SELECT ctid FROM events ORDER BY id DESC LIMIT 2)) RETURNING id
-dml/orm_patterns.slt:1988239bfb76dcc0  # UPDATE events SET processed = true LIMIT 1
-dml/orm_patterns.slt:571d379a4bd1d43f  # DELETE FROM events ORDER BY id LIMIT 1
-dml/orm_patterns.slt:533099d72bf8c527  # WITH next AS (SELECT id FROM jobs WHERE status = 'queued' ORDER BY id LIMIT 2 FOR UPDATE SKIP LOCKED) UPDATE jobs j SET status = 'running' FROM next WHERE j.id = next.id RETURNING j.id
 dml/orm_patterns.slt:8b90eccb6de1819c  # SELECT sku, name, price, version, deleted_at FROM product ORDER BY sku
-dml/update.slt:c10c03da7225fd9b  # UPDATE emp SET (salary, bonus) = (SELECT budget / 10, budget / 100 FROM dept WHERE dept.id = emp.dept_id) WHERE id = 1 RETURNING salary, bonus
-dml/update.slt:de50aaa2ed6f2397  # UPDATE emp SET (salary, bonus) = (SELECT budget, budget FROM dept) WHERE id = 1
-dml/update.slt:b373947fdc01381c  # UPDATE emp e SET e.salary = 1 WHERE id = 1
-dml/update.slt:db175a226d88e895  # INSERT INTO box VALUES (2, 3)
-dml/update.slt:4b5554aa6061c232  # UPDATE box SET w = 10 RETURNING w, h, area
-dml/update.slt:430e3fe53e23208c  # UPDATE box SET area = DEFAULT, h = 4 RETURNING area
-dml/update.slt:211eca24903ff49f  # UPDATE emp SET salary = salary * 2 WHERE id = 3 RETURNING old.salary AS before, new.salary AS after
-dml/update.slt:cc89b324fed6651e  # UPDATE emp SET bonus = 9 WHERE id = 4 RETURNING old.bonus, new.bonus, bonus
-dml/update.slt:5946860a82a80411  # UPDATE emp SET salary = salary + 1 WHERE id = 3 RETURNING WITH (OLD AS o, NEW AS n) o.salary, n.salary
 dml/update.slt:642e874a1a02056d  # UPDATE emp SET name = 'current' WHERE CURRENT OF c RETURNING id, name
 dml/update.slt:54362fd2aeb66427  # SELECT id, name, dept_id, salary, bonus FROM emp ORDER BY id
-dml/writable_cte.slt:ae4fe533f689c27d  # WITH moved AS (DELETE FROM orders WHERE status = 'done' RETURNING *) INSERT INTO order_archive SELECT * FROM moved RETURNING id, customer
-dml/writable_cte.slt:2df3a1b9e375c7e7  # SELECT id, customer FROM orders ORDER BY id
-dml/writable_cte.slt:c757b73bbe5cc656  # WITH ins AS (INSERT INTO orders (customer, total) VALUES ('dee', 5), ('eve', 6) RETURNING id, customer) SELECT customer, id FROM ins ORDER BY id
-dml/writable_cte.slt:174c4350073d8c4e  # WITH upd AS (UPDATE orders SET total = total * 2 WHERE status = 'open' RETURNING id, total) SELECT count(*), sum(total) FROM upd
-dml/writable_cte.slt:a86bdca30c30ac85  # WITH o AS (INSERT INTO orders (customer, total) VALUES ('fay', 1) RETURNING id), l AS (INSERT INTO order_line SELECT o.id, s, 1 FROM o, unnest(ARRAY['x', 'y']) s RETURNING *) SELECT sku, qty FROM l ORDER BY sku
-dml/writable_cte.slt:e483f1319a78114e  # WITH ins AS (INSERT INTO orders (customer, total) VALUES ('gus', 2) RETURNING id) SELECT count(*) FROM orders WHERE customer = 'gus'
-dml/writable_cte.slt:7a3d8cdd4a81ac3d  # SELECT count(*) FROM orders WHERE customer = 'gus'
-dml/writable_cte.slt:ec295aeca31d0a4e  # WITH d AS (DELETE FROM orders WHERE customer = 'gus') SELECT 1
-dml/writable_cte.slt:ec13b8c0074aae41  # WITH big AS (SELECT id FROM orders WHERE total >= 40) UPDATE orders SET status = 'big' FROM big WHERE orders.id = big.id RETURNING orders.id, orders.status
-dml/writable_cte.slt:fccf43e3cef403c0  # WITH gone AS (SELECT id FROM orders WHERE customer IN ('dee', 'eve')) DELETE FROM orders USING gone WHERE orders.id = gone.id RETURNING orders.customer
-dml/writable_cte.slt:1d58c8120f9926ec  # INSERT INTO order_line (order_id, sku, qty) WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 3) SELECT (SELECT min(id) FROM orders), 'r' || i, i FROM n RETURNING sku, qty
-dml/writable_cte.slt:0a00dd2ef32612e6  # WITH l AS (DELETE FROM order_line WHERE sku IN ('x', 'y') RETURNING order_id), o AS (DELETE FROM orders WHERE id IN (SELECT order_id FROM l) RETURNING customer) SELECT customer FROM o
-dml/writable_cte.slt:b1fd2d4b947c5f52  # SELECT * FROM (WITH d AS (DELETE FROM orders RETURNING id) SELECT id FROM d) s
-dml/writable_cte.slt:1f00f4fd1ad308b6  # WITH x AS (SELECT 1) SELECT * FROM x WHERE EXISTS (WITH d AS (DELETE FROM orders RETURNING 1) SELECT 1 FROM d)
-dml/writable_cte.slt:f4a0235fd90c7903  # SELECT id, customer, total, status FROM orders ORDER BY id
-dml/writable_cte.slt:429b23f753372bee  # SELECT order_id IS NOT NULL AS has_order, sku, qty FROM order_line ORDER BY sku
 functions/arrays.slt:32e8f695cdf0b645  # SELECT array_dims(ARRAY[1, 2, 3]), array_dims(ARRAY[[1, 2], [3, 4]]), array_dims('[2:4]={1,2,3}'::int[]), array_dims(ARRAY[]::int[])
 functions/arrays.slt:2dfed30613a3235b  # SELECT array_lower('[2:4]={1,2,3}'::int[], 1), array_upper('[2:4]={1,2,3}'::int[], 1), array_upper(ARRAY[1, 2], 1), array_lower(ARRAY[]::int[], 1)
 functions/arrays.slt:ff7a90f4845cff74  # SELECT ('[2:4]={1,2,3}'::int[])[2], ('[2:4]={1,2,3}'::int[])[1], '[2:4]={1,2,3}'::int[]
 functions/arrays.slt:c0d77d752209d92f  # SELECT array_fill(7, ARRAY[3]), array_fill(0, ARRAY[2, 2]), array_fill(1, ARRAY[2], ARRAY[5])
 functions/conditional_misc.slt:7e28717042d08aa6  # SELECT generate_subscripts('[3:5]={x,y,z}'::text[], 1), generate_subscripts(ARRAY[1, 2], 1, true)
 functions/conditional_misc.slt:b5355bcb6afee2be  # SELECT pg_get_viewdef('pg_roles'::regclass) IS NOT NULL
-queries/aggregates.slt:d3239e5218a86a1d  # SELECT region, product, sum(qty) FROM sales GROUP BY GROUPING SETS ((region), (product), ()) ORDER BY region NULLS LAST, product NULLS LAST
-queries/aggregates.slt:3832d5309aff50a7  # SELECT region, product, sum(qty), grouping(region, product) FROM sales GROUP BY ROLLUP (region, product) ORDER BY region NULLS LAST, product NULLS LAST
-queries/aggregates.slt:896efd16af3ec417  # SELECT region, product, count(*), grouping(region), grouping(product) FROM sales GROUP BY CUBE (region, product) ORDER BY 4, 5, region NULLS LAST, product NULLS LAST
-queries/aggregates.slt:a90d09dec86c76f4  # SELECT coalesce(region, 'ALL') AS region, sum(qty) FROM sales GROUP BY ROLLUP (region) ORDER BY grouping(region), region
-queries/aggregates.slt:71feebe9e961f372  # SELECT region, product, sum(qty) FROM sales GROUP BY region, ROLLUP (product) ORDER BY region, product NULLS LAST
-queries/aggregates.slt:7c2ac9beaeb35252  # SELECT count(*) FROM sales GROUP BY GROUPING SETS ((), ())
-queries/aggregates.slt:b5cc31f3ed549cd6  # SELECT region, grouping(product) FROM sales GROUP BY region
-queries/cte.slt:21b0f4daf432275a  # WITH RECURSIVE t(id, name) AS (SELECT id, name FROM nodes WHERE parent_id IS NULL UNION ALL SELECT n.id, n.name FROM nodes n JOIN t ON n.parent_id = t.id) SEARCH DEPTH FIRST BY id SET ord SELECT id, name FROM t ORDER BY ord
-queries/cte.slt:74cdf6f1f5926d19  # WITH RECURSIVE t(id, name) AS (SELECT id, name FROM nodes WHERE parent_id IS NULL UNION ALL SELECT n.id, n.name FROM nodes n JOIN t ON n.parent_id = t.id) SEARCH BREADTH FIRST BY id SET ord SELECT id, name FROM t ORDER BY ord
-queries/cte.slt:b84cbf5e2f8dc873  # WITH RECURSIVE g(src, dst) AS (SELECT src, dst FROM edges WHERE src = 1 UNION ALL SELECT e.src, e.dst FROM edges e JOIN g ON e.src = g.dst) CYCLE src SET is_cycle USING path SELECT src, dst, is_cycle, path::text FROM g ORDER BY path::text
-queries/cte.slt:a646c0c5e0adf2b6  # WITH RECURSIVE g(src, dst) AS (SELECT src, dst FROM edges WHERE src = 1 UNION ALL SELECT e.src, e.dst FROM edges e JOIN g ON e.src = g.dst) CYCLE src SET looped TO 'Y' DEFAULT 'N' USING p SELECT src, dst, looped FROM g ORDER BY p::text
-queries/cte.slt:a8ebb0e88202e594  # WITH ins AS (INSERT INTO log VALUES ('hello'), ('world') RETURNING msg) SELECT upper(msg) FROM ins ORDER BY 1
-queries/cte.slt:71681d4f84da3718  # WITH d AS (DELETE FROM log WHERE msg = 'hello' RETURNING *) SELECT count(*) FROM d
-queries/cte.slt:37f079d72733e394  # SELECT msg FROM log
-queries/cte.slt:476fed8af7dfd8c9  # WITH u AS (UPDATE log SET msg = 'WORLD' RETURNING msg) SELECT msg FROM u
 queries/set_operations.slt:6680237cbd789fd6  # SELECT NULL UNION SELECT 1
-queries/windows.slt:8e6a7feca8367b46  # SELECT id, pts, sum(pts) OVER (ORDER BY pts RANGE BETWEEN 5 PRECEDING AND 5 FOLLOWING) FROM scores WHERE pts IS NOT NULL ORDER BY id
-queries/windows.slt:992690e3a8e0ab60  # SELECT d, count(*) OVER (ORDER BY d RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW) FROM (VALUES (DATE '2024-01-01'), (DATE '2024-01-02'), (DATE '2024-01-04'), (DATE '2024-01-05')) v(d) ORDER BY d
-queries/windows.slt:6060d6e030ce44c4  # SELECT id, sum(pts) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW) FROM scores ORDER BY id
-queries/windows.slt:1991c4242d4260d9  # SELECT id, pts, sum(pts) OVER (ORDER BY pts ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING EXCLUDE GROUP) FROM scores WHERE team = 'red' ORDER BY id
-queries/windows.slt:cc3fc92839e3f809  # SELECT id, pts, sum(pts) OVER (ORDER BY pts RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING EXCLUDE TIES) FROM scores WHERE team = 'red' ORDER BY id
-queries/windows.slt:139b133a787e7674  # SELECT team, sum(pts), rank() OVER (ORDER BY sum(pts) DESC NULLS LAST) FROM scores GROUP BY team ORDER BY team
-queries/windows.slt:f1a18c2da35f33ba  # SELECT team, sum(pts) * 100 / sum(sum(pts)) OVER () AS share FROM scores GROUP BY team ORDER BY team
-queries/windows.slt:fc078336b10e022a  # SELECT sum(row_number() OVER ()) FROM scores
-queries/windows.slt:15bbe9ed35da9245  # SELECT sum(pts) OVER (ORDER BY team RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM scores
 session/extensions.slt:b917717b7291b646  # CREATE EXTENSION pgcrypto
 session/extensions.slt:e9c0d9706f574f7f  # SELECT encode(digest('abc', 'sha256'), 'hex')
 session/extensions.slt:33efed8b88c60365  # SELECT encode(hmac('data', 'key', 'sha1'), 'hex')

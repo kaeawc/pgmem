@@ -28,6 +28,25 @@ fn resolve_uuid_settings(name: &str, args: &[Type]) -> SqlResult<Option<Resolved
             resolved(strict("current_setting", current_setting), t, Type::Text)
         }
         "set_config" if n == 3 => resolved(lenient("set_config", set_config), vec![Type::Text, Type::Text, Type::Bool], Type::Text),
+        // `SEARCH BREADTH FIRST`'s depth (field 0 of the search record).
+        "__pgmem_search_depth" if n == 1 => resolved(
+            lenient("__pgmem_search_depth", |a, _| {
+                Ok(match &a[0] {
+                    Value::Record(_, fields) => fields.first().cloned().unwrap_or(Value::Null),
+                    _ => Value::Null,
+                })
+            }),
+            vec![args[0].clone()],
+            Type::Int4,
+        ),
+        "merge_action" if n == 0 => resolved(
+            lenient("merge_action", |_, ctx| {
+                let a = ctx.state.merge_action.get();
+                Ok(if a.is_empty() { Value::Null } else { Value::Text(a.to_owned()) })
+            }),
+            vec![],
+            Type::Text,
+        ),
         "pg_notify" if n == 2 => resolved(lenient("pg_notify", pg_notify), vec![Type::Text, Type::Text], Type::Void),
         "pg_notification_queue_usage" if n == 0 => {
             resolved(lenient("pg_notification_queue_usage", |_, _| Ok(Value::Float8(0.0))), vec![], Type::Float8)

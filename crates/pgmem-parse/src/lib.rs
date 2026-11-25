@@ -13,6 +13,7 @@ mod ddl;
 mod dml;
 mod expr;
 mod query;
+mod search_cycle;
 mod sqljson;
 mod typeddl;
 mod utility;
@@ -27,6 +28,7 @@ use sqlparser::parser::{Parser, ParserError};
 /// protocol). An empty string yields `[Statement::Empty]`.
 pub fn parse(sql: &str) -> SqlResult<Vec<Statement>> {
     let original = sql;
+    search_cycle::clear();
     if sql.trim().trim_matches(';').trim().is_empty() {
         return Ok(vec![Statement::Empty]);
     }
@@ -114,6 +116,16 @@ fn lower_create_schema(schema_name: sq::SchemaName, if_not_exists: bool, element
 /// The function name `(x).*` is rewritten to before parsing; the select-list lowering turns
 /// it back into a field expansion.
 pub(crate) const FIELD_STAR_MARKER: &str = "__pgmem_field_star";
+
+/// The pseudo-function `RETURNING WITH (OLD AS o, NEW AS n)` becomes, as the first RETURNING
+/// item: `__pgmem_returning_aliases('o', 'n')`.
+pub(crate) const RETURNING_ALIASES_MARKER: &str = "__pgmem_returning_aliases";
+
+/// A window frame's EXCLUDE clause, as the first PARTITION BY item: `__pgmem_frame_exclude('ties')`.
+pub(crate) const FRAME_EXCLUDE_MARKER: &str = "__pgmem_frame_exclude";
+
+/// `SEARCH BREADTH FIRST`'s depth: field 0 of the search record.
+pub(crate) const SEARCH_DEPTH_FN: &str = "__pgmem_search_depth";
 
 /// The function `BETWEEN SYMMETRIC`'s low bound is wrapped in before parsing.
 pub(crate) const SYMMETRIC_MARKER: &str = "__pgmem_symmetric";
@@ -214,6 +226,169 @@ fn matching_paren(tokens: &[sqlparser::tokenizer::Token], sig: &[usize], k: usiz
     None
 }
 
+type Tokens = [sqlparser::tokenizer::Token];
+
+fn is_word(tokens: &Tokens, sig: &[usize], k: usize, w: &str) -> bool {
+    use sqlparser::tokenizer::Token;
+    sig.get(k).is_some_and(|&j| matches!(&tokens[j], Token::Word(x) if x.quote_style.is_none() && x.value.eq_ignore_ascii_case(w)))
+}
+
+/// `RETURNING WITH (OLD AS o, NEW AS n) items` → `RETURNING __pgmem_returning_aliases('o', 'n'), items`.
+fn rewrite_returning_with(
+    tokens: &Tokens,
+    sig: &[usize],
+    k: usize,
+    drop: &mut [bool],
+    insert_after: &mut std::collections::HashMap<usize, String>,
+) -> bool {
+    use sqlparser::tokenizer::Token;
+    if !(is_word(tokens, sig, k, "RETURNING")
+        && is_word(tokens, sig, k + 1, "WITH")
+        && sig.get(k + 2).is_some_and(|&j| tokens[j] == Token::LParen))
+    {
+        return false;
+    }
+    let Some(close) = matching_paren(tokens, sig, k + 2) else { return false };
+    let (mut old, mut new) = ("old".to_owned(), "new".to_owned());
+    for w in sig[k + 3..close].split(|&j| tokens[j] == Token::Comma) {
+        if let [which, as_, name] = w
+            && matches!(&tokens[*as_], Token::Word(x) if x.value.eq_ignore_ascii_case("AS"))
+            && let Token::Word(n) = &tokens[*name]
+        {
+            let n = if n.quote_style.is_some() { n.value.clone() } else { n.value.to_lowercase() };
+            match &tokens[*which] {
+                Token::Word(x) if x.value.eq_ignore_ascii_case("OLD") => old = n,
+                Token::Word(x) if x.value.eq_ignore_ascii_case("NEW") => new = n,
+                _ => {}
+            }
+        }
+    }
+    insert_after.insert(sig[k], format!(" {RETURNING_ALIASES_MARKER}('{}', '{}'),", old.replace('\'', "''"), new.replace('\'', "''")));
+    for &j in &sig[k + 1..=close] {
+        drop[j] = true;
+    }
+    true
+}
+
+/// `WITH RECURSIVE name AS (...) SEARCH ... / CYCLE ...` (recorded, then stripped).
+fn rewrite_search_cycle(tokens: &Tokens, sig: &[usize], k: usize, drop: &mut [bool]) -> bool {
+    use sqlparser::tokenizer::Token;
+    if !(is_word(tokens, sig, k, "SEARCH") || is_word(tokens, sig, k, "CYCLE"))
+        || k == 0
+        || !(tokens[sig[k - 1]] == Token::RParen || drop[sig[k - 1]])
+    {
+        return false;
+    }
+    let Some(name) = cte_name_before(tokens, sig, k) else { return false };
+    let Some(len) = search_cycle::strip(tokens, sig, k, &name) else { return false };
+    for &j in &sig[k..k + len] {
+        drop[j] = true;
+    }
+    true
+}
+
+/// A window frame's `EXCLUDE CURRENT ROW | GROUP | TIES | NO OTHERS` becomes a marker first in
+/// the window's PARTITION BY: `__pgmem_frame_exclude('current row')`.
+fn rewrite_frame_exclude(
+    tokens: &Tokens,
+    sig: &[usize],
+    k: usize,
+    drop: &mut [bool],
+    insert_after: &mut std::collections::HashMap<usize, String>,
+) {
+    use sqlparser::tokenizer::Token;
+    let at = |o: usize, w: &str| is_word(tokens, sig, k + o, w);
+    if !at(0, "EXCLUDE") {
+        return;
+    }
+    let kind = if at(1, "CURRENT") && at(2, "ROW") {
+        ("current row", 2)
+    } else if at(1, "GROUP") {
+        ("group", 1)
+    } else if at(1, "TIES") {
+        ("ties", 1)
+    } else if at(1, "NO") && at(2, "OTHERS") {
+        ("no others", 2)
+    } else {
+        return;
+    };
+    let mut depth = 0usize;
+    let Some(open) = sig[..k].iter().rposition(|&j| match tokens[j] {
+        Token::RParen => {
+            depth += 1;
+            false
+        }
+        Token::LParen if depth > 0 => {
+            depth -= 1;
+            false
+        }
+        Token::LParen => true,
+        _ => false,
+    }) else {
+        return;
+    };
+    for n in 0..=kind.1 {
+        drop[sig[k + n]] = true;
+    }
+    let marker = format!("{FRAME_EXCLUDE_MARKER}('{}')", kind.0);
+    if is_word(tokens, sig, open + 1, "PARTITION") && is_word(tokens, sig, open + 2, "BY") {
+        insert_after.insert(sig[open + 2], format!(" {marker},"));
+    } else if sig.get(open + 1).is_some_and(|&j| matches!(&tokens[j], Token::Word(_)))
+        && !["ORDER", "ROWS", "RANGE", "GROUPS"].iter().any(|w| is_word(tokens, sig, open + 1, w))
+    {
+        // `OVER (base_window ...)`.
+        insert_after.insert(sig[open + 1], format!(" PARTITION BY {marker}"));
+    } else {
+        insert_after.insert(sig[open], format!("PARTITION BY {marker} "));
+    }
+}
+
+/// The name of the CTE whose body ends just before `sig[k]` (skipping a SEARCH clause
+/// already stripped there): `name [(cols)] AS [[NOT] MATERIALIZED] (body)`.
+fn cte_name_before(tokens: &[sqlparser::tokenizer::Token], sig: &[usize], k: usize) -> Option<String> {
+    use sqlparser::tokenizer::Token;
+    let word = |j: usize, w: &str| matches!(&tokens[j], Token::Word(x) if x.quote_style.is_none() && x.value.eq_ignore_ascii_case(w));
+    // Back over a stripped SEARCH clause to the body's closing parenthesis.
+    let mut close = k - 1;
+    while close > 0 && tokens[sig[close]] != Token::RParen {
+        close -= 1;
+    }
+    let mut depth = 0usize;
+    let mut open = close;
+    loop {
+        match tokens[sig[open]] {
+            Token::RParen => depth += 1,
+            Token::LParen => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        open = open.checked_sub(1)?;
+    }
+    let mut j = open.checked_sub(1)?;
+    while word(sig[j], "MATERIALIZED") || word(sig[j], "NOT") {
+        j = j.checked_sub(1)?;
+    }
+    if !word(sig[j], "AS") {
+        return None;
+    }
+    j = j.checked_sub(1)?;
+    if tokens[sig[j]] == Token::RParen {
+        while tokens[sig[j]] != Token::LParen {
+            j = j.checked_sub(1)?;
+        }
+        j = j.checked_sub(1)?;
+    }
+    match &tokens[sig[j]] {
+        Token::Word(w) if w.quote_style.is_some() => Some(w.value.clone()),
+        Token::Word(w) => Some(w.value.to_lowercase()),
+        _ => None,
+    }
+}
+
 fn rewrite_unsupported(sql: &str) -> Option<String> {
     use sqlparser::tokenizer::{Token, Tokenizer};
     let assigned = rewrite_array_assignments(sql);
@@ -223,6 +398,8 @@ fn rewrite_unsupported(sql: &str) -> Option<String> {
     // Indexes of significant (non-whitespace) tokens.
     let sig: Vec<usize> = tokens.iter().enumerate().filter(|(_, t)| !matches!(t, Token::Whitespace(_))).map(|(i, _)| i).collect();
     let mut drop = vec![false; tokens.len()];
+    // Text inserted after a token.
+    let mut insert_after: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
     let mut replace: Vec<Option<&str>> = vec![None; tokens.len()];
     for (k, &i) in sig.iter().enumerate() {
         // `(expr).*` → `__pgmem_field_star((expr))`.
@@ -301,6 +478,15 @@ fn rewrite_unsupported(sql: &str) -> Option<String> {
             replace[i] = Some("__pgmem_variadic(");
             replace[sig[close]] = Some("))");
         }
+        if rewrite_returning_with(&tokens, &sig, k, &mut drop, &mut insert_after) || rewrite_search_cycle(&tokens, &sig, k, &mut drop) {
+            continue;
+        }
+        rewrite_frame_exclude(&tokens, &sig, k, &mut drop, &mut insert_after);
+        // MERGE's `THEN INSERT DEFAULT VALUES` → `THEN INSERT VALUES (__pgmem_default_values())`.
+        if word(&tokens[i], "THEN") && at(1, "INSERT") && at(2, "DEFAULT") && at(3, "VALUES") {
+            drop[sig[k + 2]] = true;
+            replace[sig[k + 3]] = Some("VALUES (__pgmem_default_values())");
+        }
         if word(&tokens[i], "FOR") && at(1, "NO") && at(2, "KEY") && at(3, "UPDATE") {
             drop[sig[k + 1]] = true;
             drop[sig[k + 2]] = true;
@@ -336,7 +522,7 @@ fn rewrite_unsupported(sql: &str) -> Option<String> {
             }
         }
     }
-    if !drop.contains(&true) && replace.iter().all(Option::is_none) {
+    if !drop.contains(&true) && replace.iter().all(Option::is_none) && insert_after.is_empty() {
         return assigned;
     }
     Some(
@@ -344,8 +530,15 @@ fn rewrite_unsupported(sql: &str) -> Option<String> {
             .iter()
             .zip(drop)
             .zip(replace)
-            .filter(|((_, d), _)| !d)
-            .map(|((t, _), r)| r.map_or_else(|| t.to_string(), str::to_owned))
+            .enumerate()
+            .filter(|(_, ((_, d), _))| !d)
+            .map(|(i, ((t, _), r))| {
+                let mut text = r.map_or_else(|| t.to_string(), str::to_owned);
+                if let Some(extra) = insert_after.get(&i) {
+                    text.push_str(extra);
+                }
+                text
+            })
             .collect(),
     )
 }
@@ -502,6 +695,12 @@ fn map_parser_error(err: &ParserError, sql: &str) -> SqlError {
     if let Some(e) = lexer_error(&text, sql) {
         return e;
     }
+    // sqlparser's own MERGE checks: `UPDATE is not allowed in a NOT MATCHED merge clause`.
+    if let Some((what, _)) = text.split_once(" is not allowed in a ")
+        && let Some(word) = what.rsplit(' ').next()
+    {
+        return SqlError::syntax(format!("syntax error at or near \"{word}\"")).with_detail(text);
+    }
     let found = text.split("found: ").nth(1).map(|rest| rest.split(" at Line:").next().unwrap_or(rest).trim().to_owned());
     let message = match found.as_deref() {
         Some("EOF") | None if text.contains("EOF") => "syntax error at end of input".to_owned(),
@@ -594,13 +793,30 @@ pub(crate) fn unsupported(what: &str) -> SqlError {
     SqlError::new(code::FEATURE_NOT_SUPPORTED, format!("{what} is not supported by pgmem"))
 }
 
-fn lower_statement(stmt: sq::Statement) -> SqlResult<Statement> {
+pub(crate) fn lower_statement(stmt: sq::Statement) -> SqlResult<Statement> {
     use sq::Statement as S;
     Ok(match stmt {
-        S::Query(q) => Statement::Query(Box::new(query::lower_query(*q)?)),
+        S::Query(q) => {
+            let mut q = query::lower_query(*q)?;
+            // `WITH ... INSERT / UPDATE / DELETE`: the WITH belongs to the statement.
+            if let pgmem_ir::SetExpr::Dml(_) = q.body {
+                let with = q.with.take();
+                let pgmem_ir::SetExpr::Dml(mut inner) = q.body else { unreachable!() };
+                match inner.as_mut() {
+                    Statement::Insert(i) => i.with = with,
+                    Statement::Update(u) => u.with = with,
+                    Statement::Delete(d) => d.with = with,
+                    Statement::Merge(m) => m.with = with,
+                    _ => return Err(unsupported("WITH on this statement")),
+                }
+                return Ok(*inner);
+            }
+            Statement::Query(Box::new(q))
+        }
         S::Insert(i) => Statement::Insert(Box::new(dml::lower_insert(i)?)),
         S::Update(u) => Statement::Update(Box::new(dml::lower_update(u)?)),
         S::Delete(d) => Statement::Delete(Box::new(dml::lower_delete(d)?)),
+        S::Merge(m) => Statement::Merge(Box::new(dml::lower_merge(m)?)),
         S::CreateTable(ct) => Statement::CreateTable(Box::new(ddl::lower_create_table(ct)?)),
         S::CreateView(cv) => Statement::CreateView(Box::new(ddl::lower_create_view(cv)?)),
         S::CreateIndex(ci) => Statement::CreateIndex(Box::new(ddl::lower_create_index(ci)?)),

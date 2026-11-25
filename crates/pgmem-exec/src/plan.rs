@@ -98,6 +98,8 @@ pub enum SubqueryKind {
     Quantified { probe: Box<Expr>, cmp: Func, all: bool },
     /// `ARRAY(SELECT ...)`.
     Array,
+    /// `SET (a, b) = (SELECT x, y ...)`: at most one row, as a record (NULL without rows).
+    Row,
 }
 
 /// One dimension of a subscript: `[i]` (`lower` only) or `[lo:hi]` (either bound optional).
@@ -110,6 +112,13 @@ pub struct SubscriptPart {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
+    /// `GROUPING(args)`: bound with its arguments, then (after aggregation) the value for
+    /// each grouping set, read through the aggregate's set-index column `col`.
+    Grouping {
+        args: Vec<Expr>,
+        col: usize,
+        values: Vec<i32>,
+    },
     Const(Value),
     /// A column of the current input row.
     Col(usize),
@@ -256,6 +265,7 @@ impl Expr {
         f(self);
         match self {
             Expr::Const(_) | Expr::Col(_) | Expr::Outer { .. } | Expr::Param(_) => {}
+            Expr::Grouping { args, .. } => args.iter().for_each(|a| a.walk(f)),
             Expr::Call { args, .. }
             | Expr::And(args)
             | Expr::Or(args)
@@ -344,6 +354,7 @@ impl Expr {
                 else_result: else_result.map(|e| boxed(e, f)).transpose()?,
             },
             Expr::Coalesce(v) => Expr::Coalesce(vec(v, f)?),
+            Expr::Grouping { args, col, values } => Expr::Grouping { args: vec(args, f)?, col, values },
             Expr::MinMax { args, greatest } => Expr::MinMax { args: vec(args, f)?, greatest },
             Expr::NullIf(a, b) => Expr::NullIf(boxed(a, f)?, boxed(b, f)?),
             Expr::InList { probe, list, cmp, negated } => Expr::InList { probe: boxed(probe, f)?, list: vec(list, f)?, cmp, negated },
@@ -497,14 +508,28 @@ pub enum FrameUnits {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Frame {
     pub units: FrameUnits,
+    /// For RANGE, an offset bound holds the bound value itself (`key - offset` / `key +
+    /// offset`, bound over the input row), as Postgres' `in_range` support computes it.
     pub start: FrameBound,
     pub end: FrameBound,
+    pub exclude: pgmem_ir::FrameExclude,
+    /// RANGE offsets (checked to be non-negative).
+    pub range_offsets: Vec<Expr>,
+    /// For RANGE offsets: the ORDER BY key in the type the bounds are compared in.
+    pub range_key: Option<Expr>,
 }
 
 impl Frame {
     /// The SQL default: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW.
     pub fn default_frame() -> Frame {
-        Frame { units: FrameUnits::Range, start: FrameBound::UnboundedPreceding, end: FrameBound::CurrentRow }
+        Frame {
+            units: FrameUnits::Range,
+            start: FrameBound::UnboundedPreceding,
+            end: FrameBound::CurrentRow,
+            exclude: pgmem_ir::FrameExclude::NoOthers,
+            range_offsets: Vec::new(),
+            range_key: None,
+        }
     }
 }
 
@@ -577,10 +602,14 @@ pub enum Rel {
         right_width: usize,
     },
     /// Output: group keys, then one column per aggregate. With no keys, exactly one row.
+    /// Output: the group keys, one column per aggregate, then (with grouping sets) the index
+    /// of the set the row belongs to.
     Aggregate {
         input: Box<Rel>,
         group: Vec<Expr>,
         aggs: Vec<AggCall>,
+        /// GROUPING SETS: the group keys each set groups by (the others are NULL).
+        sets: Option<Vec<Vec<usize>>>,
     },
     /// Output: input columns, then one column per window call.
     Window {

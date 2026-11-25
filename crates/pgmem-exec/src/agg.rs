@@ -654,3 +654,22 @@ pub fn run_aggregate(rows: &[Row], group: &[Expr], aggs: &[AggCall], ctx: &EvalC
     }
     Ok(out)
 }
+
+/// GROUP BY GROUPING SETS: one aggregation per set, the keys outside the set NULL, each row
+/// followed by its set's index (for `GROUPING()`).
+pub fn run_grouping_sets(rows: &[Row], group: &[Expr], sets: &[Vec<usize>], aggs: &[AggCall], ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let mut out = Vec::new();
+    for (si, set) in sets.iter().enumerate() {
+        let keys: Vec<Expr> = set.iter().map(|&i| group[i].clone()).collect();
+        for r in run_aggregate(rows, &keys, aggs, ctx)? {
+            let mut full = vec![Value::Null; group.len()];
+            for (pos, &i) in set.iter().enumerate() {
+                full[i] = r[pos].clone();
+            }
+            full.extend(r[set.len()..].iter().cloned());
+            full.push(Value::Int4(i32::try_from(si).unwrap_or(i32::MAX)));
+            out.push(full);
+        }
+    }
+    Ok(out)
+}

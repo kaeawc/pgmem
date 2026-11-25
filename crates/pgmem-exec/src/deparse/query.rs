@@ -185,6 +185,8 @@ impl Analyzer<'_> {
             ir::SetExpr::Select(s) => self.select_query(s, q, names),
             ir::SetExpr::SetOp { .. } => self.setop_query(&q.body, q),
             ir::SetExpr::Values(rows) => self.values_query(rows),
+            // Views cannot contain data-modifying WITH queries (rejected when bound).
+            ir::SetExpr::Dml(_) => self.values_query(&[]),
             ir::SetExpr::Query(inner) => {
                 self.levels.pop();
                 let mut inner = self.query(inner, has_parent);

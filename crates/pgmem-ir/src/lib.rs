@@ -41,6 +41,7 @@ pub enum Statement {
     Insert(Box<Insert>),
     Update(Box<Update>),
     Delete(Box<Delete>),
+    Merge(Box<Merge>),
     CreateTable(Box<CreateTable>),
     CreateView(Box<CreateView>),
     CreateIndex(Box<CreateIndex>),
@@ -148,6 +149,9 @@ pub enum Statement {
         tables: Vec<ObjectName>,
     },
 }
+
+/// Expanded GROUPING SETS: each set lists indexes into `Select::group_by`.
+pub type GroupingSets = Vec<Vec<usize>>;
 
 /// `PREPARE`.
 #[derive(Clone, Debug, PartialEq)]
@@ -310,6 +314,8 @@ pub struct Cte {
 pub enum SetExpr {
     Select(Box<Select>),
     Values(Vec<Vec<Expr>>),
+    /// A data-modifying statement (INSERT / UPDATE / DELETE / MERGE) as a WITH query.
+    Dml(Box<Statement>),
     SetOp {
         op: SetOperator,
         all: bool,
@@ -334,6 +340,9 @@ pub struct Select {
     pub from: Vec<TableRef>,
     pub selection: Option<Expr>,
     pub group_by: Vec<Expr>,
+    /// `GROUPING SETS` / `ROLLUP` / `CUBE`, expanded: each set lists the `group_by`
+    /// expressions it groups by (None for a plain GROUP BY).
+    pub grouping_sets: Option<GroupingSets>,
     pub having: Option<Expr>,
     pub windows: Vec<NamedWindow>,
 }
@@ -758,6 +767,49 @@ pub struct Delete {
     pub using: Vec<TableRef>,
     pub selection: Option<Expr>,
     pub returning: Vec<SelectItem>,
+}
+
+/// `MERGE INTO target [alias] USING source ON condition WHEN ... [RETURNING ...]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Merge {
+    pub with: Option<With>,
+    pub table: ObjectName,
+    pub alias: Option<String>,
+    pub source: TableRef,
+    pub on: Expr,
+    pub clauses: Vec<MergeWhen>,
+    pub returning: Vec<SelectItem>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MergeMatch {
+    Matched,
+    /// `NOT MATCHED [BY TARGET]`: a source row without a target row.
+    NotMatchedByTarget,
+    /// `NOT MATCHED BY SOURCE`: a target row without a source row.
+    NotMatchedBySource,
+}
+
+/// One `WHEN [NOT] MATCHED [BY ...] [AND condition] THEN action`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MergeWhen {
+    pub kind: MergeMatch,
+    pub condition: Option<Expr>,
+    pub action: MergeAction,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum MergeAction {
+    Update(Vec<Assignment>),
+    Delete,
+    DoNothing,
+    /// `INSERT [(columns)] [OVERRIDING SYSTEM VALUE] VALUES (...)`; `values: None` is
+    /// `DEFAULT VALUES`.
+    Insert {
+        columns: Vec<String>,
+        values: Option<Vec<Expr>>,
+        overriding_system_value: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------------------------
