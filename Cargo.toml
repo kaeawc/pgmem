@@ -8,7 +8,6 @@ edition = "2024"
 rust-version = "1.100"
 license = "MIT"
 repository = "https://github.com/kaeawc/pgmem"
-homepage = "https://github.com/kaeawc/pgmem"
 keywords = ["postgres", "postgresql", "testing", "database", "in-memory"]
 categories = ["database-implementations", "development-tools::testing"]
 
