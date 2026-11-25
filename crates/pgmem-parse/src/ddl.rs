@@ -391,7 +391,13 @@ pub(crate) fn lower_alter_table(at: sq::AlterTable) -> SqlResult<AlterTable> {
             }),
             O::EnableTrigger { name } => actions.push(trigger_toggle(&name, true)),
             O::DisableTrigger { name } => actions.push(trigger_toggle(&name, false)),
-            O::OwnerTo { .. } | O::EnableRowLevelSecurity | O::DisableRowLevelSecurity | O::SetLogged | O::SetUnlogged => {}
+            O::OwnerTo { new_owner } => actions.push(AlterTableAction::OwnerTo(match new_owner {
+                sq::Owner::Ident(i) => ident(&i),
+                sq::Owner::CurrentRole => "current_role".to_owned(),
+                sq::Owner::CurrentUser => "current_user".to_owned(),
+                sq::Owner::SessionUser => "session_user".to_owned(),
+            })),
+            O::EnableRowLevelSecurity | O::DisableRowLevelSecurity | O::SetLogged | O::SetUnlogged => {}
             other => return Err(unsupported(&format!("ALTER TABLE {other}"))),
         }
     }

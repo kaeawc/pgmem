@@ -71,8 +71,9 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
     let err = || no_function(name, args);
     let n = args.len();
     match name {
-        "current_user" | "session_user" | "user" | "current_role" if n == 0 => {
-            resolved(lenient("current_user", |_, c| Ok(Value::Text(c.env.user.clone()))), vec![], Type::Name)
+        "session_user" if n == 0 => resolved(lenient("session_user", |_, c| Ok(Value::Text(c.env.user.clone()))), vec![], Type::Name),
+        "current_user" | "user" | "current_role" if n == 0 => {
+            resolved(lenient("current_user", |_, c| Ok(Value::Text(crate::roles::current_role(c.env)))), vec![], Type::Name)
         }
         "current_database" | "current_catalog" if n == 0 => {
             resolved(lenient("current_database", |_, c| Ok(Value::Text(c.env.database.clone()))), vec![], Type::Name)

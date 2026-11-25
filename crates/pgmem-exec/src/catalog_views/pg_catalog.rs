@@ -851,13 +851,30 @@ fn pg_database(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     }))
 }
 
-/// (oid, name, super, inherit, createrole, createdb, canlogin, replication, bypassrls).
-fn roles(ctx: &EvalCtx) -> Vec<(u32, String, [bool; 7])> {
-    let mut out = vec![(SUPERUSER_OID, ctx.env.user.clone(), [true; 7])];
+/// A predefined role (`pg_read_all_data`, ...): its OID.
+pub fn predefined_role(name: &str) -> Option<u32> {
+    PG_ROLES_DATA.lines().filter(|l| !l.is_empty()).find_map(|l| {
+        let f: Vec<&str> = l.split('\t').collect();
+        (f.get(1) == Some(&name)).then(|| f[0].parse().unwrap_or(0))
+    })
+}
+
+/// (oid, name, super, inherit, createrole, createdb, canlogin, replication, bypassrls,
+/// connection limit): the session user, the predefined roles, then created roles.
+fn roles(ctx: &EvalCtx) -> Vec<(u32, String, [bool; 7], i32)> {
+    let mut out = vec![(SUPERUSER_OID, ctx.env.user.clone(), [true; 7], -1)];
     for l in PG_ROLES_DATA.lines().filter(|l| !l.is_empty()) {
         let f: Vec<&str> = l.split('\t').collect();
         let b = |i: usize| f.get(i).is_some_and(|v| *v == "t");
-        out.push((f[0].parse().unwrap_or(0), f[1].to_owned(), [b(2), b(3), b(4), b(5), b(6), b(7), b(8)]));
+        out.push((f[0].parse().unwrap_or(0), f[1].to_owned(), [b(2), b(3), b(4), b(5), b(6), b(7), b(8)], -1));
+    }
+    for r in ctx.txn.catalog().roles() {
+        out.push((
+            r.oid,
+            r.name.clone(),
+            [r.superuser, r.inherit, r.createrole, r.createdb, r.login, r.replication, r.bypassrls],
+            r.connlimit,
+        ));
     }
     out
 }
@@ -866,9 +883,10 @@ fn pg_roles(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let all = roles(ctx);
     Ok(rows_of(PG_ROLES, |s| {
         all.iter()
-            .map(|(o, n, f)| {
+            .map(|(o, n, f, limit)| {
                 s.row(vec![
                     ("rolname", name(n)),
+                    ("rolconnlimit", int4(i64::from(*limit))),
                     ("rolsuper", boolean(f[0])),
                     ("rolinherit", boolean(f[1])),
                     ("rolcreaterole", boolean(f[2])),
@@ -888,9 +906,10 @@ fn pg_authid(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let all = roles(ctx);
     Ok(rows_of(PG_AUTHID, |s| {
         all.iter()
-            .map(|(o, n, f)| {
+            .map(|(o, n, f, limit)| {
                 s.row(vec![
                     ("oid", oid(*o)),
+                    ("rolconnlimit", int4(i64::from(*limit))),
                     ("rolname", name(n)),
                     ("rolsuper", boolean(f[0])),
                     ("rolinherit", boolean(f[1])),

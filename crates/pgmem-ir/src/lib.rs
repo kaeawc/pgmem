@@ -157,6 +157,48 @@ pub enum Statement {
         materialized: bool,
         if_exists: bool,
     },
+    CreateRole {
+        name: String,
+        options: Box<RoleOptions>,
+        if_not_exists: bool,
+    },
+    AlterRole {
+        name: String,
+        action: AlterRoleAction,
+    },
+    DropRole {
+        names: Vec<String>,
+        if_exists: bool,
+    },
+    /// GRANT / REVOKE of privileges on objects.
+    Grant(Box<GrantStmt>),
+    /// `GRANT role TO member` / `REVOKE role FROM member`.
+    GrantRole {
+        roles: Vec<String>,
+        members: Vec<String>,
+        admin: bool,
+        revoke: bool,
+    },
+    /// `ALTER DEFAULT PRIVILEGES [IN SCHEMA s] {GRANT | REVOKE} ... ON {TABLES | ...}`.
+    AlterDefaultPrivileges {
+        schemas: Vec<String>,
+        kind: char,
+        grant: Box<GrantStmt>,
+    },
+    DropOwned {
+        roles: Vec<String>,
+        cascade: bool,
+    },
+    ReassignOwned {
+        roles: Vec<String>,
+        to: String,
+    },
+    /// `ALTER {SCHEMA | SEQUENCE | VIEW | FUNCTION | TYPE | ...} name OWNER TO role`.
+    AlterOwner {
+        object: OwnedObject,
+        name: ObjectName,
+        owner: String,
+    },
     CreateFunction(Box<CreateFunction>),
     /// `DROP {FUNCTION | PROCEDURE | ROUTINE} [IF EXISTS] name [(types)], ... [CASCADE]`.
     DropFunction {
@@ -1079,6 +1121,79 @@ pub struct CreateSequence {
     pub options: SequenceOptions,
 }
 
+/// CREATE / ALTER ROLE options; None where not given.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct RoleOptions {
+    pub superuser: Option<bool>,
+    pub createdb: Option<bool>,
+    pub createrole: Option<bool>,
+    pub inherit: Option<bool>,
+    pub login: Option<bool>,
+    pub replication: Option<bool>,
+    pub bypassrls: Option<bool>,
+    pub connlimit: Option<i32>,
+    /// `PASSWORD 'x'` (Some(Some)) / `PASSWORD NULL` (Some(None)).
+    pub password: Option<Option<String>>,
+    pub valid_until: Option<String>,
+    /// `IN ROLE a, b`: roles the new role joins.
+    pub in_roles: Vec<String>,
+    /// `ROLE a, b` / `USER a, b`: members of the new role.
+    pub members: Vec<String>,
+    pub admins: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum AlterRoleAction {
+    Options(RoleOptions),
+    Rename(String),
+    /// `SET name {TO | =} value` (None value: `SET name TO DEFAULT`).
+    Set(String, Option<String>),
+    /// `RESET name` / `RESET ALL` (None).
+    Reset(Option<String>),
+}
+
+/// What GRANT / REVOKE names.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GrantTarget {
+    Tables(Vec<ObjectName>),
+    AllTablesInSchema(Vec<String>),
+    Sequences(Vec<ObjectName>),
+    AllSequencesInSchema(Vec<String>),
+    Schemas(Vec<String>),
+    Databases(Vec<String>),
+    Functions(Vec<(ObjectName, Option<Vec<TypeName>>)>),
+    AllFunctionsInSchema(Vec<String>),
+    Types(Vec<ObjectName>),
+    /// Object kinds pgmem keeps no privileges for (languages, foreign servers, ...).
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GrantStmt {
+    /// Privilege keywords (lowercase); None for ALL [PRIVILEGES].
+    pub privileges: Option<Vec<String>>,
+    pub target: GrantTarget,
+    /// Role names; "public" for PUBLIC.
+    pub grantees: Vec<String>,
+    /// GRANT ... WITH GRANT OPTION / REVOKE GRANT OPTION FOR.
+    pub grant_option: bool,
+    pub revoke: bool,
+    pub cascade: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnedObject {
+    Schema,
+    Sequence,
+    View,
+    MaterializedView,
+    Function,
+    Procedure,
+    Type,
+    Domain,
+    Database,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoutineKind {
     Function,
@@ -1224,6 +1339,8 @@ pub enum AlterTableAction {
         column: String,
         if_exists: bool,
     },
+    /// `OWNER TO role`.
+    OwnerTo(String),
     /// `ENABLE / DISABLE TRIGGER {name | ALL | USER}` (None: all).
     EnableTrigger {
         name: Option<String>,

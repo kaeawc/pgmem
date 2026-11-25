@@ -221,6 +221,8 @@ pub mod code {
     pub const RAISE_EXCEPTION: &str = "P0001";
     pub const FUNCTION_EXECUTED_NO_RETURN_STATEMENT: &str = "2F005";
     pub const TRIGGERED_DATA_CHANGE_VIOLATION: &str = "27000";
+    pub const INVALID_GRANT_OPERATION: &str = "0LP01";
+    pub const OBJECT_IN_USE: &str = "55006";
     pub const PROTOCOL_VIOLATION: &str = "08P01";
     pub const FEATURE_NOT_SUPPORTED: &str = "0A000";
     pub const OBJECT_NOT_IN_PREREQUISITE_STATE: &str = "55000";
