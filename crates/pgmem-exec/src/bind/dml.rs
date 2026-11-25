@@ -19,6 +19,18 @@ pub struct UniqueCheck {
     pub nulls_not_distinct: bool,
 }
 
+/// An exclusion constraint, bound against the physical row.
+#[derive(Clone, Debug)]
+pub struct ExclusionCheck {
+    pub name: String,
+    pub keys: Vec<Expr>,
+    /// Each key's operator, applied as `new op existing`.
+    pub ops: Vec<crate::plan::Func>,
+    pub predicate: Option<Expr>,
+    /// Key names for messages.
+    pub columns: Vec<String>,
+}
+
 /// Row-level rules shared by INSERT and UPDATE.
 #[derive(Clone, Debug)]
 pub struct RowRules {
@@ -29,6 +41,7 @@ pub struct RowRules {
     pub generated: Vec<Option<Expr>>,
     pub checks: Vec<(String, Expr)>,
     pub uniques: Vec<UniqueCheck>,
+    pub exclusions: Vec<ExclusionCheck>,
 }
 
 #[derive(Clone, Debug)]
@@ -245,7 +258,25 @@ impl Binder<'_> {
                 nulls_not_distinct: idx.nulls_not_distinct,
             });
         }
-        Ok(RowRules { table: Arc::clone(table), defaults, generated, checks, uniques })
+        let mut exclusions = Vec::new();
+        for con in &table.constraints {
+            let ConstraintKind::Exclude { elements, predicate, .. } = &con.kind else { continue };
+            let mut keys = Vec::new();
+            let mut ops = Vec::new();
+            let mut columns = Vec::new();
+            for (e, op) in elements {
+                let (k, t) = self.bind_expr(e, &row_ctx)?;
+                ops.push(crate::funcs::resolve_binary(op, &t, &t)?.func);
+                keys.push(k);
+                columns.push(match e {
+                    ir::Expr::Column(p) => p.last().cloned().unwrap_or_default(),
+                    other => super::like_key_name(other),
+                });
+            }
+            let predicate = predicate.as_ref().map(|p| self.bind_predicate(p, "WHERE", &row_ctx)).transpose()?;
+            exclusions.push(ExclusionCheck { name: con.name.clone(), keys, ops, predicate, columns });
+        }
+        Ok(RowRules { table: Arc::clone(table), defaults, generated, checks, uniques, exclusions })
     }
 
     /// The default of a column without its own DEFAULT whose type is a domain: the nearest

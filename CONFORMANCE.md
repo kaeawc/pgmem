@@ -7,12 +7,12 @@ PostgreSQL 18; CI re-verifies every record against PostgreSQL and runs it agains
 A record passes when pgmem returns the same column names, column types and text values, or
 the same SQLSTATE and error message.
 
-pgmem passes **3130 / 3309 records (94.6%)**.
+pgmem passes **3165 / 3309 records (95.6%)**.
 
 | Area | Records | Pass | Rate |
 |---|---:|---:|---:|
 | catalog | 226 | 196 | 86.7% |
-| constraints | 171 | 151 | 88.3% |
+| constraints | 171 | 171 | 100.0% |
 | ddl | 386 | 339 | 87.8% |
 | dml | 282 | 281 | 99.6% |
 | functions | 445 | 439 | 98.7% |
@@ -20,7 +20,7 @@ pgmem passes **3130 / 3309 records (94.6%)**.
 | session | 419 | 368 | 87.8% |
 | smoke | 7 | 7 | 100.0% |
 | transactions | 522 | 522 | 100.0% |
-| types | 411 | 388 | 94.4% |
+| types | 411 | 403 | 98.1% |
 
 ## By file
 
@@ -35,7 +35,7 @@ pgmem passes **3130 / 3309 records (94.6%)**.
 | catalog/settings.slt | 15 | 13 | 86.7% |
 | constraints/check_notnull.slt | 35 | 35 | 100.0% |
 | constraints/deferrable.slt | 38 | 38 | 100.0% |
-| constraints/exclude.slt | 20 | 0 | 0.0% |
+| constraints/exclude.slt | 20 | 20 | 100.0% |
 | constraints/foreign_keys.slt | 46 | 46 | 100.0% |
 | constraints/keys_unique.slt | 32 | 32 | 100.0% |
 | ddl/alter_table.slt | 46 | 46 | 100.0% |
@@ -96,7 +96,7 @@ pgmem passes **3130 / 3309 records (94.6%)**.
 | types/bytea.slt | 18 | 18 | 100.0% |
 | types/casts.slt | 55 | 48 | 87.3% |
 | types/datetime.slt | 58 | 58 | 100.0% |
-| types/enums_domains.slt | 58 | 43 | 74.1% |
+| types/enums_domains.slt | 58 | 58 | 100.0% |
 | types/float.slt | 24 | 24 | 100.0% |
 | types/integers.slt | 36 | 36 | 100.0% |
 | types/json.slt | 34 | 34 | 100.0% |

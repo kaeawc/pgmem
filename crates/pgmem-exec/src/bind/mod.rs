@@ -6,6 +6,10 @@ pub mod ddl;
 pub mod dml;
 mod expr;
 mod like;
+
+pub(crate) fn like_key_name(e: &pgmem_ir::Expr) -> String {
+    like::index_key_name(e)
+}
 pub mod merge;
 mod select;
 

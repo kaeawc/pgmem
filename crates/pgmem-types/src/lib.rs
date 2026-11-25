@@ -14,6 +14,7 @@ pub mod json;
 pub mod jsonpath;
 pub mod jsontext;
 pub mod numeric;
+pub mod range;
 pub mod text;
 pub mod usertype;
 mod value;
@@ -87,6 +88,10 @@ pub enum Type {
     Composite(u32),
     /// `record`: an anonymous row (`ROW(1, 'a')`).
     Record,
+    /// A builtin range type over its subtype (`int4range`, `tstzrange`, ...).
+    Range(Box<Type>),
+    /// A builtin multirange type over its range's subtype (`int4multirange`, ...).
+    Multirange(Box<Type>),
 }
 
 /// The `reg*` OID alias types.
@@ -154,6 +159,8 @@ impl Type {
             Type::OidVector => 30,
             Type::Enum(o) | Type::Domain(o) | Type::Composite(o) => *o,
             Type::Record => usertype::RECORD_OID,
+            Type::Range(s) => range::entry(s).map_or(0, |e| e.1),
+            Type::Multirange(s) => range::entry(s).map_or(0, |e| e.2),
             Type::Array(elem) => match elem.as_ref() {
                 Type::Bool => 1000,
                 Type::Bytea => 1001,
@@ -188,6 +195,8 @@ impl Type {
                 Type::Reg(RegKind::Namespace) => 4090,
                 Type::Enum(o) | Type::Domain(o) | Type::Composite(o) => usertype::array_oid(*o),
                 Type::Record => usertype::RECORD_ARRAY_OID,
+                Type::Range(s) => range::entry(s).map_or(0, |e| e.3),
+                Type::Multirange(s) => range::entry(s).map_or(0, |e| e.4),
                 _ => 0,
             },
         }
@@ -236,6 +245,16 @@ impl Type {
         };
         if let Some(t) = scalar(oid) {
             return Some(t);
+        }
+        for (sub, r, m, ra, ma, _, _) in range::RANGES {
+            let t = if oid == *r || oid == *ra {
+                Type::Range(Box::new(sub.clone()))
+            } else if oid == *m || oid == *ma {
+                Type::Multirange(Box::new(sub.clone()))
+            } else {
+                continue;
+            };
+            return Some(if oid == *ra || oid == *ma { Type::array_of(t) } else { t });
         }
         let elem = match oid {
             1000 => Type::Bool,
@@ -297,6 +316,8 @@ impl Type {
             | Type::Jsonb
             | Type::JsonPath
             | Type::Array(_)
+            | Type::Range(_)
+            | Type::Multirange(_)
             | Type::Varchar
             | Type::Bpchar
             | Type::Json => -1,
@@ -308,6 +329,7 @@ impl Type {
         match self {
             Type::Array(elem) => format!("{}[]", elem.name()),
             Type::Enum(o) | Type::Domain(o) | Type::Composite(o) => usertype::type_name(*o),
+            Type::Range(_) | Type::Multirange(_) => self.typname(),
             other => other.scalar_name().to_owned(),
         }
     }
@@ -348,7 +370,7 @@ impl Type {
             Type::OidVector => "oidvector",
             Type::Array(_) => "array",
             Type::Record => "record",
-            Type::Enum(_) | Type::Domain(_) | Type::Composite(_) => "???",
+            Type::Enum(_) | Type::Domain(_) | Type::Composite(_) | Type::Range(_) | Type::Multirange(_) => "???",
         }
     }
 
@@ -390,6 +412,8 @@ impl Type {
             Type::Array(elem) => format!("_{}", elem.typname()),
             Type::Record => "record".into(),
             Type::Enum(o) | Type::Domain(o) | Type::Composite(o) => usertype::raw_type_name(*o),
+            Type::Range(s) => range::entry(s).map_or("anyrange", |e| e.5).into(),
+            Type::Multirange(s) => range::entry(s).map_or("anymultirange", |e| e.6).into(),
         }
     }
 
@@ -451,7 +475,11 @@ impl Type {
             "jsonb" => Type::Jsonb,
             "jsonpath" => Type::JsonPath,
             "unknown" => Type::Unknown,
-            _ => return None,
+            other => {
+                let e = range::RANGES.iter().find(|e| e.5 == other || e.6 == other)?;
+                let sub = Box::new(e.0.clone());
+                if e.5 == other { Type::Range(sub) } else { Type::Multirange(sub) }
+            }
         };
         Some(t)
     }
@@ -507,6 +535,7 @@ impl Type {
             Type::Unknown => 'X',
             Type::Enum(_) => 'E',
             Type::Composite(_) | Type::Record => 'C',
+            Type::Range(_) | Type::Multirange(_) => 'R',
             Type::Domain(_) => self.base().category(),
             Type::Bytea | Type::Uuid | Type::Jsonb | Type::JsonPath | Type::Tid | Type::Xid | Type::Cid => 'U',
         }

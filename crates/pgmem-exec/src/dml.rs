@@ -17,7 +17,10 @@ use pgmem_types::{GroupKey, SqlError, SqlResult, Value, code, text};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+mod exclusion;
 mod merge;
+
+pub(crate) use exclusion::validate as validate_exclusion;
 
 pub use merge::exec_merge;
 
@@ -207,7 +210,7 @@ fn check_uniques_where(
             }
         }
     }
-    Ok(())
+    exclusion::check_exclusions(rules, final_rows, changed, ctx)
 }
 
 fn key_equal(a: &[Value], b: &[Value]) -> bool {

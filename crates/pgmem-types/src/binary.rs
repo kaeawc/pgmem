@@ -120,7 +120,76 @@ pub fn encode(v: &Value, ty: &Type) -> SqlResult<Vec<u8>> {
             Value::Record(t, fields) => encode_record(*t, fields)?,
             _ => return Err(mismatch()),
         },
+        Type::Range(sub) => match v {
+            Value::Range(r) => encode_range(r, sub)?,
+            _ => return Err(mismatch()),
+        },
+        Type::Multirange(sub) => match v {
+            Value::Multirange(_, rs) => {
+                let mut out = u32::try_from(rs.len()).unwrap_or(u32::MAX).to_be_bytes().to_vec();
+                for r in rs {
+                    let body = encode_range(r, sub)?;
+                    out.extend_from_slice(&u32::try_from(body.len()).unwrap_or(u32::MAX).to_be_bytes());
+                    out.extend_from_slice(&body);
+                }
+                out
+            }
+            _ => return Err(mismatch()),
+        },
     })
+}
+
+const RANGE_EMPTY: u8 = 0x01;
+const RANGE_LB_INC: u8 = 0x02;
+const RANGE_UB_INC: u8 = 0x04;
+const RANGE_LB_INF: u8 = 0x08;
+const RANGE_UB_INF: u8 = 0x10;
+
+/// `range_send`: flags, then each finite bound as a length-prefixed subtype value.
+fn encode_range(r: &crate::range::Range, sub: &Type) -> SqlResult<Vec<u8>> {
+    if r.empty {
+        return Ok(vec![RANGE_EMPTY]);
+    }
+    let mut flags = 0;
+    if r.lower_inc {
+        flags |= RANGE_LB_INC;
+    }
+    if r.upper_inc {
+        flags |= RANGE_UB_INC;
+    }
+    if r.lower.is_none() {
+        flags |= RANGE_LB_INF;
+    }
+    if r.upper.is_none() {
+        flags |= RANGE_UB_INF;
+    }
+    let mut out = vec![flags];
+    for b in [&r.lower, &r.upper].into_iter().flatten() {
+        let body = encode(b, sub)?;
+        out.extend_from_slice(&u32::try_from(body.len()).unwrap_or(u32::MAX).to_be_bytes());
+        out.extend_from_slice(&body);
+    }
+    Ok(out)
+}
+
+fn decode_range(b: &[u8], sub: &Type, ty: &Type) -> SqlResult<crate::range::Range> {
+    let (flags, mut rest) = b.split_first().ok_or_else(|| bad(ty, "empty"))?;
+    if flags & RANGE_EMPTY != 0 {
+        return Ok(crate::range::Range::empty(sub));
+    }
+    let mut bound = |inf: u8| -> SqlResult<Option<Value>> {
+        if flags & inf != 0 {
+            return Ok(None);
+        }
+        let len = rest.get(..4).ok_or_else(|| bad(ty, "short"))?;
+        let n = u32::from_be_bytes(len.try_into().map_err(|_| bad(ty, "short"))?) as usize;
+        let body = rest.get(4..4 + n).ok_or_else(|| bad(ty, "short"))?;
+        rest = &rest[4 + n..];
+        decode(body, sub).map(Some)
+    };
+    let lower = bound(RANGE_LB_INF)?;
+    let upper = bound(RANGE_UB_INF)?;
+    crate::range::make(sub, lower, upper, flags & RANGE_LB_INC != 0, flags & RANGE_UB_INC != 0)
 }
 
 /// `record_send`: the column count, then each column's type OID, length (-1 for NULL) and
@@ -300,6 +369,20 @@ pub fn decode(b: &[u8], ty: &Type) -> SqlResult<Value> {
         Type::Domain(_) => decode(b, &ty.base())?,
         Type::Composite(oid) => decode_record(b, *oid, ty)?,
         Type::Record => return Err(SqlError::feature_not_supported("input of anonymous composite types is not implemented")),
+        Type::Range(sub) => Value::Range(Box::new(decode_range(b, sub, ty)?)),
+        Type::Multirange(sub) => {
+            let count = b.get(..4).ok_or_else(|| bad(ty, "short"))?;
+            let count = u32::from_be_bytes(count.try_into().map_err(|_| bad(ty, "short"))?);
+            let mut rest = &b[4..];
+            let mut out = Vec::new();
+            for _ in 0..count {
+                let len = rest.get(..4).ok_or_else(|| bad(ty, "short"))?;
+                let n = u32::from_be_bytes(len.try_into().map_err(|_| bad(ty, "short"))?) as usize;
+                out.push(decode_range(rest.get(4..4 + n).ok_or_else(|| bad(ty, "short"))?, sub, ty)?);
+                rest = &rest[4 + n..];
+            }
+            Value::Multirange((**sub).clone(), crate::range::normalize(out)?)
+        }
     })
 }
 
@@ -390,6 +473,21 @@ mod tests {
             let bytes = encode(&v, &ty).expect("encode");
             assert_eq!(decode(&bytes, &ty).expect("decode"), v, "{ty}");
         }
+    }
+
+    #[test]
+    fn ranges_round_trip_in_range_send_format() {
+        let r = crate::range::make(&Type::Int4, Some(Value::Int4(1)), None, true, false).expect("range");
+        let ty = Type::Range(Box::new(Type::Int4));
+        let bytes = encode(&Value::Range(Box::new(r.clone())), &ty).expect("encode");
+        // flags (lower inclusive, upper infinite), then the lower bound as int4.
+        assert_eq!(bytes, [0x02 | 0x10, 0, 0, 0, 4, 0, 0, 0, 1]);
+        assert_eq!(decode(&bytes, &ty).expect("decode"), Value::Range(Box::new(r.clone())));
+        let empty = encode(&Value::Range(Box::new(crate::range::Range::empty(&Type::Int4))), &ty).expect("encode empty");
+        assert_eq!(empty, [0x01]);
+        let mty = Type::Multirange(Box::new(Type::Int4));
+        let m = Value::Multirange(Type::Int4, vec![r]);
+        assert_eq!(decode(&encode(&m, &mty).expect("encode"), &mty).expect("decode"), m);
     }
 
     #[test]

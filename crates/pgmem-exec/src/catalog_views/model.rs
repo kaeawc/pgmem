@@ -256,6 +256,10 @@ impl<'a> Model<'a> {
             ConstraintKind::Check { expr } => {
                 con.conkey = check_columns(t, expr);
             }
+            ConstraintKind::Exclude { elements, .. } => {
+                con.conkey = elements.iter().flat_map(|(e, _)| check_columns(t, e)).collect();
+                con.conindid = index_named(&c.name);
+            }
             ConstraintKind::ForeignKey { columns, ref_table, ref_columns, on_delete, on_update, .. } => {
                 con.conkey = attnums(columns);
                 con.confkey = attnums(ref_columns);
@@ -324,7 +328,7 @@ pub fn constraint_def(model: &Model, con: &Con) -> String {
 fn constraint_def_body(model: &Model, con: &Con) -> String {
     match (con.contype, con.kind) {
         ('n', _) => format!("NOT NULL {}", column_list(con.table, &con.conkey)),
-        ('p', _) => format!("PRIMARY KEY ({})", column_list(con.table, &con.conkey)),
+        ('p', Some(ConstraintKind::PrimaryKey { .. }) | None) => format!("PRIMARY KEY ({})", column_list(con.table, &con.conkey)),
         ('u', Some(ConstraintKind::Unique { nulls_not_distinct, .. })) => {
             let nnd = if *nulls_not_distinct { "NULLS NOT DISTINCT " } else { "" };
             format!("UNIQUE {nnd}({})", column_list(con.table, &con.conkey))

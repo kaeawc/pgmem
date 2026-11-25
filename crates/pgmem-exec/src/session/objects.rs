@@ -425,6 +425,10 @@ impl Session {
                         let detail = e.detail().unwrap_or_default().replace(" is duplicated.", " already exists.");
                         SqlError::new(code::UNIQUE_VIOLATION, format!("duplicate key value violates unique constraint \"{name}\""))
                             .with_detail(detail)
+                    } else if e.code == code::EXCLUSION_VIOLATION && e.message.starts_with("could not create exclusion constraint") {
+                        let detail = e.detail().unwrap_or_default().replace(" conflicts with key ", " conflicts with existing key ");
+                        SqlError::new(code::EXCLUSION_VIOLATION, format!("conflicting key value violates exclusion constraint \"{name}\""))
+                            .with_detail(detail)
                     } else {
                         e
                     }

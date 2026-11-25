@@ -114,14 +114,28 @@ fn lower_table_constraint(c: sq::TableConstraint) -> SqlResult<TableConstraint> 
     Ok(match c {
         sq::TableConstraint::PrimaryKey(pk) => TableConstraint {
             name: pk.name.as_ref().map(ident),
-            kind: TableConstraintKind::PrimaryKey(index_column_names(&pk.columns)?),
+            kind: {
+                let columns = index_column_names(&pk.columns)?;
+                if crate::take_temporal_key(&columns) {
+                    TableConstraintKind::Temporal { primary: true, columns }
+                } else {
+                    TableConstraintKind::PrimaryKey(columns)
+                }
+            },
             timing: timing(pk.characteristics.as_ref(), "PRIMARY KEY")?,
         },
         sq::TableConstraint::Unique(u) => TableConstraint {
             name: u.name.as_ref().map(ident),
-            kind: TableConstraintKind::Unique {
-                columns: index_column_names(&u.columns)?,
-                nulls_not_distinct: matches!(u.nulls_distinct, sq::NullsDistinctOption::NotDistinct),
+            kind: {
+                let columns = index_column_names(&u.columns)?;
+                if crate::take_temporal_key(&columns) {
+                    TableConstraintKind::Temporal { primary: false, columns }
+                } else {
+                    TableConstraintKind::Unique {
+                        columns,
+                        nulls_not_distinct: matches!(u.nulls_distinct, sq::NullsDistinctOption::NotDistinct),
+                    }
+                }
             },
             timing: timing(u.characteristics.as_ref(), "UNIQUE")?,
         },
@@ -134,6 +148,19 @@ fn lower_table_constraint(c: sq::TableConstraint) -> SqlResult<TableConstraint> 
             name: u.name.as_ref().map(ident),
             kind: TableConstraintKind::UsingIndex { primary: false, index: ident(&u.index_name) },
             timing: timing(u.characteristics.as_ref(), "UNIQUE")?,
+        },
+        sq::TableConstraint::Exclude(x) => TableConstraint {
+            name: x.name.as_ref().map(ident),
+            kind: TableConstraintKind::Exclude {
+                method: x.index_method.as_ref().map(ident),
+                elements: x
+                    .elements
+                    .into_iter()
+                    .map(|e| Ok((lower_expr(e.column.column.expr)?, e.operator.to_string())))
+                    .collect::<SqlResult<Vec<_>>>()?,
+                predicate: x.where_clause.map(|w| lower_expr(*w)).transpose()?,
+            },
+            timing: timing(x.characteristics.as_ref(), "EXCLUDE")?,
         },
         sq::TableConstraint::Check(chk) => TableConstraint {
             name: chk.name.as_ref().map(ident),

@@ -398,6 +398,9 @@ impl Expr {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AggKind {
+    /// `range_agg` / `range_intersect_agg`.
+    RangeAgg,
+    RangeIntersectAgg,
     CountStar,
     Count,
     Sum,

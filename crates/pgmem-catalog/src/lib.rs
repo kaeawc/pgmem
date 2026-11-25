@@ -115,6 +115,17 @@ pub enum ConstraintKind {
         /// `ON DELETE SET NULL / SET DEFAULT (cols)`: the referencing columns set (empty = all).
         delete_set_columns: Vec<usize>,
     },
+    /// An exclusion constraint: no two rows (where `predicate` holds) for which every
+    /// `key op key` is true. Temporal keys (`WITHOUT OVERLAPS`) are exclusions too, reported
+    /// as primary key / unique constraints.
+    Exclude {
+        method: String,
+        /// Key expressions (over column names) with their operators.
+        elements: Vec<(Expr, String)>,
+        predicate: Option<Expr>,
+        /// `Some(true)` for `PRIMARY KEY (... WITHOUT OVERLAPS)`, `Some(false)` for UNIQUE.
+        temporal: Option<bool>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -138,6 +149,9 @@ impl Constraint {
             ConstraintKind::Unique { .. } => 'u',
             ConstraintKind::Check { .. } => 'c',
             ConstraintKind::ForeignKey { .. } => 'f',
+            ConstraintKind::Exclude { temporal: Some(true), .. } => 'p',
+            ConstraintKind::Exclude { temporal: Some(false), .. } => 'u',
+            ConstraintKind::Exclude { temporal: None, .. } => 'x',
         }
     }
 }

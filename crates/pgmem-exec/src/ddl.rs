@@ -1138,6 +1138,26 @@ pub(crate) fn validate_constraint(
             }
             validate_unique(txn, def, name, env, state)
         }
+        ConstraintKind::Exclude { temporal, .. } => {
+            if *temporal == Some(true) {
+                for (_, row) in padded_rows(txn, def) {
+                    if let Some(c) = def.indexes.iter().find(|i| i.name == name).and_then(|i| i.columns.iter().find(|c| row[**c].is_null()))
+                    {
+                        return Err(SqlError::new(
+                            code::NOT_NULL_VIOLATION,
+                            format!("column \"{}\" of relation \"{}\" contains null values", def.columns[*c].name, def.name),
+                        ));
+                    }
+                }
+            }
+            let mut catalog = snapshot.clone();
+            catalog.replace_table(&def.qualified(), def.clone());
+            let b = Binder::new(&catalog, &[]);
+            let rules = b.bind_row_rules(&Arc::new(def.clone()))?;
+            let rows = padded_rows(txn, def);
+            let ctx = EvalCtx::new(txn, &[], env, state);
+            crate::dml::validate_exclusion(&rules, name, &rows, &ctx)
+        }
         ConstraintKind::ForeignKey { columns, ref_table, ref_columns, .. } => {
             let parent = if *ref_table == def.qualified() {
                 Arc::new(def.clone())

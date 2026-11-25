@@ -32,6 +32,7 @@ pub fn parse(sql: &str) -> SqlResult<Vec<Statement>> {
     FK_SET_COLUMNS.with(|c| c.borrow_mut().clear());
     VIEW_OPTIONS.with(|c| c.borrow_mut().clear());
     CTAS_COLUMNS.with(|c| c.borrow_mut().clear());
+    TEMPORAL_KEYS.with(|c| c.borrow_mut().clear());
     if sql.trim().trim_matches(';').trim().is_empty() {
         return Ok(vec![Statement::Empty]);
     }
@@ -74,6 +75,8 @@ thread_local! {
     /// Trailing `WITH CHECK OPTION` / `WITH [NO] DATA` of CREATE VIEW statements, by view name:
     /// (check option, with data).
     static VIEW_OPTIONS: std::cell::RefCell<Vec<(String, bool, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The columns of `PRIMARY KEY / UNIQUE (..., c WITHOUT OVERLAPS)` keys, in statement order.
+    static TEMPORAL_KEYS: std::cell::RefCell<Vec<Vec<String>>> = const { std::cell::RefCell::new(Vec::new()) };
     /// `CREATE TABLE name (a, b) AS ...` column name lists, by table name.
     static CTAS_COLUMNS: std::cell::RefCell<Vec<(String, Vec<String>)>> = const { std::cell::RefCell::new(Vec::new()) };
     /// `ON DELETE SET NULL / SET DEFAULT [(cols)]` column lists in statement order (empty
@@ -158,6 +161,44 @@ fn rewrite_like(sql: &str) -> Option<String> {
         return None;
     }
     Some(tokens.iter().enumerate().filter(|(i, _)| !drop[*i]).map(|(i, t)| replace.remove(&i).unwrap_or_else(|| t.to_string())).collect())
+}
+
+/// Whether the key over `columns` was written `WITHOUT OVERLAPS` (the record is consumed).
+pub(crate) fn take_temporal_key(columns: &[String]) -> bool {
+    TEMPORAL_KEYS.with(|t| {
+        let mut t = t.borrow_mut();
+        match t.iter().position(|c| c == columns) {
+            Some(i) => {
+                t.remove(i);
+                true
+            }
+            None => false,
+        }
+    })
+}
+
+/// `PRIMARY KEY / UNIQUE (a, b WITHOUT OVERLAPS)`: records the key's columns and strips the
+/// clause sqlparser lacks.
+fn rewrite_without_overlaps(tokens: &Tokens, sig: &[usize], k: usize, drop: &mut [bool]) {
+    use sqlparser::tokenizer::Token;
+    if !(is_word(tokens, sig, k, "WITHOUT") && is_word(tokens, sig, k + 1, "OVERLAPS")) || k == 0 {
+        return;
+    }
+    if !sig.get(k + 2).is_some_and(|&j| tokens[j] == Token::RParen) {
+        return;
+    }
+    let Some(open) = sig[..k].iter().rposition(|&j| tokens[j] == Token::LParen) else { return };
+    let mut cols = Vec::new();
+    for &j in &sig[open + 1..k] {
+        match &tokens[j] {
+            Token::Word(w) => cols.push(if w.quote_style.is_some() { w.value.clone() } else { w.value.to_lowercase() }),
+            Token::Comma => {}
+            _ => return,
+        }
+    }
+    drop[sig[k]] = true;
+    drop[sig[k + 1]] = true;
+    TEMPORAL_KEYS.with(|t| t.borrow_mut().push(cols));
 }
 
 /// The column names the rewrite stripped from `CREATE TABLE name (a, b) AS`.
@@ -726,6 +767,7 @@ fn rewrite_unsupported(sql: &str) -> Option<String> {
         rewrite_fk_set_columns(&tokens, &sig, k, &mut drop);
         rewrite_view_options(&tokens, &sig, k, &mut drop);
         rewrite_ctas_columns(&tokens, &sig, k, &mut drop);
+        rewrite_without_overlaps(&tokens, &sig, k, &mut drop);
         // MERGE's `THEN INSERT DEFAULT VALUES` → `THEN INSERT VALUES (__pgmem_default_values())`.
         if word(&tokens[i], "THEN") && at(1, "INSERT") && at(2, "DEFAULT") && at(3, "VALUES") {
             drop[sig[k + 2]] = true;

@@ -119,6 +119,27 @@ pub fn deparse_constraint(catalog: &Catalog, table: &TableDef, constraint: &Cons
         ConstraintKind::Unique { columns, nulls_not_distinct } => {
             format!("UNIQUE {}({})", if *nulls_not_distinct { "NULLS NOT DISTINCT " } else { "" }, column_list(table, columns))
         }
+        ConstraintKind::Exclude { method, elements, predicate, temporal } => {
+            let key = |e: &ir::Expr| -> SqlResult<String> {
+                let mut a = table_analyzer(catalog, table);
+                let n = a.expr(e);
+                let text = expr_text(&n);
+                Ok(if looks_like_function(&n) || matches!(n, Node::Var { .. }) { text } else { format!("({text})") })
+            };
+            if let Some(primary) = temporal {
+                let cols = elements.iter().map(|(e, _)| key(e)).collect::<SqlResult<Vec<_>>>()?;
+                let n = cols.len();
+                let list: Vec<String> =
+                    cols.into_iter().enumerate().map(|(i, c)| if i + 1 == n { format!("{c} WITHOUT OVERLAPS") } else { c }).collect();
+                return Ok(format!("{} ({})", if *primary { "PRIMARY KEY" } else { "UNIQUE" }, list.join(", ")));
+            }
+            let items = elements.iter().map(|(e, op)| Ok(format!("{} WITH {op}", key(e)?))).collect::<SqlResult<Vec<_>>>()?;
+            let mut s = format!("EXCLUDE USING {method} ({})", items.join(", "));
+            if let Some(p) = predicate {
+                s.push_str(&format!(" WHERE ({})", deparse_predicate(catalog, table, p)?));
+            }
+            s
+        }
         ConstraintKind::ForeignKey { columns, ref_table, ref_columns, on_delete, on_update, match_full, delete_set_columns } => {
             let ref_cols = match catalog.table_q(ref_table) {
                 Some(t) if *ref_table != table.qualified() => column_list(t, ref_columns),
