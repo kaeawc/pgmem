@@ -1,4 +1,4 @@
-module github.com/kaeawc/pgmem-go/examples
+module github.com/kaeawc/pgmem/examples
 
 go 1.26
 

@@ -50,6 +50,14 @@ PGMEM_TEST_DSN="host=127.0.0.1 port=5432 user=postgres" cargo nextest run -p pgm
 
 After any change: `cargo c && cargo lint && cargo t`.
 
+## Releasing
+
+`scripts/release.sh X.Y.Z` bumps the workspace version (and the `=X.Y.Z` pins on the internal path
+dependencies in root `Cargo.toml`), commits and tags `vX.Y.Z`. Pushing the tag runs
+`.github/workflows/release.yml`: binaries for Linux / macOS / Windows, `cargo publish --workspace`
+to crates.io via trusted publishing (environment `crates-io`), then the GitHub release. All crates
+except `pgmem-conformance` are published and share one version.
+
 ## Map
 
 - `crates/pgmem-types` — `Type` (Postgres OIDs), `Value`, `SqlError` (SQLSTATE), text/binary codecs,
