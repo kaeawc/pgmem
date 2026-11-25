@@ -79,6 +79,25 @@ pub struct Database {
     advisory: advisory::AdvisoryLocks,
     locks: locks::LockTable,
     next_txn_id: AtomicU64,
+    /// Bumped by every commit that wrote something.
+    commit_seq: AtomicU64,
+    /// Read / write sets of SERIALIZABLE transactions, for write-skew detection.
+    ssi: Mutex<Ssi>,
+}
+
+/// Serializable transactions in flight (by id: the commit sequence their snapshot saw) and
+/// the ones that committed since the oldest of them started.
+#[derive(Debug, Default)]
+struct Ssi {
+    active: HashMap<u64, u64>,
+    committed: Vec<SsiRecord>,
+}
+
+#[derive(Debug)]
+struct SsiRecord {
+    seq: u64,
+    reads: BTreeSet<Oid>,
+    writes: BTreeSet<Oid>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -102,6 +121,8 @@ impl Database {
             advisory: advisory::AdvisoryLocks::default(),
             locks: locks::LockTable::default(),
             next_txn_id: AtomicU64::new(1),
+            commit_seq: AtomicU64::new(0),
+            ssi: Mutex::new(Ssi::default()),
         }
     }
 
@@ -130,6 +151,9 @@ impl Database {
         Txn {
             id: self.next_txn_id.fetch_add(1, Ordering::Relaxed),
             held_rows: std::cell::RefCell::new(Vec::new()),
+            snapshot_seq: 0,
+            reads: std::cell::RefCell::new(BTreeSet::new()),
+            writes: BTreeSet::new(),
             db: Arc::clone(self),
             isolation,
             base,
@@ -273,6 +297,11 @@ pub struct Txn {
     id: u64,
     /// Row locks taken, in order (ROLLBACK TO releases the later ones).
     held_rows: std::cell::RefCell<Vec<(Oid, RowId, locks::RowLockMode)>>,
+    /// The commit sequence the snapshot saw (SERIALIZABLE write-skew detection).
+    snapshot_seq: u64,
+    /// Tables this transaction's queries read and tables it wrote.
+    reads: std::cell::RefCell<BTreeSet<Oid>>,
+    writes: BTreeSet<Oid>,
     db: Arc<Database>,
     isolation: Isolation,
     /// The committed state this transaction currently reads from.
@@ -335,7 +364,21 @@ impl Txn {
         if !self.started || self.isolation == Isolation::ReadCommitted {
             self.base = self.db.current();
         }
+        if !self.started {
+            self.snapshot_seq = self.db.commit_seq.load(Ordering::SeqCst);
+            if self.isolation == Isolation::Serializable {
+                lock(&self.db.ssi).active.insert(self.id, self.snapshot_seq);
+            }
+        }
         self.started = true;
+    }
+
+    /// Records that a query read `table` (SERIALIZABLE read set; Postgres' relation-level
+    /// predicate lock of a sequential scan).
+    pub fn note_read(&self, table: Oid) {
+        if self.isolation == Isolation::Serializable {
+            self.reads.borrow_mut().insert(table);
+        }
     }
 
     pub fn database(&self) -> &Arc<Database> {
@@ -381,12 +424,14 @@ impl Txn {
     }
 
     pub fn insert(&mut self, table: Oid, row: Row) -> RowId {
+        self.writes.insert(table);
         let id = self.db.alloc_row_id();
         self.changes.entry(table).or_default().inserted.insert(id, row);
         id
     }
 
     pub fn delete(&mut self, table: Oid, id: RowId) {
+        self.writes.insert(table);
         let ch = self.changes.entry(table).or_default();
         if ch.inserted.remove(&id).is_none() {
             ch.deleted.insert(id);
@@ -478,6 +523,9 @@ impl Txn {
         }
         let db = Arc::clone(&self.db);
         let _guard = lock(&db.commit_lock);
+        if self.isolation == Isolation::Serializable {
+            self.check_write_skew()?;
+        }
         let cur = db.current();
         let mut next = (*cur).clone();
         if let Some(catalog) = self.catalog.take() {
@@ -509,6 +557,32 @@ impl Txn {
             }
         }
         *db.state.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(next);
+        let seq = db.commit_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.isolation == Isolation::Serializable {
+            let reads = self.reads.borrow().clone();
+            lock(&db.ssi).committed.push(SsiRecord { seq, reads, writes: self.writes.clone() });
+        }
+        Ok(())
+    }
+
+    /// SERIALIZABLE: a concurrent serializable transaction that committed after this one's
+    /// snapshot wrote what this one read and read what this one writes (a write skew).
+    fn check_write_skew(&self) -> SqlResult<()> {
+        let reads = self.reads.borrow();
+        let ssi = lock(&self.db.ssi);
+        let skew = ssi.committed.iter().any(|other| {
+            other.seq > self.snapshot_seq
+                && other.writes.iter().any(|t| reads.contains(t))
+                && self.writes.iter().any(|t| other.reads.contains(t))
+        });
+        if skew {
+            return Err(SqlError::new(
+                code::SERIALIZATION_FAILURE,
+                "could not serialize access due to read/write dependencies among transactions",
+            )
+            .with_detail("Reason code: Canceled on identification as a pivot, during commit attempt.")
+            .with_hint("The transaction might succeed if retried."));
+        }
         Ok(())
     }
 
@@ -570,6 +644,15 @@ pub enum LockWait {
 impl Drop for Txn {
     fn drop(&mut self) {
         self.db.locks.release_all(self.id);
+        if self.isolation == Isolation::Serializable {
+            let mut ssi = lock(&self.db.ssi);
+            ssi.active.remove(&self.id);
+            // Records no in-flight serializable transaction can conflict with are done.
+            match ssi.active.values().min().copied() {
+                Some(oldest) => ssi.committed.retain(|r| r.seq > oldest),
+                None => ssi.committed.clear(),
+            }
+        }
     }
 }
 

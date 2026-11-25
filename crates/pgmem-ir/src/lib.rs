@@ -144,6 +144,11 @@ pub enum Statement {
         tables: Vec<ObjectName>,
         in_block_ok: bool,
     },
+    /// `SET CONSTRAINTS {ALL | name, ...} {DEFERRED | IMMEDIATE}` (`names` empty = ALL).
+    SetConstraints {
+        names: Vec<ObjectName>,
+        deferred: bool,
+    },
     /// `LOCK [TABLE] name, ... [IN mode MODE] [NOWAIT]`: `mode` from 1 (ACCESS SHARE) to 8
     /// (ACCESS EXCLUSIVE, the default).
     Lock {
@@ -841,6 +846,15 @@ pub struct ColumnDef {
 pub struct ColumnConstraint {
     pub name: Option<String>,
     pub kind: ColumnConstraintKind,
+    pub timing: ConstraintTiming,
+}
+
+/// `[NOT] DEFERRABLE [INITIALLY DEFERRED | IMMEDIATE]` and `NOT VALID`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct ConstraintTiming {
+    pub deferrable: bool,
+    pub initially_deferred: bool,
+    pub not_valid: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -869,6 +883,10 @@ pub struct ForeignKeyRef {
     pub columns: Vec<String>,
     pub on_delete: ReferentialAction,
     pub on_update: ReferentialAction,
+    /// `MATCH FULL` (else MATCH SIMPLE).
+    pub match_full: bool,
+    /// `ON DELETE SET NULL (cols)` / `SET DEFAULT (cols)`: the columns set (empty = all).
+    pub delete_set_columns: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -885,6 +903,7 @@ pub enum ReferentialAction {
 pub struct TableConstraint {
     pub name: Option<String>,
     pub kind: TableConstraintKind,
+    pub timing: ConstraintTiming,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -932,17 +951,55 @@ pub struct AlterTable {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum AlterTableAction {
-    AddColumn { if_not_exists: bool, column: ColumnDef },
-    DropColumn { name: String, if_exists: bool, cascade: bool },
-    RenameColumn { old: String, new: String },
-    RenameTable { new: String },
-    SetNotNull { column: String },
-    DropNotNull { column: String },
-    SetDefault { column: String, expr: Expr },
-    DropDefault { column: String },
-    AlterType { column: String, ty: TypeName, using: Option<Expr> },
+    AddColumn {
+        if_not_exists: bool,
+        column: ColumnDef,
+    },
+    DropColumn {
+        name: String,
+        if_exists: bool,
+        cascade: bool,
+    },
+    RenameColumn {
+        old: String,
+        new: String,
+    },
+    RenameTable {
+        new: String,
+    },
+    SetNotNull {
+        column: String,
+    },
+    DropNotNull {
+        column: String,
+    },
+    SetDefault {
+        column: String,
+        expr: Expr,
+    },
+    DropDefault {
+        column: String,
+    },
+    AlterType {
+        column: String,
+        ty: TypeName,
+        using: Option<Expr>,
+    },
     AddConstraint(TableConstraint),
-    DropConstraint { name: String, if_exists: bool, cascade: bool },
+    DropConstraint {
+        name: String,
+        if_exists: bool,
+        cascade: bool,
+    },
+    /// `VALIDATE CONSTRAINT name`.
+    ValidateConstraint {
+        name: String,
+    },
+    /// `ALTER CONSTRAINT name [NOT] DEFERRABLE [INITIALLY ...]`.
+    AlterConstraint {
+        name: String,
+        timing: ConstraintTiming,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -25,7 +25,6 @@ catalog/pg_catalog.slt:48122fca8c801c55  # SELECT pg_get_partkeydef('events'::re
 catalog/psql_describe.slt:bbede3599730d5d7  # SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity,
 catalog/psql_describe.slt:0a56de6a8ba8d11b  # SELECT a.attname,
 catalog/psql_describe.slt:dee11004c6bbafbd  # SELECT r.conname, pg_catalog.pg_get_constraintdef(r.oid, true)
-catalog/psql_describe.slt:17a1b25d4d29cb62  # SELECT true as sametable, conname,
 catalog/psql_describe.slt:55a36843bc50c0ea  # SELECT conname, conrelid::pg_catalog.regclass AS ontable,
 catalog/psql_describe.slt:44733f14a996f863  # SELECT pol.polname FROM pg_catalog.pg_policy pol WHERE pol.polrelid = 'orders'::regclass ORDER BY 1
 catalog/psql_describe.slt:b4a232974cda9996  # SELECT pg_catalog.pg_get_viewdef('big_orders'::regclass, true)
@@ -36,38 +35,6 @@ catalog/regtypes.slt:4f75d112acc7d9bf  # SELECT to_regproc('upper')::text, to_re
 catalog/regtypes.slt:2fc6c49cbe03bde5  # SELECT pg_table_is_visible('t'::regclass), pg_table_is_visible('other.thing'::regclass)
 catalog/settings.slt:83a5425c178e720d  # UPDATE pg_settings SET setting = 'via_update' WHERE name = 'application_name'
 catalog/settings.slt:77a2ba0cde58e2c2  # SHOW application_name
-constraints/check_notnull.slt:b60524f33966de18  # CREATE TABLE bad (a int CHECK (a IN (SELECT 1)))
-constraints/check_notnull.slt:5729fde6aff1cc84  # SELECT conname, contype FROM pg_constraint WHERE conrelid = 'nnc'::regclass ORDER BY conname
-constraints/check_notnull.slt:04bad43bc2fd289f  # ALTER TABLE nnc DROP CONSTRAINT a_required; INSERT INTO nnc VALUES (NULL, 1)
-constraints/check_notnull.slt:9f207aff5faba0d1  # CREATE TABLE legacy (v int); INSERT INTO legacy VALUES (-1); ALTER TABLE legacy ADD CONSTRAINT v_pos CHECK (v > 0) NOT VALID
-constraints/check_notnull.slt:8f29a666b34f7aa7  # INSERT INTO legacy VALUES (-2)
-constraints/check_notnull.slt:2c42630f649a3fe6  # ALTER TABLE legacy VALIDATE CONSTRAINT v_pos
-constraints/check_notnull.slt:fc11612b959c9cd9  # UPDATE legacy SET v = 1; ALTER TABLE legacy VALIDATE CONSTRAINT v_pos
-constraints/check_notnull.slt:fda3001428c49722  # SELECT conname, convalidated FROM pg_constraint WHERE conrelid = 'legacy'::regclass
-constraints/deferrable.slt:c87e447fdd1c2192  # BEGIN; INSERT INTO nodes VALUES (1, 2); INSERT INTO nodes VALUES (2, 1); COMMIT
-constraints/deferrable.slt:03e5e917f5a825b7  # BEGIN; INSERT INTO nodes VALUES (3, 99)
-constraints/deferrable.slt:7589a4fbc62c3cb6  # COMMIT
-constraints/deferrable.slt:692c3adabea532aa  # SELECT id, next_id FROM nodes ORDER BY id
-constraints/deferrable.slt:4e3f22231437f8e5  # BEGIN; INSERT INTO nodes VALUES (5, 6)
-constraints/deferrable.slt:7b2b123fa918acc7  # SET CONSTRAINTS ALL IMMEDIATE
-constraints/deferrable.slt:bd23bea82d63f61d  # BEGIN; SET CONSTRAINTS nodes_next_id_fkey IMMEDIATE
-constraints/deferrable.slt:7578657ae1b8fef7  # BEGIN; SET CONSTRAINTS ALL DEFERRED; INSERT INTO child VALUES (1); INSERT INTO parent VALUES (1); COMMIT
-constraints/deferrable.slt:8191976326570d3c  # SELECT pid FROM child
-constraints/deferrable.slt:71c3aa9483e00eab  # SET CONSTRAINTS strict_fk DEFERRED
-constraints/deferrable.slt:5586926931869ef9  # BEGIN; SET CONSTRAINTS ALL DEFERRED
-constraints/deferrable.slt:d71a2c13b65be363  # BEGIN; SET CONSTRAINTS ALL DEFERRED; UPDATE positions SET pos = 2 WHERE id = 2; UPDATE positions SET pos = 3 WHERE id = 1; COMMIT
-constraints/deferrable.slt:a3e27adacafd2e6c  # SELECT id, pos FROM positions ORDER BY id
-constraints/deferrable.slt:67d66ae91af100de  # BEGIN; SET CONSTRAINTS ALL DEFERRED; UPDATE positions SET pos = 2 WHERE id = 3
-constraints/deferrable.slt:7589a4fbc62c3cb6#2  # COMMIT
-constraints/deferrable.slt:18f0d5584bc89024  # BEGIN; INSERT INTO dpk VALUES (1, 'a'), (1, 'b'); DELETE FROM dpk WHERE tag = 'a'; COMMIT
-constraints/deferrable.slt:3f3ab3d6d15d62a1  # SELECT id, tag FROM dpk
-constraints/deferrable.slt:e415d89e6f9342e7  # INSERT INTO dpk VALUES (1, 'c') ON CONFLICT (id) DO NOTHING
-constraints/deferrable.slt:6ce03045219c92bb  # CREATE TABLE bad (a int CHECK (a > 0) DEFERRABLE)
-constraints/deferrable.slt:4fb3f096de3e9c2f  # CREATE TABLE bad (a int UNIQUE NOT DEFERRABLE INITIALLY DEFERRED)
-constraints/deferrable.slt:0a328766c3fc760a  # SELECT constraint_name, is_deferrable, initially_deferred FROM information_schema.table_constraints WHERE table_name IN ('nodes', 'child', 'positions', 'dpk', 'strict_child') AND constraint_type IN ('FOREIGN KEY', 'UNIQUE', 'PRIMARY KEY') ORDER BY constraint_name
-constraints/deferrable.slt:e6b5b97e8ef41223  # ALTER TABLE strict_child ALTER CONSTRAINT strict_fk DEFERRABLE INITIALLY DEFERRED
-constraints/deferrable.slt:6a6a29c4ac07b09a  # BEGIN; INSERT INTO strict_child VALUES (77); INSERT INTO parent VALUES (77); COMMIT
-constraints/deferrable.slt:570d79b6dd07b116  # SELECT pid FROM strict_child
 constraints/exclude.slt:45d84053fe80cee8  # CREATE TABLE bookings (room int, during tsrange, EXCLUDE USING gist (during WITH &&)); INSERT INTO bookings VALUES (1, '[2024-01-01 10:00, 2024-01-01 11:00)'), (1, '[2024-01-01 11:00, 2024-01-01 12:00)')
 constraints/exclude.slt:946c18beea9bcd21  # INSERT INTO bookings VALUES (2, '[2024-01-01 10:30, 2024-01-01 10:45)')
 constraints/exclude.slt:7027a6a7677e1821  # SELECT room, during FROM bookings ORDER BY during
@@ -88,24 +55,6 @@ constraints/exclude.slt:c5dcb59dcd0f1d91  # SELECT r FROM dex ORDER BY r
 constraints/exclude.slt:b68c916968d7b6da  # CREATE TABLE temporal (id int, valid daterange, PRIMARY KEY (id, valid WITHOUT OVERLAPS))
 constraints/exclude.slt:c5c4b2a15d6e3e8b  # CREATE TABLE temporal_r (id int4range, valid daterange, PRIMARY KEY (id, valid WITHOUT OVERLAPS)); INSERT INTO temporal_r VALUES ('[1,2)', '[2024-01-01,2024-02-01)'), ('[1,2)', '[2024-02-01,2024-03-01)')
 constraints/exclude.slt:8b82178e368cd681  # INSERT INTO temporal_r VALUES ('[1,2)', '[2024-01-15,2024-01-20)')
-constraints/foreign_keys.slt:4f50a3866d5a589c  # CREATE TABLE bad (x text REFERENCES authors (id))
-constraints/foreign_keys.slt:6178f3fe8e9b92c7  # SELECT 'cascade', id, pid FROM c_cascade UNION ALL SELECT 'setnull', id, pid FROM c_setnull UNION ALL SELECT 'setdef', id, pid FROM c_setdef ORDER BY 1, 2
-constraints/foreign_keys.slt:d6de3e6b5be0ed1a  # DELETE FROM p WHERE id = 3
-constraints/foreign_keys.slt:fc94c06d1f3617e7  # DELETE FROM p WHERE id = 20
-constraints/foreign_keys.slt:a97383cf4ba128fe  # UPDATE p SET id = 21 WHERE id = 20
-constraints/foreign_keys.slt:75a7a3987713e22a  # CREATE TABLE tenants (tid int, id int, PRIMARY KEY (tid, id)); CREATE TABLE tenant_items (tid int NOT NULL, parent_id int, FOREIGN KEY (tid, parent_id) REFERENCES tenants ON DELETE SET NULL (parent_id)); INSERT INTO tenants VALUES (1, 1); INSERT INTO tenant_items VALUES (1, 1); DELETE FROM tenants
-constraints/foreign_keys.slt:02cf6b79360dc245  # SELECT tid, parent_id FROM tenant_items
-constraints/foreign_keys.slt:0b65eeef13e9f95c  # INSERT INTO fk_full VALUES (9, NULL)
-constraints/foreign_keys.slt:d90916d2628c4663  # CREATE TABLE bad (a int, b int, FOREIGN KEY (a, b) REFERENCES ck (a))
-constraints/foreign_keys.slt:207665a0dd8db414  # ALTER TABLE late_child ADD CONSTRAINT late_fk FOREIGN KEY (pid) REFERENCES p (id) NOT VALID
-constraints/foreign_keys.slt:248d9980957a26f4  # INSERT INTO late_child VALUES (998)
-constraints/foreign_keys.slt:00061078459f9b81  # ALTER TABLE late_child VALIDATE CONSTRAINT late_fk
-constraints/foreign_keys.slt:e1774fe300977cfc  # DELETE FROM late_child WHERE pid = 999; ALTER TABLE late_child VALIDATE CONSTRAINT late_fk
-constraints/foreign_keys.slt:2716a595ee382a72  # SELECT conname, convalidated FROM pg_constraint WHERE conname = 'late_fk'
-constraints/foreign_keys.slt:33c1e49d31d0f7a5  # SELECT constraint_name, update_rule, delete_rule, match_option FROM information_schema.referential_constraints WHERE constraint_schema = 'public' ORDER BY constraint_name
-constraints/keys_unique.slt:0308954344c2b403  # UPDATE seqs SET n = n + 1
-constraints/keys_unique.slt:88876c83c90d08ae  # ALTER TABLE named ADD CONSTRAINT bc_unique UNIQUE (a)
-constraints/keys_unique.slt:f45a27899f67be03  # SELECT conname, contype, condeferrable, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'later'::regclass ORDER BY conname
 ddl/alter_table.slt:2a30c0766251ab31  # ALTER TABLE ty ALTER COLUMN b TYPE int
 ddl/alter_table.slt:9b74524baf76d354  # ALTER TABLE t ADD CONSTRAINT score_nonneg CHECK (score >= 0); ALTER TABLE t RENAME CONSTRAINT score_nonneg TO score_positive
 ddl/alter_table.slt:a4b9f6bf5b64c464  # INSERT INTO t (id, name, score) VALUES (6, 'f', -1)
@@ -315,33 +264,6 @@ session/roles.slt:dfbf7fb3babe5bd0#2  # DROP ROLE IF EXISTS conf_sess_login
 session/utility.slt:14a255b6d915c7e9  # DO $$ BEGIN PERFORM 1; END $$
 session/utility.slt:6ef5fcb4d663b855  # DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'u') THEN CREATE TABLE u (x int); END IF; END $$
 session/utility.slt:7e9fe260f01363ab  # SELECT to_regclass('u') IS NOT NULL
-transactions/deferred.slt:94702a6f25b463a9  # INSERT INTO child VALUES (1, 10)
-transactions/deferred.slt:3375b3ae829ba206  # INSERT INTO parent VALUES (10)
-transactions/deferred.slt:5f853eb6868b7712  # SELECT id, parent_id FROM child
-transactions/deferred.slt:6aef54b342160497  # INSERT INTO child VALUES (2, 99)
-transactions/deferred.slt:7589a4fbc62c3cb6#2  # COMMIT
-transactions/deferred.slt:161bcaccce0e4a33  # INSERT INTO child VALUES (4, 97)
-transactions/deferred.slt:7b2b123fa918acc7  # SET CONSTRAINTS ALL IMMEDIATE
-transactions/deferred.slt:d4a8cb2bce41a341#2  # INSERT INTO strict_child VALUES (1, 30)
-transactions/deferred.slt:22fbfdae79840230  # INSERT INTO parent VALUES (30)
-transactions/deferred.slt:30bf87e231e31658  # SELECT id, parent_id FROM strict_child
-transactions/deferred.slt:f72f54b2d4ba16e6  # INSERT INTO child VALUES (5, 40)
-transactions/deferred.slt:745b9433578b2e78  # UPDATE child SET parent_id = 10 WHERE id = 5
-transactions/deferred.slt:d8e0e25e5a4823ff  # SET CONSTRAINTS no_such_constraint DEFERRED
-transactions/deferred.slt:68a7b7018bbe1b78  # SET CONSTRAINTS plain_fk DEFERRED
-transactions/deferred.slt:6ab17aec47b15c62  # UPDATE seq_strict SET pos = pos + 1
-transactions/deferred.slt:d4c8737465fe0bd3  # INSERT INTO seq_commit VALUES (1)
-transactions/deferred.slt:0fc29339fbfb376f  # UPDATE seq_commit SET pos = 0 WHERE pos = 1 AND ctid = (SELECT max(ctid) FROM seq_commit WHERE pos = 1)
-transactions/deferred.slt:f2e5baecd365cba7  # SELECT pos FROM seq_commit ORDER BY pos
-transactions/deferred.slt:d4d2737466066058  # INSERT INTO seq_commit VALUES (2)
-transactions/deferred.slt:7589a4fbc62c3cb6#7  # COMMIT
-transactions/deferred.slt:6df84ead7778e9ff  # INSERT INTO seq_commit VALUES (3) ON CONFLICT (pos) DO NOTHING
-transactions/deferred.slt:6ce03045219c92bb  # CREATE TABLE bad (a int CHECK (a > 0) DEFERRABLE)
-transactions/serialization.slt:c414f24cab86e436  # COMMIT
-transactions/serialization.slt:f654956a7ca4b651  # SELECT doctor, on_duty FROM oncall ORDER BY doctor
-transactions/serialization.slt:acfaacf8e23e6dc4  # SELECT on_duty FROM oncall WHERE doctor = 'bob'
-transactions/serialization.slt:c414f24cab86e436#2  # COMMIT
-transactions/serialization.slt:fe34efe19b672efe  # SELECT room, slot FROM booking ORDER BY slot
 types/arrays.slt:59695c5e88ee43b9  # SELECT '[0:2]={a,b,c}'::text[], ('[0:2]={a,b,c}'::text[])[0], array_lower('[0:2]={a,b,c}'::text[], 1)
 types/casts.slt:58960dc407f61ee5  # SELECT 'x'::inet
 types/casts.slt:aa0e6d00a2e1688f  # SELECT '192.168.0.1/24'::inet, '10.0.0.0/8'::cidr, '08:00:2b:01:02:03'::macaddr, '$1,234.50'::money

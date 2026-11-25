@@ -29,6 +29,7 @@ use sqlparser::parser::{Parser, ParserError};
 pub fn parse(sql: &str) -> SqlResult<Vec<Statement>> {
     let original = sql;
     search_cycle::clear();
+    FK_SET_COLUMNS.with(|c| c.borrow_mut().clear());
     if sql.trim().trim_matches(';').trim().is_empty() {
         return Ok(vec![Statement::Empty]);
     }
@@ -65,6 +66,9 @@ pub fn parse(sql: &str) -> SqlResult<Vec<Statement>> {
 }
 
 thread_local! {
+    /// `ON DELETE SET NULL / SET DEFAULT [(cols)]` column lists in statement order (empty
+    /// when there is none), stripped by the rewrite and taken by the lowering.
+    static FK_SET_COLUMNS: std::cell::RefCell<std::collections::VecDeque<Vec<String>>> = const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
     /// The text the statements being lowered were parsed from (spans point into it).
     static PARSED_TEXT: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
@@ -72,6 +76,11 @@ thread_local! {
 /// Postgres' `syntax error at or near "X"` for the first token at or after `at` in the text
 /// being lowered (`at end of input` when there is none): for syntax sqlparser accepts but
 /// Postgres' grammar rejects.
+/// The next recorded `SET NULL / SET DEFAULT (cols)` list.
+pub(crate) fn take_fk_set_columns() -> Vec<String> {
+    FK_SET_COLUMNS.with(|c| c.borrow_mut().pop_front().unwrap_or_default())
+}
+
 pub(crate) fn syntax_error_at(at: sqlparser::tokenizer::Location) -> SqlError {
     use sqlparser::tokenizer::{Token, Tokenizer};
     let next = PARSED_TEXT.with(|t| {
@@ -283,6 +292,31 @@ fn lock_marker(insert_after: &mut std::collections::HashMap<usize, String>, sig:
     if k > 0 {
         insert_after.insert(sig[k - 1], format!(" FOR SHARE OF {marker}"));
     }
+}
+
+/// `ON DELETE SET NULL (cols)` / `SET DEFAULT (cols)`: records every such action's column list
+/// (empty without one) and strips the list sqlparser lacks.
+fn rewrite_fk_set_columns(tokens: &Tokens, sig: &[usize], k: usize, drop: &mut [bool]) {
+    use sqlparser::tokenizer::Token;
+    if !(is_word(tokens, sig, k, "ON")
+        && is_word(tokens, sig, k + 1, "DELETE")
+        && is_word(tokens, sig, k + 2, "SET")
+        && (is_word(tokens, sig, k + 3, "NULL") || is_word(tokens, sig, k + 3, "DEFAULT")))
+    {
+        return;
+    }
+    let mut cols = Vec::new();
+    if sig.get(k + 4).is_some_and(|&j| tokens[j] == Token::LParen)
+        && let Some(close) = matching_paren(tokens, sig, k + 4)
+    {
+        for &j in &sig[k + 4..=close] {
+            if let Token::Word(w) = &tokens[j] {
+                cols.push(if w.quote_style.is_some() { w.value.clone() } else { w.value.to_lowercase() });
+            }
+            drop[j] = true;
+        }
+    }
+    FK_SET_COLUMNS.with(|c| c.borrow_mut().push_back(cols));
 }
 
 /// `WHERE CURRENT OF cursor` → `WHERE __pgmem_current_of('cursor', ctid, tableoid)`.
@@ -518,6 +552,7 @@ fn rewrite_unsupported(sql: &str) -> Option<String> {
         }
         rewrite_frame_exclude(&tokens, &sig, k, &mut drop, &mut insert_after);
         rewrite_current_of(&tokens, &sig, k, &mut drop, &mut insert_after);
+        rewrite_fk_set_columns(&tokens, &sig, k, &mut drop);
         // MERGE's `THEN INSERT DEFAULT VALUES` → `THEN INSERT VALUES (__pgmem_default_values())`.
         if word(&tokens[i], "THEN") && at(1, "INSERT") && at(2, "DEFAULT") && at(3, "VALUES") {
             drop[sig[k + 2]] = true;
@@ -740,6 +775,11 @@ fn map_parser_error(err: &ParserError, sql: &str) -> SqlError {
         && let Some(word) = what.rsplit(' ').next()
     {
         return SqlError::syntax(format!("syntax error at or near \"{word}\"")).with_detail(text);
+    }
+    // `CHECK (...) DEFERRABLE` as a column constraint.
+    if text.contains("found: DEFERRABLE") || text.contains("found: INITIALLY") {
+        let what = if text.contains("found: DEFERRABLE") { "DEFERRABLE" } else { "INITIALLY" };
+        return SqlError::syntax(format!("misplaced {what} clause")).with_detail(text);
     }
     let found = text.split("found: ").nth(1).map(|rest| rest.split(" at Line:").next().unwrap_or(rest).trim().to_owned());
     let message = match found.as_deref() {

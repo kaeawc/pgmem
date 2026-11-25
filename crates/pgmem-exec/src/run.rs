@@ -14,18 +14,21 @@ pub fn run(rel: &Rel, ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     match rel {
         Rel::Values { rows } => rows.iter().map(|r| r.iter().map(|e| eval(e, &[], ctx)).collect()).collect(),
         Rel::Virtual { rows } => (rows.0)(ctx),
-        Rel::Scan { table, slots, missing, system } => Ok(ctx
-            .txn
-            .scan(*table)
-            .into_iter()
-            .map(|(id, stored)| {
-                let mut row: Row = slots.iter().zip(missing).map(|(s, m)| stored.get(*s).cloned().unwrap_or_else(|| m.clone())).collect();
-                if *system {
-                    row.extend(crate::dml::system_values(*table, Some(id), 0));
-                }
-                row
-            })
-            .collect()),
+        Rel::Scan { table, slots, missing, system } => Ok({
+            ctx.txn.note_read(*table);
+            ctx.txn
+                .scan(*table)
+                .into_iter()
+                .map(|(id, stored)| {
+                    let mut row: Row =
+                        slots.iter().zip(missing).map(|(s, m)| stored.get(*s).cloned().unwrap_or_else(|| m.clone())).collect();
+                    if *system {
+                        row.extend(crate::dml::system_values(*table, Some(id), 0));
+                    }
+                    row
+                })
+                .collect()
+        }),
         Rel::ProjectSet { input, srfs } => {
             let rows = run(input, ctx)?;
             let mut out = Vec::new();

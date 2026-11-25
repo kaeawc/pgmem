@@ -349,9 +349,18 @@ impl Session {
 
     /// Ends the current transaction: commits or rolls back the data, closes the cursors that
     /// do not survive it, and (on commit) applies LISTEN / UNLISTEN and sends notifications.
-    pub(super) fn finish_txn(&mut self, txn: Txn, commit: bool) -> SqlResult<()> {
+    pub(super) fn finish_txn(&mut self, mut txn: Txn, commit: bool) -> SqlResult<()> {
+        let pending = std::mem::take(&mut self.pending_checks);
+        self.constraint_modes = super::ConstraintModes::default();
         let result = if commit {
-            txn.commit()
+            // Deferred constraints are checked at commit; a violation rolls everything back.
+            match self.check_constraints(&mut txn, pending) {
+                Ok(()) => txn.commit(),
+                Err(e) => {
+                    txn.rollback();
+                    Err(e)
+                }
+            }
         } else {
             txn.rollback();
             Ok(())
@@ -373,6 +382,98 @@ impl Session {
             self.pending_notify.clear();
         }
         result
+    }
+
+    /// Runs deferred constraint checks: (table OID, constraint name) against the table's rows.
+    fn check_constraints(&self, txn: &mut Txn, checks: Vec<(pgmem_catalog::Oid, String)>) -> SqlResult<()> {
+        if checks.is_empty() {
+            return Ok(());
+        }
+        let _ctx = pgmem_types::context::enter(self.format_context());
+        let env = self.env();
+        let state = StatementState::default();
+        for (oid, name) in checks {
+            let catalog = txn.catalog().clone();
+            let Some(def) = catalog.table_by_oid(oid).cloned() else { continue };
+            if def.constraints.iter().any(|c| c.name == name) {
+                // A unique violation reads as an insertion's, not as index creation's.
+                crate::ddl::validate_constraint(txn, &def, &name, &catalog, &env, &state).map_err(|e| {
+                    if e.code == code::UNIQUE_VIOLATION && e.message.starts_with("could not create unique index") {
+                        let detail = e.detail().unwrap_or_default().replace(" is duplicated.", " already exists.");
+                        SqlError::new(code::UNIQUE_VIOLATION, format!("duplicate key value violates unique constraint \"{name}\""))
+                            .with_detail(detail)
+                    } else {
+                        e
+                    }
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `SET CONSTRAINTS {ALL | names} {DEFERRED | IMMEDIATE}`; IMMEDIATE runs the checks owed
+    /// so far.
+    pub(super) fn set_constraints(&mut self, names: &[ir::ObjectName], deferred: bool) -> SqlResult<QueryResult> {
+        // Outside a block it warns, still checks the names, and has no lasting effect.
+        let in_block = self.in_block();
+        let catalog = self.catalog_snapshot();
+        let mut chosen: Vec<(pgmem_catalog::Oid, pgmem_catalog::Oid, String)> = Vec::new();
+        if names.is_empty() {
+            self.constraint_modes.all = Some(deferred);
+            self.constraint_modes.by_oid.clear();
+        } else {
+            let _ctx = pgmem_types::context::enter(self.format_context());
+            for n in names {
+                let matches: Vec<_> = catalog
+                    .tables()
+                    .filter(|t| {
+                        n.schema().is_none_or(|s| s == t.schema) && (n.schema().is_some() || catalog.relation_visible(&t.schema, &t.name))
+                    })
+                    .flat_map(|t| t.constraints.iter().filter(|c| c.name == n.base()).map(move |c| (t.oid, c)))
+                    .collect();
+                if matches.is_empty() {
+                    return Err(SqlError::new(code::UNDEFINED_OBJECT, format!("constraint \"{}\" does not exist", n.base())));
+                }
+                for (table, c) in matches {
+                    if !c.deferrable {
+                        return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("constraint \"{}\" is not deferrable", c.name)));
+                    }
+                    chosen.push((table, c.oid, c.name.clone()));
+                }
+            }
+            for (_, oid, _) in &chosen {
+                self.constraint_modes.by_oid.insert(*oid, deferred);
+            }
+        }
+        if !in_block {
+            self.constraint_modes = super::ConstraintModes::default();
+            return Ok(QueryResult {
+                tag: "SET CONSTRAINTS".into(),
+                notices: vec![super::Notice {
+                    severity: "WARNING",
+                    code: code::NO_ACTIVE_SQL_TRANSACTION,
+                    message: "SET CONSTRAINTS can only be used in transaction blocks".into(),
+                }],
+                ..Default::default()
+            });
+        }
+        if !deferred {
+            let due: Vec<_> = if names.is_empty() {
+                std::mem::take(&mut self.pending_checks)
+            } else {
+                let (due, rest) = std::mem::take(&mut self.pending_checks)
+                    .into_iter()
+                    .partition(|(t, n)| chosen.iter().any(|(ct, _, cn)| ct == t && cn == n));
+                self.pending_checks = rest;
+                due
+            };
+            if let Some(mut txn) = self.txn.take() {
+                let result = self.check_constraints(&mut txn, due);
+                self.txn = Some(txn);
+                result?;
+            }
+        }
+        Ok(tag("SET CONSTRAINTS"))
     }
 
     /// ROLLBACK TO the savepoint at `depth`: forgets what was queued after it.

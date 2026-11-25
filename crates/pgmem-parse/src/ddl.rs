@@ -4,8 +4,8 @@ use crate::expr::{lower_expr, lower_type};
 use crate::query::{lower_order_by_expr, lower_query};
 use crate::{ident, object_name, unsupported};
 use pgmem_ir::{
-    AlterTable, AlterTableAction, ColumnConstraint, ColumnConstraintKind, ColumnDef, CreateIndex, CreateSequence, CreateTable, CreateView,
-    ForeignKeyRef, ReferentialAction, TableConstraint, TableConstraintKind,
+    AlterTable, AlterTableAction, ColumnConstraint, ColumnConstraintKind, ColumnDef, ConstraintTiming, CreateIndex, CreateSequence,
+    CreateTable, CreateView, ForeignKeyRef, ReferentialAction, TableConstraint, TableConstraintKind,
 };
 use pgmem_types::{SqlError, SqlResult};
 use sqlparser::ast as sq;
@@ -20,6 +20,12 @@ fn referential(a: Option<sq::ReferentialAction>) -> ReferentialAction {
     }
 }
 
+/// The column list of an `ON DELETE SET NULL / SET DEFAULT (cols)` the rewrite recorded (in
+/// statement order).
+fn delete_set_columns(action: ReferentialAction) -> Vec<String> {
+    if matches!(action, ReferentialAction::SetNull | ReferentialAction::SetDefault) { crate::take_fk_set_columns() } else { Vec::new() }
+}
+
 fn index_column_names(cols: &[sq::IndexColumn]) -> SqlResult<Vec<String>> {
     cols.iter()
         .map(|c| match &c.column.expr {
@@ -27,6 +33,20 @@ fn index_column_names(cols: &[sq::IndexColumn]) -> SqlResult<Vec<String>> {
             other => Err(unsupported(&format!("expression `{other}` in a key constraint"))),
         })
         .collect()
+}
+
+/// `[NOT] DEFERRABLE [INITIALLY DEFERRED | IMMEDIATE]`, with Postgres' grammar checks.
+fn timing(c: Option<&sq::ConstraintCharacteristics>, what: &str) -> SqlResult<ConstraintTiming> {
+    let Some(c) = c else { return Ok(ConstraintTiming::default()) };
+    let initially_deferred = matches!(c.initially, Some(sq::DeferrableInitial::Deferred));
+    let deferrable = c.deferrable.unwrap_or(initially_deferred);
+    if initially_deferred && !deferrable {
+        return Err(SqlError::syntax("constraint declared INITIALLY DEFERRED must be DEFERRABLE"));
+    }
+    if deferrable && what == "CHECK" {
+        return Err(SqlError::feature_not_supported("CHECK constraints cannot be marked DEFERRABLE"));
+    }
+    Ok(ConstraintTiming { deferrable, initially_deferred, not_valid: false })
 }
 
 fn lower_column_def(c: sq::ColumnDef) -> SqlResult<ColumnDef> {
@@ -39,29 +59,39 @@ fn lower_column_def(c: sq::ColumnDef) -> SqlResult<ColumnDef> {
             sq::ColumnOption::Default(e) => ColumnConstraintKind::Default(lower_expr(e)?),
             sq::ColumnOption::PrimaryKey(pk) => {
                 let name = name.clone().or_else(|| pk.name.as_ref().map(ident));
-                constraints.push(ColumnConstraint { name, kind: ColumnConstraintKind::PrimaryKey });
+                let timing = timing(pk.characteristics.as_ref(), "PRIMARY KEY")?;
+                constraints.push(ColumnConstraint { name, kind: ColumnConstraintKind::PrimaryKey, timing });
                 continue;
             }
             sq::ColumnOption::Unique(u) => {
                 let name = name.clone().or_else(|| u.name.as_ref().map(ident));
                 let nulls_not_distinct = matches!(u.nulls_distinct, sq::NullsDistinctOption::NotDistinct);
-                constraints.push(ColumnConstraint { name, kind: ColumnConstraintKind::Unique { nulls_not_distinct } });
+                let timing = timing(u.characteristics.as_ref(), "UNIQUE")?;
+                constraints.push(ColumnConstraint { name, kind: ColumnConstraintKind::Unique { nulls_not_distinct }, timing });
                 continue;
             }
             sq::ColumnOption::ForeignKey(fk) => {
                 let name = name.clone().or_else(|| fk.name.as_ref().map(ident));
+                let on_delete = referential(fk.on_delete);
                 let r = ForeignKeyRef {
                     table: object_name(&fk.foreign_table)?,
                     columns: fk.referred_columns.iter().map(ident).collect(),
-                    on_delete: referential(fk.on_delete),
+                    on_delete,
                     on_update: referential(fk.on_update),
+                    match_full: matches!(fk.match_kind, Some(sq::ConstraintReferenceMatchKind::Full)),
+                    delete_set_columns: delete_set_columns(on_delete),
                 };
-                constraints.push(ColumnConstraint { name, kind: ColumnConstraintKind::References(r) });
+                let timing = timing(fk.characteristics.as_ref(), "FOREIGN KEY")?;
+                constraints.push(ColumnConstraint { name, kind: ColumnConstraintKind::References(r), timing });
                 continue;
             }
             sq::ColumnOption::Check(chk) => {
                 let name = name.clone().or_else(|| chk.name.as_ref().map(ident));
-                constraints.push(ColumnConstraint { name, kind: ColumnConstraintKind::Check(lower_expr(*chk.expr)?) });
+                constraints.push(ColumnConstraint {
+                    name,
+                    kind: ColumnConstraintKind::Check(lower_expr(*chk.expr)?),
+                    timing: ConstraintTiming::default(),
+                });
                 continue;
             }
             sq::ColumnOption::Generated { generated_as, generation_expr, .. } => match generation_expr {
@@ -72,26 +102,31 @@ fn lower_column_def(c: sq::ColumnDef) -> SqlResult<ColumnDef> {
             sq::ColumnOption::Collation(_) | sq::ColumnOption::Comment(_) => continue,
             other => return Err(unsupported(&format!("column option {other}"))),
         };
-        constraints.push(ColumnConstraint { name, kind });
+        constraints.push(ColumnConstraint { name, kind, timing: ConstraintTiming::default() });
     }
     Ok(ColumnDef { name: ident(&c.name), ty: lower_type(&c.data_type)?, constraints })
 }
 
 fn lower_table_constraint(c: sq::TableConstraint) -> SqlResult<TableConstraint> {
     Ok(match c {
-        sq::TableConstraint::PrimaryKey(pk) => {
-            TableConstraint { name: pk.name.as_ref().map(ident), kind: TableConstraintKind::PrimaryKey(index_column_names(&pk.columns)?) }
-        }
+        sq::TableConstraint::PrimaryKey(pk) => TableConstraint {
+            name: pk.name.as_ref().map(ident),
+            kind: TableConstraintKind::PrimaryKey(index_column_names(&pk.columns)?),
+            timing: timing(pk.characteristics.as_ref(), "PRIMARY KEY")?,
+        },
         sq::TableConstraint::Unique(u) => TableConstraint {
             name: u.name.as_ref().map(ident),
             kind: TableConstraintKind::Unique {
                 columns: index_column_names(&u.columns)?,
                 nulls_not_distinct: matches!(u.nulls_distinct, sq::NullsDistinctOption::NotDistinct),
             },
+            timing: timing(u.characteristics.as_ref(), "UNIQUE")?,
         },
-        sq::TableConstraint::Check(chk) => {
-            TableConstraint { name: chk.name.as_ref().map(ident), kind: TableConstraintKind::Check(lower_expr(*chk.expr)?) }
-        }
+        sq::TableConstraint::Check(chk) => TableConstraint {
+            name: chk.name.as_ref().map(ident),
+            kind: TableConstraintKind::Check(lower_expr(*chk.expr)?),
+            timing: ConstraintTiming::default(),
+        },
         sq::TableConstraint::ForeignKey(fk) => TableConstraint {
             name: fk.name.as_ref().map(ident),
             kind: TableConstraintKind::ForeignKey {
@@ -101,8 +136,11 @@ fn lower_table_constraint(c: sq::TableConstraint) -> SqlResult<TableConstraint> 
                     columns: fk.referred_columns.iter().map(ident).collect(),
                     on_delete: referential(fk.on_delete),
                     on_update: referential(fk.on_update),
+                    match_full: matches!(fk.match_kind, Some(sq::ConstraintReferenceMatchKind::Full)),
+                    delete_set_columns: delete_set_columns(referential(fk.on_delete)),
                 },
             },
+            timing: timing(fk.characteristics.as_ref(), "FOREIGN KEY")?,
         },
         _ => return Err(unsupported("this table constraint")),
     })
@@ -206,7 +244,12 @@ pub(crate) fn lower_alter_table(at: sq::AlterTable) -> SqlResult<AlterTable> {
                     _ => return Err(unsupported("this ALTER COLUMN action")),
                 });
             }
-            O::AddConstraint { constraint, .. } => actions.push(AlterTableAction::AddConstraint(lower_table_constraint(constraint)?)),
+            O::AddConstraint { constraint, not_valid } => {
+                let mut c = lower_table_constraint(constraint)?;
+                c.timing.not_valid = not_valid;
+                actions.push(AlterTableAction::AddConstraint(c));
+            }
+            O::ValidateConstraint { name } => actions.push(AlterTableAction::ValidateConstraint { name: ident(&name) }),
             O::DropConstraint { if_exists, name, drop_behavior } => actions.push(AlterTableAction::DropConstraint {
                 name: ident(&name),
                 if_exists,

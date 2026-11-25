@@ -63,6 +63,22 @@ pub struct SessionEnv {
     pub lastval: Option<i64>,
     /// Prepared statements, cursors and LISTEN channels (catalog views read them).
     pub objects: Arc<SessionObjects>,
+    /// SET CONSTRAINTS state of the current transaction.
+    pub constraint_modes: Arc<ConstraintModes>,
+}
+
+/// `SET CONSTRAINTS` within a transaction: ALL, then per-constraint overrides.
+#[derive(Clone, Debug, Default)]
+pub struct ConstraintModes {
+    pub all: Option<bool>,
+    pub by_oid: HashMap<Oid, bool>,
+}
+
+impl ConstraintModes {
+    /// Whether the constraint is checked at commit rather than immediately.
+    pub fn deferred(&self, c: &pgmem_catalog::Constraint) -> bool {
+        c.deferrable && self.by_oid.get(&c.oid).copied().or(self.all).unwrap_or(c.initially_deferred)
+    }
 }
 
 impl SessionEnv {
@@ -86,6 +102,7 @@ impl SessionEnv {
             currval: HashMap::new(),
             lastval: None,
             objects: Arc::default(),
+            constraint_modes: Arc::default(),
         }
     }
 }
@@ -228,6 +245,10 @@ pub struct Session {
     pipeline: bool,
     /// The current transaction is READ ONLY.
     txn_read_only: bool,
+    /// SET CONSTRAINTS of the current transaction.
+    constraint_modes: ConstraintModes,
+    /// Deferred constraint checks owed at commit: (table OID, constraint name).
+    pending_checks: Vec<(Oid, String)>,
 }
 
 /// A savepoint's marks into the transaction's undo and queues.
@@ -268,6 +289,8 @@ impl Session {
             pending_notify: Vec::new(),
             pipeline: false,
             txn_read_only: false,
+            constraint_modes: ConstraintModes::default(),
+            pending_checks: Vec::new(),
         }
     }
 
@@ -292,6 +315,7 @@ impl Session {
             currval: self.currval.clone(),
             lastval: self.lastval,
             objects: self.objects(),
+            constraint_modes: Arc::new(self.constraint_modes.clone()),
         }
     }
 
@@ -493,6 +517,7 @@ impl Session {
             Statement::Notify { channel, payload } => return self.notify(channel, payload.as_deref()),
             Statement::Maintenance { tag, tables, in_block_ok } => return self.maintenance(tag, tables, *in_block_ok),
             Statement::Lock { tables, mode, nowait } => return self.lock_tables(tables, *mode, *nowait),
+            Statement::SetConstraints { names, deferred } => return self.set_constraints(names, *deferred),
             Statement::Discard(k) if *k != ir::DiscardKind::Temp && *k != ir::DiscardKind::All => return self.discard(*k),
             _ => {}
         }
@@ -584,6 +609,11 @@ impl Session {
         drop(produced);
         for (channel, payload) in state.notifies.take() {
             self.queue_notification(channel, payload);
+        }
+        for check in state.deferred.take() {
+            if !self.pending_checks.contains(&check) {
+                self.pending_checks.push(check);
+            }
         }
         let mut result = result;
         let pending = state.settings.take();

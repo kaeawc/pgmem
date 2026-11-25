@@ -407,6 +407,14 @@ pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<Inser
         None => None,
         Some(oc) => {
             let arbiter = arbiter_for(b, &rules, &table, &oc.target)?;
+            if let Some(a) = &arbiter
+                && table.constraints.iter().any(|c| c.name == a.name && c.deferrable)
+            {
+                return Err(SqlError::new(
+                    code::OBJECT_NOT_IN_PREREQUISITE_STATE,
+                    "ON CONFLICT does not support deferrable unique constraints/exclusion constraints as arbiters",
+                ));
+            }
             let update = match &oc.action {
                 ir::ConflictAction::Nothing => None,
                 ir::ConflictAction::Update { assignments, selection } => {

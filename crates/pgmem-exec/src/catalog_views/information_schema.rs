@@ -382,6 +382,9 @@ fn table_constraints(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("table_schema", name(&c.table.schema)),
                 ("table_name", name(&c.table.name)),
                 ("constraint_type", txt(constraint_type(c))),
+                ("is_deferrable", yes_no(c.flags().0)),
+                ("initially_deferred", yes_no(c.flags().1)),
+                ("enforced", txt("YES")),
                 ("nulls_distinct", nulls_distinct),
             ])
         })
@@ -432,10 +435,10 @@ fn referential_constraints(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     Ok(all
         .iter()
         .filter_map(|c| match c.kind {
-            Some(ConstraintKind::ForeignKey { on_delete, on_update, .. }) => Some((c, *on_delete, *on_update)),
+            Some(ConstraintKind::ForeignKey { on_delete, on_update, match_full, .. }) => Some((c, *on_delete, *on_update, *match_full)),
             _ => None,
         })
-        .map(|(c, on_delete, on_update)| {
+        .map(|(c, on_delete, on_update, match_full)| {
             let unique = referenced_constraint(&all, c);
             s.row(vec![
                 ("constraint_catalog", catalog_name(ctx)),
@@ -444,7 +447,7 @@ fn referential_constraints(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("unique_constraint_catalog", unique.map_or(Value::Null, |_| catalog_name(ctx))),
                 ("unique_constraint_schema", unique.map_or(Value::Null, |u| name(&u.table.schema))),
                 ("unique_constraint_name", unique.map_or(Value::Null, |u| name(&u.name))),
-                ("match_option", txt("NONE")),
+                ("match_option", txt(if match_full { "FULL" } else { "NONE" })),
                 ("update_rule", txt(fk_action_rule(on_update))),
                 ("delete_rule", txt(fk_action_rule(on_delete))),
             ])

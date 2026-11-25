@@ -703,12 +703,21 @@ fn pg_constraint(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("conindid", oid(c.conindid)),
                 ("conkey", int2_array(&c.conkey)),
             ];
+            let (deferrable, deferred, validated) = c.flags();
+            vals.extend([("condeferrable", boolean(deferrable)), ("condeferred", boolean(deferred)), ("convalidated", boolean(validated))]);
             if c.contype == 'f' {
                 vals.extend([
                     ("confrelid", oid(c.confrelid)),
                     ("confupdtype", ch(c.on_update)),
                     ("confdeltype", ch(c.on_delete)),
-                    ("confmatchtype", ch('s')),
+                    (
+                        "confmatchtype",
+                        ch(if matches!(c.kind, Some(pgmem_catalog::ConstraintKind::ForeignKey { match_full: true, .. })) {
+                            'f'
+                        } else {
+                            's'
+                        }),
+                    ),
                     ("confkey", int2_array(&c.confkey)),
                 ]);
             }

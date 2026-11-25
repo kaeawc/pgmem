@@ -26,6 +26,9 @@ pub struct StatementState {
     pub notifies: RefCell<Vec<(String, String)>>,
     /// `merge_action()` while a MERGE evaluates RETURNING.
     pub merge_action: std::cell::Cell<&'static str>,
+    /// Deferred constraints this statement skipped: (table OID, constraint name), checked at
+    /// commit or SET CONSTRAINTS ... IMMEDIATE.
+    pub deferred: RefCell<Vec<(Oid, String)>>,
 }
 
 impl StatementState {

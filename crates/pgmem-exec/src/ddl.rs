@@ -311,72 +311,7 @@ fn apply_validation(
             }
             Ok(())
         }
-        Validation::Constraint(name) => {
-            let con = def.constraints.iter().find(|c| c.name == name).cloned().ok_or_else(|| SqlError::internal("constraint vanished"))?;
-            match &con.kind {
-                ConstraintKind::Check { expr } => {
-                    let mut catalog = snapshot.clone();
-                    catalog.replace_table(&def.qualified(), def.clone());
-                    let b = Binder::new(&catalog, &[]);
-                    let level = Level::new(bind::dml::physical_scope(def, &def.name));
-                    let pred = b.bind_predicate(expr, "CHECK", &Ctx::new(&level))?;
-                    let ctx = EvalCtx::new(txn, &[], env, state);
-                    for (_, row) in padded_rows(txn, def) {
-                        if matches!(eval(&pred, &row, &ctx)?, Value::Bool(false)) {
-                            return Err(SqlError::new(
-                                code::CHECK_VIOLATION,
-                                format!("check constraint \"{name}\" of relation \"{}\" is violated by some row", def.name),
-                            ));
-                        }
-                    }
-                    Ok(())
-                }
-                ConstraintKind::PrimaryKey { columns } | ConstraintKind::Unique { columns, .. } => {
-                    if matches!(con.kind, ConstraintKind::PrimaryKey { .. }) {
-                        for (_, row) in padded_rows(txn, def) {
-                            if let Some(c) = columns.iter().find(|c| row[**c].is_null()) {
-                                return Err(SqlError::new(
-                                    code::NOT_NULL_VIOLATION,
-                                    format!("column \"{}\" of relation \"{}\" contains null values", def.columns[*c].name, def.name),
-                                ));
-                            }
-                        }
-                    }
-                    validate_unique(txn, def, &name, env, state)
-                }
-                ConstraintKind::ForeignKey { columns, ref_table, ref_columns, .. } => {
-                    let parent = if *ref_table == def.qualified() {
-                        Arc::new(def.clone())
-                    } else {
-                        txn.catalog().table_q(ref_table).cloned().ok_or_else(|| SqlError::undefined_table(&ref_table.name))?
-                    };
-                    let ref_table = &ref_table.name;
-                    let parents = padded_rows(txn, &parent);
-                    for (_, row) in padded_rows(txn, def) {
-                        let key: Vec<Value> = columns.iter().map(|c| row[*c].clone()).collect();
-                        if key.iter().any(Value::is_null) {
-                            continue;
-                        }
-                        let found = parents.iter().any(|(_, p)| {
-                            ref_columns.iter().zip(&key).all(|(rc, k)| pgmem_types::compare_values(&p[*rc], k).is_ok_and(|o| o.is_eq()))
-                        });
-                        if !found {
-                            let names: Vec<&str> = columns.iter().map(|c| def.columns[*c].name.as_str()).collect();
-                            return Err(SqlError::new(
-                                code::FOREIGN_KEY_VIOLATION,
-                                format!("insert or update on table \"{}\" violates foreign key constraint \"{name}\"", def.name),
-                            )
-                            .with_detail(format!(
-                                "Key ({})=({}) is not present in table \"{ref_table}\".",
-                                names.join(", "),
-                                key.iter().map(display).collect::<Vec<_>>().join(", ")
-                            )));
-                        }
-                    }
-                    Ok(())
-                }
-            }
-        }
+        Validation::Constraint(name) => validate_constraint(txn, def, &name, snapshot, env, state),
         Validation::ConvertColumn { slot, using } => {
             let column = def.columns[slot].clone();
             // Compute new values with an immutable view, then rewrite.
@@ -1007,3 +942,79 @@ fn retarget_nextval(def: &mut TableDef, seq: &QualName, schema: &str) {
 
 #[allow(dead_code)]
 fn unused(_: Scope) {}
+
+/// Checks every row of `def` against its constraint `name` (ALTER TABLE ADD / VALIDATE
+/// CONSTRAINT, and deferred constraints at commit).
+pub(crate) fn validate_constraint(
+    txn: &mut Txn,
+    def: &TableDef,
+    name: &str,
+    snapshot: &Catalog,
+    env: &SessionEnv,
+    state: &StatementState,
+) -> SqlResult<()> {
+    let con = def.constraints.iter().find(|c| c.name == name).cloned().ok_or_else(|| SqlError::internal("constraint vanished"))?;
+    match &con.kind {
+        ConstraintKind::Check { expr } => {
+            let mut catalog = snapshot.clone();
+            catalog.replace_table(&def.qualified(), def.clone());
+            let b = Binder::new(&catalog, &[]);
+            let level = Level::new(bind::dml::physical_scope(def, &def.name));
+            let pred = b.bind_predicate(expr, "CHECK", &Ctx::new(&level))?;
+            let ctx = EvalCtx::new(txn, &[], env, state);
+            for (_, row) in padded_rows(txn, def) {
+                if matches!(eval(&pred, &row, &ctx)?, Value::Bool(false)) {
+                    return Err(SqlError::new(
+                        code::CHECK_VIOLATION,
+                        format!("check constraint \"{name}\" of relation \"{}\" is violated by some row", def.name),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        ConstraintKind::PrimaryKey { columns } | ConstraintKind::Unique { columns, .. } => {
+            if matches!(con.kind, ConstraintKind::PrimaryKey { .. }) {
+                for (_, row) in padded_rows(txn, def) {
+                    if let Some(c) = columns.iter().find(|c| row[**c].is_null()) {
+                        return Err(SqlError::new(
+                            code::NOT_NULL_VIOLATION,
+                            format!("column \"{}\" of relation \"{}\" contains null values", def.columns[*c].name, def.name),
+                        ));
+                    }
+                }
+            }
+            validate_unique(txn, def, name, env, state)
+        }
+        ConstraintKind::ForeignKey { columns, ref_table, ref_columns, .. } => {
+            let parent = if *ref_table == def.qualified() {
+                Arc::new(def.clone())
+            } else {
+                txn.catalog().table_q(ref_table).cloned().ok_or_else(|| SqlError::undefined_table(&ref_table.name))?
+            };
+            let ref_table = &ref_table.name;
+            let parents = padded_rows(txn, &parent);
+            for (_, row) in padded_rows(txn, def) {
+                let key: Vec<Value> = columns.iter().map(|c| row[*c].clone()).collect();
+                if key.iter().any(Value::is_null) {
+                    continue;
+                }
+                let found = parents.iter().any(|(_, p)| {
+                    ref_columns.iter().zip(&key).all(|(rc, k)| pgmem_types::compare_values(&p[*rc], k).is_ok_and(|o| o.is_eq()))
+                });
+                if !found {
+                    let names: Vec<&str> = columns.iter().map(|c| def.columns[*c].name.as_str()).collect();
+                    return Err(SqlError::new(
+                        code::FOREIGN_KEY_VIOLATION,
+                        format!("insert or update on table \"{}\" violates foreign key constraint \"{name}\"", def.name),
+                    )
+                    .with_detail(format!(
+                        "Key ({})=({}) is not present in table \"{ref_table}\".",
+                        names.join(", "),
+                        key.iter().map(display).collect::<Vec<_>>().join(", ")
+                    )));
+                }
+            }
+            Ok(())
+        }
+    }
+}

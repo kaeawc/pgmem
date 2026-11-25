@@ -7,19 +7,19 @@ PostgreSQL 18; CI re-verifies every record against PostgreSQL and runs it agains
 A record passes when pgmem returns the same column names, column types and text values, or
 the same SQLSTATE and error message.
 
-pgmem passes **2944 / 3309 records (89.0%)**.
+pgmem passes **3022 / 3309 records (91.3%)**.
 
 | Area | Records | Pass | Rate |
 |---|---:|---:|---:|
-| catalog | 226 | 190 | 84.1% |
-| constraints | 171 | 101 | 59.1% |
+| catalog | 226 | 191 | 84.5% |
+| constraints | 171 | 151 | 88.3% |
 | ddl | 386 | 236 | 61.1% |
 | dml | 282 | 281 | 99.6% |
 | functions | 445 | 439 | 98.7% |
 | queries | 440 | 439 | 99.8% |
 | session | 419 | 368 | 87.8% |
 | smoke | 7 | 7 | 100.0% |
-| transactions | 522 | 495 | 94.8% |
+| transactions | 522 | 522 | 100.0% |
 | types | 411 | 388 | 94.4% |
 
 ## By file
@@ -30,14 +30,14 @@ pgmem passes **2944 / 3309 records (89.0%)**.
 | catalog/information_schema.slt | 38 | 34 | 89.5% |
 | catalog/orm_reflection.slt | 35 | 30 | 85.7% |
 | catalog/pg_catalog.slt | 51 | 41 | 80.4% |
-| catalog/psql_describe.slt | 22 | 15 | 68.2% |
+| catalog/psql_describe.slt | 22 | 16 | 72.7% |
 | catalog/regtypes.slt | 33 | 28 | 84.8% |
 | catalog/settings.slt | 15 | 13 | 86.7% |
-| constraints/check_notnull.slt | 35 | 27 | 77.1% |
-| constraints/deferrable.slt | 38 | 14 | 36.8% |
+| constraints/check_notnull.slt | 35 | 35 | 100.0% |
+| constraints/deferrable.slt | 38 | 38 | 100.0% |
 | constraints/exclude.slt | 20 | 0 | 0.0% |
-| constraints/foreign_keys.slt | 46 | 31 | 67.4% |
-| constraints/keys_unique.slt | 32 | 29 | 90.6% |
+| constraints/foreign_keys.slt | 46 | 46 | 100.0% |
+| constraints/keys_unique.slt | 32 | 32 | 100.0% |
 | ddl/alter_table.slt | 46 | 38 | 82.6% |
 | ddl/create_table.slt | 40 | 24 | 60.0% |
 | ddl/drop.slt | 36 | 16 | 44.4% |
@@ -85,10 +85,10 @@ pgmem passes **2944 / 3309 records (89.0%)**.
 | transactions/advisory.slt | 38 | 38 | 100.0% |
 | transactions/basics.slt | 84 | 84 | 100.0% |
 | transactions/chain.slt | 28 | 28 | 100.0% |
-| transactions/deferred.slt | 59 | 37 | 62.7% |
+| transactions/deferred.slt | 59 | 59 | 100.0% |
 | transactions/row_locks.slt | 61 | 61 | 100.0% |
 | transactions/savepoints.slt | 86 | 86 | 100.0% |
-| transactions/serialization.slt | 59 | 54 | 91.5% |
+| transactions/serialization.slt | 59 | 59 | 100.0% |
 | transactions/settings.slt | 52 | 52 | 100.0% |
 | transactions/visibility.slt | 55 | 55 | 100.0% |
 | types/arrays.slt | 37 | 36 | 97.3% |
