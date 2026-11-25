@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	postgres "github.com/kaeawc/pgmem-go/examples/internal/pgmemtest"
+	postgres "github.com/kaeawc/pgmem/examples/internal/pgmemtest"
 )
 
 // TestCopy bulk-loads rows with pgx's CopyFrom (binary COPY FROM STDIN) and reads them back

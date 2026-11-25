@@ -10,8 +10,17 @@ error codes and messages, transaction semantics, constraint enforcement.
 
 > This repository started as **pgmem-go** (Go). It now holds the Rust rewrite, which ports every
 > pgmem-go test ([PARITY.md](PARITY.md)); the Go implementation has been removed. The Go
-> [`examples/`](examples/) remain as sqlc + pgx suites running against the Rust server. The
-> repository name is unchanged.
+> [`examples/`](examples/) remain as sqlc + pgx suites running against the Rust server.
+
+## Install
+
+```bash
+cargo add --dev pgmem          # library, for Rust tests
+cargo install pgmem            # the `pgmem` server binary
+```
+
+Prebuilt binaries for Linux, macOS and Windows are attached to each
+[GitHub release](https://github.com/kaeawc/pgmem/releases).
 
 ## Use it from Rust tests
 

@@ -12,8 +12,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/kaeawc/pgmem-go/examples/blog/db"
-	postgres "github.com/kaeawc/pgmem-go/examples/internal/pgmemtest"
+	"github.com/kaeawc/pgmem/examples/blog/db"
+	postgres "github.com/kaeawc/pgmem/examples/internal/pgmemtest"
 )
 
 // setup spins up pgmem-go, applies schema.sql, and returns a sqlc

@@ -7,19 +7,21 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.100"
 license = "MIT"
-publish = false
+repository = "https://github.com/kaeawc/pgmem"
+keywords = ["postgres", "postgresql", "testing", "database", "in-memory"]
+categories = ["database-implementations", "development-tools::testing"]
 
 # Every crate inherits deps from here, so each dependency is built with one feature set no matter
 # which `-p` subset you build. New deps: `default-features = false` plus only the features used.
 [workspace.dependencies]
-pgmem-types = { path = "crates/pgmem-types" }
-pgmem-ir = { path = "crates/pgmem-ir" }
-pgmem-parse = { path = "crates/pgmem-parse" }
-pgmem-catalog = { path = "crates/pgmem-catalog" }
-pgmem-storage = { path = "crates/pgmem-storage" }
-pgmem-exec = { path = "crates/pgmem-exec" }
-pgmem-wire = { path = "crates/pgmem-wire" }
-pgmem = { path = "crates/pgmem" }
+pgmem-types = { path = "crates/pgmem-types", version = "=0.1.0" }
+pgmem-ir = { path = "crates/pgmem-ir", version = "=0.1.0" }
+pgmem-parse = { path = "crates/pgmem-parse", version = "=0.1.0" }
+pgmem-catalog = { path = "crates/pgmem-catalog", version = "=0.1.0" }
+pgmem-storage = { path = "crates/pgmem-storage", version = "=0.1.0" }
+pgmem-exec = { path = "crates/pgmem-exec", version = "=0.1.0" }
+pgmem-wire = { path = "crates/pgmem-wire", version = "=0.1.0" }
+pgmem = { path = "crates/pgmem", version = "=0.1.0" }
 
 getrandom = { version = "0.4", default-features = false, features = ["std"] }
 md-5 = { version = "0.11", default-features = false }
