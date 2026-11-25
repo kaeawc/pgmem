@@ -83,12 +83,14 @@ pub fn eval(expr: &Expr, row: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
             .ok_or_else(|| SqlError::new(code::UNDEFINED_PARAMETER, format!("there is no parameter ${}", i + 1)))?,
         Expr::Call { func, args } => {
             let mut vals = Vec::with_capacity(args.len());
+            // Only bound-aware functions see an array's lower bounds.
+            let keep_bounds = BOUND_AWARE.contains(&func.name);
             for a in args {
                 let v = eval(a, row, ctx)?;
                 if func.strict && v.is_null() {
                     return Ok(Value::Null);
                 }
-                vals.push(v);
+                vals.push(if keep_bounds { v } else { v.unbounded() });
             }
             (func.f)(&vals, ctx)?
         }
@@ -286,7 +288,11 @@ pub fn eval(expr: &Expr, row: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
         }
         Expr::Subscript { expr, subs, slice } => {
             let arr = eval(expr, row, ctx)?;
-            let Value::Array(items) = arr else { return Ok(Value::Null) };
+            let (lower, items) = match arr {
+                Value::Array(items) => (Vec::new(), items),
+                Value::BoundedArray(lb, items) => (lb, items),
+                _ => return Ok(Value::Null),
+            };
             let mut bounds = Vec::with_capacity(subs.len());
             for s in subs {
                 let lo = s.lower.as_ref().map(|e| eval(e, row, ctx)).transpose()?;
@@ -295,7 +301,9 @@ pub fn eval(expr: &Expr, row: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
                 if lo.as_ref().is_some_and(Value::is_null) || hi.as_ref().is_some_and(Value::is_null) {
                     return Ok(Value::Null);
                 }
-                bounds.push((lo.and_then(|v| v.as_i64()), hi.and_then(|v| v.as_i64()), s.range));
+                // Subscripts count from the dimension's lower bound.
+                let shift = i64::from(lower.get(bounds.len()).copied().unwrap_or(1)) - 1;
+                bounds.push((lo.and_then(|v| v.as_i64()).map(|v| v - shift), hi.and_then(|v| v.as_i64()).map(|v| v - shift), s.range));
             }
             if *slice { array_slice(&items, &bounds) } else { array_element(&items, &bounds) }
         }
@@ -333,6 +341,9 @@ pub fn eval(expr: &Expr, row: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
         Expr::AggCall(_) | Expr::WindowCall(_) => return Err(SqlError::internal("unresolved aggregate or window call")),
     })
 }
+
+/// Functions that see arrays' lower bounds (the rest see bounded arrays as plain ones).
+const BOUND_AWARE: &[&str] = &["array_dims", "array_lower", "array_upper", "=", "<>", "<", "<=", ">", ">=", "array_eq"];
 
 /// `x op ANY/ALL (items)` with three-valued logic.
 fn quantified(l: &Value, items: impl Iterator<Item = Value>, cmp: &crate::plan::Func, all: bool, ctx: &EvalCtx) -> SqlResult<Value> {

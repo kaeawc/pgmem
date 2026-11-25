@@ -37,6 +37,10 @@ pub fn encode(v: &Value, ty: &Type) -> SqlResult<String> {
         (Value::Reg(_, _, name), _) => name.clone(),
         (Value::Enum(t, label), _) => crate::usertype::enum_label(*t, *label)?,
         (Value::Record(t, fields), _) => crate::usertype::format_record(*t, fields)?,
+        (Value::Bit(b), _) => b.clone(),
+        (Value::Money(m), _) => crate::netbits::format_money(*m),
+        (Value::Inet(ip, bits), ty) => crate::netbits::format_inet(ip, *bits, *ty == Type::Cidr),
+        (Value::MacAddr(b), _) => crate::netbits::format_mac(b),
         (Value::Range(r), ty) => {
             let sub = range_subtype(ty, v);
             crate::range::format(r, &|b| encode(b, &sub))?
@@ -47,6 +51,17 @@ pub fn encode(v: &Value, ty: &Type) -> SqlResult<String> {
         }
         (Value::Array(items), Type::Int2Vector | Type::OidVector) => {
             items.iter().map(|i| encode(i, &i.natural_type())).collect::<SqlResult<Vec<_>>>()?.join(" ")
+        }
+        (Value::BoundedArray(lb, items), ty) => {
+            let elem_ty = ty.element().cloned().unwrap_or_else(|| v.natural_type().element().cloned().unwrap_or(Type::Text));
+            let dims = crate::binary::array_dims(items);
+            let mut out = String::new();
+            for (l, d) in lb.iter().zip(&dims) {
+                let _ = write!(out, "[{l}:{}]", i64::from(*l) + i64::try_from(*d).unwrap_or(0) - 1);
+            }
+            out.push('=');
+            out.push_str(&format_array(items, &elem_ty)?);
+            out
         }
         (Value::Array(items), ty) => {
             let elem_ty = ty.element().cloned().unwrap_or_else(|| v.natural_type().element().cloned().unwrap_or(Type::Text));
@@ -104,13 +119,18 @@ pub fn decode(s: &str, ty: &Type) -> SqlResult<Value> {
         Type::Interval => parse_interval(s).map(Value::Interval),
         Type::Jsonb => Jsonb::parse(s).map(Value::Jsonb),
         Type::JsonPath => crate::jsonpath::normalize(s).map(Value::Text),
-        Type::Array(elem) => parse_array(s, elem).map(Value::Array),
+        Type::Array(elem) => parse_bounded_array(s, elem),
         Type::Enum(oid) => crate::usertype::parse_enum(s, *oid),
         Type::Composite(oid) => crate::usertype::parse_record(s, *oid),
         // Domain input is the base type's; the executor checks the constraints.
         Type::Domain(_) => decode(s, &ty.base()),
         Type::Record => Err(SqlError::feature_not_supported("input of anonymous composite types is not implemented")),
         Type::Range(sub) => crate::range::parse(s, sub, &|b| decode(b, sub)).map(|r| Value::Range(Box::new(r))),
+        Type::Bit | Type::VarBit => crate::netbits::parse_bits(s).map(Value::Bit),
+        Type::Money => crate::netbits::parse_money(s).map(Value::Money),
+        Type::Inet | Type::Cidr => crate::netbits::parse_inet(s, *ty == Type::Cidr).map(|(ip, b)| Value::Inet(ip, b)),
+        Type::MacAddr => crate::netbits::parse_mac(s, 6).map(Value::MacAddr),
+        Type::MacAddr8 => crate::netbits::parse_mac(s, 8).map(Value::MacAddr),
         Type::Multirange(sub) => crate::range::parse_multi(s, sub, &|b| decode(b, sub)).map(|rs| Value::Multirange((**sub).clone(), rs)),
     }
 }
@@ -502,6 +522,41 @@ fn array_elem_needs_quotes(s: &str) -> bool {
 /// `array_in`: `{1,2,NULL}`, `{"a b","c\"d"}`, `{{1,2},{3,4}}` (rectangular; nested arrays
 /// are returned as inner dimensions). An optional `[lo:hi]=` dimension decoration is accepted
 /// and ignored.
+/// `array_in` with an optional dimension decoration (`[2:4]={...}`).
+pub fn parse_bounded_array(s: &str, elem: &Type) -> SqlResult<Value> {
+    let t = s.trim_start();
+    if !t.starts_with('[') {
+        return parse_array(s, elem).map(Value::Array);
+    }
+    let err = || SqlError::new(code::INVALID_TEXT_REPRESENTATION, format!("malformed array literal: \"{s}\""));
+    let eq = t.find('=').ok_or_else(|| err().with_detail("Missing \"=\" after array dimensions."))?;
+    let mut bounds: Vec<(i32, i32)> = Vec::new();
+    let mut rest = t[..eq].trim();
+    while let Some(inner) = rest.strip_prefix('[') {
+        let close = inner.find(']').ok_or_else(|| err().with_detail("Missing \"]\" in array dimensions."))?;
+        let dim = &inner[..close];
+        let (lo, hi) = match dim.split_once(':') {
+            Some((l, h)) => (l.trim().parse::<i32>().map_err(|_| err())?, h.trim().parse::<i32>().map_err(|_| err())?),
+            None => (1, dim.trim().parse::<i32>().map_err(|_| err())?),
+        };
+        if hi < lo {
+            return Err(SqlError::new(code::INVALID_TEXT_REPRESENTATION, "upper bound cannot be less than lower bound"));
+        }
+        bounds.push((lo, hi));
+        rest = inner[close + 1..].trim_start();
+    }
+    if !rest.is_empty() {
+        return Err(err());
+    }
+    let items = parse_array(&t[eq + 1..], elem)?;
+    let dims = crate::binary::array_dims(&items);
+    let expected: Vec<usize> = bounds.iter().map(|(l, h)| usize::try_from(i64::from(*h) - i64::from(*l) + 1).unwrap_or(0)).collect();
+    if dims != expected {
+        return Err(err().with_detail("Specified array dimensions do not match array contents."));
+    }
+    Ok(Value::array_with_bounds(bounds.iter().map(|(l, _)| *l).collect(), items))
+}
+
 pub fn parse_array(s: &str, elem: &Type) -> SqlResult<Vec<Value>> {
     let err = || SqlError::new(code::INVALID_TEXT_REPRESENTATION, format!("malformed array literal: \"{s}\""));
     let mut t = s.trim();

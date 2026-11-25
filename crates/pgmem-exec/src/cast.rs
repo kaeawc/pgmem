@@ -64,6 +64,9 @@ pub fn cast_context(from: &Type, to: &Type) -> Option<CoercionContext> {
         (_, Text | Varchar | Bpchar | Name) => Assignment,
         (Text | Varchar | Bpchar | Name, _) => Explicit,
         (Array(a), Array(b)) => cast_context(a, b)?,
+        (Bit, VarBit) | (VarBit, Bit) | (Cidr, Inet) => Implicit,
+        (Int4 | Int8, Bit) | (Bit, Int4 | Int8) => Explicit,
+        (Int4 | Int8 | Numeric, Money) | (Money, Numeric) | (Inet, Cidr) | (MacAddr, MacAddr8) | (MacAddr8, MacAddr) => Assignment,
         // Row constructors convert to any composite type; every composite is a record.
         (Record, Composite(_)) | (Composite(_), Record) => Implicit,
         _ => return None,
@@ -89,7 +92,24 @@ pub fn cast_value_ctx(v: Value, to: &Type, typmod: i32, explicit: bool) -> SqlRe
         let (base, dmod) = pgmem_types::usertype::domain_base(*oid).unwrap_or((Type::Unknown, -1));
         return cast_value_ctx(v, &base, if typmod >= 0 { typmod } else { dmod }, explicit);
     }
-    let out = convert(v, to)?;
+    // A bounded array keeps its bounds through element conversions.
+    if let (Value::BoundedArray(lb, items), Type::Array(_)) = (&v, to) {
+        let lb = lb.clone();
+        let out = cast_value_ctx(Value::Array(items.clone()), to, typmod, explicit)?;
+        return Ok(match out {
+            Value::Array(items) => Value::array_with_bounds(lb, items),
+            other => other,
+        });
+    }
+    // An integer becomes its low n bits (`bitfromint4(int, n)`).
+    if *to == Type::Bit
+        && let Some(n) = v.as_i64()
+    {
+        let width = usize::try_from(typmod.max(1)).unwrap_or(1);
+        let bits: String = (0..width).rev().map(|i| if i < 64 && (n >> i) & 1 == 1 { '1' } else { '0' }).collect();
+        return Ok(Value::Bit(bits));
+    }
+    let out = convert(v.unbounded(), to)?;
     apply_typmod(out, to, typmod, explicit)
 }
 
@@ -151,6 +171,35 @@ fn convert(v: Value, to: &Type) -> SqlResult<Value> {
     }
     Ok(match (v, to) {
         (V::Text(s) | V::Json(s), t) => text::decode(&s, t)?,
+        (V::Bit(b), Type::Bit | Type::VarBit) => V::Bit(b),
+        (V::Bit(b), t @ (Type::Int4 | Type::Int8)) => {
+            let width = if *t == Type::Int4 { 32 } else { 64 };
+            if b.len() > width {
+                return Err(int_out_of_range(t));
+            }
+            let n = u64::from_str_radix(if b.is_empty() { "0" } else { &b }, 2).unwrap_or(0);
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            if width == 32 { V::Int4(n as u32 as i32) } else { V::Int8(n as i64) }
+        }
+        (V::Inet(ip, bits), Type::Cidr) => V::Inet(pgmem_types::netbits::masked(&ip, bits, false), bits),
+        (V::Inet(ip, bits), Type::Inet) => V::Inet(ip, bits),
+        (V::Inet(ip, bits), Type::Text | Type::Varchar) => V::Text(format!("{ip}/{bits}")),
+        (V::MacAddr(b), Type::MacAddr8) if b.len() == 6 => V::MacAddr([&b[..3], &[0xff, 0xfe], &b[3..]].concat()),
+        (V::MacAddr(b), Type::MacAddr) if b.len() == 8 => {
+            if b[3] != 0xff || b[4] != 0xfe {
+                return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, "macaddr8 data out of range to convert to macaddr")
+                    .with_hint("Only addresses that have FF and FE as values in the 4th and 5th bytes from the left, for example xx:xx:xx:ff:fe:xx:xx:xx, are eligible to be converted from macaddr8 to macaddr."));
+            }
+            V::MacAddr([&b[..3], &b[5..]].concat())
+        }
+        (v @ (V::Int2(_) | V::Int4(_) | V::Int8(_)), Type::Money) => {
+            V::Money(v.as_i64().unwrap_or_default().checked_mul(100).ok_or_else(|| SqlError::out_of_range("money"))?)
+        }
+        (V::Numeric(n), Type::Money) => {
+            let cents = n.mul(&Numeric::from_i64(100)).round(0);
+            V::Money(cents.to_i64().ok_or_else(|| SqlError::out_of_range("money"))?)
+        }
+        (V::Money(c), Type::Numeric) => V::Numeric(Numeric::from_i64(c).div(&Numeric::from_i64(100))?.round(2)),
         (V::Oid(o) | V::Reg(_, o, _), Type::Oid) => V::Oid(o),
         (V::Oid(o) | V::Reg(_, o, _), Type::Int8) => V::Int8(i64::from(o)),
         #[allow(clippy::cast_possible_wrap)]
@@ -328,6 +377,28 @@ fn apply_typmod(v: Value, to: &Type, typmod: i32, explicit: bool) -> SqlResult<V
         (Value::Timestamptz(t), Type::Timestamptz) if t != i64::MAX && t != i64::MIN => Ok(Value::Timestamptz(round_micros(t, typmod))),
         (Value::Time(t), Type::Time) => Ok(Value::Time(round_micros(t, typmod))),
         (Value::TimeTz(t, z), Type::TimeTz) => Ok(Value::TimeTz(round_micros(t, typmod), z)),
+        (Value::Bit(b), Type::Bit | Type::VarBit) => {
+            let n = usize::try_from(typmod).unwrap_or(usize::MAX);
+            let fixed = *to == Type::Bit;
+            if b.len() == n || (!fixed && b.len() < n) {
+                return Ok(Value::Bit(b));
+            }
+            if explicit {
+                // Explicit casts truncate (and bit(n) pads with zeros).
+                let mut out: String = b.chars().take(n).collect();
+                if fixed {
+                    while out.len() < n {
+                        out.push('0');
+                    }
+                }
+                return Ok(Value::Bit(out));
+            }
+            Err(if fixed {
+                SqlError::new(code::STRING_DATA_LENGTH_MISMATCH, format!("bit string length {} does not match type bit({n})", b.len()))
+            } else {
+                SqlError::new(code::STRING_DATA_RIGHT_TRUNCATION, format!("bit string too long for type bit varying({n})"))
+            })
+        }
         (Value::Interval(iv), Type::Interval) => {
             Ok(Value::Interval(pgmem_types::Interval { micros: round_micros(iv.micros, typmod & 0xFFFF), ..iv }))
         }

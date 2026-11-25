@@ -41,11 +41,23 @@ pub enum Value {
     Reg(crate::RegKind, u32, String),
     /// A one-dimensional array; elements may be `Null`.
     Array(Vec<Value>),
+    /// An array with a lower bound other than 1 in some dimension (`'[2:4]={1,2,3}'`): the
+    /// lower bound of each dimension, then the elements as in `Array`. Functions that ignore
+    /// bounds see it as a plain `Array`.
+    BoundedArray(Vec<i32>, Vec<Value>),
     /// An enum value: the enum type's OID and the label's OID (`pg_enum.oid`), so renaming a
     /// label changes stored values too, as in Postgres.
     Enum(u32, u32),
     /// A composite value: its type's OID (`record` for anonymous rows) and the fields.
     Record(u32, Vec<Value>),
+    /// A bit string, as `0` / `1` characters.
+    Bit(String),
+    /// `money`, in cents.
+    Money(i64),
+    /// `inet` / `cidr`: address and netmask length.
+    Inet(std::net::IpAddr, u8),
+    /// `macaddr` (6 bytes) / `macaddr8` (8 bytes).
+    MacAddr(Vec<u8>),
     Range(Box<crate::range::Range>),
     /// A multirange: canonical (sorted, non-overlapping, no empty ranges).
     Multirange(Type, Vec<crate::range::Range>),
@@ -54,6 +66,19 @@ pub enum Value {
 impl Value {
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
+    }
+
+    /// An array with the given lower bounds: `BoundedArray` unless every bound is 1.
+    pub fn array_with_bounds(lower: Vec<i32>, items: Vec<Value>) -> Value {
+        if lower.iter().all(|b| *b == 1) || items.is_empty() { Value::Array(items) } else { Value::BoundedArray(lower, items) }
+    }
+
+    /// A bounded array as a plain one (the bounds dropped); other values unchanged.
+    pub fn unbounded(self) -> Value {
+        match self {
+            Value::BoundedArray(_, items) => Value::Array(items),
+            other => other,
+        }
     }
 
     pub fn as_bool(&self) -> Option<bool> {
@@ -121,10 +146,14 @@ impl Value {
             Value::Oid(_) => "oid",
             Value::Tid(..) => "tid",
             Value::Reg(k, ..) => k.typname(),
-            Value::Array(_) => "array",
+            Value::Array(_) | Value::BoundedArray(..) => "array",
             Value::Enum(..) => "enum",
             Value::Record(..) => "record",
             Value::Range(_) => "range",
+            Value::Bit(_) => "bit",
+            Value::Money(_) => "money",
+            Value::Inet(..) => "inet",
+            Value::MacAddr(_) => "macaddr",
             Value::Multirange(..) => "multirange",
         }
     }
@@ -163,8 +192,18 @@ impl Value {
             Value::Oid(o) | Value::Reg(_, o, _) => GroupKey::Int(i64::from(*o)),
             Value::Tid(b, i) => GroupKey::Int((i64::from(*b) << 16) | i64::from(*i)),
             Value::Array(items) | Value::Record(_, items) => GroupKey::Array(items.iter().map(Value::group_key).collect()),
+            Value::BoundedArray(lb, items) => GroupKey::Array(
+                lb.iter()
+                    .map(|b| GroupKey::Int(i64::from(*b)))
+                    .chain(std::iter::once(GroupKey::Array(items.iter().map(Value::group_key).collect())))
+                    .collect(),
+            ),
             Value::Enum(_, label) => GroupKey::Int(i64::from(*label)),
             Value::Range(r) => range_key(r),
+            Value::Bit(b) => GroupKey::Text(b.clone()),
+            Value::Money(m) => GroupKey::Int(*m),
+            Value::Inet(ip, bits) => GroupKey::Text(format!("{ip}/{bits}")),
+            Value::MacAddr(b) => GroupKey::Bytes(b.clone()),
             Value::Multirange(_, rs) => GroupKey::Array(rs.iter().map(range_key).collect()),
         }
     }
@@ -225,6 +264,10 @@ pub fn compare_values(a: &Value, b: &Value) -> SqlResult<Ordering> {
         (Tid(xb, xi), Tid(yb, yi)) => (xb, xi).cmp(&(yb, yi)),
         (Enum(t, x), Enum(u, y)) if t == u => crate::usertype::compare_enum(*t, *x, *y),
         (Range(x), Range(y)) => crate::range::compare(x, y)?,
+        (Bit(x), Bit(y)) => x.cmp(y),
+        (Money(x), Money(y)) => x.cmp(y),
+        (Inet(x, xb), Inet(y, yb)) => crate::netbits::compare_inet((x, *xb), (y, *yb)),
+        (MacAddr(x), MacAddr(y)) => x.cmp(y),
         (Multirange(_, x), Multirange(_, y)) => crate::range::compare_multi(x, y)?,
         // Composite values compare field by field; two NULL fields are equal and NULL sorts
         // above non-NULL (btree record_cmp semantics).
@@ -240,20 +283,37 @@ pub fn compare_values(a: &Value, b: &Value) -> SqlResult<Ordering> {
             }
             Ordering::Equal
         }
-        (Array(x), Array(y)) => {
-            for (l, r) in x.iter().zip(y.iter()) {
-                let o = compare_values(l, r)?;
-                if o != Ordering::Equal {
-                    return Ok(o);
-                }
+        (Array(x), Array(y)) => compare_elements(x, y)?,
+        // Bounds only break ties between equal contents (`array_cmp`).
+        (Array(x) | BoundedArray(_, x), Array(y) | BoundedArray(_, y)) => {
+            let o = compare_elements(x, y)?;
+            if o != Ordering::Equal {
+                return Ok(o);
             }
-            x.len().cmp(&y.len())
+            let bounds = |v: &Value| match v {
+                BoundedArray(lb, _) => lb.clone(),
+                _ => Vec::new(),
+            };
+            let (lx, ly) = (bounds(a), bounds(b));
+            let n = lx.len().max(ly.len());
+            let pad = |l: Vec<i32>| (0..n).map(|i| l.get(i).copied().unwrap_or(1)).collect::<Vec<_>>();
+            pad(lx).cmp(&pad(ly))
         }
         _ => {
             return Err(SqlError::new(crate::code::UNDEFINED_FUNCTION, format!("operator does not exist: {} = {}", a.kind(), b.kind())));
         }
     };
     Ok(ord)
+}
+
+fn compare_elements(x: &[Value], y: &[Value]) -> SqlResult<Ordering> {
+    for (l, r) in x.iter().zip(y.iter()) {
+        let o = compare_values(l, r)?;
+        if o != Ordering::Equal {
+            return Ok(o);
+        }
+    }
+    Ok(x.len().cmp(&y.len()))
 }
 
 /// Postgres float ordering: NaN equals NaN and sorts above every other value.
@@ -293,7 +353,7 @@ impl Value {
             Value::Oid(_) => Type::Oid,
             Value::Tid(..) => Type::Tid,
             Value::Reg(k, ..) => Type::Reg(*k),
-            Value::Array(items) => {
+            Value::Array(items) | Value::BoundedArray(_, items) => {
                 let elem = items.iter().find(|v| !v.is_null()).map_or(Type::Text, Value::natural_type);
                 Type::array_of(elem)
             }
@@ -302,6 +362,16 @@ impl Value {
             Value::Record(t, _) if crate::usertype::is_blessed(*t) => Type::Record,
             Value::Record(t, _) => Type::Composite(*t),
             Value::Range(r) => Type::Range(Box::new(r.sub.clone())),
+            Value::Bit(_) => Type::VarBit,
+            Value::Money(_) => Type::Money,
+            Value::Inet(..) => Type::Inet,
+            Value::MacAddr(b) => {
+                if b.len() == 8 {
+                    Type::MacAddr8
+                } else {
+                    Type::MacAddr
+                }
+            }
             Value::Multirange(sub, _) => Type::Multirange(Box::new(sub.clone())),
         }
     }

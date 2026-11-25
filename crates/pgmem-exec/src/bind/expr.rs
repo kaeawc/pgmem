@@ -175,6 +175,8 @@ fn figure_colname(e: &ir::Expr) -> Option<(String, u8)> {
             Some((name, 2)) => Some((name, 2)),
             _ => Some((type_display_name(ty), 1)),
         },
+        // `B'1010'` / `X'1F'` constants (no length limit) are unnamed, like literals.
+        ir::Expr::TypedString { ty, .. } if ty.name == "bit" && ty.modifiers == [-1] => None,
         ir::Expr::TypedString { ty, .. } => Some((type_display_name(ty), 1)),
         ir::Expr::Case { .. } => Some(("case".into(), 1)),
         // `x AT TIME ZONE z` is the function call timezone(z, x).

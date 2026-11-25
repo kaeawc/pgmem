@@ -13,6 +13,7 @@ mod go_port;
 pub mod json;
 pub mod jsonpath;
 pub mod jsontext;
+pub mod netbits;
 pub mod numeric;
 pub mod range;
 pub mod text;
@@ -88,6 +89,16 @@ pub enum Type {
     Composite(u32),
     /// `record`: an anonymous row (`ROW(1, 'a')`).
     Record,
+    /// `bit(n)` (fixed length, the typmod) and `bit varying(n)`.
+    Bit,
+    VarBit,
+    /// `money`: cents in an int8.
+    Money,
+    /// `inet` / `cidr` (IPv4 or IPv6 address and netmask length), `macaddr`, `macaddr8`.
+    Inet,
+    Cidr,
+    MacAddr,
+    MacAddr8,
     /// A builtin range type over its subtype (`int4range`, `tstzrange`, ...).
     Range(Box<Type>),
     /// A builtin multirange type over its range's subtype (`int4multirange`, ...).
@@ -159,6 +170,13 @@ impl Type {
             Type::OidVector => 30,
             Type::Enum(o) | Type::Domain(o) | Type::Composite(o) => *o,
             Type::Record => usertype::RECORD_OID,
+            Type::Bit => 1560,
+            Type::VarBit => 1562,
+            Type::Money => 790,
+            Type::Inet => 869,
+            Type::Cidr => 650,
+            Type::MacAddr => 829,
+            Type::MacAddr8 => 774,
             Type::Range(s) => range::entry(s).map_or(0, |e| e.1),
             Type::Multirange(s) => range::entry(s).map_or(0, |e| e.2),
             Type::Array(elem) => match elem.as_ref() {
@@ -195,6 +213,13 @@ impl Type {
                 Type::Reg(RegKind::Namespace) => 4090,
                 Type::Enum(o) | Type::Domain(o) | Type::Composite(o) => usertype::array_oid(*o),
                 Type::Record => usertype::RECORD_ARRAY_OID,
+                Type::Bit => 1561,
+                Type::VarBit => 1563,
+                Type::Money => 791,
+                Type::Inet => 1041,
+                Type::Cidr => 651,
+                Type::MacAddr => 1040,
+                Type::MacAddr8 => 775,
                 Type::Range(s) => range::entry(s).map_or(0, |e| e.3),
                 Type::Multirange(s) => range::entry(s).map_or(0, |e| e.4),
                 _ => 0,
@@ -241,6 +266,13 @@ impl Type {
             4072 => Some(Type::JsonPath),
             705 => Some(Type::Unknown),
             usertype::RECORD_OID => Some(Type::Record),
+            1560 => Some(Type::Bit),
+            1562 => Some(Type::VarBit),
+            790 => Some(Type::Money),
+            869 => Some(Type::Inet),
+            650 => Some(Type::Cidr),
+            829 => Some(Type::MacAddr),
+            774 => Some(Type::MacAddr8),
             _ => None,
         };
         if let Some(t) = scalar(oid) {
@@ -289,6 +321,13 @@ impl Type {
             3807 => Type::Jsonb,
             4073 => Type::JsonPath,
             usertype::RECORD_ARRAY_OID => Type::Record,
+            1561 => Type::Bit,
+            1563 => Type::VarBit,
+            791 => Type::Money,
+            1041 => Type::Inet,
+            651 => Type::Cidr,
+            1040 => Type::MacAddr,
+            775 => Type::MacAddr8,
             _ => return usertype::type_for_oid(oid),
         };
         Some(Type::array_of(elem))
@@ -305,6 +344,9 @@ impl Type {
             Type::Int8 | Type::Float8 | Type::Timestamptz | Type::Timestamp | Type::Time => 8,
             Type::TimeTz => 12,
             Type::Interval | Type::Uuid => 16,
+            Type::Money | Type::MacAddr8 => 8,
+            Type::MacAddr => 6,
+            Type::Bit | Type::VarBit | Type::Inet | Type::Cidr => -1,
             Type::Unknown => -2,
             Type::Void => 4,
             Type::Int2Vector | Type::OidVector | Type::Composite(_) | Type::Record => -1,
@@ -370,6 +412,13 @@ impl Type {
             Type::OidVector => "oidvector",
             Type::Array(_) => "array",
             Type::Record => "record",
+            Type::Bit => "bit",
+            Type::VarBit => "bit varying",
+            Type::Money => "money",
+            Type::Inet => "inet",
+            Type::Cidr => "cidr",
+            Type::MacAddr => "macaddr",
+            Type::MacAddr8 => "macaddr8",
             Type::Enum(_) | Type::Domain(_) | Type::Composite(_) | Type::Range(_) | Type::Multirange(_) => "???",
         }
     }
@@ -411,6 +460,13 @@ impl Type {
             Type::OidVector => "oidvector".into(),
             Type::Array(elem) => format!("_{}", elem.typname()),
             Type::Record => "record".into(),
+            Type::Bit => "bit".into(),
+            Type::VarBit => "varbit".into(),
+            Type::Money => "money".into(),
+            Type::Inet => "inet".into(),
+            Type::Cidr => "cidr".into(),
+            Type::MacAddr => "macaddr".into(),
+            Type::MacAddr8 => "macaddr8".into(),
             Type::Enum(o) | Type::Domain(o) | Type::Composite(o) => usertype::raw_type_name(*o),
             Type::Range(s) => range::entry(s).map_or("anyrange", |e| e.5).into(),
             Type::Multirange(s) => range::entry(s).map_or("anymultirange", |e| e.6).into(),
@@ -475,6 +531,15 @@ impl Type {
             "jsonb" => Type::Jsonb,
             "jsonpath" => Type::JsonPath,
             "unknown" => Type::Unknown,
+            "bit" => Type::Bit,
+            "varbit" | "bit varying" => Type::VarBit,
+            "money" => Type::Money,
+            "inet" => Type::Inet,
+            "cidr" => Type::Cidr,
+            "macaddr" => Type::MacAddr,
+            "macaddr8" => Type::MacAddr8,
+            // `_int4`: an array type by its pg_type name.
+            other if other.starts_with('_') && other.len() > 1 => return Type::from_sql_name(&other[1..]).map(Type::array_of),
             other => {
                 let e = range::RANGES.iter().find(|e| e.5 == other || e.6 == other)?;
                 let sub = Box::new(e.0.clone());
@@ -536,6 +601,10 @@ impl Type {
             Type::Enum(_) => 'E',
             Type::Composite(_) | Type::Record => 'C',
             Type::Range(_) | Type::Multirange(_) => 'R',
+            Type::Bit | Type::VarBit => 'V',
+            Type::Money => 'N',
+            Type::Inet | Type::Cidr => 'I',
+            Type::MacAddr | Type::MacAddr8 => 'U',
             Type::Domain(_) => self.base().category(),
             Type::Bytea | Type::Uuid | Type::Jsonb | Type::JsonPath | Type::Tid | Type::Xid | Type::Cid => 'U',
         }

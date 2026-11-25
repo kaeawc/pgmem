@@ -22,6 +22,7 @@ use node::{Analyzer, Level, Node, Rte, ScopeCol, coerce};
 use pgmem_catalog::{Catalog, ColumnDef, Constraint, ConstraintKind, FkAction, IndexDef, TableDef, ViewDef};
 use pgmem_ir as ir;
 use pgmem_types::SqlResult;
+pub use print::with_pretty;
 use print::{Printer, expr_text, looks_like_function};
 
 pub use pg::{format_type, quote_ident};

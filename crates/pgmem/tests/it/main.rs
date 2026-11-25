@@ -133,6 +133,7 @@ mod transactions;
 mod trim_length;
 mod truncate;
 mod txn_locks;
+mod types_more;
 mod unary_minus;
 mod union;
 mod unique;

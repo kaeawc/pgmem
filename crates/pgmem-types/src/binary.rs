@@ -103,11 +103,12 @@ pub fn encode(v: &Value, ty: &Type) -> SqlResult<Vec<u8>> {
             _ => return Err(mismatch()),
         },
         Type::Int2Vector | Type::OidVector => match v {
-            Value::Array(items) => encode_array(items, ty.element().unwrap_or(&Type::Int2))?,
+            Value::Array(items) => encode_array(items, ty.element().unwrap_or(&Type::Int2), &[])?,
             _ => return Err(mismatch()),
         },
         Type::Array(elem) => match v {
-            Value::Array(items) => encode_array(items, elem)?,
+            Value::Array(items) => encode_array(items, elem, &[])?,
+            Value::BoundedArray(lb, items) => encode_array(items, elem, lb)?,
             _ => return Err(mismatch()),
         },
         // enum_send is the label's text.
@@ -118,6 +119,22 @@ pub fn encode(v: &Value, ty: &Type) -> SqlResult<Vec<u8>> {
         Type::Domain(_) => encode(v, &ty.base())?,
         Type::Composite(_) | Type::Record => match v {
             Value::Record(t, fields) => encode_record(*t, fields)?,
+            _ => return Err(mismatch()),
+        },
+        Type::Bit | Type::VarBit => match v {
+            Value::Bit(b) => crate::netbits::bits_to_binary(b),
+            _ => return Err(mismatch()),
+        },
+        Type::Money => match v {
+            Value::Money(m) => m.to_be_bytes().to_vec(),
+            _ => return Err(mismatch()),
+        },
+        Type::Inet | Type::Cidr => match v {
+            Value::Inet(ip, bits) => crate::netbits::inet_to_binary(ip, *bits, *ty == Type::Cidr),
+            _ => return Err(mismatch()),
+        },
+        Type::MacAddr | Type::MacAddr8 => match v {
+            Value::MacAddr(b) => b.clone(),
             _ => return Err(mismatch()),
         },
         Type::Range(sub) => match v {
@@ -265,7 +282,7 @@ pub fn array_flatten(items: &[Value]) -> Vec<&Value> {
 }
 
 /// `array_send`: dimensions and lower bounds, then the elements in row-major order.
-fn encode_array(items: &[Value], elem: &Type) -> SqlResult<Vec<u8>> {
+fn encode_array(items: &[Value], elem: &Type, lower: &[i32]) -> SqlResult<Vec<u8>> {
     let mut out = Vec::new();
     let flat = array_flatten(items);
     let has_null = flat.iter().any(|v| v.is_null());
@@ -280,9 +297,9 @@ fn encode_array(items: &[Value], elem: &Type) -> SqlResult<Vec<u8>> {
     put_i32(&mut out, i32::try_from(dims.len()).map_err(|_| SqlError::internal("too many dimensions"))?);
     put_i32(&mut out, i32::from(has_null));
     put_i32(&mut out, elem_oid);
-    for d in &dims {
+    for (i, d) in dims.iter().enumerate() {
         put_i32(&mut out, i32::try_from(*d).map_err(|_| SqlError::internal("array too large"))?);
-        put_i32(&mut out, 1);
+        put_i32(&mut out, lower.get(i).copied().unwrap_or(1));
     }
     for item in flat {
         if item.is_null() {
@@ -360,8 +377,11 @@ pub fn decode(b: &[u8], ty: &Type) -> SqlResult<Value> {
             let text = std::str::from_utf8(rest).map_err(|_| bad(ty, "invalid UTF-8"))?;
             crate::text::decode(text, ty)?
         }
-        Type::Array(elem) => Value::Array(decode_array(b, elem, ty)?),
-        Type::Int2Vector | Type::OidVector => Value::Array(decode_array(b, ty.element().unwrap_or(&Type::Int2), ty)?),
+        Type::Array(elem) => {
+            let (lower, items) = decode_array(b, elem, ty)?;
+            Value::array_with_bounds(lower, items)
+        }
+        Type::Int2Vector | Type::OidVector => Value::Array(decode_array(b, ty.element().unwrap_or(&Type::Int2), ty)?.1),
         Type::Enum(oid) => {
             let s = std::str::from_utf8(b).map_err(|_| bad(ty, "invalid UTF-8"))?;
             crate::usertype::parse_enum(s, *oid)?
@@ -370,6 +390,14 @@ pub fn decode(b: &[u8], ty: &Type) -> SqlResult<Value> {
         Type::Composite(oid) => decode_record(b, *oid, ty)?,
         Type::Record => return Err(SqlError::feature_not_supported("input of anonymous composite types is not implemented")),
         Type::Range(sub) => Value::Range(Box::new(decode_range(b, sub, ty)?)),
+        Type::Bit | Type::VarBit => Value::Bit(crate::netbits::bits_from_binary(b)?),
+        Type::Money => Value::Money(i64::from_be_bytes(fixed(b, ty)?)),
+        Type::Inet | Type::Cidr => {
+            let (ip, bits) = crate::netbits::inet_from_binary(b)?;
+            Value::Inet(ip, bits)
+        }
+        Type::MacAddr => Value::MacAddr(fixed::<6>(b, ty)?.to_vec()),
+        Type::MacAddr8 => Value::MacAddr(fixed::<8>(b, ty)?.to_vec()),
         Type::Multirange(sub) => {
             let count = b.get(..4).ok_or_else(|| bad(ty, "short"))?;
             let count = u32::from_be_bytes(count.try_into().map_err(|_| bad(ty, "short"))?);
@@ -408,13 +436,14 @@ impl Reader<'_> {
     }
 }
 
-fn decode_array(b: &[u8], elem: &Type, ty: &Type) -> SqlResult<Vec<Value>> {
+/// `array_recv`: the lower bounds and the (nested) elements.
+fn decode_array(b: &[u8], elem: &Type, ty: &Type) -> SqlResult<(Vec<i32>, Vec<Value>)> {
     let mut r = Reader { b, pos: 0, ty };
     let ndim = usize::try_from(r.i32()?).map_err(|_| bad(ty, "negative dimension count"))?;
     let _has_null = r.i32()?;
     let _elem_oid = r.i32()?;
     if ndim == 0 {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     if ndim > 6 {
         return Err(SqlError::new(
@@ -423,9 +452,10 @@ fn decode_array(b: &[u8], elem: &Type, ty: &Type) -> SqlResult<Vec<Value>> {
         ));
     }
     let mut dims = Vec::with_capacity(ndim);
+    let mut lower = Vec::with_capacity(ndim);
     for _ in 0..ndim {
         dims.push(usize::try_from(r.i32()?).map_err(|_| bad(ty, "negative dimension"))?);
-        let _lower = r.i32()?;
+        lower.push(r.i32()?);
     }
     let total: usize = dims.iter().product();
     let mut flat = Vec::with_capacity(total);
@@ -438,7 +468,7 @@ fn decode_array(b: &[u8], elem: &Type, ty: &Type) -> SqlResult<Vec<Value>> {
             flat.push(decode(chunk, elem)?);
         }
     }
-    Ok(nest(&mut flat.into_iter(), &dims))
+    Ok((lower, nest(&mut flat.into_iter(), &dims)))
 }
 
 /// Rebuilds nested arrays from row-major elements.
