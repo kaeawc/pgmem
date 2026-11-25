@@ -49,7 +49,7 @@ and what comes next. Updated with every PR.
 | 2026-11-25 | #134 extensions: pgcrypto, uuid-ossp, citext, pg_trgm, hstore; range catalog rows | 564/564 | 3292/3309 (99.5%) |
 | 2026-11-25 | #135 COPY (text, CSV, binary; STDIN / STDOUT / files), regproc / regprocedure over builtins, ON CONFLICT on expressions, UPDATE pg_settings, column collations, element_types, system view definitions | 565/565 | 3305/3309 (99.9%) |
 | 2026-11-25 | #136 declarative partitioning: RANGE / LIST / HASH, sub-partitions, routing, row movement, ATTACH / DETACH, partition catalogs (+60 corpus records) | 565/565 | 3368/3369 (99.97%) |
-| 2026-11-25 | client matrix in CI: psql output against PostgreSQL's, tokio-postgres and sqlx suites; psql \d / \dp / \dD catalog support, user type OIDs in Parse | 565/565 | 3368/3369 (99.97%) |
+| 2026-11-25 | #137 client matrix in CI: psql output against PostgreSQL's, tokio-postgres and sqlx suites; psql \d / \dp / \dD catalog support, user type OIDs in Parse | 565/565 | 3368/3369 (99.97%) |
 
 ## Supported
 
