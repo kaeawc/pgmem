@@ -80,6 +80,10 @@ pub(super) const PG_PROC: &str = "oid:oid, proname:name, pronamespace:oid, proow
     probin:text, prosqlbody:pg_node_tree, proconfig:text[], proacl:aclitem[]";
 const PG_ENUM: &str = "oid:oid, enumtypid:oid, enumsortorder:float4, enumlabel:name";
 const PG_DEPEND: &str = "classid:oid, objid:oid, objsubid:int4, refclassid:oid, refobjid:oid, refobjsubid:int4, deptype:\"char\"";
+const PG_POLICY: &str = "oid:oid, polname:name, polrelid:oid, polcmd:\"char\", polpermissive:bool, polroles:oid[], \
+    polqual:pg_node_tree, polwithcheck:pg_node_tree";
+const PG_PARTITIONED_TABLE: &str = "partrelid:oid, partstrat:\"char\", partnatts:int2, partdefid:oid, partattrs:int2vector, \
+    partclass:oidvector, partcollation:oidvector, partexprs:pg_node_tree";
 const PG_INHERITS: &str = "inhrelid:oid, inhparent:oid, inhseqno:int4, inhdetachpending:bool";
 pub(super) const PG_TRIGGER: &str = "oid:oid, tgrelid:oid, tgparentid:oid, tgname:name, tgfoid:oid, tgtype:int2, tgenabled:\"char\", \
     tgisinternal:bool, tgconstrrelid:oid, tgconstrindid:oid, tgconstraint:oid, tgdeferrable:bool, tginitdeferred:bool, tgnargs:int2, \
@@ -125,6 +129,8 @@ pub static DEFS: &[Def] = &[
     def!("pg_enum", 3501, 'r', PG_ENUM, pg_enum),
     def!("pg_depend", 2608, 'r', PG_DEPEND, pg_depend),
     def!("pg_inherits", 2611, 'r', PG_INHERITS, empty),
+    def!("pg_policy", 3256, 'r', PG_POLICY, empty),
+    def!("pg_partitioned_table", 3350, 'r', PG_PARTITIONED_TABLE, empty),
     def!("pg_trigger", 2620, 'r', PG_TRIGGER, super::routines::pg_trigger),
     def!("pg_range", 3541, 'r', PG_RANGE, pg_range),
     def!("pg_sequence", 2224, 'r', PG_SEQUENCE, pg_sequence),
@@ -203,7 +209,8 @@ pub fn type_storage(t: &Type) -> (i16, bool, char, char, u32) {
 }
 
 fn regproc(name: &str) -> Value {
-    if name == "-" { Value::Reg(RegKind::Proc, 0, "-".into()) } else { Value::Reg(RegKind::Proc, 0, name.to_owned()) }
+    let oid = super::builtin_procs().iter().find(|p| p.name == name).map_or(0, |p| p.oid);
+    Value::Reg(RegKind::Proc, oid, name.to_owned())
 }
 
 fn pg_namespace(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
@@ -308,8 +315,12 @@ fn fk_tables(m: &Model) -> Vec<u32> {
 }
 
 fn att_row(s: &Spec, relid: u32, a: &Att) -> Row {
-    let (len, byval, align, storage, collation) = type_storage(&a.ty);
+    let (len, byval, align, storage, type_collation) = type_storage(&a.ty);
     let column = a.column;
+    let collation = column
+        .and_then(|c| c.collation.as_deref())
+        .and_then(|n| crate::bind::ddl::COLLATIONS.iter().find(|(c, _)| *c == n))
+        .map_or(type_collation, |(_, o)| *o);
     let mut vals = vec![
         ("attrelid", oid(relid)),
         ("attname", name(&a.name)),

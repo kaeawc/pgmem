@@ -120,6 +120,79 @@ pub fn defs() -> impl Iterator<Item = &'static Def> {
     all_defs()
 }
 
+/// Builtin functions recorded from Postgres 18's `pg_proc` (pg_catalog): oid, name, argument
+/// type OIDs.
+const PG_PROC_DATA: &str = include_str!("pg_proc.tsv");
+
+/// Every builtin type's name and `format_type` text, recorded from Postgres 18 (`oid`,
+/// `typname`, `format_type(oid, NULL)`), for the types pgmem does not model.
+const PG_TYPE_NAMES: &str = include_str!("pg_type_names.tsv");
+
+/// (oid, typname, format_type) of a builtin type.
+pub fn builtin_type_name(f: impl Fn(u32, &str) -> bool) -> Option<(u32, &'static str, &'static str)> {
+    PG_TYPE_NAMES.lines().find_map(|l| {
+        let mut it = l.split('\t');
+        let oid = it.next()?.parse().ok()?;
+        let name = it.next()?;
+        let formatted = it.next()?;
+        f(oid, name).then_some((oid, name, formatted))
+    })
+}
+
+pub struct BuiltinProc {
+    pub oid: u32,
+    pub name: &'static str,
+    pub args: Vec<u32>,
+}
+
+pub fn builtin_procs() -> &'static [BuiltinProc] {
+    static PROCS: std::sync::OnceLock<Vec<BuiltinProc>> = std::sync::OnceLock::new();
+    PROCS.get_or_init(|| {
+        PG_PROC_DATA
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.split('\t');
+                let oid = f.next()?.parse().ok()?;
+                let name = f.next()?;
+                let args = f.next().unwrap_or("").split(' ').filter_map(|a| a.parse().ok()).collect();
+                Some(BuiltinProc { oid, name, args })
+            })
+            .collect()
+    })
+}
+
+/// `pg_get_viewdef` of the system views, recorded from Postgres 18: `schema.name`, the
+/// definition, the pretty definition (`\n`, `\t` and `\\` escaped).
+const SYSTEM_VIEWDEFS: &str = include_str!("system_viewdefs.tsv");
+
+fn unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// The definition of a system view (`pg_get_viewdef`), by OID.
+pub fn system_viewdef(oid: u32, pretty: bool) -> Option<String> {
+    let d = system_relation_by_oid(oid).filter(|d| d.kind == 'v')?;
+    let key = format!("{}.{}", d.schema, d.name);
+    let line = SYSTEM_VIEWDEFS.lines().find(|l| l.split('\t').next() == Some(key.as_str()))?;
+    let mut fields = line.split('\t').skip(1);
+    let plain = fields.next()?;
+    Some(unescape(if pretty { fields.next().unwrap_or(plain) } else { plain }))
+}
+
 // Value helpers for row builders.
 
 pub(crate) fn oid(o: u32) -> Value {

@@ -6,6 +6,7 @@ pub mod agg;
 pub mod bind;
 pub mod cast;
 pub mod catalog_views;
+pub mod copy;
 pub mod ddl;
 mod ddl_sequences;
 mod ddl_views;
@@ -33,4 +34,4 @@ pub mod views;
 pub mod window;
 
 pub use plan::{OutCol, Row};
-pub use session::{Clock, Description, Notice, QueryResult, ServerClock, Session, SessionEnv, TxStatus};
+pub use session::{Clock, CopyIn, CopyOut, Description, Notice, QueryResult, ServerClock, Session, SessionEnv, TxStatus};

@@ -23,8 +23,11 @@ fn text_arg(v: &Value) -> &str {
 pub fn format_type(type_oid: u32, typmod: i32, catalog: &pgmem_catalog::Catalog) -> Option<String> {
     let Some(ty) = Type::from_oid(type_oid) else {
         // A table's row type is named after the table.
-        let rel = catalog.tables().find(|t| crate::catalog_views::rowtype_oid_of(t.oid) == type_oid);
-        return rel.map(|t| quote_ident(&t.name));
+        if let Some(t) = catalog.tables().find(|t| crate::catalog_views::rowtype_oid_of(t.oid) == type_oid) {
+            return Some(quote_ident(&t.name));
+        }
+        // Other builtin types (pseudo-types such as "any" or anyelement, tsvector, ...).
+        return crate::catalog_views::builtin_type_name(|o, _| o == type_oid).map(|(_, _, f)| f.to_owned());
     };
     let (elem, array) = match &ty {
         Type::Array(e) => ((**e).clone(), "[]"),
@@ -309,14 +312,25 @@ fn indexdef_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
 
 fn viewdef_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
     let catalog = ctx.txn.catalog();
+    let pretty = a.get(1).and_then(Value::as_bool) == Some(true);
     let view = match &a[0] {
         Value::Text(s) => match crate::reg::relation_from_text(s, catalog)? {
             Some(pgmem_catalog::Relation::View(v)) => Some(v),
-            _ => return Err(SqlError::undefined_table(s)),
+            _ => {
+                let (schema, name) = s.rsplit_once('.').map_or((None, s.as_str()), |(sc, n)| (Some(sc), n));
+                if let Some(d) = crate::catalog_views::system_relation(schema, name) {
+                    return Ok(crate::catalog_views::system_viewdef(d.oid, pretty).map_or(Value::Null, Value::Text));
+                }
+                return Err(SqlError::undefined_table(s));
+            }
         },
-        other => oid_arg(other).and_then(|o| catalog.views().find(|v| v.oid == o).cloned()),
+        other => match oid_arg(other) {
+            Some(o) if crate::catalog_views::system_relation_by_oid(o).is_some() => {
+                return Ok(crate::catalog_views::system_viewdef(o, pretty).map_or(Value::Null, Value::Text));
+            }
+            o => o.and_then(|o| catalog.views().find(|v| v.oid == o).cloned()),
+        },
     };
-    let pretty = a.get(1).and_then(Value::as_bool) == Some(true);
     Ok(view.map_or(Value::Null, |v| {
         Value::Text(crate::deparse::with_pretty(pretty, || crate::deparse::deparse_view(catalog, &v)).unwrap_or_default())
     }))
@@ -380,6 +394,7 @@ fn to_reg_fn(kind: RegKind) -> crate::plan::ScalarFn {
         RegKind::Type => |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Type, ctx.txn.catalog()).unwrap_or(Value::Null)),
         RegKind::Namespace => |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Namespace, ctx.txn.catalog()).unwrap_or(Value::Null)),
         RegKind::Proc => |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Proc, ctx.txn.catalog()).unwrap_or(Value::Null)),
+        RegKind::Procedure => |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Procedure, ctx.txn.catalog()).unwrap_or(Value::Null)),
     }
 }
 
@@ -467,6 +482,9 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
             resolved(strict("to_regnamespace", to_reg_fn(RegKind::Namespace)), vec![Text], Type::Reg(RegKind::Namespace))
         }
         "to_regproc" if n == 1 => resolved(strict("to_regproc", to_reg_fn(RegKind::Proc)), vec![Text], Type::Reg(RegKind::Proc)),
+        "to_regprocedure" if n == 1 => {
+            resolved(strict("to_regprocedure", to_reg_fn(RegKind::Procedure)), vec![Text], Type::Reg(RegKind::Procedure))
+        }
         "pg_relation_size" | "pg_total_relation_size" | "pg_table_size" | "pg_indexes_size" if n == 1 => {
             resolved(strict("pg_relation_size", relation_size_fn), vec![Type::Reg(RegKind::Class)], Type::Int8)
         }

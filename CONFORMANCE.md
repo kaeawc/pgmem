@@ -7,32 +7,32 @@ PostgreSQL 18; CI re-verifies every record against PostgreSQL and runs it agains
 A record passes when pgmem returns the same column names, column types and text values, or
 the same SQLSTATE and error message.
 
-pgmem passes **3292 / 3309 records (99.5%)**.
+pgmem passes **3305 / 3309 records (99.9%)**.
 
 | Area | Records | Pass | Rate |
 |---|---:|---:|---:|
-| catalog | 226 | 214 | 94.7% |
+| catalog | 226 | 223 | 98.7% |
 | constraints | 171 | 171 | 100.0% |
 | ddl | 386 | 386 | 100.0% |
-| dml | 282 | 281 | 99.6% |
-| functions | 445 | 444 | 99.8% |
+| dml | 282 | 282 | 100.0% |
+| functions | 445 | 445 | 100.0% |
 | queries | 440 | 439 | 99.8% |
 | session | 419 | 419 | 100.0% |
 | smoke | 7 | 7 | 100.0% |
 | transactions | 522 | 522 | 100.0% |
-| types | 411 | 409 | 99.5% |
+| types | 411 | 411 | 100.0% |
 
 ## By file
 
 | File | Records | Pass | Rate |
 |---|---:|---:|---:|
 | catalog/comments.slt | 32 | 32 | 100.0% |
-| catalog/information_schema.slt | 38 | 37 | 97.4% |
+| catalog/information_schema.slt | 38 | 38 | 100.0% |
 | catalog/orm_reflection.slt | 35 | 35 | 100.0% |
 | catalog/pg_catalog.slt | 51 | 48 | 94.1% |
-| catalog/psql_describe.slt | 22 | 18 | 81.8% |
-| catalog/regtypes.slt | 33 | 31 | 93.9% |
-| catalog/settings.slt | 15 | 13 | 86.7% |
+| catalog/psql_describe.slt | 22 | 22 | 100.0% |
+| catalog/regtypes.slt | 33 | 33 | 100.0% |
+| catalog/settings.slt | 15 | 15 | 100.0% |
 | constraints/check_notnull.slt | 35 | 35 | 100.0% |
 | constraints/deferrable.slt | 38 | 38 | 100.0% |
 | constraints/exclude.slt | 20 | 20 | 100.0% |
@@ -52,13 +52,13 @@ pgmem passes **3292 / 3309 records (99.5%)**.
 | dml/delete.slt | 32 | 32 | 100.0% |
 | dml/insert.slt | 45 | 45 | 100.0% |
 | dml/merge.slt | 25 | 25 | 100.0% |
-| dml/on_conflict.slt | 45 | 44 | 97.8% |
+| dml/on_conflict.slt | 45 | 45 | 100.0% |
 | dml/orm_patterns.slt | 29 | 29 | 100.0% |
 | dml/truncate.slt | 37 | 37 | 100.0% |
 | dml/update.slt | 48 | 48 | 100.0% |
 | dml/writable_cte.slt | 21 | 21 | 100.0% |
 | functions/arrays.slt | 49 | 49 | 100.0% |
-| functions/conditional_misc.slt | 49 | 48 | 98.0% |
+| functions/conditional_misc.slt | 49 | 49 | 100.0% |
 | functions/datetime.slt | 99 | 99 | 100.0% |
 | functions/json.slt | 85 | 85 | 100.0% |
 | functions/math.slt | 61 | 61 | 100.0% |
@@ -94,7 +94,7 @@ pgmem passes **3292 / 3309 records (99.5%)**.
 | types/arrays.slt | 37 | 37 | 100.0% |
 | types/boolean.slt | 17 | 17 | 100.0% |
 | types/bytea.slt | 18 | 18 | 100.0% |
-| types/casts.slt | 55 | 53 | 96.4% |
+| types/casts.slt | 55 | 55 | 100.0% |
 | types/datetime.slt | 58 | 58 | 100.0% |
 | types/enums_domains.slt | 58 | 58 | 100.0% |
 | types/float.slt | 24 | 24 | 100.0% |

@@ -133,6 +133,7 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
                 ir::ColumnConstraintKind::Null => {}
                 ir::ColumnConstraintKind::Default(e) => col.default = Some(e.clone()),
                 ir::ColumnConstraintKind::Generated(e) => col.generated = Some(e.clone()),
+                ir::ColumnConstraintKind::Collate(n) => col.collation = column_collation(&col.ty, n)?,
                 ir::ColumnConstraintKind::Identity { always, options } => {
                     if col.default.is_some() && serial_type(&c.ty.name).is_some() {
                         return Err(SqlError::syntax(format!(
@@ -1139,4 +1140,20 @@ fn is_constant_expr(e: &ir::Expr) -> bool {
         ir::Expr::Array(items) => items.iter().all(is_constant_expr),
         _ => false,
     }
+}
+
+/// The collations pgmem knows (Postgres' builtin ones): name and OID.
+pub const COLLATIONS: &[(&str, u32)] = &[("default", 100), ("C", 950), ("POSIX", 951), ("ucs_basic", 962), ("pg_c_utf8", 811)];
+
+/// Validates `COLLATE name` on a column of type `ty`: None for the type's default collation.
+pub fn column_collation(ty: &Type, collation: &str) -> SqlResult<Option<String>> {
+    let base = ty.base();
+    let elem = base.element().cloned().unwrap_or(base);
+    if !(elem.is_string() || elem == Type::CiText || elem == Type::Name) {
+        return Err(SqlError::datatype_mismatch(format!("collations are not supported by type {}", ty.name())));
+    }
+    if !COLLATIONS.iter().any(|(n, _)| *n == collation) {
+        return Err(SqlError::new(code::UNDEFINED_OBJECT, format!("collation \"{collation}\" for encoding \"UTF8\" does not exist")));
+    }
+    Ok((collation != "default").then(|| collation.to_owned()))
 }

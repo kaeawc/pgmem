@@ -9,6 +9,7 @@
 //! migration tools routinely send (`SET` variants, `COMMENT ON`, `CREATE EXTENSION`, ...) are
 //! recognized by prefix as a fallback and become no-ops, so connection setup never fails.
 
+mod copy;
 mod ddl;
 mod dml;
 mod expr;
@@ -35,6 +36,7 @@ pub fn parse(sql: &str) -> SqlResult<Vec<Statement>> {
     VIEW_OPTIONS.with(|c| c.borrow_mut().clear());
     CTAS_COLUMNS.with(|c| c.borrow_mut().clear());
     TEMPORAL_KEYS.with(|c| c.borrow_mut().clear());
+    CONFLICT_EXPRS.with(|c| c.borrow_mut().clear());
     if sql.trim().trim_matches(';').trim().is_empty() {
         return Ok(vec![Statement::Empty]);
     }
@@ -84,6 +86,8 @@ thread_local! {
     /// `ON DELETE SET NULL / SET DEFAULT [(cols)]` column lists in statement order (empty
     /// when there is none), stripped by the rewrite and taken by the lowering.
     static FK_SET_COLUMNS: std::cell::RefCell<std::collections::VecDeque<Vec<String>>> = const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+    /// Expression elements of `ON CONFLICT (...)` targets, by marker column number.
+    static CONFLICT_EXPRS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
     /// The text the statements being lowered were parsed from (spans point into it).
     static PARSED_TEXT: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
@@ -547,6 +551,66 @@ fn rewrite_fk_set_columns(tokens: &Tokens, sig: &[usize], k: usize, drop: &mut [
     FK_SET_COLUMNS.with(|c| c.borrow_mut().push_back(cols));
 }
 
+/// Marker column standing for an expression in an ON CONFLICT target (`rewrite_conflict_exprs`).
+pub(crate) const CONFLICT_EXPR_MARKER: &str = "__pgmem_conflict_expr_";
+
+/// The expression text a conflict-target marker column stands for.
+pub(crate) fn conflict_expr(column: &str) -> Option<String> {
+    let n: usize = column.strip_prefix(CONFLICT_EXPR_MARKER)?.parse().ok()?;
+    CONFLICT_EXPRS.with(|c| c.borrow().get(n).cloned())
+}
+
+/// `ON CONFLICT (lower(email), id)`: each element that is not a plain column becomes a marker
+/// column (sqlparser takes only column names); the lowering parses the recorded text.
+fn rewrite_conflict_exprs(
+    tokens: &Tokens,
+    sig: &[usize],
+    k: usize,
+    drop: &mut [bool],
+    insert_after: &mut std::collections::HashMap<usize, String>,
+) {
+    use sqlparser::tokenizer::Token;
+    if !(is_word(tokens, sig, k, "ON")
+        && is_word(tokens, sig, k + 1, "CONFLICT")
+        && sig.get(k + 2).is_some_and(|&j| tokens[j] == Token::LParen))
+    {
+        return;
+    }
+    let Some(close) = matching_paren(tokens, sig, k + 2) else { return };
+    // Elements: runs of significant tokens between top-level commas.
+    let mut elements: Vec<Vec<usize>> = vec![Vec::new()];
+    let mut depth = 0usize;
+    for n in k + 3..close {
+        match tokens[sig[n]] {
+            Token::Comma if depth == 0 => elements.push(Vec::new()),
+            Token::LParen => {
+                depth += 1;
+                elements.last_mut().unwrap_or_else(|| unreachable!()).push(n);
+            }
+            Token::RParen => {
+                depth = depth.saturating_sub(1);
+                elements.last_mut().unwrap_or_else(|| unreachable!()).push(n);
+            }
+            _ => elements.last_mut().unwrap_or_else(|| unreachable!()).push(n),
+        }
+    }
+    for el in elements {
+        if el.len() <= 1 {
+            continue;
+        }
+        let text: String = (sig[el[0]]..=sig[el[el.len() - 1]]).map(|j| tokens[j].to_string()).collect();
+        let n = CONFLICT_EXPRS.with(|c| {
+            let mut c = c.borrow_mut();
+            c.push(text);
+            c.len() - 1
+        });
+        for d in &mut drop[sig[el[0]]..=sig[el[el.len() - 1]]] {
+            *d = true;
+        }
+        insert_after.insert(sig[el[0] - 1], format!(" {CONFLICT_EXPR_MARKER}{n}"));
+    }
+}
+
 /// `WHERE CURRENT OF cursor` → `WHERE __pgmem_current_of('cursor', ctid, tableoid)`.
 fn rewrite_current_of(
     tokens: &Tokens,
@@ -781,6 +845,7 @@ fn rewrite_unsupported(sql: &str) -> Option<String> {
         rewrite_frame_exclude(&tokens, &sig, k, &mut drop, &mut insert_after);
         rewrite_current_of(&tokens, &sig, k, &mut drop, &mut insert_after);
         rewrite_fk_set_columns(&tokens, &sig, k, &mut drop);
+        rewrite_conflict_exprs(&tokens, &sig, k, &mut drop, &mut insert_after);
         rewrite_view_options(&tokens, &sig, k, &mut drop);
         rewrite_ctas_columns(&tokens, &sig, k, &mut drop);
         rewrite_without_overlaps(&tokens, &sig, k, &mut drop);

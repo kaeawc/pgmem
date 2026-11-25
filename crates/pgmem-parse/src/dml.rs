@@ -83,10 +83,18 @@ pub(crate) fn lower_insert(i: sq::Insert) -> SqlResult<Insert> {
         Some(sq::OnInsert::OnConflict(oc)) => Some(OnConflict {
             target: match oc.conflict_target {
                 None => ConflictTarget::None,
-                Some(sq::ConflictTarget::Columns { columns, predicate }) => ConflictTarget::Columns {
-                    columns: columns.iter().map(ident).collect(),
-                    selection: predicate.map(lower_expr).transpose()?,
-                },
+                Some(sq::ConflictTarget::Columns { columns, predicate }) => {
+                    let mut names = Vec::new();
+                    let mut exprs = Vec::new();
+                    for c in &columns {
+                        let name = ident(c);
+                        match crate::conflict_expr(&name) {
+                            Some(text) => exprs.push(conflict_target_expr(&text)?),
+                            None => names.push(name),
+                        }
+                    }
+                    ConflictTarget::Columns { columns: names, exprs, selection: predicate.map(lower_expr).transpose()? }
+                }
                 Some(sq::ConflictTarget::OnConstraint(n)) => ConflictTarget::Constraint(object_name(&n)?.base().to_owned()),
             },
             action: match oc.action {
@@ -237,4 +245,14 @@ pub(crate) fn lower_merge(m: sq::Merge) -> SqlResult<pgmem_ir::Merge> {
         None => Vec::new(),
     };
     Ok(pgmem_ir::Merge { with: None, table, alias, source, on: lower_expr(*m.on)?, clauses, returning })
+}
+
+/// An ON CONFLICT target element that is an expression (`lower(email)`, `(a + b)`).
+fn conflict_target_expr(text: &str) -> SqlResult<pgmem_ir::Expr> {
+    let dialect = sqlparser::dialect::PostgreSqlDialect {};
+    let e = sqlparser::parser::Parser::new(&dialect)
+        .try_with_sql(text)
+        .and_then(|mut p| p.parse_expr())
+        .map_err(|e| SqlError::syntax(e.to_string()))?;
+    lower_expr(e)
 }

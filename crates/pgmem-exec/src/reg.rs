@@ -78,7 +78,8 @@ pub fn reg_name(kind: RegKind, oid: u32, catalog: &Catalog) -> String {
             .or_else(|| crate::catalog_views::system_relation_by_oid(oid).map(system_display)),
         RegKind::Type => Type::from_oid(oid).map(|t| t.name()),
         RegKind::Namespace => namespace_name(oid).map(quote_ident).or_else(|| catalog.schema_by_oid(oid).map(|sc| quote_ident(&sc.name))),
-        RegKind::Proc => catalog.function_by_oid(oid).map(|f| f.name.clone()),
+        RegKind::Proc => proc_name(catalog, oid),
+        RegKind::Procedure => procedure_name(catalog, oid),
     };
     name.unwrap_or_else(|| oid.to_string())
 }
@@ -151,6 +152,110 @@ fn lookup_namespace(s: &str, catalog: &Catalog) -> SqlResult<Value> {
     Ok(Value::Reg(RegKind::Namespace, oid, quote_ident(name)))
 }
 
+/// The functions (user ones and builtins) a possibly qualified name finds: (oid, argument
+/// type OIDs).
+fn functions_named(parts: &[String], catalog: &Catalog) -> Vec<(u32, Vec<u32>)> {
+    let mut out: Vec<(u32, Vec<u32>)> = catalog
+        .find_functions(&pgmem_ir::ObjectName(parts.to_vec()))
+        .iter()
+        .map(|f| (f.oid, f.input_types().iter().map(Type::oid).collect()))
+        .collect();
+    let builtin = match parts {
+        [n] => Some(n),
+        [schema, n] if schema == "pg_catalog" => Some(n),
+        _ => None,
+    };
+    if let Some(n) = builtin {
+        out.extend(crate::catalog_views::builtin_procs().iter().filter(|p| p.name == n).map(|p| (p.oid, p.args.clone())));
+    }
+    out
+}
+
+fn no_function(s: &str) -> SqlError {
+    SqlError::new(code::UNDEFINED_FUNCTION, format!("function \"{}\" does not exist", s.trim()))
+}
+
+/// `regprocin`: a function name that must find exactly one function.
+fn lookup_proc(s: &str, catalog: &Catalog) -> SqlResult<Value> {
+    let parts = parse_qualified(s)?;
+    match functions_named(&parts, catalog).as_slice() {
+        [] => Err(no_function(s)),
+        [(oid, _)] => Ok(Value::Reg(RegKind::Proc, *oid, reg_name(RegKind::Proc, *oid, catalog))),
+        _ => Err(SqlError::new(code::AMBIGUOUS_FUNCTION, format!("more than one function named \"{}\"", s.trim()))),
+    }
+}
+
+/// `regprocedurein`: `name(type, ...)`.
+fn lookup_procedure(s: &str, catalog: &Catalog) -> SqlResult<Value> {
+    let text = s.trim();
+    let open = text.find('(').ok_or_else(|| SqlError::new(code::INVALID_TEXT_REPRESENTATION, "expected a left parenthesis"))?;
+    let close = text
+        .rfind(')')
+        .filter(|c| *c > open)
+        .ok_or_else(|| SqlError::new(code::INVALID_TEXT_REPRESENTATION, "expected a right parenthesis"))?;
+    let parts = parse_qualified(&text[..open])?;
+    let inner = text[open + 1..close].trim();
+    let mut args = Vec::new();
+    if !inner.is_empty() {
+        let mut depth = 0i32;
+        let mut start = 0;
+        let mut pieces = Vec::new();
+        for (i, c) in inner.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    pieces.push(&inner[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        pieces.push(&inner[start..]);
+        for p in pieces {
+            let p = p.trim();
+            // Pseudo-types (`"any"`, `anyelement`, `internal`) by their pg_type name.
+            let pseudo = p.trim_matches('"').to_ascii_lowercase();
+            let oid = match lookup_type(p, catalog) {
+                Ok(Value::Reg(_, oid, _)) => oid,
+                Ok(_) => 0,
+                Err(e) => crate::catalog_views::builtin_type_name(|_, n| n == pseudo).map(|(oid, _, _)| oid).ok_or(e)?,
+            };
+            args.push(oid);
+        }
+    }
+    let found = functions_named(&parts, catalog).into_iter().find(|(_, a)| *a == args).ok_or_else(|| no_function(s))?;
+    Ok(Value::Reg(RegKind::Procedure, found.0, reg_name(RegKind::Procedure, found.0, catalog)))
+}
+
+/// `regprocout`: the function's name, schema-qualified when the name alone is ambiguous.
+fn proc_name(catalog: &Catalog, oid: u32) -> Option<String> {
+    let (schema, name) = match catalog.function_by_oid(oid) {
+        Some(f) => (f.schema.clone(), f.name.clone()),
+        None => ("pg_catalog".to_owned(), crate::catalog_views::builtin_procs().iter().find(|p| p.oid == oid)?.name.to_owned()),
+    };
+    let unique = functions_named(std::slice::from_ref(&name), catalog).len() == 1;
+    Some(if unique { quote_ident(&name) } else { format!("{}.{}", quote_ident(&schema), quote_ident(&name)) })
+}
+
+/// `regprocedureout` (`format_procedure`): `name(type,type)`.
+fn procedure_name(catalog: &Catalog, oid: u32) -> Option<String> {
+    let (name, args) = match catalog.function_by_oid(oid) {
+        Some(f) => {
+            let on_path = catalog.search_path().iter().any(|e| matches!(e, pgmem_catalog::PathEntry::Schema(s) if *s == f.schema));
+            let name = if on_path { quote_ident(&f.name) } else { format!("{}.{}", quote_ident(&f.schema), quote_ident(&f.name)) };
+            (name, f.input_types().iter().map(Type::oid).collect::<Vec<_>>())
+        }
+        None => {
+            let p = crate::catalog_views::builtin_procs().iter().find(|p| p.oid == oid)?;
+            (quote_ident(p.name), p.args.clone())
+        }
+    };
+    let types: Vec<String> =
+        args.iter().map(|a| crate::funcs::catalog::format_type(*a, -1, catalog).unwrap_or_else(|| a.to_string())).collect();
+    Some(format!("{name}({})", types.join(",")))
+}
+
 /// Converts a value to a reg* type (`'t'::regclass`, `16384::regclass`, `oid::regtype`).
 pub fn to_reg(v: Value, kind: RegKind, catalog: &Catalog) -> SqlResult<Value> {
     let from_oid = |oid: u32| Value::Reg(kind, oid, reg_name(kind, oid, catalog));
@@ -174,20 +279,8 @@ pub fn to_reg(v: Value, kind: RegKind, catalog: &Catalog) -> SqlResult<Value> {
                 RegKind::Class => lookup_class(&s, catalog),
                 RegKind::Type => lookup_type(&s, catalog),
                 RegKind::Namespace => lookup_namespace(&s, catalog),
-                RegKind::Proc => {
-                    let parts = parse_qualified(&s)?;
-                    let name = parts.last().cloned().unwrap_or_default();
-                    // User functions resolve to their OID; builtins keep their name.
-                    let user = catalog.find_functions(&pgmem_ir::ObjectName(parts.clone()));
-                    match user.as_slice() {
-                        [] => Ok(Value::Reg(RegKind::Proc, 0, name)),
-                        [f] => Ok(Value::Reg(RegKind::Proc, f.oid, name)),
-                        _ => Err(SqlError::new(
-                            pgmem_types::code::AMBIGUOUS_FUNCTION,
-                            format!("more than one function named \"{}\"", s.trim()),
-                        )),
-                    }
-                }
+                RegKind::Proc => lookup_proc(&s, catalog),
+                RegKind::Procedure => lookup_procedure(&s, catalog),
             }
         }
         other => Err(SqlError::cannot_coerce(&other.natural_type().name(), &Type::Reg(kind).name())),

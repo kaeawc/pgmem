@@ -395,7 +395,7 @@ impl Binder<'_> {
 fn arbiter_for(b: &Binder, rules: &RowRules, table: &Arc<TableDef>, target: &ir::ConflictTarget) -> SqlResult<Option<UniqueCheck>> {
     match target {
         ir::ConflictTarget::None => Ok(None),
-        ir::ConflictTarget::Columns { columns, selection } => {
+        ir::ConflictTarget::Columns { columns, exprs, selection } => {
             // A partial unique index is only inferred when the ON CONFLICT WHERE clause
             // matches its predicate (Postgres accepts any clause that implies it).
             let row_level = Level::new(physical_scope(table, &table.name));
@@ -407,16 +407,27 @@ fn arbiter_for(b: &Binder, rules: &RowRules, table: &Arc<TableDef>, target: &ir:
             }
             wanted.sort_unstable();
             wanted.dedup();
+            // With expression elements, the index's key expressions must be the same set.
+            let mut keys: Vec<Expr> = wanted.iter().map(|i| Expr::Col(*i)).collect();
+            for e in exprs {
+                let bound = b.bind_expr(e, &row_ctx)?.0;
+                if !keys.contains(&bound) {
+                    keys.push(bound);
+                }
+            }
+            let same_keys = |u: &UniqueCheck| {
+                if u.exprs.is_empty() {
+                    let mut cols = u.columns.clone();
+                    cols.sort_unstable();
+                    exprs.is_empty() && cols == wanted
+                } else {
+                    u.exprs.len() == keys.len() && u.exprs.iter().all(|e| keys.contains(e))
+                }
+            };
             rules
                 .uniques
                 .iter()
-                .find(|u| {
-                    u.exprs.is_empty() && (u.predicate.is_none() || u.predicate == selection) && {
-                        let mut cols = u.columns.clone();
-                        cols.sort_unstable();
-                        cols == wanted
-                    }
-                })
+                .find(|u| (u.predicate.is_none() || u.predicate == selection) && same_keys(u))
                 .cloned()
                 .map(Some)
                 .ok_or_else(|| {

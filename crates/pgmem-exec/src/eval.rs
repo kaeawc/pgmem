@@ -1,6 +1,5 @@
 //! Expression evaluation.
 
-use crate::cast::cast_value;
 use crate::plan::{Expr, Row, SubqueryKind};
 use crate::run::run;
 use crate::session::SessionEnv;
@@ -96,11 +95,11 @@ pub fn eval(expr: &Expr, row: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
             }
             (func.f)(&vals, ctx)?
         }
-        Expr::Cast { expr, to, typmod } => {
+        Expr::Cast { expr, to, typmod, explicit } => {
             let v = eval(expr, row, ctx)?;
             match to {
                 pgmem_types::Type::Reg(kind) => crate::reg::to_reg(v, *kind, ctx.txn.catalog())?,
-                _ => cast_value(v, to, *typmod)?,
+                _ => crate::cast::cast_value_ctx(v, to, *typmod, *explicit)?,
             }
         }
         Expr::And(items) => {

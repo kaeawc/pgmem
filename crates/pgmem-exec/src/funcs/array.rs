@@ -259,6 +259,11 @@ pub fn resolve_srf(name: &str, args: &[Type]) -> SqlResult<Option<SrfResolution>
             Ok(Some((vec![out], targets, generate_series)))
         }
         "pg_listening_channels" if args.is_empty() => Ok(Some((vec![Type::Text], vec![], pg_listening_channels))),
+        // pgmem has no partitions: no relation has ancestors (Postgres returns no rows for a
+        // relation that is not a partition or partitioned table).
+        "pg_partition_ancestors" if args.len() == 1 => {
+            Ok(Some((vec![Type::Reg(pgmem_types::RegKind::Class)], vec![Type::Reg(pgmem_types::RegKind::Class)], |_, _| Ok(Vec::new()))))
+        }
         "string_to_table" if args.len() == 2 || args.len() == 3 => {
             Ok(Some((vec![Type::Text], vec![Type::Text; args.len()], string_to_table)))
         }
