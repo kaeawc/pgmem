@@ -153,6 +153,9 @@ pub(crate) fn exec_statement(
     if let Some(with) = leading_with(stmt) {
         return exec_with(stmt, with, binder, ctx, txn, params, env, state);
     }
+    if let Some(r) = crate::triggers::instead_of(stmt, txn, params, env, state)? {
+        return Ok(r);
+    }
     Ok(match stmt {
         Statement::Query(q) => {
             let bound = binder.bind_query(q, ctx)?;

@@ -13,6 +13,8 @@ pub const CLASS_CLASS_OID: Oid = 1259;
 pub const ATTRDEF_CLASS_OID: Oid = 2604;
 pub const CONSTRAINT_CLASS_OID: Oid = 2606;
 pub const NAMESPACE_CLASS_OID: Oid = 2615;
+pub const PROC_CLASS_OID: Oid = 1255;
+pub const TRIGGER_CLASS_OID: Oid = 2620;
 /// information_schema's namespace OID differs between Postgres builds; any fixed value works.
 pub const INFORMATION_SCHEMA_NAMESPACE_OID: Oid = 13_000;
 /// The bootstrap superuser every pgmem session runs as.

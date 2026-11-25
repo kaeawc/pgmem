@@ -7,17 +7,17 @@ PostgreSQL 18; CI re-verifies every record against PostgreSQL and runs it agains
 A record passes when pgmem returns the same column names, column types and text values, or
 the same SQLSTATE and error message.
 
-pgmem passes **3183 / 3309 records (96.2%)**.
+pgmem passes **3240 / 3309 records (97.9%)**.
 
 | Area | Records | Pass | Rate |
 |---|---:|---:|---:|
-| catalog | 226 | 203 | 89.8% |
+| catalog | 226 | 210 | 92.9% |
 | constraints | 171 | 171 | 100.0% |
-| ddl | 386 | 339 | 87.8% |
+| ddl | 386 | 386 | 100.0% |
 | dml | 282 | 281 | 99.6% |
 | functions | 445 | 444 | 99.8% |
 | queries | 440 | 439 | 99.8% |
-| session | 419 | 368 | 87.8% |
+| session | 419 | 371 | 88.5% |
 | smoke | 7 | 7 | 100.0% |
 | transactions | 522 | 522 | 100.0% |
 | types | 411 | 409 | 99.5% |
@@ -26,10 +26,10 @@ pgmem passes **3183 / 3309 records (96.2%)**.
 
 | File | Records | Pass | Rate |
 |---|---:|---:|---:|
-| catalog/comments.slt | 32 | 29 | 90.6% |
-| catalog/information_schema.slt | 38 | 35 | 92.1% |
+| catalog/comments.slt | 32 | 32 | 100.0% |
+| catalog/information_schema.slt | 38 | 37 | 97.4% |
 | catalog/orm_reflection.slt | 35 | 31 | 88.6% |
-| catalog/pg_catalog.slt | 51 | 46 | 90.2% |
+| catalog/pg_catalog.slt | 51 | 48 | 94.1% |
 | catalog/psql_describe.slt | 22 | 18 | 81.8% |
 | catalog/regtypes.slt | 33 | 31 | 93.9% |
 | catalog/settings.slt | 15 | 13 | 86.7% |
@@ -40,15 +40,15 @@ pgmem passes **3183 / 3309 records (96.2%)**.
 | constraints/keys_unique.slt | 32 | 32 | 100.0% |
 | ddl/alter_table.slt | 46 | 46 | 100.0% |
 | ddl/create_table.slt | 40 | 40 | 100.0% |
-| ddl/drop.slt | 36 | 26 | 72.2% |
+| ddl/drop.slt | 36 | 36 | 100.0% |
 | ddl/generated.slt | 23 | 23 | 100.0% |
 | ddl/identity.slt | 38 | 38 | 100.0% |
 | ddl/indexes.slt | 33 | 33 | 100.0% |
-| ddl/migrations.slt | 58 | 28 | 48.3% |
+| ddl/migrations.slt | 58 | 58 | 100.0% |
 | ddl/schema.slt | 31 | 31 | 100.0% |
 | ddl/sequences.slt | 34 | 34 | 100.0% |
-| ddl/truncate_comment.slt | 14 | 12 | 85.7% |
-| ddl/views.slt | 33 | 28 | 84.8% |
+| ddl/truncate_comment.slt | 14 | 14 | 100.0% |
+| ddl/views.slt | 33 | 33 | 100.0% |
 | dml/delete.slt | 32 | 32 | 100.0% |
 | dml/insert.slt | 45 | 45 | 100.0% |
 | dml/merge.slt | 25 | 25 | 100.0% |
@@ -80,7 +80,7 @@ pgmem passes **3183 / 3309 records (96.2%)**.
 | session/prepare_cursor.slt | 77 | 77 | 100.0% |
 | session/roles.slt | 46 | 21 | 45.7% |
 | session/set_show.slt | 133 | 133 | 100.0% |
-| session/utility.slt | 48 | 45 | 93.8% |
+| session/utility.slt | 48 | 48 | 100.0% |
 | smoke/basics.slt | 7 | 7 | 100.0% |
 | transactions/advisory.slt | 38 | 38 | 100.0% |
 | transactions/basics.slt | 84 | 84 | 100.0% |

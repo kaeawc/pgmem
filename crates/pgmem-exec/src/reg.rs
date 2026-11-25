@@ -78,7 +78,7 @@ pub fn reg_name(kind: RegKind, oid: u32, catalog: &Catalog) -> String {
             .or_else(|| crate::catalog_views::system_relation_by_oid(oid).map(system_display)),
         RegKind::Type => Type::from_oid(oid).map(|t| t.name()),
         RegKind::Namespace => namespace_name(oid).map(quote_ident).or_else(|| catalog.schema_by_oid(oid).map(|sc| quote_ident(&sc.name))),
-        RegKind::Proc => None,
+        RegKind::Proc => catalog.function_by_oid(oid).map(|f| f.name.clone()),
     };
     name.unwrap_or_else(|| oid.to_string())
 }
@@ -177,7 +177,16 @@ pub fn to_reg(v: Value, kind: RegKind, catalog: &Catalog) -> SqlResult<Value> {
                 RegKind::Proc => {
                     let parts = parse_qualified(&s)?;
                     let name = parts.last().cloned().unwrap_or_default();
-                    Ok(Value::Reg(RegKind::Proc, 0, name))
+                    // User functions resolve to their OID; builtins keep their name.
+                    let user = catalog.find_functions(&pgmem_ir::ObjectName(parts.clone()));
+                    match user.as_slice() {
+                        [] => Ok(Value::Reg(RegKind::Proc, 0, name)),
+                        [f] => Ok(Value::Reg(RegKind::Proc, f.oid, name)),
+                        _ => Err(SqlError::new(
+                            pgmem_types::code::AMBIGUOUS_FUNCTION,
+                            format!("more than one function named \"{}\"", s.trim()),
+                        )),
+                    }
                 }
             }
         }

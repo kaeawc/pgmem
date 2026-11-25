@@ -80,3 +80,27 @@ pub fn defaults_using_sequence(catalog: &Catalog, oid: Oid) -> Vec<(QualName, us
     }
     out
 }
+
+/// Columns whose DEFAULT calls user function `f`: (table, column slot).
+pub fn defaults_using_function(catalog: &Catalog, f: &pgmem_catalog::FunctionDef) -> Vec<(QualName, usize)> {
+    let mut out = Vec::new();
+    for t in catalog.tables() {
+        for (i, c) in t.live_columns() {
+            let Some(d) = &c.default else { continue };
+            let mut uses = false;
+            d.walk(&mut |x| {
+                if let ir::Expr::Function(call) = x
+                    && call.name.base() == f.name
+                    && (call.name.0.len() == 1 || call.name.0[0] == f.schema)
+                    && call.args.len() <= f.input_types().len()
+                {
+                    uses = true;
+                }
+            });
+            if uses {
+                out.push((t.qualified(), i));
+            }
+        }
+    }
+    out
+}

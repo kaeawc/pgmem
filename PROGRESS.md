@@ -8,10 +8,10 @@ and what comes next. Updated with every PR.
 | Metric | Value | How it is measured |
 |---|---|---|
 | pgmem-go parity | **564 / 564** Go tests ported | `scripts/parity.py check` ([PARITY.md](PARITY.md)) |
-| Integration suite on pgmem | **631 / 631** pass | `cargo nextest run -p pgmem --test it` |
-| Integration suite on real PostgreSQL 18 | **631 / 631** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
+| Integration suite on pgmem | **636 / 636** pass | `cargo nextest run -p pgmem --test it` |
+| Integration suite on real PostgreSQL 18 | **636 / 636** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
 | Go pgx example suites (sqlc) against the Rust binary | **27 / 27** pass | `make examples` (CI `pgx-examples`) |
-| **SQL conformance corpus** (3309 records, 9 areas) | **3183 / 3309 (96.2%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
+| **SQL conformance corpus** (3309 records, 9 areas) | **3240 / 3309 (97.9%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
 
 ### Conformance history
 
@@ -42,7 +42,8 @@ and what comes next. Updated with every PR.
 | 2026-11-25 | #128 updatable views, materialized views, DROP / ALTER dependencies, CREATE TABLE AS / LIKE, ON COMMIT, index and constraint renames | 564/564 | 3089/3309 (93.4%) |
 | 2026-11-25 | #129 sequence parameters and ALTER SEQUENCE, identity options and ALTER ... IDENTITY, generated column rules | 564/564 | 3130/3309 (94.6%) |
 | 2026-11-25 | #130 range and multirange types, EXCLUDE constraints, WITHOUT OVERLAPS keys | 564/564 | 3165/3309 (95.6%) |
-| 2026-11-25 | array lower bounds, bit strings, money, inet/cidr/macaddr, pretty deparse | 564/564 | 3183/3309 (96.2%) |
+| 2026-11-25 | #131 array lower bounds, bit strings, money, inet/cidr/macaddr, pretty deparse | 564/564 | 3183/3309 (96.2%) |
+| 2026-11-25 | SQL and PL/pgSQL functions and procedures, DO, CALL, triggers | 564/564 | 3240/3309 (97.9%) |
 
 ## Supported
 
@@ -139,6 +140,20 @@ and what comes next. Updated with every PR.
   DEFERRABLE, gist operator-class checks) and Postgres 18 `PRIMARY KEY / UNIQUE (..., c WITHOUT
   OVERLAPS)`; `pg_constraint` / `information_schema` /
   `pg_get_constraintdef` report all of it.
+- **Functions and triggers**: CREATE [OR REPLACE] FUNCTION / PROCEDURE in SQL (statements or a
+  SQL-standard `RETURN` / `BEGIN ATOMIC` body) and PL/pgSQL, with Postgres' OR REPLACE rules,
+  overloads and resolution, named and `$n` arguments, defaults, STRICT, OUT parameters,
+  `RETURNS SETOF` / `TABLE (...)` (in FROM), DROP (by signature, dependencies, CASCADE), CALL,
+  DO, `COMMENT ON FUNCTION`; PL/pgSQL blocks with DECLARE (`%TYPE`, `%ROWTYPE`, record,
+  CONSTANT, NOT NULL), IF / CASE, LOOP / WHILE / FOR (integer, query, EXECUTE) / FOREACH with
+  labels, EXIT / CONTINUE, RETURN / RETURN NEXT / RETURN QUERY, SELECT / DML ... INTO [STRICT],
+  PERFORM, EXECUTE ... USING / INTO, GET DIAGNOSTICS, FOUND, RAISE (levels, `%` formatting,
+  USING options, conditions), ASSERT, and EXCEPTION handlers (condition names, SQLSTATE,
+  SQLSTATE / SQLERRM, the block's changes undone); triggers BEFORE / AFTER / INSTEAD OF, row and
+  statement level, `UPDATE OF`, WHEN, TG_* variables, NEW / OLD, ENABLE / DISABLE; `pg_proc`,
+  `pg_trigger`, `information_schema.routines` / `parameters` / `triggers`,
+  `pg_get_function_arguments` / `_result` / `_identity_arguments`, `pg_get_functiondef`,
+  `pg_get_triggerdef`.
 - **Transactions**: BEGIN/COMMIT/ROLLBACK [AND [NO] CHAIN], savepoints, failed-transaction state
   (25P02), READ COMMITTED (per-statement snapshots) and REPEATABLE READ/SERIALIZABLE
   (transaction snapshot; updating, deleting or locking a row changed since the snapshot fails
@@ -194,8 +209,12 @@ and what comes next. Updated with every PR.
   values read back are the same.
 - WITH LOCAL CHECK OPTION checks like CASCADED; views with INSTEAD OF triggers or rules are not
   supported (no triggers yet).
-- `pg_proc` and `pg_trigger` have no user rows (no user functions or triggers yet); `regproc`
-  / `regprocedure` do not resolve builtin function OIDs.
+- Functions called from a query (and BEFORE row triggers) run read-only: data-modifying
+  statements in them fail (0A000); CALL, DO and AFTER / statement triggers may modify data.
+  Set-returning user functions work in FROM, not in the select list. No transaction control
+  inside procedures, no event triggers, no cursors in PL/pgSQL; errors carry no CONTEXT field.
+- `pg_proc` has no rows for builtin functions; `regproc` / `regprocedure` do not resolve
+  builtin function OIDs.
 - Multiranges have I/O, constructors, `@>`, `&&`, lower/upper and range_agg, not the full
   operator set. No user-defined range types.
 - No COPY, stored procedures, triggers. Functions that build arrays from bounded ones (`||`,
@@ -221,6 +240,5 @@ and what comes next. Updated with every PR.
 Hill-climb, ordered by conformance records recovered per unit of work and by what blocks real
 clients. Each item names the corpus area it moves (see CONFORMANCE.md for per-file rates).
 
-1. **Functions/procedures/triggers** (SQL and PL/pgSQL), `DO` blocks — large; most of ddl/migrations.
-2. Roles, extensions (pgcrypto, uuid-ossp, citext), COPY, collations, catalog remainder.
-3. Client matrix in CI: psql, tokio-postgres and sqlx (Go pgx is covered by `examples/`).
+1. Roles, extensions (pgcrypto, uuid-ossp, citext), COPY, collations, catalog remainder.
+2. Client matrix in CI: psql, tokio-postgres and sqlx (Go pgx is covered by `examples/`).

@@ -803,6 +803,7 @@ pub(crate) fn lower_type(dt: &sq::DataType) -> SqlResult<TypeName> {
         D::JSON => simple("json"),
         D::JSONB => simple("jsonb"),
         D::Regclass => simple("regclass"),
+        D::Trigger => simple("trigger"),
         // A bare `bit` is `bit(1)`; `bit varying` has no limit.
         D::Bit(n) => TypeName { modifiers: vec![n.map_or(1, |n| i64::try_from(n).unwrap_or(i64::MAX))], ..simple("bit") },
         D::BitVarying(n) | D::VarBit(n) => {

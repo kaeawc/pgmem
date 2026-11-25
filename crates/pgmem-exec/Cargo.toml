@@ -13,6 +13,7 @@ doctest = false
 [dependencies]
 pgmem-catalog = { workspace = true }
 pgmem-ir = { workspace = true }
+pgmem-parse = { workspace = true }
 pgmem-storage = { workspace = true }
 pgmem-types = { workspace = true }
 serde_json = { workspace = true }
@@ -20,9 +21,7 @@ regex = { workspace = true }
 getrandom = { workspace = true }
 md-5 = { workspace = true }
 sha2 = { workspace = true }
-
-[dev-dependencies]
-pgmem-parse = { workspace = true }
+sqlparser = { workspace = true }
 
 [lints]
 workspace = true

@@ -284,6 +284,111 @@ impl SequenceDef {
     }
 }
 
+/// A function argument (`pg_proc.proargnames` / `proargmodes` / `proargtypes`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FuncArg {
+    pub name: Option<String>,
+    pub ty: Type,
+    pub mode: ArgMode,
+    pub default: Option<Expr>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArgMode {
+    In,
+    Out,
+    InOut,
+    Variadic,
+}
+
+impl ArgMode {
+    /// `pg_proc.proargmodes` letter.
+    pub fn code(self) -> char {
+        match self {
+            ArgMode::In => 'i',
+            ArgMode::Out => 'o',
+            ArgMode::InOut => 'b',
+            ArgMode::Variadic => 'v',
+        }
+    }
+
+    /// Whether callers pass this argument.
+    pub fn is_input(self) -> bool {
+        !matches!(self, ArgMode::Out)
+    }
+}
+
+/// What a function returns.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FuncReturn {
+    Scalar(Type),
+    /// `RETURNS SETOF type`.
+    SetOf(Type),
+    /// `RETURNS TABLE (...)`, or OUT parameters of a set-returning function.
+    Table(Vec<(String, Type)>),
+    /// A procedure.
+    None,
+}
+
+/// A user function or procedure (`pg_proc`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FunctionDef {
+    pub oid: Oid,
+    pub schema: String,
+    pub name: String,
+    pub procedure: bool,
+    pub args: Vec<FuncArg>,
+    pub ret: FuncReturn,
+    /// `sql` or `plpgsql`.
+    pub language: String,
+    /// The function body as written (`prosrc`).
+    pub body: String,
+    /// `i`, `s` or `v`.
+    pub volatility: char,
+    pub strict: bool,
+    pub security_definer: bool,
+}
+
+impl FunctionDef {
+    /// The input argument types (what overload resolution matches).
+    pub fn input_types(&self) -> Vec<Type> {
+        self.args.iter().filter(|a| a.mode.is_input()).map(|a| a.ty.clone()).collect()
+    }
+
+    pub fn returns_set(&self) -> bool {
+        matches!(self.ret, FuncReturn::SetOf(_) | FuncReturn::Table(_))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TriggerTiming {
+    Before,
+    After,
+    InsteadOf,
+}
+
+/// A trigger (`pg_trigger`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TriggerDef {
+    pub oid: Oid,
+    pub name: String,
+    /// The table or view the trigger is on.
+    pub table: Oid,
+    pub timing: TriggerTiming,
+    pub insert: bool,
+    pub delete: bool,
+    pub truncate: bool,
+    /// `UPDATE [OF columns]`: Some(columns) when the trigger fires on update.
+    pub update: Option<Vec<String>>,
+    pub for_each_row: bool,
+    /// The WHEN condition's SQL text.
+    pub when: Option<String>,
+    pub function: Oid,
+    pub args: Vec<String>,
+    /// False after `ALTER TABLE ... DISABLE TRIGGER`.
+    pub enabled: bool,
+}
+
 /// A named CHECK constraint of a domain; `expr` refers to the value as `VALUE`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DomainCheck {
@@ -463,6 +568,10 @@ pub struct Catalog {
     views: BTreeMap<QualName, Arc<ViewDef>>,
     sequences: BTreeMap<QualName, Arc<SequenceDef>>,
     types: BTreeMap<QualName, Arc<TypeDef>>,
+    /// User functions and procedures by OID (names are overloaded).
+    functions: BTreeMap<Oid, Arc<FunctionDef>>,
+    /// Triggers by OID.
+    triggers: BTreeMap<Oid, Arc<TriggerDef>>,
     /// `COMMENT ON` text by (classoid, objoid, objsubid), as in `pg_description`.
     comments: BTreeMap<(Oid, Oid, i32), String>,
     next_oid: Oid,
@@ -492,6 +601,8 @@ impl Catalog {
             views: BTreeMap::new(),
             sequences: BTreeMap::new(),
             types: BTreeMap::new(),
+            functions: BTreeMap::new(),
+            triggers: BTreeMap::new(),
             comments: BTreeMap::new(),
             next_oid: FIRST_USER_OID,
         }
@@ -916,6 +1027,63 @@ impl Catalog {
         self.types.values()
     }
 
+    pub fn functions(&self) -> impl Iterator<Item = &Arc<FunctionDef>> {
+        self.functions.values()
+    }
+
+    pub fn function_by_oid(&self, oid: Oid) -> Option<&Arc<FunctionDef>> {
+        self.functions.get(&oid)
+    }
+
+    /// Functions named `name` (schema-qualified, or the first schema on the search path that
+    /// has any).
+    pub fn find_functions(&self, name: &pgmem_ir::ObjectName) -> Vec<Arc<FunctionDef>> {
+        let base = name.base();
+        let in_schema =
+            |s: &str| -> Vec<Arc<FunctionDef>> { self.functions.values().filter(|f| f.schema == s && f.name == base).cloned().collect() };
+        if name.0.len() > 1 {
+            return in_schema(&self.resolve_schema_name(&name.0[name.0.len() - 2]));
+        }
+        for e in self.search_path() {
+            if let PathEntry::Schema(s) = e {
+                let found = in_schema(&s);
+                if !found.is_empty() {
+                    return found;
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    /// Adds or replaces (same OID) a function.
+    pub fn put_function(&mut self, def: FunctionDef) {
+        self.functions.insert(def.oid, Arc::new(def));
+    }
+
+    pub fn drop_function(&mut self, oid: Oid) -> Option<Arc<FunctionDef>> {
+        self.triggers.retain(|_, t| t.function != oid);
+        self.functions.remove(&oid)
+    }
+
+    pub fn triggers(&self) -> impl Iterator<Item = &Arc<TriggerDef>> {
+        self.triggers.values()
+    }
+
+    /// Triggers of table `oid`, in firing order (by name, as Postgres fires them).
+    pub fn table_triggers(&self, oid: Oid) -> Vec<Arc<TriggerDef>> {
+        let mut out: Vec<Arc<TriggerDef>> = self.triggers.values().filter(|t| t.table == oid).cloned().collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
+    pub fn put_trigger(&mut self, def: TriggerDef) {
+        self.triggers.insert(def.oid, Arc::new(def));
+    }
+
+    pub fn drop_trigger(&mut self, oid: Oid) -> Option<Arc<TriggerDef>> {
+        self.triggers.remove(&oid)
+    }
+
     /// Types share `pg_type`'s namespace with the row types of tables and views.
     fn ensure_type_name_free(&self, schema: &str, name: &str) -> SqlResult<()> {
         let key = QualName::new(schema, name);
@@ -973,6 +1141,7 @@ impl Catalog {
 
     pub fn drop_table(&mut self, name: &QualName) -> Option<Arc<TableDef>> {
         let dropped = self.tables.remove(name)?;
+        self.triggers.retain(|_, t| t.table != dropped.oid);
         // Sequences owned by the table's columns go with it.
         self.sequences.retain(|_, s| s.schema != name.schema || s.owned_by.as_ref().is_none_or(|(t, _)| *t != name.name));
         Some(dropped)
@@ -991,7 +1160,9 @@ impl Catalog {
     }
 
     pub fn drop_view(&mut self, name: &QualName) -> Option<Arc<ViewDef>> {
-        self.views.remove(name)
+        let dropped = self.views.remove(name)?;
+        self.triggers.retain(|_, t| t.table != dropped.oid);
+        Some(dropped)
     }
 
     pub fn create_sequence(&mut self, def: SequenceDef) -> SqlResult<()> {

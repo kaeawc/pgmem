@@ -10,6 +10,7 @@
 mod information_schema;
 mod model;
 mod pg_catalog;
+pub mod routines;
 
 use crate::eval::EvalCtx;
 use crate::plan::{Row, VirtualRowsFn};
@@ -17,8 +18,8 @@ use pgmem_types::{Type, Value, text};
 
 pub use model::rowtype_oid as rowtype_oid_of;
 pub use model::{
-    ATTRDEF_CLASS_OID, CLASS_CLASS_OID, CONSTRAINT_CLASS_OID, INFORMATION_SCHEMA_NAMESPACE_OID, Model, NAMESPACE_CLASS_OID, constraint_def,
-    index_def, not_null_constraint_name, sequence_type,
+    ATTRDEF_CLASS_OID, CLASS_CLASS_OID, CONSTRAINT_CLASS_OID, INFORMATION_SCHEMA_NAMESPACE_OID, Model, NAMESPACE_CLASS_OID, PROC_CLASS_OID,
+    TRIGGER_CLASS_OID, constraint_def, index_def, not_null_constraint_name, sequence_type,
 };
 pub use pg_catalog::{DomainCon, domain_constraints};
 

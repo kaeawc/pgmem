@@ -29,6 +29,8 @@ pub struct StatementState {
     /// Deferred constraints this statement skipped: (table OID, constraint name), checked at
     /// commit or SET CONSTRAINTS ... IMMEDIATE.
     pub deferred: RefCell<Vec<(Oid, String)>>,
+    /// Notices raised while the statement ran (PL/pgSQL `RAISE NOTICE`, ...).
+    pub notices: RefCell<Vec<crate::session::Notice>>,
 }
 
 impl StatementState {

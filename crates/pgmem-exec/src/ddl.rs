@@ -87,6 +87,26 @@ fn comment_target(
             }
             (TYPE_CLASS_OID, ty.oid, 0)
         }
+        T::Function(args) => {
+            let f = crate::functions::find_routine(catalog, name, args.as_deref())?;
+            (crate::catalog_views::PROC_CLASS_OID, f.oid, 0)
+        }
+        T::Constraint(table) => {
+            let t = catalog.lookup_table(table)?;
+            let base = name.base();
+            let c = t.constraints.iter().find(|c| c.name == base).ok_or_else(|| {
+                SqlError::new(code::UNDEFINED_OBJECT, format!("constraint \"{base}\" for table \"{}\" does not exist", t.name))
+            })?;
+            (crate::catalog_views::CONSTRAINT_CLASS_OID, c.oid, 0)
+        }
+        T::Trigger(table) => {
+            let rel = catalog.lookup_relation(table)?.ok_or_else(|| SqlError::undefined_table(&table.to_string()))?;
+            let base = name.base();
+            let t = catalog.triggers().find(|t| t.table == rel.oid() && t.name == base).ok_or_else(|| {
+                SqlError::new(code::UNDEFINED_OBJECT, format!("trigger \"{base}\" for table \"{}\" does not exist", rel.name()))
+            })?;
+            (crate::catalog_views::TRIGGER_CLASS_OID, t.oid, 0)
+        }
         T::Other => return Ok(None),
     }))
 }
@@ -129,6 +149,14 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
             crate::ddl_views::refresh_matview(name, *concurrently, *with_data, txn, env, state)
         }
         Statement::RenameIndex { name, new_name, if_exists } => rename_index(name, new_name, *if_exists, txn),
+        Statement::CreateFunction(cf) => crate::functions::create_function(cf, txn),
+        Statement::DropFunction { items, if_exists, cascade, kind } => {
+            crate::functions::drop_function(items, *if_exists, *cascade, *kind, txn)
+        }
+        Statement::Call { name, args } => crate::functions::call(name, args, txn, env, state),
+        Statement::Do { language, body } => crate::functions::do_block(language, body, txn, env, state),
+        Statement::CreateTrigger(ct) => crate::triggers::create_trigger(ct, txn),
+        Statement::DropTrigger { name, table, if_exists, .. } => crate::triggers::drop_trigger(name, table, *if_exists, txn),
         Statement::AlterSequence { name, if_exists, options, rename_to } => {
             crate::ddl_sequences::alter_sequence(name, *if_exists, options, rename_to.as_deref(), txn)
         }
@@ -204,6 +232,10 @@ pub(crate) fn alter_table_action(
 ) -> SqlResult<QualName> {
     let table = txn.catalog().table_q(current).cloned().ok_or_else(|| SqlError::undefined_table(&current.name))?;
     if crate::ddl_sequences::alter_identity(txn, &table, action)? {
+        return Ok(current.clone());
+    }
+    if let ir::AlterTableAction::EnableTrigger { name, enabled } = action {
+        crate::triggers::set_enabled(&table, name.as_deref(), *enabled, txn)?;
         return Ok(current.clone());
     }
     // Generated columns reading a dropped column: an error, or dropped too with CASCADE.
@@ -1060,8 +1092,12 @@ fn set_schema(kind: ObjectType, name: &ir::ObjectName, if_exists: bool, schema: 
         Relation::View(v) => {
             let mut def = (*v).clone();
             def.schema = target;
+            let triggers: Vec<_> = txn.catalog().triggers().filter(|t| t.table == v.oid).cloned().collect();
             txn.catalog_mut().drop_view(&old);
             txn.catalog_mut().create_view(def, false)?;
+            for t in triggers {
+                txn.catalog_mut().put_trigger((*t).clone());
+            }
         }
         Relation::Sequence(s) => {
             if s.owned_by.is_some() {

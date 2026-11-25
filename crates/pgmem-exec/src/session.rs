@@ -628,6 +628,7 @@ impl Session {
             }
         }
         let mut result = result;
+        result.notices.extend(state.notices.take());
         let pending = state.settings.take();
         if !pending.is_empty() {
             let autocommit = self.status == TxStatus::Idle && !self.implicit_block;
@@ -655,6 +656,11 @@ impl Session {
             Statement::RenameView { .. } => "ALTER VIEW",
             Statement::RenameIndex { .. } => "ALTER INDEX",
             Statement::AlterSequence { .. } => "ALTER SEQUENCE",
+            Statement::CreateFunction(cf) if cf.procedure => "CREATE PROCEDURE",
+            Statement::CreateFunction(_) => "CREATE FUNCTION",
+            Statement::DropFunction { .. } => "DROP FUNCTION",
+            Statement::CreateTrigger(_) => "CREATE TRIGGER",
+            Statement::DropTrigger { .. } => "DROP TRIGGER",
             Statement::CreateIndex(_) => "CREATE INDEX",
             Statement::CreateSequence(_) => "CREATE SEQUENCE",
             Statement::AlterTable(_) => "ALTER TABLE",

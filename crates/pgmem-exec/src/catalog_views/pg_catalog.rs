@@ -73,7 +73,7 @@ const PG_SEQUENCE: &str = "seqrelid:oid, seqtypid:oid, seqstart:int8, seqincreme
 const PG_SETTINGS: &str = "name:text, setting:text, unit:text, category:text, short_desc:text, extra_desc:text, context:text, \
     vartype:text, source:text, min_val:text, max_val:text, enumvals:text[], boot_val:text, reset_val:text, sourcefile:text, \
     sourceline:int4, pending_restart:bool=f";
-const PG_PROC: &str = "oid:oid, proname:name, pronamespace:oid, proowner:oid, prolang:oid, procost:float4, prorows:float4, \
+pub(super) const PG_PROC: &str = "oid:oid, proname:name, pronamespace:oid, proowner:oid, prolang:oid, procost:float4, prorows:float4, \
     provariadic:oid, prosupport:regproc, prokind:\"char\", prosecdef:bool, proleakproof:bool, proisstrict:bool, proretset:bool, \
     provolatile:\"char\", proparallel:\"char\", pronargs:int2, pronargdefaults:int2, prorettype:oid, proargtypes:oidvector, \
     proallargtypes:oid[], proargmodes:\"char\"[], proargnames:text[], proargdefaults:pg_node_tree, protrftypes:oid[], prosrc:text, \
@@ -81,7 +81,7 @@ const PG_PROC: &str = "oid:oid, proname:name, pronamespace:oid, proowner:oid, pr
 const PG_ENUM: &str = "oid:oid, enumtypid:oid, enumsortorder:float4, enumlabel:name";
 const PG_DEPEND: &str = "classid:oid, objid:oid, objsubid:int4, refclassid:oid, refobjid:oid, refobjsubid:int4, deptype:\"char\"";
 const PG_INHERITS: &str = "inhrelid:oid, inhparent:oid, inhseqno:int4, inhdetachpending:bool";
-const PG_TRIGGER: &str = "oid:oid, tgrelid:oid, tgparentid:oid, tgname:name, tgfoid:oid, tgtype:int2, tgenabled:\"char\", \
+pub(super) const PG_TRIGGER: &str = "oid:oid, tgrelid:oid, tgparentid:oid, tgname:name, tgfoid:oid, tgtype:int2, tgenabled:\"char\", \
     tgisinternal:bool, tgconstrrelid:oid, tgconstrindid:oid, tgconstraint:oid, tgdeferrable:bool, tginitdeferred:bool, tgnargs:int2, \
     tgattr:int2vector, tgargs:bytea, tgqual:pg_node_tree, tgoldtable:name, tgnewtable:name";
 const PG_RANGE: &str = "rngtypid:oid, rngsubtype:oid, rngmultitypid:oid, rngcollation:oid, rngsubopc:oid, rngcanonical:regproc, \
@@ -121,11 +121,11 @@ pub static DEFS: &[Def] = &[
     def!("pg_tablespace", 1213, 'r', PG_TABLESPACE, pg_tablespace),
     def!("pg_language", 2612, 'r', PG_LANGUAGE, pg_language),
     def!("pg_extension", 3079, 'r', PG_EXTENSION, pg_extension),
-    def!("pg_proc", 1255, 'r', PG_PROC, empty),
+    def!("pg_proc", 1255, 'r', PG_PROC, super::routines::pg_proc),
     def!("pg_enum", 3501, 'r', PG_ENUM, pg_enum),
     def!("pg_depend", 2608, 'r', PG_DEPEND, pg_depend),
     def!("pg_inherits", 2611, 'r', PG_INHERITS, empty),
-    def!("pg_trigger", 2620, 'r', PG_TRIGGER, empty),
+    def!("pg_trigger", 2620, 'r', PG_TRIGGER, super::routines::pg_trigger),
     def!("pg_range", 3541, 'r', PG_RANGE, empty),
     def!("pg_sequence", 2224, 'r', PG_SEQUENCE, pg_sequence),
     def!("pg_roles", 12_001, 'v', PG_ROLES, pg_roles),
@@ -250,7 +250,7 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("relfilenode", oid(t.oid)),
                 ("relhasindex", boolean(!t.indexes.is_empty())),
                 ("relchecks", int2(checks)),
-                ("relhastriggers", boolean(triggers.contains(&t.oid))),
+                ("relhastriggers", boolean(triggers.contains(&t.oid) || !m.catalog.table_triggers(t.oid).is_empty())),
                 ("relreplident", ch('d')),
                 (
                     "relpersistence",

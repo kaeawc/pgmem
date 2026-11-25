@@ -51,13 +51,13 @@ const COLUMN_PRIVILEGES: &str = "grantor:name, grantee:name, table_catalog:name,
     privilege_type:varchar, is_grantable:varchar";
 const ENABLED_ROLES: &str = "role_name:name";
 const APPLICABLE_ROLES: &str = "grantee:name, role_name:name, is_grantable:varchar";
-const ROUTINES: &str = "specific_catalog:name, specific_schema:name, specific_name:name, routine_catalog:name, routine_schema:name, \
+pub(super) const ROUTINES: &str = "specific_catalog:name, specific_schema:name, specific_name:name, routine_catalog:name, routine_schema:name, \
     routine_name:name, routine_type:varchar, data_type:varchar, type_udt_name:name, routine_body:varchar, routine_definition:varchar, \
     external_language:varchar, is_deterministic:varchar, security_type:varchar";
-const PARAMETERS: &str = "specific_catalog:name, specific_schema:name, specific_name:name, ordinal_position:int4, \
+pub(super) const PARAMETERS: &str = "specific_catalog:name, specific_schema:name, specific_name:name, ordinal_position:int4, \
     parameter_mode:varchar, is_result:varchar, as_locator:varchar, parameter_name:name, data_type:varchar, udt_name:name, \
     parameter_default:varchar";
-const TRIGGERS: &str = "trigger_catalog:name, trigger_schema:name, trigger_name:name, event_manipulation:varchar, \
+pub(super) const TRIGGERS: &str = "trigger_catalog:name, trigger_schema:name, trigger_name:name, event_manipulation:varchar, \
     event_object_catalog:name, event_object_schema:name, event_object_table:name, action_order:int4, action_condition:varchar, \
     action_statement:varchar, action_orientation:varchar, action_timing:varchar, action_reference_old_table:name, \
     action_reference_new_table:name, action_reference_old_row:name, action_reference_new_row:name, created:timestamptz";
@@ -92,9 +92,9 @@ pub static DEFS: &[Def] = &[
     def!("column_privileges", 13_112, COLUMN_PRIVILEGES, column_privileges),
     def!("enabled_roles", 13_113, ENABLED_ROLES, enabled_roles),
     def!("applicable_roles", 13_114, APPLICABLE_ROLES, empty),
-    def!("routines", 13_115, ROUTINES, empty),
-    def!("parameters", 13_116, PARAMETERS, empty),
-    def!("triggers", 13_117, TRIGGERS, empty),
+    def!("routines", 13_115, ROUTINES, super::routines::is_routines),
+    def!("parameters", 13_116, PARAMETERS, super::routines::is_parameters),
+    def!("triggers", 13_117, TRIGGERS, super::routines::is_triggers),
     def!("domains", 13_118, DOMAINS, domains),
     def!("domain_constraints", 13_119, DOMAIN_CONSTRAINTS, domain_constraints),
 ];
@@ -177,7 +177,7 @@ fn empty(_: &EvalCtx) -> SqlResult<Vec<Row>> {
     Ok(Vec::new())
 }
 
-fn catalog_name(ctx: &EvalCtx) -> Value {
+pub(super) fn catalog_name(ctx: &EvalCtx) -> Value {
     name(&ctx.env.database)
 }
 
@@ -227,6 +227,16 @@ fn tables(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
 }
 
 /// The information_schema type columns of a column type: data_type, character lengths,
+/// `information_schema`'s data_type text: the type's name, `ARRAY`, or `USER-DEFINED`.
+pub(super) fn data_type_name(ty: &Type) -> String {
+    match ty {
+        Type::Array(_) => "ARRAY".to_owned(),
+        Type::Enum(_) | Type::Composite(_) => "USER-DEFINED".to_owned(),
+        Type::Domain(_) => ty.base().name(),
+        other => other.name(),
+    }
+}
+
 /// numeric precision/radix/scale and datetime precision.
 fn type_columns(ty: &Type, typmod: i32, catalog: &Value) -> Vec<(&'static str, Value)> {
     // A domain column is described by its base type (with the domain's typmod) and names the

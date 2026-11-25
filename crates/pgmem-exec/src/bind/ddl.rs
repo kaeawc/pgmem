@@ -833,9 +833,10 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
             def.columns[slot].name = new.clone();
             Ok(AlterOutcome::Replace { def: Box::new(def), rename_from: None, sequences: vec![], validate: Validation::None })
         }
-        ir::AlterTableAction::AddIdentity { .. } | ir::AlterTableAction::SetIdentity { .. } | ir::AlterTableAction::DropIdentity { .. } => {
-            Err(SqlError::internal("identity actions run in ddl::alter_identity"))
-        }
+        ir::AlterTableAction::AddIdentity { .. }
+        | ir::AlterTableAction::SetIdentity { .. }
+        | ir::AlterTableAction::DropIdentity { .. }
+        | ir::AlterTableAction::EnableTrigger { .. } => Err(SqlError::internal("identity actions run in ddl::alter_identity")),
         ir::AlterTableAction::SetExpression { column, expr } => {
             let slot = def.column_index(column).ok_or_else(|| not_found(column))?;
             if def.columns[slot].generated.is_none() {

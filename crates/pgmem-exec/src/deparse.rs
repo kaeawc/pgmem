@@ -12,7 +12,7 @@
 //! functions uses: full parenthesization, line breaks and indentation for CASE and queries.
 
 mod node;
-mod pg;
+pub(crate) mod pg;
 mod print;
 mod query;
 #[cfg(test)]

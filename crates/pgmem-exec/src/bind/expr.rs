@@ -969,8 +969,13 @@ impl Binder<'_> {
     fn bind_function(&self, f: &ir::FunctionCall, ctx: &Ctx) -> SqlResult<Bound> {
         let name = match f.name.0.as_slice() {
             [n] => n.as_str(),
-            [s, n] if s == "pg_catalog" || s == "public" => n.as_str(),
-            _ => return Err(funcs::no_function(&f.name.to_string(), &[])),
+            [s, n] if s == "pg_catalog" => n.as_str(),
+            // Another schema: only user functions live there.
+            _ => {
+                let bound = f.args.iter().map(|a| self.bind_expr(a, ctx)).collect::<SqlResult<Vec<_>>>()?;
+                let types: Vec<Type> = bound.iter().map(|(_, t)| t.clone()).collect();
+                return self.bind_user_call(f, bound, ctx)?.ok_or_else(|| funcs::no_function(&f.name.to_string(), &types));
+            }
         };
         if name == "grouping" && f.name.0.len() == 1 {
             // Resolved against the GROUP BY when the query is aggregated.
@@ -1095,13 +1100,78 @@ impl Binder<'_> {
         if let Some((outs, targets, f)) = select_list_srf(name, &types)? {
             return self.bind_srf_call(name, outs, targets, f, bound, ctx);
         }
-        let res = resolve_function(name, &types)?.ok_or_else(|| funcs::no_function(name, &types))?;
+        let res = match resolve_function(name, &types) {
+            Ok(Some(r)) => r,
+            builtin => match self.bind_user_call(f, bound.clone(), ctx)? {
+                Some(b) => return Ok(b),
+                None => builtin?.ok_or_else(|| funcs::no_function(name, &types))?,
+            },
+        };
         let args = bound
             .into_iter()
             .zip(&res.args)
             .map(|((e, et), target)| coerce(self, e, &et, target, CoercionContext::Explicit))
             .collect::<SqlResult<Vec<_>>>()?;
         Ok((Expr::Call { func: res.func, args }, res.ret))
+    }
+
+    /// A call of a user function: its arguments coerced, omitted ones defaulted, the
+    /// function's OID first. None when no user function has the name.
+    pub(crate) fn bind_user_call(&self, f: &ir::FunctionCall, bound: Vec<Bound>, ctx: &Ctx) -> SqlResult<Option<Bound>> {
+        let Some((def, args)) = self.user_call_args(f, bound, ctx)? else { return Ok(None) };
+        if def.returns_set() {
+            return Err(SqlError::feature_not_supported(format!(
+                "pgmem supports set-returning user functions only in FROM ({} called in the select list)",
+                def.name
+            )));
+        }
+        let ret = match &def.ret {
+            pgmem_catalog::FuncReturn::Scalar(Type::Unknown) => {
+                return Err(SqlError::feature_not_supported("trigger functions can only be called as triggers"));
+            }
+            pgmem_catalog::FuncReturn::Scalar(t) => t.clone(),
+            _ => Type::Record,
+        };
+        let func = funcs::lenient("user function", crate::functions::call_scalar);
+        Ok(Some((Expr::Call { func, args }, ret)))
+    }
+
+    /// Resolves a user function call: the function and its argument expressions (OID first).
+    pub(crate) fn user_call_args(
+        &self,
+        f: &ir::FunctionCall,
+        bound: Vec<Bound>,
+        ctx: &Ctx,
+    ) -> SqlResult<Option<(std::sync::Arc<pgmem_catalog::FunctionDef>, Vec<Expr>)>> {
+        let cands = self.catalog.find_functions(&f.name);
+        if cands.is_empty() {
+            return Ok(None);
+        }
+        let types: Vec<Type> = bound.iter().map(|(_, t)| t.clone()).collect();
+        let Some(call) = crate::functions::resolve(f.name.base(), &cands, &types, false)? else {
+            if crate::functions::resolve(f.name.base(), &cands, &types, true)?.is_some() {
+                return Err(SqlError::new(
+                    code::WRONG_OBJECT_TYPE,
+                    format!("{} is a procedure", crate::functions::signature(f.name.base(), &types)),
+                )
+                .with_hint("To call a procedure, use CALL."));
+            }
+            return Ok(None);
+        };
+        let mut args = vec![Expr::Const(Value::Oid(call.def.oid))];
+        for ((e, et), target) in bound.into_iter().zip(&call.targets) {
+            args.push(coerce(self, e, &et, target, CoercionContext::Implicit)?);
+        }
+        // Defaults are bound on their own (they cannot see the call's scope).
+        let _ = ctx;
+        let empty = Level::new(super::Scope::default());
+        let dctx = Ctx::new(&empty);
+        for a in call.def.args.iter().filter(|a| a.mode.is_input()).skip(args.len() - 1) {
+            let d = a.default.as_ref().ok_or_else(|| SqlError::internal("argument without default"))?;
+            let (e, t) = self.bind_expr(d, &dctx)?;
+            args.push(coerce(self, e, &t, &a.ty, CoercionContext::Assignment)?);
+        }
+        Ok(Some((call.def, args)))
     }
 
     /// `enum_first(anyenum)`, `enum_last(anyenum)`, `enum_range(anyenum [, anyenum])`: only the
