@@ -10,6 +10,7 @@ pub mod dtparse;
 pub mod error;
 #[cfg(test)]
 mod go_port;
+pub mod hstore;
 pub mod json;
 pub mod jsonpath;
 pub mod jsontext;
@@ -99,11 +100,20 @@ pub enum Type {
     Cidr,
     MacAddr,
     MacAddr8,
+    /// The `citext` extension's case-insensitive text.
+    CiText,
+    /// The `hstore` extension's key/value map.
+    HStore,
     /// A builtin range type over its subtype (`int4range`, `tstzrange`, ...).
     Range(Box<Type>),
     /// A builtin multirange type over its range's subtype (`int4multirange`, ...).
     Multirange(Box<Type>),
 }
+
+/// OIDs pgmem gives the extension types (Postgres assigns them at CREATE EXTENSION); each
+/// array type is the next OID.
+pub const CITEXT_OID: u32 = 90_100;
+pub const HSTORE_OID: u32 = 90_102;
 
 /// The `reg*` OID alias types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -177,6 +187,8 @@ impl Type {
             Type::Cidr => 650,
             Type::MacAddr => 829,
             Type::MacAddr8 => 774,
+            Type::CiText => CITEXT_OID,
+            Type::HStore => HSTORE_OID,
             Type::Range(s) => range::entry(s).map_or(0, |e| e.1),
             Type::Multirange(s) => range::entry(s).map_or(0, |e| e.2),
             Type::Array(elem) => match elem.as_ref() {
@@ -220,6 +232,8 @@ impl Type {
                 Type::Cidr => 651,
                 Type::MacAddr => 1040,
                 Type::MacAddr8 => 775,
+                Type::CiText => CITEXT_OID + 1,
+                Type::HStore => HSTORE_OID + 1,
                 Type::Range(s) => range::entry(s).map_or(0, |e| e.3),
                 Type::Multirange(s) => range::entry(s).map_or(0, |e| e.4),
                 _ => 0,
@@ -273,6 +287,8 @@ impl Type {
             650 => Some(Type::Cidr),
             829 => Some(Type::MacAddr),
             774 => Some(Type::MacAddr8),
+            CITEXT_OID => Some(Type::CiText),
+            HSTORE_OID => Some(Type::HStore),
             _ => None,
         };
         if let Some(t) = scalar(oid) {
@@ -328,6 +344,8 @@ impl Type {
             651 => Type::Cidr,
             1040 => Type::MacAddr,
             775 => Type::MacAddr8,
+            o if o == CITEXT_OID + 1 => Type::CiText,
+            o if o == HSTORE_OID + 1 => Type::HStore,
             _ => return usertype::type_for_oid(oid),
         };
         Some(Type::array_of(elem))
@@ -346,7 +364,7 @@ impl Type {
             Type::Interval | Type::Uuid => 16,
             Type::Money | Type::MacAddr8 => 8,
             Type::MacAddr => 6,
-            Type::Bit | Type::VarBit | Type::Inet | Type::Cidr => -1,
+            Type::Bit | Type::VarBit | Type::Inet | Type::Cidr | Type::CiText | Type::HStore => -1,
             Type::Unknown => -2,
             Type::Void => 4,
             Type::Int2Vector | Type::OidVector | Type::Composite(_) | Type::Record => -1,
@@ -419,6 +437,8 @@ impl Type {
             Type::Cidr => "cidr",
             Type::MacAddr => "macaddr",
             Type::MacAddr8 => "macaddr8",
+            Type::CiText => "citext",
+            Type::HStore => "hstore",
             Type::Enum(_) | Type::Domain(_) | Type::Composite(_) | Type::Range(_) | Type::Multirange(_) => "???",
         }
     }
@@ -467,6 +487,8 @@ impl Type {
             Type::Cidr => "cidr".into(),
             Type::MacAddr => "macaddr".into(),
             Type::MacAddr8 => "macaddr8".into(),
+            Type::CiText => "citext".into(),
+            Type::HStore => "hstore".into(),
             Type::Enum(o) | Type::Domain(o) | Type::Composite(o) => usertype::raw_type_name(*o),
             Type::Range(s) => range::entry(s).map_or("anyrange", |e| e.5).into(),
             Type::Multirange(s) => range::entry(s).map_or("anymultirange", |e| e.6).into(),
@@ -503,7 +525,9 @@ impl Type {
             "float4" | "real" => Type::Float4,
             "float8" | "double precision" | "float" => Type::Float8,
             "numeric" | "decimal" => Type::Numeric,
-            "text" | "citext" => Type::Text,
+            "text" => Type::Text,
+            "citext" => Type::CiText,
+            "hstore" => Type::HStore,
             "varchar" | "character varying" => Type::Varchar,
             "char" | "character" | "bpchar" => Type::Bpchar,
             "name" => Type::Name,
@@ -567,7 +591,7 @@ impl Type {
     /// Postgres' implicit casts make them do.
     pub fn lookup_type(&self) -> Type {
         let base = self.base();
-        if base.is_string() { Type::Text } else { base }
+        if base.is_string() || base == Type::CiText { Type::Text } else { base }
     }
 
     pub fn is_numeric(&self) -> bool {
@@ -601,6 +625,8 @@ impl Type {
             Type::Enum(_) => 'E',
             Type::Composite(_) | Type::Record => 'C',
             Type::Range(_) | Type::Multirange(_) => 'R',
+            Type::CiText => 'S',
+            Type::HStore => 'U',
             Type::Bit | Type::VarBit => 'V',
             Type::Money => 'N',
             Type::Inet | Type::Cidr => 'I',

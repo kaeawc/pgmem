@@ -1,10 +1,6 @@
 # Corpus records pgmem fails today, by key (file:hash of the SQL); the first line of the SQL
 # follows for reading. Regenerate with `cargo run -p pgmem-conformance -- --update`.
 catalog/information_schema.slt:bcd84fafea9ffe59  # SELECT c.column_name, e.data_type
-catalog/orm_reflection.slt:dd8b06fac31bd173  # SELECT a.attname
-catalog/orm_reflection.slt:63a6c813bc48d939  # SELECT indexname, array_agg(attname ORDER BY arridx), indisunique, indisprimary, amname
-catalog/orm_reflection.slt:b4efb73737c9ebd0  # SELECT ns.nspname, typ.typname, typ.typtype, typ.typcategory,
-catalog/orm_reflection.slt:ee468900ba31ee71  # SELECT r.rngsubtype::regtype::text FROM pg_range r WHERE r.rngtypid = 'int4range'::regtype
 catalog/pg_catalog.slt:a085ef479946ad0c  # CREATE TABLE events_2024 PARTITION OF events FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
 catalog/pg_catalog.slt:d26d4fea085e04ff  # SELECT c.relname, c.relkind, c.relispartition, pg_get_expr(c.relpartbound, c.oid)
 catalog/pg_catalog.slt:48122fca8c801c55  # SELECT pg_get_partkeydef('events'::regclass)
@@ -19,28 +15,5 @@ catalog/settings.slt:77a2ba0cde58e2c2  # SHOW application_name
 dml/on_conflict.slt:8ce9ce1dd7ed5cb8  # INSERT INTO accounts VALUES (2, 'ALICE@example.COM') ON CONFLICT (lower(email)) DO UPDATE SET email = EXCLUDED.email RETURNING id, email
 functions/conditional_misc.slt:b5355bcb6afee2be  # SELECT pg_get_viewdef('pg_roles'::regclass) IS NOT NULL
 queries/set_operations.slt:6680237cbd789fd6  # SELECT NULL UNION SELECT 1
-session/extensions.slt:b917717b7291b646  # CREATE EXTENSION pgcrypto
-session/extensions.slt:e9c0d9706f574f7f  # SELECT encode(digest('abc', 'sha256'), 'hex')
-session/extensions.slt:33efed8b88c60365  # SELECT encode(hmac('data', 'key', 'sha1'), 'hex')
-session/extensions.slt:f0f5b84729217917  # SELECT crypt('password', gen_salt('bf')) <> 'password', length(gen_random_bytes(16))
-session/extensions.slt:051ab2bf56de7fda  # SELECT crypt('pw', '$1$abcdefgh$')
-session/extensions.slt:1beb9c94b5b9e2e1  # SELECT uuid_generate_v5(uuid_ns_url(), 'https://example.com')
-session/extensions.slt:cdfd0f242e56f40c  # SELECT uuid_generate_v3(uuid_ns_dns(), 'example.com'), uuid_nil()
-session/extensions.slt:4e6397eb3ce723f9  # SELECT email FROM members WHERE email = 'alice@example.COM'
-session/extensions.slt:57fe7a4566c3c3b1  # INSERT INTO members VALUES ('ALICE@example.com')
-session/extensions.slt:218fa9e05e38e957  # SELECT 'ABC'::citext = 'abc'::citext, 'a'::citext < 'B'::citext, 'abc'::citext LIKE 'A%'
-session/extensions.slt:61a54c79c746954f  # SELECT pg_typeof('x'::citext)::text, 'Hello'::citext::text
-session/extensions.slt:4770f8be4c48ab5a  # SELECT similarity('word', 'words')
-session/extensions.slt:4b46d8c233a96842  # SELECT show_trgm('cat')
-session/extensions.slt:4faa6a1edd11212b  # SELECT 'postgres' % 'postgre', word_similarity('word', 'two words')
-session/extensions.slt:0202ec7026b74ea1  # SELECT body FROM docs WHERE body % 'hello wrld'
-session/extensions.slt:f75f7c3209c554b5  # SELECT 'a=>1, b=>2'::hstore -> 'b'
-session/extensions.slt:1b73d2d692d4dda0  # SELECT 'a=>1, b=>2'::hstore ? 'a', 'a=>1'::hstore || 'c=>3'::hstore
-session/extensions.slt:0942560e8d35f7b5  # SELECT akeys('x=>1, y=>2'::hstore), hstore('k', 'v')
-session/extensions.slt:a5f6ffc30aa8867f  # SELECT extname FROM pg_extension WHERE extname <> 'plpgsql' ORDER BY extname
-session/extensions.slt:78c914c21f3e5d24  # SELECT installed_version IS NOT NULL FROM pg_available_extensions WHERE name = 'citext'
-session/extensions.slt:6095da0ee328ac66  # SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'btree_gist'
-session/extensions.slt:b5188c728c7d0a7e  # DROP EXTENSION citext
-session/extensions.slt:adf882d006810dbf  # CREATE EXTENSION no_such_extension
 types/casts.slt:562a638a088bc3c9  # SELECT 'pg_catalog.lower'::regproc
 types/casts.slt:fc3868fddb298ef7  # INSERT INTO c (v) VALUES (B'1'::text || 'abcd')

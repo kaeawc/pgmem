@@ -888,6 +888,8 @@ impl Binder<'_> {
     ) -> SqlResult<Expr> {
         let (e, et) = self.bind_expr(expr, ctx)?;
         let (p, pt) = self.bind_expr(pattern, ctx)?;
+        // citext's LIKE is case-insensitive.
+        let func = if et == Type::CiText && func.name == "~~" { funcs::strict("~~*", funcs::string::ilike_fn) } else { func };
         if !(et == Type::Unknown || funcs::implicit_ok(&et, &Type::Text))
             || !(pt == Type::Unknown || funcs::implicit_ok(&pt, &Type::Text))
             || matches!(

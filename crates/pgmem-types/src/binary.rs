@@ -125,6 +125,14 @@ pub fn encode(v: &Value, ty: &Type) -> SqlResult<Vec<u8>> {
             Value::Bit(b) => crate::netbits::bits_to_binary(b),
             _ => return Err(mismatch()),
         },
+        Type::CiText => match v {
+            Value::CiText(s) | Value::Text(s) => s.as_bytes().to_vec(),
+            _ => return Err(mismatch()),
+        },
+        Type::HStore => match v {
+            Value::HStore(pairs) => crate::hstore::to_binary(pairs),
+            _ => return Err(mismatch()),
+        },
         Type::Money => match v {
             Value::Money(m) => m.to_be_bytes().to_vec(),
             _ => return Err(mismatch()),
@@ -391,6 +399,11 @@ pub fn decode(b: &[u8], ty: &Type) -> SqlResult<Value> {
         Type::Record => return Err(SqlError::feature_not_supported("input of anonymous composite types is not implemented")),
         Type::Range(sub) => Value::Range(Box::new(decode_range(b, sub, ty)?)),
         Type::Bit | Type::VarBit => Value::Bit(crate::netbits::bits_from_binary(b)?),
+        Type::CiText => Value::CiText(
+            String::from_utf8(b.to_vec())
+                .map_err(|_| SqlError::new(code::INVALID_TEXT_REPRESENTATION, "invalid byte sequence for encoding \"UTF8\""))?,
+        ),
+        Type::HStore => Value::HStore(crate::hstore::from_binary(b)?),
         Type::Money => Value::Money(i64::from_be_bytes(fixed(b, ty)?)),
         Type::Inet | Type::Cidr => {
             let (ip, bits) = crate::netbits::inet_from_binary(b)?;

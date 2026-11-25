@@ -6,14 +6,17 @@
 pub mod array;
 pub mod catalog;
 pub mod datetime;
+pub mod hstore;
 pub mod json;
 pub mod math;
 pub mod misc;
 pub mod netbits;
 pub mod numfmt;
+pub mod pgcrypto;
 pub mod range;
 pub mod sqljson;
 pub mod string;
+pub mod trgm;
 
 use crate::cast::{CoercionContext, can_coerce};
 use crate::eval::EvalCtx;
@@ -73,6 +76,15 @@ pub fn resolve_function(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>
         return Ok(Some(r));
     }
     if let Some(r) = netbits::resolve(name, args)? {
+        return Ok(Some(r));
+    }
+    if let Some(r) = pgcrypto::resolve(name, args)? {
+        return Ok(Some(r));
+    }
+    if let Some(r) = trgm::resolve(name, args)? {
+        return Ok(Some(r));
+    }
+    if let Some(r) = hstore::resolve(name, args)? {
         return Ok(Some(r));
     }
     if let Some(r) = math::resolve(name, args)? {
@@ -159,8 +171,9 @@ pub fn common_type(l: &Type, r: &Type) -> Option<Type> {
                 return Some(if a >= b { l.clone() } else { r.clone() });
             }
             match (l, r) {
-                // Different string types meet at text, their preferred type.
+                // Different string types meet at text, their preferred type (citext too).
                 _ if l.is_string() && r.is_string() => Some(Type::Text),
+                (Type::CiText, t) | (t, Type::CiText) if t.is_string() => Some(Type::Text),
                 (Type::Oid | Type::Reg(_), Type::Oid | Type::Reg(_)) => Some(Type::Oid),
                 (Type::Oid | Type::Reg(_), t) | (t, Type::Oid | Type::Reg(_)) if t.is_integer() => Some(Type::Oid),
                 (Type::Time, Type::TimeTz) | (Type::TimeTz, Type::Time) => Some(Type::TimeTz),
@@ -449,10 +462,30 @@ pub fn resolve_binary(op: &str, l: &Type, r: &Type) -> SqlResult<Resolved> {
         }
         return Err(no_operator(op, Some(l), r));
     }
+    // citext's pattern operators are case-insensitive.
+    if *l == Type::CiText || *r == Type::CiText {
+        let ci = match op {
+            "~~" => Some("~~*"),
+            "!~~" => Some("!~~*"),
+            "~" => Some("~*"),
+            "!~" => Some("!~*"),
+            _ => None,
+        };
+        if let Some(ci) = ci {
+            return resolve_binary(ci, &Type::Text, &Type::Text);
+        }
+    }
     let (l, r) = (&lookup_type(l), &lookup_type(r));
     if let Some(r) = range::resolve_operator(op, l, r)? {
         return Ok(r);
     }
+    if let Some(r) = hstore::resolve_operator(op, l, r)? {
+        return Ok(r);
+    }
+    if let Some(r) = trgm::resolve_operator(op, l, r)? {
+        return Ok(r);
+    }
+
     if let Some(r) = netbits::resolve_operator(op, l, r)? {
         return Ok(r);
     }

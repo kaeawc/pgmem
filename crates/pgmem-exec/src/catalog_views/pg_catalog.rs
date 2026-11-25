@@ -126,7 +126,7 @@ pub static DEFS: &[Def] = &[
     def!("pg_depend", 2608, 'r', PG_DEPEND, pg_depend),
     def!("pg_inherits", 2611, 'r', PG_INHERITS, empty),
     def!("pg_trigger", 2620, 'r', PG_TRIGGER, super::routines::pg_trigger),
-    def!("pg_range", 3541, 'r', PG_RANGE, empty),
+    def!("pg_range", 3541, 'r', PG_RANGE, pg_range),
     def!("pg_sequence", 2224, 'r', PG_SEQUENCE, pg_sequence),
     def!("pg_roles", 12_001, 'v', PG_ROLES, pg_roles),
     def!("pg_user", 12_002, 'v', PG_USER, pg_user),
@@ -456,7 +456,94 @@ fn pg_type(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     for t in m.catalog.types() {
         rows.extend(user_type_rows(&s, m.catalog, t));
     }
+    rows.extend(range_type_rows(&s));
+    rows.extend(extension_type_rows(&s, &m));
     Ok(rows)
+}
+
+/// A varlena base or array type row (ranges, multiranges, extension types).
+#[allow(clippy::too_many_arguments)]
+fn varlena_type_row(
+    s: &Spec,
+    o: u32,
+    typname: &str,
+    namespace: u32,
+    typtype: char,
+    category: char,
+    elem: u32,
+    array: u32,
+    io: &str,
+) -> Row {
+    s.row(vec![
+        ("oid", oid(o)),
+        ("typname", name(typname)),
+        ("typnamespace", oid(namespace)),
+        ("typlen", Value::Int2(-1)),
+        ("typbyval", boolean(false)),
+        ("typtype", ch(typtype)),
+        ("typcategory", ch(category)),
+        ("typdelim", ch(',')),
+        ("typelem", oid(elem)),
+        ("typarray", oid(array)),
+        ("typinput", regproc(&format!("{io}_in"))),
+        ("typoutput", regproc(&format!("{io}_out"))),
+        ("typreceive", regproc(&format!("{io}_recv"))),
+        ("typsend", regproc(&format!("{io}_send"))),
+        ("typmodin", regproc("-")),
+        ("typmodout", regproc("-")),
+        ("typsubscript", regproc(if category == 'A' { "array_subscript_handler" } else { "-" })),
+        ("typanalyze", regproc("-")),
+        ("typalign", ch('i')),
+        ("typstorage", ch('x')),
+    ])
+}
+
+/// The builtin range and multirange types and their arrays.
+fn range_type_rows(s: &Spec) -> Vec<Row> {
+    let mut rows = Vec::new();
+    for (_, r, m, ra, ma, rname, mname) in pgmem_types::range::RANGES {
+        rows.push(varlena_type_row(s, *r, rname, PG_CATALOG_NAMESPACE_OID, 'r', 'R', 0, *ra, "range"));
+        rows.push(varlena_type_row(s, *m, mname, PG_CATALOG_NAMESPACE_OID, 'm', 'R', 0, *ma, "multirange"));
+        rows.push(varlena_type_row(s, *ra, &format!("_{rname}"), PG_CATALOG_NAMESPACE_OID, 'b', 'A', *r, 0, "array"));
+        rows.push(varlena_type_row(s, *ma, &format!("_{mname}"), PG_CATALOG_NAMESPACE_OID, 'b', 'A', *m, 0, "array"));
+    }
+    rows
+}
+
+/// citext / hstore, once their extension is installed (in its schema).
+fn extension_type_rows(s: &Spec, m: &Model) -> Vec<Row> {
+    let mut rows = Vec::new();
+    for (ext, o, typname, category) in
+        [("citext", pgmem_types::CITEXT_OID, "citext", 'S'), ("hstore", pgmem_types::HSTORE_OID, "hstore", 'U')]
+    {
+        let Some(e) = m.catalog.extension(ext) else { continue };
+        let ns = m.namespace(&e.schema);
+        rows.push(varlena_type_row(s, o, typname, ns, 'b', category, 0, o + 1, typname));
+        rows.push(varlena_type_row(s, o + 1, &format!("_{typname}"), ns, 'b', 'A', o, 0, "array"));
+    }
+    rows
+}
+
+fn pg_range(_: &EvalCtx) -> SqlResult<Vec<Row>> {
+    Ok(rows_of(PG_RANGE, |s| {
+        pgmem_types::range::RANGES
+            .iter()
+            .map(|(sub, r, m, ..)| {
+                let discrete = matches!(sub, Type::Int4 | Type::Int8 | Type::Date);
+                let canonical =
+                    if discrete { format!("{}_canonical", Type::Range(Box::new(sub.clone())).typname()) } else { "-".to_owned() };
+                s.row(vec![
+                    ("rngtypid", oid(*r)),
+                    ("rngsubtype", oid(sub.oid())),
+                    ("rngmultitypid", oid(*m)),
+                    ("rngcollation", oid(0)),
+                    ("rngsubopc", oid(0)),
+                    ("rngcanonical", regproc(&canonical)),
+                    ("rngsubdiff", regproc("-")),
+                ])
+            })
+            .collect()
+    }))
 }
 
 /// The `pg_type` rows of a user type and of its array type, as `TypeCreate` fills them.
@@ -958,11 +1045,35 @@ fn pg_language(_: &EvalCtx) -> SqlResult<Vec<Row>> {
     }))
 }
 
-fn pg_extension(_: &EvalCtx) -> SqlResult<Vec<Row>> {
-    Ok(rows_of(PG_EXTENSION, |s| vec![s.row(vec![("oid", oid(13_558)), ("extname", name("plpgsql")), ("extversion", txt("1.0"))])]))
+/// An extension Postgres 18 ships: (name, default version).
+pub fn available_extension(ext: &str) -> Option<(&'static str, &'static str)> {
+    PG_EXTENSIONS_DATA.lines().filter(|l| !l.is_empty()).find_map(|l| {
+        let mut f = l.splitn(3, '\t');
+        let n = f.next()?;
+        let v = f.next()?;
+        (n == ext).then_some((n, v))
+    })
 }
 
-fn pg_available_extensions(_: &EvalCtx) -> SqlResult<Vec<Row>> {
+fn pg_extension(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let m = snapshot(ctx);
+    Ok(rows_of(PG_EXTENSION, |s| {
+        let mut rows = vec![s.row(vec![("oid", oid(13_558)), ("extname", name("plpgsql")), ("extversion", txt("1.0"))])];
+        for e in m.catalog.extensions() {
+            rows.push(s.row(vec![
+                ("oid", oid(e.oid)),
+                ("extname", name(&e.name)),
+                ("extnamespace", oid(m.namespace(&e.schema))),
+                ("extversion", txt(e.version.clone())),
+                ("extrelocatable", boolean(true)),
+            ]));
+        }
+        rows
+    }))
+}
+
+fn pg_available_extensions(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let catalog = ctx.txn.catalog();
     Ok(rows_of(PG_AVAILABLE_EXTENSIONS, |s| {
         PG_EXTENSIONS_DATA
             .lines()
@@ -970,7 +1081,11 @@ fn pg_available_extensions(_: &EvalCtx) -> SqlResult<Vec<Row>> {
             .map(|l| {
                 let f: Vec<&str> = l.splitn(3, '\t').collect();
                 let get = |i: usize| f.get(i).copied().unwrap_or("");
-                let installed = if get(0) == "plpgsql" { txt(get(1)) } else { Value::Null };
+                let installed = match catalog.extension(get(0)) {
+                    Some(e) => txt(e.version.clone()),
+                    None if get(0) == "plpgsql" => txt(get(1)),
+                    None => Value::Null,
+                };
                 s.row(vec![
                     ("name", name(get(0))),
                     ("default_version", txt(get(1))),

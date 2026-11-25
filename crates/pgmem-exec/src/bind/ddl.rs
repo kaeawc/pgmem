@@ -1066,9 +1066,11 @@ fn add_exclusion(
     for (e, op) in &elements {
         let (_, ty) = b.bind_expr(e, &ctx)?;
         let base = ty.base();
-        // gist has default operator classes for ranges and multiranges only (no btree_gist).
+        // gist has default operator classes for ranges and multiranges (and, with btree_gist,
+        // for the scalar types).
+        let btree_gist = b.catalog.extension("btree_gist").is_some();
         let has_opclass = match method {
-            "gist" | "spgist" => matches!(base, Type::Range(_) | Type::Multirange(_)),
+            "gist" | "spgist" => matches!(base, Type::Range(_) | Type::Multirange(_)) || (btree_gist && method == "gist"),
             _ => !matches!(base, Type::Json),
         };
         if !has_opclass {

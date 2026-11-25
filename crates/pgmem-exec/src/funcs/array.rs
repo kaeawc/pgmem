@@ -50,7 +50,7 @@ fn elem_of(t: &Type) -> Type {
 
 fn arr_type(t: &Type) -> Option<Type> {
     match t {
-        Type::Array(_) => Some(t.clone()),
+        Type::Array(_) | Type::Int2Vector | Type::OidVector => Some(t.clone()),
         Type::Unknown => Some(Type::array_of(Type::Text)),
         _ => None,
     }
@@ -199,7 +199,7 @@ pub fn resolve_srf(name: &str, args: &[Type]) -> SqlResult<Option<SrfResolution>
             let mut targets = Vec::new();
             for a in args {
                 let t = match a {
-                    Type::Array(_) => a.clone(),
+                    Type::Array(_) | Type::Int2Vector | Type::OidVector => a.clone(),
                     Type::Unknown => Type::array_of(Type::Text),
                     _ => return Err(no_function(name, args)),
                 };
@@ -278,7 +278,10 @@ pub fn resolve_srf(name: &str, args: &[Type]) -> SqlResult<Option<SrfResolution>
             if args.len() == 3 {
                 t.push(Type::Bool);
             }
-            Ok(Some((vec![Type::Int4], t, generate_subscripts)))
+            // int2vector / oidvector subscripts start at 0.
+            let f: SrfFn =
+                if matches!(args[0], Type::Int2Vector | Type::OidVector) { generate_subscripts_zero } else { generate_subscripts };
+            Ok(Some((vec![Type::Int4], t, f)))
         }
         _ => Ok(None),
     }
@@ -381,6 +384,10 @@ fn generate_subscripts(a: &[Value], _: &EvalCtx) -> SqlResult<Vec<Row>> {
         out.reverse();
     }
     Ok(out)
+}
+
+fn generate_subscripts_zero(a: &[Value], c: &EvalCtx) -> SqlResult<Vec<Row>> {
+    Ok(generate_subscripts(a, c)?.into_iter().map(|r| r.into_iter().map(|v| int4(v.as_i64().unwrap_or(1) - 1)).collect()).collect())
 }
 
 /// The length of dimension `a[1]` (1-based), NULL when there is none.

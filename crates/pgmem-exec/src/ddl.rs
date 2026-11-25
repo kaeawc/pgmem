@@ -149,6 +149,10 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
             crate::ddl_views::refresh_matview(name, *concurrently, *with_data, txn, env, state)
         }
         Statement::RenameIndex { name, new_name, if_exists } => rename_index(name, new_name, *if_exists, txn),
+        Statement::CreateExtension { name, if_not_exists, schema, version } => {
+            crate::extensions::create_extension(name, *if_not_exists, schema.as_deref(), version.as_deref(), txn)
+        }
+        Statement::DropExtension { names, if_exists, cascade } => crate::extensions::drop_extension(names, *if_exists, *cascade, txn),
         Statement::CreateRole { name, options, if_not_exists } => crate::roles::create_role(name, options, *if_not_exists, txn, env),
         Statement::AlterRole { name, action } => crate::roles::alter_role(name, action, txn, env),
         Statement::DropRole { names, if_exists } => crate::roles::drop_role(names, *if_exists, txn, env),

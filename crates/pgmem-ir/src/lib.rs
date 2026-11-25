@@ -199,6 +199,17 @@ pub enum Statement {
         name: ObjectName,
         owner: String,
     },
+    CreateExtension {
+        name: String,
+        if_not_exists: bool,
+        schema: Option<String>,
+        version: Option<String>,
+    },
+    DropExtension {
+        names: Vec<String>,
+        if_exists: bool,
+        cascade: bool,
+    },
     CreateFunction(Box<CreateFunction>),
     /// `DROP {FUNCTION | PROCEDURE | ROUTINE} [IF EXISTS] name [(types)], ... [CASCADE]`.
     DropFunction {

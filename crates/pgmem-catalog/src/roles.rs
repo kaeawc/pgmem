@@ -76,7 +76,32 @@ pub struct DefaultPrivilege {
     pub privileges: Vec<char>,
 }
 
+/// An installed extension (`pg_extension`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtensionDef {
+    pub oid: Oid,
+    pub name: String,
+    pub schema: String,
+    pub version: String,
+}
+
 impl Catalog {
+    pub fn extensions(&self) -> impl Iterator<Item = &ExtensionDef> {
+        self.extensions.values()
+    }
+
+    pub fn extension(&self, name: &str) -> Option<&ExtensionDef> {
+        self.extensions.get(name)
+    }
+
+    pub fn put_extension(&mut self, def: ExtensionDef) {
+        self.extensions.insert(def.name.clone(), def);
+    }
+
+    pub fn drop_extension(&mut self, name: &str) -> Option<ExtensionDef> {
+        self.extensions.remove(name)
+    }
+
     pub fn roles(&self) -> impl Iterator<Item = &Arc<RoleDef>> {
         self.roles.values()
     }
