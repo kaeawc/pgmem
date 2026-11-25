@@ -13,6 +13,19 @@ fn bad(ty: &Type, why: &str) -> SqlError {
 pub fn encode(v: &Value, ty: &Type) -> SqlResult<Vec<u8>> {
     let mismatch = || SqlError::internal(format!("cannot binary-encode {} as {}", v.kind(), ty.name()));
     Ok(match ty {
+        Type::Xid | Type::Cid => {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let n = v.as_i64().ok_or_else(mismatch)? as u32;
+            n.to_be_bytes().to_vec()
+        }
+        Type::Tid => match v {
+            Value::Tid(block, item) => {
+                let mut out = block.to_be_bytes().to_vec();
+                out.extend_from_slice(&item.to_be_bytes());
+                out
+            }
+            _ => return Err(mismatch()),
+        },
         Type::Bool => vec![u8::from(v.as_bool().ok_or_else(mismatch)?)],
         Type::Int2 => {
             let n = v.as_i64().ok_or_else(mismatch)?;
@@ -234,6 +247,11 @@ pub fn decode(b: &[u8], ty: &Type) -> SqlResult<Value> {
             crate::text::decode(s, ty)?
         }
         Type::Oid => Value::Oid(u32::from_be_bytes(fixed(b, ty)?)),
+        Type::Xid | Type::Cid => Value::Int8(i64::from(u32::from_be_bytes(fixed(b, ty)?))),
+        Type::Tid => {
+            let raw: [u8; 6] = fixed(b, ty)?;
+            Value::Tid(u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]), u16::from_be_bytes([raw[4], raw[5]]))
+        }
         Type::Reg(k) => {
             let o = u32::from_be_bytes(fixed(b, ty)?);
             Value::Reg(*k, o, o.to_string())

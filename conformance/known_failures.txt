@@ -183,9 +183,6 @@ ddl/indexes.slt:4c6e700a408aabc9  # ALTER INDEX accounts_org_idx RENAME TO accou
 ddl/indexes.slt:9e875ec61d297af5#2  # SELECT indexname FROM pg_indexes WHERE tablename = 'accounts' ORDER BY indexname
 ddl/indexes.slt:f05601fa90c15cdd  # CREATE TABLE ui (a int); CREATE UNIQUE INDEX ui_a_idx ON ui (a); ALTER TABLE ui ADD CONSTRAINT ui_a_unique UNIQUE USING INDEX ui_a_idx
 ddl/indexes.slt:cc9b2bc18077ba1f  # SELECT conname, contype FROM pg_constraint WHERE conrelid = 'ui'::regclass
-ddl/migrations.slt:6bcf744ad9557798  # SELECT pg_try_advisory_lock(1)
-ddl/migrations.slt:70c4511f72841147  # SELECT pg_advisory_unlock(1), pg_advisory_unlock(1), pg_advisory_unlock(1)
-ddl/migrations.slt:6bd6804ad95baaaa  # SELECT pg_try_advisory_lock(7)
 ddl/migrations.slt:57bc92a514011689  # DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'status') THEN CREATE TYPE status AS ENUM ('a', 'b'); END IF; END $$; DO $$ BEGIN CREATE TYPE status AS ENUM ('a'); EXCEPTION WHEN duplicate_object THEN null; END $$
 ddl/migrations.slt:751b49cfc21be4f7  # DO $$ DECLARE i int; BEGIN FOR i IN 1..3 LOOP INSERT INTO schema_migrations VALUES ('do_' || i); END LOOP; END $$; DO $$ BEGIN EXECUTE 'ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS dirty boolean NOT NULL DEFAULT false'; END $$
 ddl/migrations.slt:d6fca8810f9b16fb  # SELECT version, dirty FROM schema_migrations ORDER BY version
@@ -259,21 +256,7 @@ ddl/views.slt:9988938598b9534b  # REFRESH MATERIALIZED VIEW mv_empty
 ddl/views.slt:fb8c7c353fbd2694  # SELECT count(*) FROM mv_empty
 ddl/views.slt:ee61cccb4f6b2ca5  # DROP MATERIALIZED VIEW mv_totals
 ddl/views.slt:c7c87224f956484a  # SELECT matviewname, ispopulated FROM pg_matviews WHERE schemaname = 'public' ORDER BY 1
-dml/delete.slt:e1f0d2dfc7388255  # DELETE FROM book WHERE CURRENT OF cur RETURNING id
-dml/delete.slt:cc7500f6d2aed8f0  # DELETE FROM book RETURNING id
-dml/on_conflict.slt:4c55601137341f40  # INSERT INTO kv (k, v) VALUES ('d', 41), ('f', 7) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v RETURNING k, v, (xmax = 0) AS inserted
-dml/on_conflict.slt:e0386e843951fad8  # INSERT INTO kv (k, v) VALUES ('f', 0) ON CONFLICT (k) DO UPDATE SET k = 'f2' RETURNING k, v
-dml/on_conflict.slt:8af6d1dd260c17ba  # INSERT INTO kv (k, v) VALUES ('f2', 0) ON CONFLICT (k) DO UPDATE SET k = 'a'
-dml/on_conflict.slt:c7d8af710482c7dd  # SELECT k, v, hits FROM kv ORDER BY k
 dml/on_conflict.slt:8ce9ce1dd7ed5cb8  # INSERT INTO accounts VALUES (2, 'ALICE@example.COM') ON CONFLICT (lower(email)) DO UPDATE SET email = EXCLUDED.email RETURNING id, email
-dml/orm_patterns.slt:c6825b22183268e8  # INSERT INTO product (sku, name, price) VALUES ('H8'::varchar, 'Eta'::text, '12.345'::numeric) ON CONFLICT (sku) DO UPDATE SET price = EXCLUDED.price RETURNING id > 0 AS has_id, price, (xmax = 0) AS inserted
-dml/orm_patterns.slt:df1c5a2fc0c36afe  # INSERT INTO product (sku, name, price) VALUES ('H8'::varchar, 'Eta'::text, '13'::numeric) ON CONFLICT (sku) DO UPDATE SET price = EXCLUDED.price RETURNING price, (xmax = 0) AS inserted
-dml/orm_patterns.slt:63925db1c9f27f54  # SELECT sku FROM product WHERE deleted_at IS NULL ORDER BY sku
-dml/orm_patterns.slt:93413b6eeb285830  # DELETE FROM events WHERE ctid IN (SELECT ctid FROM events WHERE kind = 'odd' ORDER BY id LIMIT 2) RETURNING id
-dml/orm_patterns.slt:c7bec65a73bf3c3c  # DELETE FROM events WHERE ctid = ANY(ARRAY(SELECT ctid FROM events ORDER BY id DESC LIMIT 2)) RETURNING id
-dml/orm_patterns.slt:8b90eccb6de1819c  # SELECT sku, name, price, version, deleted_at FROM product ORDER BY sku
-dml/update.slt:642e874a1a02056d  # UPDATE emp SET name = 'current' WHERE CURRENT OF c RETURNING id, name
-dml/update.slt:54362fd2aeb66427  # SELECT id, name, dept_id, salary, bonus FROM emp ORDER BY id
 functions/arrays.slt:32e8f695cdf0b645  # SELECT array_dims(ARRAY[1, 2, 3]), array_dims(ARRAY[[1, 2], [3, 4]]), array_dims('[2:4]={1,2,3}'::int[]), array_dims(ARRAY[]::int[])
 functions/arrays.slt:2dfed30613a3235b  # SELECT array_lower('[2:4]={1,2,3}'::int[], 1), array_upper('[2:4]={1,2,3}'::int[], 1), array_upper(ARRAY[1, 2], 1), array_lower(ARRAY[]::int[], 1)
 functions/arrays.slt:ff7a90f4845cff74  # SELECT ('[2:4]={1,2,3}'::int[])[2], ('[2:4]={1,2,3}'::int[])[1], '[2:4]={1,2,3}'::int[]
@@ -332,31 +315,6 @@ session/roles.slt:dfbf7fb3babe5bd0#2  # DROP ROLE IF EXISTS conf_sess_login
 session/utility.slt:14a255b6d915c7e9  # DO $$ BEGIN PERFORM 1; END $$
 session/utility.slt:6ef5fcb4d663b855  # DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'u') THEN CREATE TABLE u (x int); END IF; END $$
 session/utility.slt:7e9fe260f01363ab  # SELECT to_regclass('u') IS NOT NULL
-transactions/advisory.slt:04759863e43176a3  # SELECT pg_try_advisory_lock(1001)
-transactions/advisory.slt:04759863e43176a3#2  # SELECT pg_try_advisory_lock(1001)
-transactions/advisory.slt:b887b2e2f3f636ae#3  # SELECT pg_advisory_unlock(1001)
-transactions/advisory.slt:dd1e62f9f9bb71f5  # SELECT pg_try_advisory_lock(2002)
-transactions/advisory.slt:61d56bab2ed9da7c  # SELECT pg_try_advisory_xact_lock(3003)
-transactions/advisory.slt:6821e30587545c19  # SELECT pg_try_advisory_lock(4004)
-transactions/advisory.slt:a3c114a06f767e47  # SELECT pg_try_advisory_lock(1, 2), pg_try_advisory_lock(2, 1)
-transactions/advisory.slt:1ff926831b7b0233  # SELECT locktype, classid, objid, objsubid, mode, granted FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid() ORDER BY objsubid, classid, objid
-transactions/advisory.slt:970c22b75fc0f4a7  # SELECT pg_try_advisory_xact_lock(hashtext('migrations'))
-transactions/advisory.slt:6f415f8f9ceee827  # SELECT pg_try_advisory_xact_lock(hashtext('migrations'))
-transactions/advisory.slt:36c7dc46921ec2c4  # SELECT pg_try_advisory_lock(hashtext('migrations'))
-transactions/advisory.slt:a9c5ad2d0e12db2d  # SELECT pg_advisory_unlock(hashtext('migrations'))
-transactions/basics.slt:04caca50ec3ada76  # SELECT current_setting('transaction_isolation') AS iso, current_setting('transaction_read_only') AS ro
-transactions/basics.slt:fce4e292ffb44146  # INSERT INTO t VALUES (20, 'ro')
-transactions/basics.slt:018e9706a0892d9e  # UPDATE t SET v = 'ro'
-transactions/basics.slt:d2560187e0a29db3  # CREATE TABLE ro (a int)
-transactions/basics.slt:262cd3bc434184c6  # INSERT INTO t VALUES (21, 'ro default')
-transactions/chain.slt:04caca50ec3ada76  # SELECT current_setting('transaction_isolation') AS iso, current_setting('transaction_read_only') AS ro
-transactions/chain.slt:9d73e647610c45ac  # INSERT INTO t VALUES (1)
-transactions/chain.slt:04caca50ec3ada76#2  # SELECT current_setting('transaction_isolation') AS iso, current_setting('transaction_read_only') AS ro
-transactions/chain.slt:9d73e647610c45ac#2  # INSERT INTO t VALUES (1)
-transactions/chain.slt:65ded50a766d7c86  # SELECT id FROM t ORDER BY id
-transactions/chain.slt:a54aba6981cbd4aa#3  # COMMIT AND CHAIN
-transactions/chain.slt:4c6b57865554e5eb#3  # ROLLBACK AND CHAIN
-transactions/chain.slt:2a8aed709dfe5956  # SAVEPOINT probe
 transactions/deferred.slt:94702a6f25b463a9  # INSERT INTO child VALUES (1, 10)
 transactions/deferred.slt:3375b3ae829ba206  # INSERT INTO parent VALUES (10)
 transactions/deferred.slt:5f853eb6868b7712  # SELECT id, parent_id FROM child
@@ -379,31 +337,9 @@ transactions/deferred.slt:d4d2737466066058  # INSERT INTO seq_commit VALUES (2)
 transactions/deferred.slt:7589a4fbc62c3cb6#7  # COMMIT
 transactions/deferred.slt:6df84ead7778e9ff  # INSERT INTO seq_commit VALUES (3) ON CONFLICT (pos) DO NOTHING
 transactions/deferred.slt:6ce03045219c92bb  # CREATE TABLE bad (a int CHECK (a > 0) DEFERRABLE)
-transactions/row_locks.slt:a638b95362843898  # SELECT id FROM job ORDER BY id FOR UPDATE SKIP LOCKED
-transactions/row_locks.slt:aa5ca8b8e5181cd7  # SELECT id FROM job WHERE id = 1 FOR UPDATE NOWAIT
-transactions/row_locks.slt:795c097334af8dea  # SELECT id FROM job WHERE id = 2 FOR SHARE NOWAIT
-transactions/row_locks.slt:4339a1be178baaf4  # SELECT id FROM job WHERE id = 1 FOR KEY SHARE NOWAIT
-transactions/row_locks.slt:1ad972feb9ba839b  # SELECT id FROM job ORDER BY id LIMIT 2 FOR UPDATE SKIP LOCKED
-transactions/row_locks.slt:1a51dd4d159eba2c  # UPDATE job SET state = 'running' WHERE id = (SELECT id FROM job WHERE state = 'queued' ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING id
-transactions/row_locks.slt:c414f24cab86e436  # COMMIT
-transactions/row_locks.slt:d3f66c58b76ba23e  # SELECT id, state FROM job ORDER BY id
-transactions/row_locks.slt:c2d1331f9d5ef88b  # SELECT id FROM job WHERE id = 3 FOR SHARE NOWAIT
-transactions/row_locks.slt:27d84be5749a5fdd  # SELECT id FROM job WHERE id = 3 FOR NO KEY UPDATE NOWAIT
-transactions/row_locks.slt:02fa4fe8092c9cb8  # SELECT id FROM job WHERE id = 4 FOR UPDATE NOWAIT
-transactions/row_locks.slt:9556374dc66516ab  # SELECT 1 FROM job WHERE id = 1 FOR UPDATE NOWAIT
-transactions/row_locks.slt:7515fecf15eb0524  # SELECT 1
-transactions/row_locks.slt:6699bac91f9dd928  # SELECT count(*) FROM job FOR UPDATE
-transactions/row_locks.slt:4ac633b3e92d2635  # SELECT DISTINCT state FROM job FOR UPDATE
-transactions/row_locks.slt:0ab9557ef2582a34  # SELECT id FROM job UNION SELECT id FROM job FOR UPDATE
-transactions/row_locks.slt:ea2921e7144a657d  # LOCK TABLE job IN ROW EXCLUSIVE MODE NOWAIT
-transactions/serialization.slt:7726cceb577e14ec  # UPDATE item SET n = n + 10 WHERE id = 1
-transactions/serialization.slt:ab5916c5a8dfb1a4  # SELECT 1
-transactions/serialization.slt:b8d5d195739185d4  # DELETE FROM item WHERE id = 2
-transactions/serialization.slt:14e28bfbed5c1dc6  # SELECT n FROM item WHERE id = 1 FOR UPDATE
 transactions/serialization.slt:c414f24cab86e436  # COMMIT
 transactions/serialization.slt:f654956a7ca4b651  # SELECT doctor, on_duty FROM oncall ORDER BY doctor
 transactions/serialization.slt:acfaacf8e23e6dc4  # SELECT on_duty FROM oncall WHERE doctor = 'bob'
-transactions/serialization.slt:eafdbe7787827286  # UPDATE oncall SET on_duty = true WHERE doctor = 'bob'
 transactions/serialization.slt:c414f24cab86e436#2  # COMMIT
 transactions/serialization.slt:fe34efe19b672efe  # SELECT room, slot FROM booking ORDER BY slot
 types/arrays.slt:59695c5e88ee43b9  # SELECT '[0:2]={a,b,c}'::text[], ('[0:2]={a,b,c}'::text[])[0], array_lower('[0:2]={a,b,c}'::text[], 1)

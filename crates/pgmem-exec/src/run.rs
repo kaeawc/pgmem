@@ -14,11 +14,17 @@ pub fn run(rel: &Rel, ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     match rel {
         Rel::Values { rows } => rows.iter().map(|r| r.iter().map(|e| eval(e, &[], ctx)).collect()).collect(),
         Rel::Virtual { rows } => (rows.0)(ctx),
-        Rel::Scan { table, slots, missing } => Ok(ctx
+        Rel::Scan { table, slots, missing, system } => Ok(ctx
             .txn
             .scan(*table)
             .into_iter()
-            .map(|(_, stored)| slots.iter().zip(missing).map(|(s, m)| stored.get(*s).cloned().unwrap_or_else(|| m.clone())).collect())
+            .map(|(id, stored)| {
+                let mut row: Row = slots.iter().zip(missing).map(|(s, m)| stored.get(*s).cloned().unwrap_or_else(|| m.clone())).collect();
+                if *system {
+                    row.extend(crate::dml::system_values(*table, Some(id), 0));
+                }
+                row
+            })
             .collect()),
         Rel::ProjectSet { input, srfs } => {
             let rows = run(input, ctx)?;
@@ -155,6 +161,37 @@ pub fn run(rel: &Rel, ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         Rel::CteScan { id } => {
             let rows = ctx.state.ctes.borrow().get(id).cloned().ok_or_else(|| SqlError::internal(format!("CTE {id} not materialized")))?;
             Ok(rows.as_ref().clone())
+        }
+        Rel::LockRows { input, targets, mode, wait, limit, offset, visible } => {
+            let rows = run(input, ctx)?;
+            let count = |e: &Option<crate::plan::Expr>| -> SqlResult<Option<usize>> {
+                Ok(match e {
+                    Some(e) => eval(e, &[], ctx)?.as_i64().map(|n| usize::try_from(n.max(0)).unwrap_or(usize::MAX)),
+                    None => None,
+                })
+            };
+            let (limit, offset) = (count(limit)?, count(offset)?.unwrap_or(0));
+            let mut out = Vec::new();
+            let mut skipped = 0;
+            'rows: for row in rows {
+                if limit.is_some_and(|l| out.len() >= l) {
+                    break;
+                }
+                for (t, c) in targets {
+                    let (Some(Value::Oid(table)), Some(Value::Tid(block, item))) = (row.get(*t), row.get(*c)) else { continue };
+                    let name = ctx.txn.catalog().table_by_oid(*table).map(|d| d.name.clone()).unwrap_or_default();
+                    let id = (u64::from(*block) << 16) | u64::from(*item);
+                    if !ctx.txn.lock_row(*table, &name, id, *mode, *wait)? {
+                        continue 'rows;
+                    }
+                }
+                if skipped < offset {
+                    skipped += 1;
+                    continue;
+                }
+                out.push(row[..*visible].to_vec());
+            }
+            Ok(out)
         }
         Rel::With { ctes, body } => {
             for cte in ctes {

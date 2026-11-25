@@ -165,6 +165,8 @@ pub mod code {
     pub const INVALID_CURSOR_NAME: &str = "34000";
     pub const INVALID_SAVEPOINT_SPECIFICATION: &str = "3B001";
     pub const SERIALIZATION_FAILURE: &str = "40001";
+    pub const LOCK_NOT_AVAILABLE: &str = "55P03";
+    pub const READ_ONLY_SQL_TRANSACTION: &str = "25006";
     pub const DEADLOCK_DETECTED: &str = "40P01";
     pub const SYNTAX_ERROR: &str = "42601";
     pub const INSUFFICIENT_PRIVILEGE: &str = "42501";

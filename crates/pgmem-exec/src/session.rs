@@ -226,6 +226,8 @@ pub struct Session {
     pending_notify: Vec<(String, String)>,
     /// Running an extended-protocol implicit transaction, which ends at Sync.
     pipeline: bool,
+    /// The current transaction is READ ONLY.
+    txn_read_only: bool,
 }
 
 /// A savepoint's marks into the transaction's undo and queues.
@@ -265,6 +267,7 @@ impl Session {
             pending_listen: Vec::new(),
             pending_notify: Vec::new(),
             pipeline: false,
+            txn_read_only: false,
         }
     }
 
@@ -439,6 +442,8 @@ impl Session {
         self.txn_start = self.clock.now_micros();
         self.txid_counter += 1;
         self.txn = Some(self.db.begin(self.default_isolation));
+        let read_only = self.settings.get("default_transaction_read_only").is_some_and(|v| v == "on");
+        self.set_read_only(read_only);
         true
     }
 
@@ -456,6 +461,9 @@ impl Session {
         }
         self.settings
             .insert("transaction_isolation".into(), self.settings.get("default_transaction_isolation").cloned().unwrap_or_default());
+        self.txn_read_only = false;
+        let ro = self.settings.get("default_transaction_read_only").cloned().unwrap_or_else(|| "off".into());
+        self.settings.insert("transaction_read_only".into(), ro);
     }
 
     /// Executes one statement with bound parameter values.
@@ -484,7 +492,7 @@ impl Session {
             Statement::Unlisten { channel } => return Ok(self.listen(channel.clone().map(|c| (c, false)))),
             Statement::Notify { channel, payload } => return self.notify(channel, payload.as_deref()),
             Statement::Maintenance { tag, tables, in_block_ok } => return self.maintenance(tag, tables, *in_block_ok),
-            Statement::Lock { tables } => return self.lock_tables(tables),
+            Statement::Lock { tables, mode, nowait } => return self.lock_tables(tables, *mode, *nowait),
             Statement::Discard(k) if *k != ir::DiscardKind::Temp && *k != ir::DiscardKind::All => return self.discard(*k),
             _ => {}
         }
@@ -519,6 +527,11 @@ impl Session {
     }
 
     fn run_in_txn(&mut self, stmt: &Statement, param_types: &[Type], params: &[Value]) -> SqlResult<QueryResult> {
+        if self.txn_read_only
+            && let Some(what) = self.read_only_violation(stmt)
+        {
+            return Err(SqlError::new(code::READ_ONLY_SQL_TRANSACTION, format!("cannot execute {what} in a read-only transaction")));
+        }
         match stmt {
             Statement::Execute { name, args } => return self.execute_prepared(name, args),
             Statement::DeclareCursor(d) => return self.declare_cursor(d),
@@ -582,6 +595,53 @@ impl Session {
         Ok(result)
     }
 
+    /// The command a READ ONLY transaction may not run (writes to temporary tables are allowed).
+    fn read_only_violation(&self, stmt: &Statement) -> Option<&'static str> {
+        let temp = |name: &ir::ObjectName| {
+            let catalog = self.catalog_snapshot();
+            matches!(catalog.find_relation(name), Ok(Some(Relation::Table(t))) if Some(&t.schema) == self.temp_schema.as_ref())
+        };
+        Some(match stmt {
+            Statement::Insert(i) if !temp(&i.table) => "INSERT",
+            Statement::Update(u) if !temp(&u.table) => "UPDATE",
+            Statement::Delete(d) if !temp(&d.table) => "DELETE",
+            Statement::Merge(m) if !temp(&m.table) => "MERGE",
+            Statement::CreateTable(ct) if !ct.temporary => "CREATE TABLE",
+            Statement::CreateView(_) => "CREATE VIEW",
+            Statement::CreateIndex(_) => "CREATE INDEX",
+            Statement::CreateSequence(_) => "CREATE SEQUENCE",
+            Statement::AlterTable(_) => "ALTER TABLE",
+            Statement::CreateType(_) => "CREATE TYPE",
+            Statement::CreateDomain(_) => "CREATE DOMAIN",
+            Statement::AlterType(_) => "ALTER TYPE",
+            Statement::AlterDomain(_) => "ALTER DOMAIN",
+            Statement::Drop(d) => match d.object_type {
+                ir::ObjectType::Table => "DROP TABLE",
+                ir::ObjectType::View => "DROP VIEW",
+                ir::ObjectType::Index => "DROP INDEX",
+                ir::ObjectType::Sequence => "DROP SEQUENCE",
+                ir::ObjectType::Schema => "DROP SCHEMA",
+                ir::ObjectType::Type => "DROP TYPE",
+                ir::ObjectType::Domain => "DROP DOMAIN",
+                ir::ObjectType::Extension => "DROP EXTENSION",
+                ir::ObjectType::Function => "DROP FUNCTION",
+            },
+            Statement::Truncate(_) => "TRUNCATE TABLE",
+            Statement::CreateSchema(_) => "CREATE SCHEMA",
+            Statement::AlterSchema { .. } => "ALTER SCHEMA",
+            Statement::SetSchema { .. } => "ALTER TABLE",
+            Statement::Comment { .. } => "COMMENT",
+            Statement::Query(q) => match q.locking.first().map(|l| l.strength) {
+                Some(ir::LockStrength::Update) => "SELECT FOR UPDATE",
+                Some(ir::LockStrength::NoKeyUpdate) => "SELECT FOR NO KEY UPDATE",
+                Some(ir::LockStrength::Share) => "SELECT FOR SHARE",
+                Some(ir::LockStrength::KeyShare) => "SELECT FOR KEY SHARE",
+                None => return None,
+            },
+            _ => return None,
+        })
+    }
+
     /// Drops the session's temporary objects (at disconnect).
     pub fn drop_temp_objects(&mut self) {
         let Some(temp) = self.temp_schema.clone() else { return };
@@ -609,42 +669,17 @@ impl Session {
                 self.implicit_block = false;
                 self.pipeline = false;
                 self.ensure_txn();
-                let _ = read_only;
+                if let Some(ro) = read_only {
+                    self.set_read_only(*ro);
+                }
                 if let Some(level) = isolation {
                     self.set_isolation(*level)?;
                 }
                 self.status = TxStatus::InBlock;
                 Ok(tag("BEGIN"))
             }
-            TransactionStmt::Commit { .. } => {
-                let Some(txn) = self.txn.take() else {
-                    let mut r = tag("COMMIT");
-                    r.notices.push(warning("there is no transaction in progress", code::NO_ACTIVE_SQL_TRANSACTION));
-                    return Ok(r);
-                };
-                let failed = self.status == TxStatus::Failed;
-                self.status = TxStatus::Idle;
-                self.pipeline = false;
-                self.end_transaction_settings(!failed);
-                if failed {
-                    self.finish_txn(txn, false)?;
-                    return Ok(tag("ROLLBACK"));
-                }
-                self.finish_txn(txn, true)?;
-                Ok(tag("COMMIT"))
-            }
-            TransactionStmt::Rollback { .. } => {
-                let Some(txn) = self.txn.take() else {
-                    let mut r = tag("ROLLBACK");
-                    r.notices.push(warning("there is no transaction in progress", code::NO_ACTIVE_SQL_TRANSACTION));
-                    return Ok(r);
-                };
-                self.status = TxStatus::Idle;
-                self.pipeline = false;
-                self.end_transaction_settings(false);
-                self.finish_txn(txn, false)?;
-                Ok(tag("ROLLBACK"))
-            }
+            TransactionStmt::Commit { chain } => self.end_block(true, *chain),
+            TransactionStmt::Rollback { chain } => self.end_block(false, *chain),
             TransactionStmt::Savepoint(name) => {
                 if self.status == TxStatus::Failed {
                     return Err(SqlError::new(
@@ -700,7 +735,7 @@ impl Session {
                 }
                 Ok(tag("ROLLBACK"))
             }
-            TransactionStmt::SetTransaction { isolation, .. } => {
+            TransactionStmt::SetTransaction { isolation, read_only } => {
                 if self.txn.is_none() {
                     let mut r = tag("SET");
                     r.notices.push(warning("SET TRANSACTION can only be used in transaction blocks", code::NO_ACTIVE_SQL_TRANSACTION));
@@ -709,9 +744,65 @@ impl Session {
                 if let Some(level) = isolation {
                     self.set_isolation(*level)?;
                 }
+                if let Some(ro) = read_only {
+                    self.set_read_only(*ro);
+                }
                 Ok(tag("SET"))
             }
         }
+    }
+
+    /// COMMIT / ROLLBACK [AND [NO] CHAIN]. A chained transaction keeps the characteristics of
+    /// the one that ended.
+    fn end_block(&mut self, commit: bool, chain: bool) -> SqlResult<QueryResult> {
+        let name = if commit { "COMMIT" } else { "ROLLBACK" };
+        let Some(txn) = self.txn.take() else {
+            if chain {
+                return Err(SqlError::new(
+                    code::NO_ACTIVE_SQL_TRANSACTION,
+                    format!("{name} AND CHAIN can only be used in transaction blocks"),
+                ));
+            }
+            return Ok(QueryResult {
+                tag: name.into(),
+                notices: vec![Notice {
+                    severity: "WARNING",
+                    code: code::NO_ACTIVE_SQL_TRANSACTION,
+                    message: "there is no transaction in progress".into(),
+                }],
+                ..Default::default()
+            });
+        };
+        let failed = self.status == TxStatus::Failed;
+        let isolation = self.settings.get("transaction_isolation").cloned().unwrap_or_default();
+        let read_only = self.txn_read_only;
+        self.status = TxStatus::Idle;
+        self.pipeline = false;
+        self.end_transaction_settings(commit && !failed);
+        self.finish_txn(txn, commit && !failed)?;
+        if chain {
+            self.ensure_txn();
+            self.status = TxStatus::InBlock;
+            // COMMIT AND CHAIN of an aborted transaction starts a default one; ROLLBACK AND
+            // CHAIN keeps the characteristics.
+            if !(commit && failed) {
+                let level = match isolation.as_str() {
+                    "repeatable read" => ir::IsolationLevel::RepeatableRead,
+                    "serializable" => ir::IsolationLevel::Serializable,
+                    "read uncommitted" => ir::IsolationLevel::ReadUncommitted,
+                    _ => ir::IsolationLevel::ReadCommitted,
+                };
+                self.set_isolation(level)?;
+                self.set_read_only(read_only);
+            }
+        }
+        Ok(QueryResult { tag: if commit && failed { "ROLLBACK" } else { name }.into(), ..Default::default() })
+    }
+
+    /// READ ONLY / READ WRITE for the current transaction.
+    fn set_read_only(&mut self, read_only: bool) {
+        self.txn_read_only = read_only;
+        self.settings.insert("transaction_read_only".into(), if read_only { "on" } else { "off" }.into());
     }
 
     fn set_isolation(&mut self, level: ir::IsolationLevel) -> SqlResult<()> {

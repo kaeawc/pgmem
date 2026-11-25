@@ -139,7 +139,7 @@ pub static DEFS: &[Def] = &[
     def!("pg_available_extensions", 12_009, 'v', PG_AVAILABLE_EXTENSIONS, pg_available_extensions),
     def!("pg_prepared_statements", 12_010, 'v', PG_PREPARED_STATEMENTS, pg_prepared_statements),
     def!("pg_cursors", 12_011, 'v', PG_CURSORS, pg_cursors),
-    def!("pg_locks", 12_012, 'v', PG_LOCKS, empty),
+    def!("pg_locks", 12_012, 'v', PG_LOCKS, pg_locks),
     def!("pg_stat_activity", 12_013, 'v', PG_STAT_ACTIVITY, pg_stat_activity),
 ];
 
@@ -1147,6 +1147,28 @@ fn pg_cursors(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                     ("is_binary", boolean(c.binary)),
                     ("is_scrollable", boolean(c.scroll)),
                     ("creation_time", Value::Timestamptz(c.creation_time)),
+                ])
+            })
+            .collect()
+    }))
+}
+
+/// Advisory locks of every session (other lock types are not tracked).
+fn pg_locks(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let held = ctx.txn.database().advisory().held();
+    Ok(rows_of(PG_LOCKS, |s| {
+        held.iter()
+            .map(|l| {
+                s.row(vec![
+                    ("locktype", txt("advisory")),
+                    ("database", oid(5)),
+                    ("classid", oid(l.key.0)),
+                    ("objid", oid(l.key.1)),
+                    ("objsubid", int2(usize::from(l.key.2))),
+                    ("pid", Value::Int4(l.pid)),
+                    ("mode", txt(if l.shared { "ShareLock" } else { "ExclusiveLock" })),
+                    ("granted", boolean(true)),
+                    ("fastpath", boolean(false)),
                 ])
             })
             .collect()

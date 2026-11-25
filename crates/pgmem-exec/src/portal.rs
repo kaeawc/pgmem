@@ -19,6 +19,9 @@ pub struct PreparedStatement {
     pub prepare_time: i64,
 }
 
+/// A cursor row's table OID and `ctid` (what `WHERE CURRENT OF` compares with).
+pub type RowIdentity = (u32, pgmem_types::Value);
+
 /// What `pg_cursors` shows about a cursor.
 #[derive(Clone, Debug)]
 pub struct CursorInfo {
@@ -28,6 +31,11 @@ pub struct CursorInfo {
     pub binary: bool,
     pub scroll: bool,
     pub creation_time: i64,
+    /// The table OID and `ctid` of the row the cursor is on (`WHERE CURRENT OF`).
+    pub current: Option<RowIdentity>,
+    /// `WHERE CURRENT OF` can name it: a FOR UPDATE / SHARE cursor, or a plain scan of one
+    /// table (no ORDER BY / LIMIT).
+    pub updatable: bool,
 }
 
 /// An open cursor over its (materialized) result.
@@ -36,6 +44,8 @@ pub struct Cursor {
     pub info: CursorInfo,
     pub columns: Vec<OutCol>,
     rows: Vec<Row>,
+    /// Per row, its table OID and `ctid` (a cursor over a single-table SELECT).
+    row_ids: Vec<Option<RowIdentity>>,
     /// 0 = before the first row, k = on row k, `rows.len() + 1` = after the last row.
     pos: usize,
     /// Declared in the current transaction (a rollback closes it even WITH HOLD).
@@ -52,7 +62,21 @@ pub struct Fetched {
 
 impl Cursor {
     pub fn new(info: CursorInfo, columns: Vec<OutCol>, rows: Vec<Row>, savepoint_depth: usize) -> Cursor {
-        Cursor { info, columns, rows, pos: 0, in_txn: true, savepoint_depth }
+        Cursor { info, columns, rows, row_ids: Vec::new(), pos: 0, in_txn: true, savepoint_depth }
+    }
+
+    /// Records each row's table OID and `ctid`.
+    pub fn with_row_ids(mut self, ids: Vec<Option<RowIdentity>>) -> Cursor {
+        self.row_ids = ids;
+        self
+    }
+
+    /// The table OID and `ctid` of the current row.
+    pub fn current_row_id(&self) -> Option<RowIdentity> {
+        if self.pos == 0 || self.pos > self.rows.len() {
+            return None;
+        }
+        self.row_ids.get(self.pos - 1).cloned().flatten()
     }
 
     fn end(&self) -> usize {
@@ -205,7 +229,16 @@ mod tests {
     use pgmem_types::Value;
 
     fn cursor(n: i32, scroll: bool) -> Cursor {
-        let info = CursorInfo { name: "c".into(), text: String::new(), hold: false, binary: false, scroll, creation_time: 0 };
+        let info = CursorInfo {
+            name: "c".into(),
+            text: String::new(),
+            hold: false,
+            binary: false,
+            scroll,
+            creation_time: 0,
+            current: None,
+            updatable: false,
+        };
         Cursor::new(info, Vec::new(), (1..=n).map(|i| vec![Value::Int4(i)]).collect(), 0)
     }
 

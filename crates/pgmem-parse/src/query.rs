@@ -48,21 +48,34 @@ pub(crate) fn lower_query(q: sq::Query) -> SqlResult<Query> {
             None => Expr::Literal(pgmem_ir::Literal::Integer("1".into())),
         });
     }
-    let locking = q
-        .locks
-        .into_iter()
-        .map(|l| {
-            Ok(LockClause {
-                strength: match l.lock_type {
-                    sq::LockType::Update => LockStrength::Update,
-                    sq::LockType::Share => LockStrength::Share,
-                },
-                of: l.of.iter().map(object_name).collect::<SqlResult<Vec<_>>>()?,
-                nowait: matches!(l.nonblock, Some(sq::NonBlock::Nowait)),
-                skip_locked: matches!(l.nonblock, Some(sq::NonBlock::SkipLocked)),
-            })
-        })
-        .collect::<SqlResult<Vec<_>>>()?;
+    // `FOR NO KEY UPDATE` / `FOR KEY SHARE` arrive as a marker clause before the clause they
+    // set the strength of (see `lock_marker`).
+    let mut locking = Vec::new();
+    let mut pending: Option<LockStrength> = None;
+    for l in q.locks {
+        let of = l.of.iter().map(object_name).collect::<SqlResult<Vec<_>>>()?;
+        match of.first().map(|n| n.base()) {
+            Some(crate::NO_KEY_UPDATE_MARKER) => {
+                pending = Some(LockStrength::NoKeyUpdate);
+                continue;
+            }
+            Some(crate::KEY_SHARE_MARKER) => {
+                pending = Some(LockStrength::KeyShare);
+                continue;
+            }
+            _ => {}
+        }
+        let strength = pending.take().unwrap_or(match l.lock_type {
+            sq::LockType::Update => LockStrength::Update,
+            sq::LockType::Share => LockStrength::Share,
+        });
+        locking.push(LockClause {
+            strength,
+            of,
+            nowait: matches!(l.nonblock, Some(sq::NonBlock::Nowait)),
+            skip_locked: matches!(l.nonblock, Some(sq::NonBlock::SkipLocked)),
+        });
+    }
     Ok(Query { with, body, order_by, limit, offset, with_ties, locking })
 }
 

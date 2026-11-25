@@ -33,6 +33,7 @@ pub fn encode(v: &Value, ty: &Type) -> SqlResult<String> {
         (Value::Jsonb(j), _) => j.to_string(),
         (Value::Json(s), _) => s.clone(),
         (Value::Oid(o), _) => o.to_string(),
+        (Value::Tid(block, item), _) => format!("({block},{item})"),
         (Value::Reg(_, _, name), _) => name.clone(),
         (Value::Enum(t, label), _) => crate::usertype::enum_label(*t, *label)?,
         (Value::Record(t, fields), _) => crate::usertype::format_record(*t, fields)?,
@@ -65,6 +66,8 @@ pub fn decode(s: &str, ty: &Type) -> SqlResult<Value> {
             Ok(Value::Json(s.to_owned()))
         }
         Type::Oid => parse_oid(s).map(Value::Oid),
+        Type::Xid | Type::Cid => parse_oid(s).map(|n| Value::Int8(i64::from(n))),
+        Type::Tid => parse_tid(s),
         // reg* input needs the catalog; the executor resolves names (see pgmem-exec `reg`).
         Type::Reg(_) => parse_oid(s).map(|o| {
             Value::Reg(
@@ -100,6 +103,16 @@ pub fn decode(s: &str, ty: &Type) -> SqlResult<Value> {
         Type::Domain(_) => decode(s, &ty.base()),
         Type::Record => Err(SqlError::feature_not_supported("input of anonymous composite types is not implemented")),
     }
+}
+
+/// `tidin`: `(block,item)`.
+fn parse_tid(s: &str) -> SqlResult<Value> {
+    let bad = || SqlError::new(code::INVALID_TEXT_REPRESENTATION, format!("invalid input syntax for type tid: \"{s}\""));
+    let inner = s.trim().strip_prefix('(').and_then(|r| r.strip_suffix(')')).ok_or_else(bad)?;
+    let (b, i) = inner.split_once(',').ok_or_else(bad)?;
+    let block: u32 = b.trim().parse().map_err(|_| bad())?;
+    let item: u16 = i.trim().parse().map_err(|_| bad())?;
+    Ok(Value::Tid(block, item))
 }
 
 /// `name` input: at most 63 bytes, cut at a character boundary.
