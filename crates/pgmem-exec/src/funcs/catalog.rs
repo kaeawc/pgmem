@@ -417,10 +417,32 @@ fn always_false(_: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     Ok(Value::Bool(false))
 }
 
+/// `pg_get_partkeydef`, `pg_partition_root`.
+fn partition_function(name: &str, n: usize) -> SqlResult<Option<Resolved>> {
+    match name {
+        "pg_get_partkeydef" if n == 1 => resolved(
+            strict("pg_get_partkeydef", |a, c| {
+                let catalog = c.txn.catalog();
+                let t = oid_arg(&a[0]).and_then(|o| catalog.table_by_oid(o));
+                Ok(t.and_then(|t| crate::partition::key_definition(catalog, t)).map_or(Value::Null, Value::Text))
+            }),
+            vec![Type::Oid],
+            Type::Text,
+        ),
+        "pg_partition_root" if n == 1 => {
+            resolved(strict("pg_partition_root", crate::partition::root_fn), vec![Type::Reg(RegKind::Class)], Type::Reg(RegKind::Class))
+        }
+        _ => Ok(None),
+    }
+}
+
 pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
     use Type::{Bool, Int4, Oid, Text};
     let n = args.len();
     let name_arg = Type::Name;
+    if let Some(r) = partition_function(name, n)? {
+        return Ok(Some(r));
+    }
     match name {
         "format_type" if n == 2 => resolved(lenient("format_type", format_type_fn), vec![Oid, Int4], Text),
         "pg_get_function_arguments"

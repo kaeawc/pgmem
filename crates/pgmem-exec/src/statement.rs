@@ -163,6 +163,15 @@ pub(crate) fn exec_statement(
             let rows = run(&bound.rel, &ectx)?;
             QueryResult { tag: format!("SELECT {}", rows.len()), columns: bound.columns, returns_rows: true, rows, ..Default::default() }
         }
+        Statement::Insert(i) if let Some(root) = crate::partition::partitioned_target(txn.catalog(), &i.table) => {
+            crate::partition::exec_insert(i, &root, binder, ctx, txn, params, env, state)?
+        }
+        Statement::Update(u) if let Some(root) = crate::partition::partitioned_target(txn.catalog(), &u.table) => {
+            crate::partition::exec_update(u, &root, binder, ctx, txn, params, env, state)?
+        }
+        Statement::Delete(d) if let Some(root) = crate::partition::partitioned_target(txn.catalog(), &d.table) => {
+            crate::partition::exec_delete(d, &root, binder, ctx, txn, params, env, state)?
+        }
         Statement::Insert(i) => {
             let plan = bind::bind_insert(binder, i, ctx)?;
             let r = crate::dml::exec_insert(&plan, txn, params, env, state)?;

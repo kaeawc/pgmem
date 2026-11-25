@@ -128,9 +128,9 @@ pub static DEFS: &[Def] = &[
     def!("pg_proc", 1255, 'r', PG_PROC, super::routines::pg_proc),
     def!("pg_enum", 3501, 'r', PG_ENUM, pg_enum),
     def!("pg_depend", 2608, 'r', PG_DEPEND, pg_depend),
-    def!("pg_inherits", 2611, 'r', PG_INHERITS, empty),
+    def!("pg_inherits", 2611, 'r', PG_INHERITS, pg_inherits),
     def!("pg_policy", 3256, 'r', PG_POLICY, empty),
-    def!("pg_partitioned_table", 3350, 'r', PG_PARTITIONED_TABLE, empty),
+    def!("pg_partitioned_table", 3350, 'r', PG_PARTITIONED_TABLE, pg_partitioned_table),
     def!("pg_trigger", 2620, 'r', PG_TRIGGER, super::routines::pg_trigger),
     def!("pg_range", 3541, 'r', PG_RANGE, pg_range),
     def!("pg_sequence", 2224, 'r', PG_SEQUENCE, pg_sequence),
@@ -148,6 +148,128 @@ pub static DEFS: &[Def] = &[
     def!("pg_locks", 12_012, 'v', PG_LOCKS, pg_locks),
     def!("pg_stat_activity", 12_013, 'v', PG_STAT_ACTIVITY, pg_stat_activity),
 ];
+
+fn pg_inherits(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let m = snapshot(ctx);
+    Ok(rows_of(PG_INHERITS, |s| {
+        m.tables()
+            .into_iter()
+            .filter_map(|t| m.catalog.partition_of(t.oid).map(|of| (t.oid, of.parent)))
+            .map(|(child, parent)| {
+                s.row(vec![
+                    ("inhrelid", oid(child)),
+                    ("inhparent", oid(parent)),
+                    ("inhseqno", Value::Int4(1)),
+                    ("inhdetachpending", boolean(false)),
+                ])
+            })
+            .collect()
+    }))
+}
+
+/// Default btree (403) and hash (405) operator classes by input type, recorded from Postgres 18.
+const DEFAULT_OPCLASSES: &[(u32, u32, u32)] = &[
+    (403, 16, 10003),
+    (403, 17, 10006),
+    (403, 18, 10007),
+    (403, 19, 10028),
+    (403, 20, 3124),
+    (403, 21, 1979),
+    (403, 23, 1978),
+    (403, 25, 3126),
+    (403, 26, 1981),
+    (403, 700, 10012),
+    (403, 701, 3123),
+    (403, 1042, 10004),
+    (403, 1082, 3122),
+    (403, 1083, 10038),
+    (403, 1114, 3128),
+    (403, 1184, 3127),
+    (403, 1186, 10022),
+    (403, 1266, 10041),
+    (403, 1700, 3125),
+    (403, 2950, 10065),
+    (403, 3614, 10071),
+    (403, 3802, 10088),
+    (405, 16, 10048),
+    (405, 17, 10049),
+    (405, 18, 10008),
+    (405, 19, 10029),
+    (405, 20, 10021),
+    (405, 21, 10019),
+    (405, 23, 10020),
+    (405, 25, 10037),
+    (405, 26, 10031),
+    (405, 700, 10013),
+    (405, 701, 10014),
+    (405, 1042, 10005),
+    (405, 1082, 10011),
+    (405, 1083, 10039),
+    (405, 1114, 10046),
+    (405, 1184, 10040),
+    (405, 1186, 10023),
+    (405, 1266, 10042),
+    (405, 1700, 10030),
+    (405, 2950, 10066),
+    (405, 3802, 10089),
+];
+
+fn default_opclass(method: u32, ty: &Type) -> u32 {
+    // varchar and name-like strings use text's operator class.
+    let oid = if *ty == Type::Varchar { 25 } else { ty.base().oid() };
+    DEFAULT_OPCLASSES.iter().find(|(m, t, _)| *m == method && *t == oid).map_or(0, |(_, _, o)| *o)
+}
+
+fn pg_partitioned_table(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let m = snapshot(ctx);
+    Ok(rows_of(PG_PARTITIONED_TABLE, |s| {
+        let mut rows = Vec::new();
+        for t in m.tables() {
+            let Some(key) = m.catalog.partition_key(t.oid) else { continue };
+            let default = m.catalog.partitions(t.oid).into_iter().find(|(_, of)| of.bound == pgmem_catalog::PartitionBound::Default);
+            let attrs: Vec<Value> = key
+                .parts
+                .iter()
+                .map(|p| match p {
+                    pgmem_catalog::PartitionKeyPart::Column(slot) => Value::Int2(i16::try_from(slot + 1).unwrap_or(0)),
+                    pgmem_catalog::PartitionKeyPart::Expr(_) => Value::Int2(0),
+                })
+                .collect();
+            let exprs: Vec<String> = key
+                .parts
+                .iter()
+                .filter_map(|p| match p {
+                    pgmem_catalog::PartitionKeyPart::Expr(e) => crate::deparse::deparse_expr(m.catalog, t, e).ok(),
+                    pgmem_catalog::PartitionKeyPart::Column(_) => None,
+                })
+                .collect();
+            let n = key.parts.len();
+            let binder = crate::bind::Binder::new(m.catalog, &[]);
+            let method = if key.strategy == pgmem_catalog::PartitionStrategy::Hash { 405 } else { 403 };
+            let classes: Vec<Value> = crate::partition::key_types(&binder, t, key)
+                .unwrap_or_default()
+                .iter()
+                .map(|ty| Value::Oid(default_opclass(method, ty)))
+                .collect();
+            let collations: Vec<Value> = crate::partition::key_types(&binder, t, key)
+                .unwrap_or_default()
+                .iter()
+                .map(|ty| Value::Oid(if ty.base().is_string() { model::DEFAULT_COLLATION_OID } else { 0 }))
+                .collect();
+            rows.push(s.row(vec![
+                ("partrelid", oid(t.oid)),
+                ("partstrat", ch(key.strategy.code())),
+                ("partnatts", int2(n)),
+                ("partdefid", oid(default.map_or(0, |(d, _)| d.oid))),
+                ("partattrs", Value::Array(attrs)),
+                ("partclass", Value::Array(classes)),
+                ("partcollation", Value::Array(collations)),
+                ("partexprs", if exprs.is_empty() { Value::Null } else { txt(exprs.join(", ")) }),
+            ]));
+        }
+        rows
+    }))
+}
 
 fn empty(_: &EvalCtx) -> SqlResult<Vec<Row>> {
     Ok(Vec::new())
@@ -244,17 +366,27 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let mut rows = Vec::new();
     for t in m.tables() {
         let checks = t.constraints.iter().filter(|c| c.contype() == 'c').count();
+        let partitioned = m.catalog.is_partitioned(t.oid);
+        let bound = crate::partition::partition_bound_text(m.catalog, t);
         rows.push(class_row(
             &s,
             t.oid,
             &t.name,
             m.namespace(&t.schema),
-            if t.matview.is_some() { 'm' } else { 'r' },
+            if t.matview.is_some() {
+                'm'
+            } else if partitioned {
+                'p'
+            } else {
+                'r'
+            },
             t.columns.len(),
             vec![
                 ("reltype", oid(rowtype_oid(t.oid))),
-                ("relam", oid(2)),
-                ("relfilenode", oid(t.oid)),
+                ("relam", oid(if partitioned { 0 } else { 2 })),
+                ("relfilenode", oid(if partitioned { 0 } else { t.oid })),
+                ("relispartition", boolean(bound.is_some())),
+                ("relpartbound", bound.map_or(Value::Null, txt)),
                 ("relhasindex", boolean(!t.indexes.is_empty())),
                 ("relchecks", int2(checks)),
                 ("relhastriggers", boolean(triggers.contains(&t.oid) || !m.catalog.table_triggers(t.oid).is_empty())),
@@ -285,14 +417,15 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     }
     for (t, idx) in m.indexes() {
         let natts = idx.columns.len() + idx.exprs.len();
+        let partitioned = m.catalog.is_partitioned(t.oid);
         rows.push(class_row(
             &s,
             idx.oid,
             &idx.name,
             m.namespace(&t.schema),
-            'i',
+            if partitioned { 'I' } else { 'i' },
             natts,
-            vec![("relam", oid(403)), ("relfilenode", oid(idx.oid))],
+            vec![("relam", oid(403)), ("relfilenode", oid(if partitioned { 0 } else { idx.oid }))],
         ));
     }
     for d in super::defs() {

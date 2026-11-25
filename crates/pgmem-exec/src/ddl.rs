@@ -18,7 +18,7 @@ fn tag(t: &str) -> QueryResult {
     QueryResult { tag: t.to_owned(), ..Default::default() }
 }
 
-fn notice(t: &str, msg: String) -> QueryResult {
+pub(crate) fn notice(t: &str, msg: String) -> QueryResult {
     QueryResult { tag: t.to_owned(), notices: vec![Notice { severity: "NOTICE", code: "00000", message: msg }], ..Default::default() }
 }
 
@@ -122,6 +122,7 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
             Ok(tag("COMMENT"))
         }
         Statement::CreateTable(ct) if ct.as_query.is_some() => crate::ddl_views::create_table_as(ct, txn, binder, env, state),
+        Statement::CreateTable(ct) if ct.options.partition_of.is_some() => crate::partition::create_partition(ct, txn, binder, env, state),
         Statement::CreateTable(ct) => {
             let Some(CreateTablePlan { mut table, sequences, comments }) = bind::bind_create_table(binder, ct)? else {
                 let name = ct.name.base();
@@ -139,7 +140,13 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
                     cat.set_comment(crate::catalog_views::CLASS_CLASS_OID, oid, i32::try_from(i + 1).unwrap_or(i32::MAX), Some(text));
                 }
             }
+            let key = ct.options.partition_by.as_ref().map(|p| crate::partition::bind_key(binder, &table, p)).transpose()?;
+            if let Some(k) = &key {
+                crate::partition::check_unique_keys(&table, k)?;
+            }
+            let cat = txn.catalog_mut();
             cat.create_table(table)?;
+            cat.set_partition_key(oid, key);
             txn.created_table(oid);
             Ok(tag("CREATE TABLE"))
         }
@@ -204,7 +211,21 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
             if unique {
                 validate_unique(txn, &def, &name, env, state)?;
             }
+            if let Some(key) = txn.catalog().partition_key(def.oid).cloned() {
+                crate::partition::check_unique_keys(&def, &key)?;
+            }
+            let partitions = txn.catalog().partitions(def.oid).into_iter().map(|(t, _)| t).collect::<Vec<_>>();
             txn.catalog_mut().replace_table(&tname, def);
+            // An index on a partitioned table is created on each partition too.
+            for p in partitions {
+                let mut child = (**ci).clone();
+                child.name = None;
+                child.if_not_exists = false;
+                child.table = ir::ObjectName(vec![p.schema.clone(), p.name.clone()]);
+                let snapshot = txn.catalog().clone();
+                let b = Binder::new(&snapshot, &[]);
+                execute_ddl(&Statement::CreateIndex(Box::new(child)), txn, &b, env, state)?;
+            }
             Ok(tag("CREATE INDEX"))
         }
         Statement::AlterTable(at) => {
@@ -246,6 +267,17 @@ pub(crate) fn alter_table_action(
     state: &StatementState,
 ) -> SqlResult<QualName> {
     let table = txn.catalog().table_q(current).cloned().ok_or_else(|| SqlError::undefined_table(&current.name))?;
+    match action {
+        ir::AlterTableAction::AttachPartition { partition, bound } => {
+            crate::partition::attach(current, partition, bound, txn, env, state)?;
+            return Ok(current.clone());
+        }
+        ir::AlterTableAction::DetachPartition { partition } => {
+            crate::partition::detach(current, partition, txn)?;
+            return Ok(current.clone());
+        }
+        _ => {}
+    }
     if crate::ddl_sequences::alter_identity(txn, &table, action)? {
         return Ok(current.clone());
     }
@@ -299,7 +331,18 @@ pub(crate) fn alter_table_action(
                 rename_table_refs(txn.catalog_mut(), old, &def.name);
             }
             let new_name = def.qualified();
+            if let Some(key) = txn.catalog().partition_key(def.oid).cloned() {
+                crate::partition::check_unique_keys(&def, &key)?;
+            }
+            let oid = def.oid;
             txn.catalog_mut().replace_table(rename_from.as_ref().unwrap_or(current), def);
+            // Most actions on a partitioned table apply to its partitions too.
+            if let Some(child_action) = crate::partition::recurses(action) {
+                let partitions: Vec<QualName> = txn.catalog().partitions(oid).into_iter().map(|(t, _)| t.qualified()).collect();
+                for p in partitions {
+                    alter_table_action(txn, &p, &child_action, env, state)?;
+                }
+            }
             Ok(new_name)
         }
     }
@@ -367,7 +410,7 @@ fn column_view_dependencies(txn: &mut Txn, table: &TableDef, action: &ir::AlterT
     }
 }
 
-fn assign_oids(cat: &mut Catalog, table: &mut TableDef) {
+pub(crate) fn assign_oids(cat: &mut Catalog, table: &mut TableDef) {
     if table.oid == 0 {
         table.oid = cat.alloc_oid();
     }
@@ -730,6 +773,10 @@ fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> 
                         });
                     }
                 }
+                // A partitioned table's partitions go with it.
+                for p in txn.catalog().partition_descendants(t.oid).into_iter().rev() {
+                    txn.catalog_mut().drop_table(&p.qualified());
+                }
                 txn.catalog_mut().drop_table(&t.qualified());
             }
             (ObjectType::Table, Some(other)) => {
@@ -824,7 +871,12 @@ fn truncate(t: &ir::Truncate, txn: &mut Txn, binder: &Binder) -> SqlResult<Query
     let _ = binder;
     let mut names: Vec<QualName> = Vec::new();
     for n in &t.tables {
-        names.push(txn.catalog().lookup_table(n)?.qualified());
+        let table = txn.catalog().lookup_table(n)?;
+        // A partitioned table is truncated through its partitions.
+        for p in txn.catalog().partition_descendants(table.oid) {
+            names.push(p.qualified());
+        }
+        names.push(table.qualified());
     }
     // Tables referencing a truncated table must be truncated too (CASCADE adds them).
     let mut i = 0;

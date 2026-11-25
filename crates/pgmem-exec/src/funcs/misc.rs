@@ -359,6 +359,24 @@ fn current_of(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
 
 /// Postgres' `hash_bytes` (Bob Jenkins' lookup3, `hashfn.c`), as `hashtext` uses it.
 pub(crate) fn hash_bytes(k: &[u8]) -> u32 {
+    lookup3(k, 0, None).1
+}
+
+/// `hash_bytes_extended`: the 64-bit hash with a seed (partition routing).
+pub(crate) fn hash_bytes_extended(k: &[u8], seed: u64) -> u64 {
+    let (b, c) = lookup3(k, seed, None);
+    (u64::from(b) << 32) | u64::from(c)
+}
+
+/// `hash_uint32_extended`.
+pub(crate) fn hash_uint32_extended(k: u32, seed: u64) -> u64 {
+    let (b, c) = lookup3(&[], seed, Some(k));
+    (u64::from(b) << 32) | u64::from(c)
+}
+
+/// lookup3 over `k` (or, for `hash_uint32`, the single word `word`), seeded like the
+/// `_extended` variants; returns (b, c).
+fn lookup3(k: &[u8], seed: u64, word32: Option<u32>) -> (u32, u32) {
     fn mix(a: &mut u32, b: &mut u32, c: &mut u32) {
         *a = a.wrapping_sub(*c);
         *a ^= c.rotate_left(4);
@@ -397,8 +415,22 @@ pub(crate) fn hash_bytes(k: &[u8]) -> u32 {
     }
     let word = |s: &[u8]| s.iter().enumerate().fold(0u32, |acc, (i, &x)| acc.wrapping_add(u32::from(x) << (8 * i)));
     #[allow(clippy::cast_possible_truncation)]
-    let init = 0x9e37_79b9u32.wrapping_add(k.len() as u32).wrapping_add(3_923_095);
+    let len = if word32.is_some() { 4 } else { k.len() as u32 };
+    let init = 0x9e37_79b9u32.wrapping_add(len).wrapping_add(3_923_095);
     let (mut a, mut b, mut c) = (init, init, init);
+    if seed != 0 {
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            a = a.wrapping_add((seed >> 32) as u32);
+            b = b.wrapping_add(seed as u32);
+        }
+        mix(&mut a, &mut b, &mut c);
+    }
+    if let Some(w) = word32 {
+        a = a.wrapping_add(w);
+        finish(&mut a, &mut b, &mut c);
+        return (b, c);
+    }
     let mut rest = k;
     while rest.len() >= 12 {
         a = a.wrapping_add(word(&rest[0..4]));
@@ -416,7 +448,7 @@ pub(crate) fn hash_bytes(k: &[u8]) -> u32 {
         c = c.wrapping_add(word(&rest[8..]) << 8);
     }
     finish(&mut a, &mut b, &mut c);
-    c
+    (b, c)
 }
 
 /// The advisory lock key of a bigint argument or a pair of int4 arguments.

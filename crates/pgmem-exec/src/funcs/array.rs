@@ -187,6 +187,14 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
 /// Output column types, argument coercion targets and implementation of a set-returning function.
 pub type SrfResolution = (Vec<Type>, Vec<Type>, SrfFn);
 
+/// Output column names of builtin set-returning functions with several columns.
+pub fn srf_column_names(name: &str) -> Option<&'static [&'static str]> {
+    match name {
+        "pg_partition_tree" => Some(&["relid", "parentrelid", "isleaf", "level"]),
+        _ => None,
+    }
+}
+
 /// Resolves a set-returning function in FROM: output column types and implementation, plus
 /// the argument coercion targets.
 pub fn resolve_srf(name: &str, args: &[Type]) -> SqlResult<Option<SrfResolution>> {
@@ -259,10 +267,13 @@ pub fn resolve_srf(name: &str, args: &[Type]) -> SqlResult<Option<SrfResolution>
             Ok(Some((vec![out], targets, generate_series)))
         }
         "pg_listening_channels" if args.is_empty() => Ok(Some((vec![Type::Text], vec![], pg_listening_channels))),
-        // pgmem has no partitions: no relation has ancestors (Postgres returns no rows for a
-        // relation that is not a partition or partitioned table).
         "pg_partition_ancestors" if args.len() == 1 => {
-            Ok(Some((vec![Type::Reg(pgmem_types::RegKind::Class)], vec![Type::Reg(pgmem_types::RegKind::Class)], |_, _| Ok(Vec::new()))))
+            let reg = Type::Reg(pgmem_types::RegKind::Class);
+            Ok(Some((vec![reg.clone()], vec![reg], crate::partition::ancestors_srf)))
+        }
+        "pg_partition_tree" if args.len() == 1 => {
+            let reg = Type::Reg(pgmem_types::RegKind::Class);
+            Ok(Some((vec![reg.clone(), reg.clone(), Type::Bool, Type::Int4], vec![reg], crate::partition::tree_srf)))
         }
         "string_to_table" if args.len() == 2 || args.len() == 3 => {
             Ok(Some((vec![Type::Text], vec![Type::Text; args.len()], string_to_table)))

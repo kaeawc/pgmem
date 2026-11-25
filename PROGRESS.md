@@ -8,10 +8,10 @@ and what comes next. Updated with every PR.
 | Metric | Value | How it is measured |
 |---|---|---|
 | pgmem-go parity | **565 / 565** Go tests ported | `scripts/parity.py check` ([PARITY.md](PARITY.md)) |
-| Integration suite on pgmem | **650 / 650** pass | `cargo nextest run -p pgmem --test it` |
-| Integration suite on real PostgreSQL 18 | **650 / 650** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
+| Integration suite on pgmem | **653 / 653** pass | `cargo nextest run -p pgmem --test it` |
+| Integration suite on real PostgreSQL 18 | **653 / 653** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
 | Go pgx example suites (sqlc) against the Rust binary | **28 / 28** pass | `make examples` (CI `pgx-examples`) |
-| **SQL conformance corpus** (3309 records, 9 areas) | **3305 / 3309 (99.9%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
+| **SQL conformance corpus** (3369 records, 9 areas) | **3368 / 3369 (99.97%)** on pgmem; 3369 / 3369 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
 
 ### Conformance history
 
@@ -47,6 +47,7 @@ and what comes next. Updated with every PR.
 | 2026-11-25 | #133 roles, memberships, GRANT / REVOKE with enforcement, default privileges, owners | 564/564 | 3265/3309 (98.7%) |
 | 2026-11-25 | #134 extensions: pgcrypto, uuid-ossp, citext, pg_trgm, hstore; range catalog rows | 564/564 | 3292/3309 (99.5%) |
 | 2026-11-25 | #135 COPY (text, CSV, binary; STDIN / STDOUT / files), regproc / regprocedure over builtins, ON CONFLICT on expressions, UPDATE pg_settings, column collations, element_types, system view definitions | 565/565 | 3305/3309 (99.9%) |
+| 2026-11-25 | #136 declarative partitioning: RANGE / LIST / HASH, sub-partitions, routing, row movement, ATTACH / DETACH, partition catalogs (+60 corpus records) | 565/565 | 3368/3369 (99.97%) |
 
 ## Supported
 
@@ -138,6 +139,17 @@ and what comes next. Updated with every PR.
   LOCAL] CHECK OPTION (44000), CREATE OR REPLACE rules (42P16), ALTER VIEW RENAME; materialized
   views (WITH [NO] DATA, REFRESH [CONCURRENTLY] with its unique-index rule, 55000 when not
   populated, `pg_matviews`, relkind `m`).
+- **Partitioning**: `PARTITION BY RANGE / LIST / HASH` over columns and expressions,
+  `PARTITION OF ... FOR VALUES FROM / TO (MINVALUE / MAXVALUE) | IN (incl. NULL) | WITH (MODULUS,
+  REMAINDER) | DEFAULT`, sub-partitions; Postgres' bound validation and overlap rules (42P16 /
+  42P17); INSERT (and COPY) routing to leaf partitions (23514 when none fits), hash routing with
+  Postgres' extended hash functions, partition constraints on direct writes, UPDATE moving rows
+  between partitions, DELETE / UPDATE / SELECT / TRUNCATE / DROP through the partitioned table;
+  indexes, key constraints (which must include the partition key), CHECK and foreign keys
+  copied to partitions, ALTER TABLE actions recursing; foreign keys referencing partitioned
+  tables; ATTACH (column, NOT NULL and existing-row checks, default-partition conflicts) and
+  DETACH; `relkind 'p'`, `relispartition`, `relpartbound`, `pg_partitioned_table`,
+  `pg_inherits`, `pg_get_partkeydef`, `pg_partition_tree` / `_root` / `_ancestors`.
 - **Constraints**: NOT NULL (named, Postgres 18 style), CHECK, PRIMARY KEY, UNIQUE (NULLS NOT
   DISTINCT), FOREIGN KEY (multi-column, MATCH SIMPLE / FULL; NO ACTION / RESTRICT (23001) /
   CASCADE / SET NULL / SET DEFAULT on delete and update, `SET NULL (cols)`), serial and identity
@@ -266,8 +278,12 @@ and what comes next. Updated with every PR.
   normalization (`normalize`, `IS NORMALIZED`) covers ASCII text only. `VARIADIC` needs an
   array known when the statement is bound. Comparison is bytewise, which is what the corpus' `C.UTF-8`
   database collation does; column collations are recorded and reported but do not change
-  comparison, and CREATE TABLE AS does not carry them over. No partitioning: PARTITION BY is
-  accepted and ignored (a plain table), PARTITION OF / ATTACH fail with 0A000.
+  comparison, and CREATE TABLE AS does not carry them over.
+- Partitioning: triggers on a partitioned table are not cloned to its partitions, partition
+  pruning is not modelled (every partition is scanned; EXPLAIN shows no Append), rows moved by
+  an UPDATE are re-inserted without their RETURNING seeing other FROM tables, and a partition
+  created with PARTITION OF keeps the parent's dropped-column slots. Table inheritance
+  (INHERITS) is not supported.
 - `ctid` and `xmin` derive from pgmem's row ids (they change with every row version, but xmin is
   not the inserting transaction's id).
   UNION without ORDER BY returns rows in first-seen order where Postgres' hash order can differ.
@@ -286,8 +302,6 @@ and what comes next. Updated with every PR.
 Hill-climb, ordered by conformance records recovered per unit of work and by what blocks real
 clients. Each item names the corpus area it moves (see CONFORMANCE.md for per-file rates).
 
-1. Declarative partitioning: PARTITION BY RANGE / LIST / HASH, PARTITION OF, ATTACH / DETACH,
-   row routing and scans of partitioned tables, `pg_partitioned_table`, `relpartbound`,
-   `pg_get_partkeydef`, `pg_partition_tree` (catalog area: the last 3 records besides UNION
-   order).
-2. Client matrix in CI: psql, tokio-postgres and sqlx (Go pgx is covered by `examples/`).
+1. Client matrix in CI: psql, tokio-postgres and sqlx (Go pgx is covered by `examples/`).
+2. Known gaps above, by what real test suites hit first: BEFORE row triggers that write,
+   select-list user SRFs, collation-aware comparison, table inheritance.

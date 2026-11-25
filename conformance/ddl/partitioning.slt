@@ -1,0 +1,271 @@
+# Declarative partitioning: range, list and hash partitions, sub-partitions, row routing and
+# movement, partition constraints, ATTACH / DETACH, and the catalog views of partition trees.
+
+statement ok
+CREATE TABLE measurements (id int NOT NULL, city text NOT NULL, at date NOT NULL, temp numeric(4,1), PRIMARY KEY (id, at)) PARTITION BY RANGE (at)
+
+statement ok
+CREATE TABLE measurements_2024 PARTITION OF measurements FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
+
+statement ok
+CREATE TABLE measurements_2025 PARTITION OF measurements FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')
+
+query
+INSERT INTO measurements VALUES (1, 'oslo', '2024-02-01', -3.5), (2, 'rome', '2025-07-01', 31.0) RETURNING tableoid::regclass, *
+----
+tableoid:regclass | id:int4 | city:text | at:date | temp:numeric
+measurements_2024 | 1 | oslo | 2024-02-01 | -3.5
+measurements_2025 | 2 | rome | 2025-07-01 | 31.0
+
+statement error 23514 no partition of relation "measurements" found for row
+INSERT INTO measurements VALUES (3, 'oslo', '2030-01-01', 1)
+
+statement error 23514 new row for relation "measurements_2024" violates partition constraint
+INSERT INTO measurements_2024 VALUES (3, 'oslo', '2025-03-01', 1)
+
+query
+SELECT tableoid::regclass, id, city FROM measurements ORDER BY id
+----
+tableoid:regclass | id:int4 | city:text
+measurements_2024 | 1 | oslo
+measurements_2025 | 2 | rome
+
+query
+SELECT count(*) FROM measurements_2025
+----
+count:int8
+1
+
+query
+UPDATE measurements SET at = '2025-02-02' WHERE id = 1 RETURNING tableoid::regclass, id, at
+----
+tableoid:regclass | id:int4 | at:date
+measurements_2025 | 1 | 2025-02-02
+
+query
+SELECT tableoid::regclass, id FROM measurements ORDER BY id
+----
+tableoid:regclass | id:int4
+measurements_2025 | 1
+measurements_2025 | 2
+
+statement error 23514 new row for relation "measurements_2025" violates partition constraint
+UPDATE measurements_2025 SET at = '2024-02-02' WHERE id = 1
+
+statement error 42P17 partition "measurements_overlap" would overlap partition "measurements_2025"
+CREATE TABLE measurements_overlap PARTITION OF measurements FOR VALUES FROM ('2025-06-01') TO ('2027-01-01')
+
+statement error 42P17 empty range bound specified for partition "measurements_empty"
+CREATE TABLE measurements_empty PARTITION OF measurements FOR VALUES FROM ('2027-01-01') TO ('2026-01-01')
+
+statement error 42P16 invalid bound specification for a range partition
+CREATE TABLE measurements_list PARTITION OF measurements FOR VALUES IN ('2027-01-01')
+
+statement ok
+CREATE TABLE measurements_default PARTITION OF measurements DEFAULT
+
+statement ok
+INSERT INTO measurements VALUES (3, 'oslo', '2030-01-01', 1)
+
+statement error 23514 updated partition constraint for default partition "measurements_default" would be violated by some row
+CREATE TABLE measurements_2030 PARTITION OF measurements FOR VALUES FROM ('2030-01-01') TO ('2031-01-01')
+
+statement error 0A000 unique constraint on partitioned table must include all partitioning columns
+ALTER TABLE measurements ADD CONSTRAINT measurements_city_key UNIQUE (city)
+
+query
+SELECT c.relname, c.relkind, c.relispartition, pg_get_expr(c.relpartbound, c.oid) FROM pg_class c WHERE c.relname LIKE 'measurements%' AND c.relkind IN ('r', 'p') ORDER BY 1
+----
+relname:name | relkind:char | relispartition:bool | pg_get_expr:text
+measurements | p | f | NULL
+measurements_2024 | r | t | FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
+measurements_2025 | r | t | FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')
+measurements_default | r | t | DEFAULT
+
+query
+SELECT pg_get_partkeydef('measurements'::regclass), pg_get_partkeydef('measurements_2024'::regclass)
+----
+pg_get_partkeydef:text | pg_get_partkeydef:text
+RANGE (at) | NULL
+
+query
+SELECT partstrat, partnatts, partattrs, partdefid = 'measurements_default'::regclass FROM pg_partitioned_table WHERE partrelid = 'measurements'::regclass
+----
+partstrat:char | partnatts:int2 | partattrs:int2vector | ?column?:bool
+r | 1 | 3 | t
+
+query
+SELECT inhrelid::regclass, inhparent::regclass FROM pg_inherits WHERE inhparent = 'measurements'::regclass ORDER BY 1
+----
+inhrelid:regclass | inhparent:regclass
+measurements_2024 | measurements
+measurements_2025 | measurements
+measurements_default | measurements
+
+query
+SELECT relid, parentrelid, isleaf, level FROM pg_partition_tree('measurements') ORDER BY level, relid::text
+----
+relid:regclass | parentrelid:regclass | isleaf:bool | level:int4
+measurements | NULL | f | 0
+measurements_2024 | measurements | t | 1
+measurements_2025 | measurements | t | 1
+measurements_default | measurements | t | 1
+
+query
+SELECT pg_partition_root('measurements_2024'), pg_partition_ancestors('measurements_2024')
+----
+pg_partition_root:regclass | pg_partition_ancestors:regclass
+measurements | measurements_2024
+measurements | measurements
+
+query
+SELECT c.relname, i.relname AS index FROM pg_index x JOIN pg_class c ON c.oid = x.indrelid JOIN pg_class i ON i.oid = x.indexrelid WHERE c.relname LIKE 'measurements%' ORDER BY 1
+----
+relname:name | index:name
+measurements | measurements_pkey
+measurements_2024 | measurements_2024_pkey
+measurements_2025 | measurements_2025_pkey
+measurements_default | measurements_default_pkey
+
+statement ok
+ALTER TABLE measurements DETACH PARTITION measurements_2024
+
+query
+SELECT relispartition, (SELECT count(*) FROM measurements) FROM pg_class WHERE relname = 'measurements_2024'
+----
+relispartition:bool | count:int8
+f | 3
+
+statement ok
+ALTER TABLE measurements ATTACH PARTITION measurements_2024 FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
+
+statement ok
+CREATE TABLE stray (id int NOT NULL, city text NOT NULL, at date NOT NULL, temp numeric(4,1), extra int)
+
+statement error 42804 table "stray" contains column "extra" not found in parent "measurements"
+ALTER TABLE measurements ATTACH PARTITION stray FOR VALUES FROM ('2020-01-01') TO ('2021-01-01')
+
+statement ok
+CREATE TABLE late (id int NOT NULL, city text NOT NULL, at date NOT NULL, temp numeric(4,1))
+
+statement ok
+INSERT INTO late VALUES (9, 'oslo', '2019-05-05', 0)
+
+statement error 23514 partition constraint of relation "late" is violated by some row
+ALTER TABLE measurements ATTACH PARTITION late FOR VALUES FROM ('2020-01-01') TO ('2021-01-01')
+
+# List partitions with NULL and sub-partitions
+statement ok
+CREATE TABLE orders_p (id int, region text, total int) PARTITION BY LIST (region)
+
+statement ok
+CREATE TABLE orders_p_eu PARTITION OF orders_p FOR VALUES IN ('de', 'fr') PARTITION BY RANGE (total)
+
+statement ok
+CREATE TABLE orders_p_eu_small PARTITION OF orders_p_eu FOR VALUES FROM (MINVALUE) TO (100)
+
+statement ok
+CREATE TABLE orders_p_eu_big PARTITION OF orders_p_eu FOR VALUES FROM (100) TO (MAXVALUE)
+
+statement ok
+CREATE TABLE orders_p_none PARTITION OF orders_p FOR VALUES IN (NULL)
+
+query
+INSERT INTO orders_p VALUES (1, 'de', 50), (2, 'fr', 500), (3, NULL, 7) RETURNING tableoid::regclass, *
+----
+tableoid:regclass | id:int4 | region:text | total:int4
+orders_p_eu_small | 1 | de | 50
+orders_p_eu_big | 2 | fr | 500
+orders_p_none | 3 | NULL | 7
+
+statement error 23514 no partition of relation "orders_p" found for row
+INSERT INTO orders_p VALUES (4, 'us', 1)
+
+statement error 42P17 partition "orders_p_fr" would overlap partition "orders_p_eu"
+CREATE TABLE orders_p_fr PARTITION OF orders_p FOR VALUES IN ('fr')
+
+query
+SELECT pg_get_expr(relpartbound, oid) FROM pg_class WHERE relname LIKE 'orders_p_%' ORDER BY relname
+----
+pg_get_expr:text
+FOR VALUES IN ('de', 'fr')
+FOR VALUES FROM (100) TO (MAXVALUE)
+FOR VALUES FROM (MINVALUE) TO (100)
+FOR VALUES IN (NULL)
+
+query
+UPDATE orders_p SET total = total * 10 WHERE id = 1 RETURNING tableoid::regclass, total
+----
+tableoid:regclass | total:int4
+orders_p_eu_big | 500
+
+query
+DELETE FROM orders_p WHERE total > 400 RETURNING tableoid::regclass, id
+----
+tableoid:regclass | id:int4
+orders_p_eu_big | 2
+orders_p_eu_big | 1
+
+query
+SELECT region, sum(total) FROM orders_p GROUP BY region ORDER BY region
+----
+region:text | sum:int8
+NULL | 7
+
+statement error 42P17 cannot use "list" partition strategy with more than one column
+CREATE TABLE multi_list (a int, b int) PARTITION BY LIST (a, b)
+
+# Hash partitions route like Postgres' hash functions
+statement ok
+CREATE TABLE events_h (id int, payload text) PARTITION BY HASH (id)
+
+statement ok
+CREATE TABLE events_h0 PARTITION OF events_h FOR VALUES WITH (MODULUS 3, REMAINDER 0)
+
+statement ok
+CREATE TABLE events_h1 PARTITION OF events_h FOR VALUES WITH (MODULUS 3, REMAINDER 1)
+
+statement ok
+CREATE TABLE events_h2 PARTITION OF events_h FOR VALUES WITH (MODULUS 3, REMAINDER 2)
+
+statement ok
+INSERT INTO events_h SELECT g, 'e' || g FROM generate_series(1, 20) g
+
+query
+SELECT tableoid::regclass, string_agg(id::text, ',' ORDER BY id) FROM events_h GROUP BY 1 ORDER BY 1
+----
+tableoid:regclass | string_agg:text
+events_h0 | 2,4,6,8,15,16,18,19,20
+events_h1 | 3,7,10,13,14
+events_h2 | 1,5,9,11,12,17
+
+statement error 42P17 every hash partition modulus must be a factor of the next larger modulus
+CREATE TABLE events_h4 PARTITION OF events_h FOR VALUES WITH (MODULUS 4, REMAINDER 0)
+
+statement ok
+CREATE TABLE names_h (name text) PARTITION BY HASH (name)
+
+statement ok
+CREATE TABLE names_h0 PARTITION OF names_h FOR VALUES WITH (MODULUS 2, REMAINDER 0)
+
+statement ok
+CREATE TABLE names_h1 PARTITION OF names_h FOR VALUES WITH (MODULUS 2, REMAINDER 1)
+
+statement ok
+INSERT INTO names_h VALUES ('alice'), ('bob'), ('carol'), ('dave'), ('erin'), ('frank')
+
+query
+SELECT tableoid::regclass, string_agg(name, ',' ORDER BY name) FROM names_h GROUP BY 1 ORDER BY 1
+----
+tableoid:regclass | string_agg:text
+names_h0 | bob,dave,erin,frank
+names_h1 | alice,carol
+
+statement ok
+DROP TABLE orders_p
+
+query
+SELECT count(*) FROM pg_class WHERE relname LIKE 'orders_p%'
+----
+count:int8
+0

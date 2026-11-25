@@ -86,12 +86,12 @@ fn display(v: &Value) -> String {
 }
 
 /// `Failing row contains (1, null, x).`
-fn failing_row(table: &TableDef, row: &Row) -> String {
+pub(crate) fn failing_row(table: &TableDef, row: &Row) -> String {
     let vals: Vec<String> = table.live_columns().map(|(i, _)| display(row.get(i).unwrap_or(&Value::Null))).collect();
     format!("Failing row contains ({}).", vals.join(", "))
 }
 
-fn pad(row: &mut Row, table: &TableDef) {
+pub(crate) fn pad(row: &mut Row, table: &TableDef) {
     while row.len() < table.columns.len() {
         let i = row.len();
         row.push(table.columns[i].missing.clone());
@@ -308,13 +308,7 @@ fn check_foreign_keys(table: &TableDef, rows: &[&Row], txn: &Txn, own_final: Opt
                 |rows| rows.iter().map(|(_, r)| r.clone()).collect(),
             )
         } else {
-            txn.scan_latest(parent.oid)
-                .into_iter()
-                .map(|(_, mut r)| {
-                    pad(&mut r, &parent);
-                    r
-                })
-                .collect()
+            crate::partition::latest_rows(txn, &parent)
         };
         for row in rows {
             let key: Vec<Value> = columns.iter().map(|c| row.get(*c).cloned().unwrap_or(Value::Null)).collect();
@@ -331,7 +325,7 @@ fn check_foreign_keys(table: &TableDef, rows: &[&Row], txn: &Txn, own_final: Opt
                     code::FOREIGN_KEY_VIOLATION,
                     format!("insert or update on table \"{}\" violates foreign key constraint \"{}\"", table.name, con.name),
                 )
-                .with_detail(format!("Key ({})=({}) is not present in table \"{ref_table}\".", names.join(", "), vals.join(", ")))
+                .with_detail(format!("Key ({})=({}) is not present in table \"{}\".", names.join(", "), vals.join(", "), ref_table.name))
                 .with_table(&table.name)
                 .with_constraint(&con.name));
             }
@@ -359,8 +353,16 @@ fn referential_actions(
     if depth > 64 {
         return Err(SqlError::new("54001", "stack depth limit exceeded in cascading foreign key actions"));
     }
+    // Rows of a partition are rows of its ancestors, which foreign keys may reference.
+    if let Some(of) = txn.catalog().partition_of(table.oid).cloned()
+        && let Some(parent) = txn.catalog().table_by_oid(of.parent).cloned()
+    {
+        let up = |rows: &[Row]| rows.iter().map(|r| crate::partition::remap(r, table, &parent)).collect::<Vec<_>>();
+        let (removed_up, replaced_up) = (up(removed), up(replaced));
+        referential_actions(txn, &parent, &removed_up, &replaced_up, is_delete, depth + 1, ck)?;
+    }
     let children: Vec<Arc<TableDef>> = txn.catalog().tables().cloned().collect();
-    let parent_now: Vec<Row> = txn.scan_latest(table.oid).into_iter().map(|(_, r)| r).collect();
+    let parent_now: Vec<Row> = crate::partition::latest_rows(txn, table);
     for child in children {
         for con in &child.constraints {
             let ConstraintKind::ForeignKey { columns, ref_table, ref_columns, on_delete, on_update, delete_set_columns, .. } = &con.kind
@@ -557,10 +559,81 @@ fn identity_always_error(col: &str) -> SqlError {
         .with_hint("Use OVERRIDING SYSTEM VALUE to override.")
 }
 
+/// One INSERT row from its source values: explicit values in their slots (with the generated
+/// and identity column rules), defaults elsewhere.
+fn source_row(plan: &InsertPlan, table: &TableDef, src: Vec<Option<Value>>, ctx: &EvalCtx) -> SqlResult<Row> {
+    let width = table.columns.len();
+    let mut row: Row = vec![Value::Null; width];
+    let mut explicit = vec![false; width];
+    for (pos, v) in src.into_iter().enumerate() {
+        let slot = plan.columns[pos];
+        if let Some(v) = v {
+            let col = &table.columns[slot];
+            if col.generated.is_some() {
+                return Err(SqlError::new(
+                    code::GENERATED_ALWAYS,
+                    format!("cannot insert a non-DEFAULT value into column \"{}\"", col.name),
+                )
+                .with_detail(format!("Column \"{}\" is a generated column.", col.name)));
+            }
+            if col.identity == Some(Identity::Always) && !plan.overriding_system_value && !plan.overriding_user_value {
+                return Err(identity_always_error(&col.name));
+            }
+            if col.identity.is_some() && plan.overriding_user_value {
+                continue;
+            }
+            row[slot] = v;
+            explicit[slot] = true;
+        }
+    }
+    for (i, c) in table.columns.iter().enumerate() {
+        if !explicit[i]
+            && !c.dropped
+            && c.generated.is_none()
+            && let Some(d) = &plan.rules.defaults[i]
+        {
+            row[i] = eval(d, &[], ctx)?;
+        }
+    }
+    Ok(row)
+}
+
+fn insert_sources(plan: &InsertPlan, ctx: &EvalCtx) -> SqlResult<Vec<Vec<Option<Value>>>> {
+    Ok(match &plan.rows {
+        InsertRows::DefaultValues => vec![vec![]],
+        InsertRows::Values(rows) => rows
+            .iter()
+            .map(|r| r.iter().map(|e| e.as_ref().map(|e| eval(e, &[], ctx)).transpose()).collect::<SqlResult<Vec<_>>>())
+            .collect::<SqlResult<Vec<_>>>()?,
+        InsertRows::Query(rel) => run(rel, ctx)?.into_iter().map(|r| r.into_iter().map(Some).collect()).collect(),
+    })
+}
+
+/// The rows an INSERT would add (explicit values and defaults; generated columns left NULL),
+/// without adding them: INSERT into a partitioned table routes them to its partitions.
+pub(crate) fn insert_preview(
+    plan: &InsertPlan,
+    txn: &Txn,
+    params: &[Value],
+    env: &SessionEnv,
+    state: &StatementState,
+) -> SqlResult<Vec<Row>> {
+    let ctx = EvalCtx::new(txn, params, env, state);
+    let table = Arc::clone(&plan.rules.table);
+    let mut rows = Vec::new();
+    for src in insert_sources(plan, &ctx)? {
+        let row = source_row(plan, &table, src, &ctx)?;
+        check_checks(&plan.rules, &row, &ctx)?;
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
 pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &SessionEnv, state: &StatementState) -> SqlResult<DmlResult> {
     let table = Arc::clone(&plan.rules.table);
     let width = table.columns.len();
     let trig = Triggers::load(txn, &table, Event::Insert, None);
+    let is_partition = txn.catalog().partition_of(table.oid).is_some();
     trig.statement(TriggerTiming::Before, &table, Event::Insert, txn, env, state)?;
     // Phase 1: compute rows (reads only).
     enum Effect {
@@ -571,14 +644,7 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
     let mut returning_rows = Vec::new();
     {
         let ctx = EvalCtx::new(txn, params, env, state);
-        let sources: Vec<Vec<Option<Value>>> = match &plan.rows {
-            InsertRows::DefaultValues => vec![vec![]],
-            InsertRows::Values(rows) => rows
-                .iter()
-                .map(|r| r.iter().map(|e| e.as_ref().map(|e| eval(e, &[], &ctx)).transpose()).collect::<SqlResult<Vec<_>>>())
-                .collect::<SqlResult<Vec<_>>>()?,
-            InsertRows::Query(rel) => run(rel, &ctx)?.into_iter().map(|r| r.into_iter().map(Some).collect()).collect(),
-        };
+        let sources = insert_sources(plan, &ctx)?;
         let existing: Vec<(RowId, Row)> = txn
             .scan_latest(table.oid)
             .into_iter()
@@ -591,38 +657,7 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
         let mut updated_ids: HashSet<RowId> = HashSet::new();
         let mut current: Vec<(RowId, Row)> = existing.clone();
         for src in sources {
-            let mut row: Row = vec![Value::Null; width];
-            let mut explicit = vec![false; width];
-            for (pos, v) in src.into_iter().enumerate() {
-                let slot = plan.columns[pos];
-                if let Some(v) = v {
-                    let col = &table.columns[slot];
-                    if col.generated.is_some() {
-                        return Err(SqlError::new(
-                            code::GENERATED_ALWAYS,
-                            format!("cannot insert a non-DEFAULT value into column \"{}\"", col.name),
-                        )
-                        .with_detail(format!("Column \"{}\" is a generated column.", col.name)));
-                    }
-                    if col.identity == Some(Identity::Always) && !plan.overriding_system_value && !plan.overriding_user_value {
-                        return Err(identity_always_error(&col.name));
-                    }
-                    if col.identity.is_some() && plan.overriding_user_value {
-                        continue;
-                    }
-                    row[slot] = v;
-                    explicit[slot] = true;
-                }
-            }
-            for (i, c) in table.columns.iter().enumerate() {
-                if !explicit[i]
-                    && !c.dropped
-                    && c.generated.is_none()
-                    && let Some(d) = &plan.rules.defaults[i]
-                {
-                    row[i] = eval(d, &[], &ctx)?;
-                }
-            }
+            let mut row = source_row(plan, &table, src, &ctx)?;
             if !trig.before_row.is_empty() {
                 let mut exec = Exec::Read(&ctx);
                 match triggers::fire_row(&trig.before_row, &table, Event::Insert, Some(row), None, &mut exec)? {
@@ -719,6 +754,9 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
             check_not_null(&table, &row)?;
             check_checks(&plan.rules, &row, &ctx)?;
             check_view_options(&table, &plan.view_checks, &row, &ctx)?;
+            if is_partition && !crate::partition::satisfies_constraint(ctx.txn.catalog(), &table, &row, &ctx)? {
+                return Err(crate::partition::constraint_error(&table, &row));
+            }
             if !plan.returning.is_empty() {
                 let mut current = row.clone();
                 current.extend(system_values(table.oid, None, 0));
@@ -828,6 +866,7 @@ pub fn exec_update(plan: &UpdatePlan, txn: &mut Txn, params: &[Value], env: &Ses
     let table = Arc::clone(&plan.rules.table);
     let set_columns: Vec<String> = plan.assignments.iter().map(|(slot, _)| table.columns[*slot].name.clone()).collect();
     let trig = Triggers::load(txn, &table, Event::Update, Some(&set_columns));
+    let is_partition = txn.catalog().partition_of(table.oid).is_some();
     trig.statement(TriggerTiming::Before, &table, Event::Update, txn, env, state)?;
     let mut changes: Vec<(RowId, Row, Row)> = Vec::new();
     let mut returning_rows = Vec::new();
@@ -854,6 +893,17 @@ pub fn exec_update(plan: &UpdatePlan, txn: &mut Txn, params: &[Value], env: &Ses
                 }
             }
             apply_generated(&plan.rules, &mut new_row, &ctx)?;
+            // A row whose new partition key belongs to another partition: moved there when the
+            // UPDATE came through the partitioned table, an error otherwise.
+            if is_partition && !crate::partition::satisfies_constraint(ctx.txn.catalog(), &table, &new_row, &ctx)? {
+                match state.moved_rows.borrow_mut().as_mut() {
+                    Some(moved) => {
+                        moved.push((table.oid, id, new_row));
+                        continue;
+                    }
+                    None => return Err(crate::partition::constraint_error(&table, &new_row)),
+                }
+            }
             check_not_null(&table, &new_row)?;
             check_checks(&plan.rules, &new_row, &ctx)?;
             check_view_options(&table, &plan.view_checks, &new_row, &ctx)?;

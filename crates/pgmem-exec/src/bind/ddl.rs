@@ -720,6 +720,9 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
     let mut def = table.clone();
     let not_found = |c: &str| SqlError::undefined_column(&format!("\"{c}\" of relation \"{tname}\""));
     match action {
+        ir::AlterTableAction::AttachPartition { .. } | ir::AlterTableAction::DetachPartition { .. } => {
+            Err(SqlError::internal("ATTACH / DETACH PARTITION are applied by the executor"))
+        }
         ir::AlterTableAction::AddColumn { if_not_exists, column } => {
             if def.column_index(&column.name).is_some() {
                 if *if_not_exists {

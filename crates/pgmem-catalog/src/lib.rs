@@ -11,7 +11,9 @@ use pgmem_types::{SqlError, SqlResult, Type, Value, code};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+mod partitions;
 mod roles;
+pub use partitions::{PartitionBound, PartitionKey, PartitionKeyPart, PartitionOf, PartitionStrategy, RangeDatum};
 pub use roles::{DefaultPrivilege, ExtensionDef, Grant, GrantObject, RoleDef};
 
 pub type Oid = u32;
@@ -590,6 +592,10 @@ pub struct Catalog {
     extensions: BTreeMap<String, ExtensionDef>,
     /// `COMMENT ON` text by (classoid, objoid, objsubid), as in `pg_description`.
     comments: BTreeMap<(Oid, Oid, i32), String>,
+    /// Partition keys of partitioned tables, by table OID.
+    partition_keys: BTreeMap<Oid, PartitionKey>,
+    /// Partitions' parents and bounds, by partition OID.
+    partition_bounds: BTreeMap<Oid, PartitionOf>,
     next_oid: Oid,
 }
 
@@ -626,6 +632,8 @@ impl Catalog {
             owners: BTreeMap::new(),
             extensions: BTreeMap::new(),
             comments: BTreeMap::new(),
+            partition_keys: BTreeMap::new(),
+            partition_bounds: BTreeMap::new(),
             next_oid: FIRST_USER_OID,
         }
     }
@@ -1165,6 +1173,8 @@ impl Catalog {
 
     pub fn drop_table(&mut self, name: &QualName) -> Option<Arc<TableDef>> {
         let dropped = self.tables.remove(name)?;
+        self.partition_keys.remove(&dropped.oid);
+        self.partition_bounds.remove(&dropped.oid);
         self.triggers.retain(|_, t| t.table != dropped.oid);
         self.grants.retain(|g| g.object != GrantObject::Relation(dropped.oid));
         self.owners.remove(&dropped.oid);
