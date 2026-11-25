@@ -7,11 +7,9 @@ catalog/information_schema.slt:bcd84fafea9ffe59  # SELECT c.column_name, e.data_
 catalog/information_schema.slt:dcbc700fd5754b49  # CREATE FUNCTION add_one(x int) RETURNS int LANGUAGE sql AS 'SELECT x + 1'
 catalog/information_schema.slt:7650ba5efab0cdd3  # SELECT routine_name, routine_type, data_type
 catalog/orm_reflection.slt:dd8b06fac31bd173  # SELECT a.attname
-catalog/orm_reflection.slt:8a89934c4b7330b3  # SELECT c.relname,
 catalog/orm_reflection.slt:63a6c813bc48d939  # SELECT indexname, array_agg(attname ORDER BY arridx), indisunique, indisprimary, amname
 catalog/orm_reflection.slt:b4efb73737c9ebd0  # SELECT ns.nspname, typ.typname, typ.typtype, typ.typcategory,
 catalog/orm_reflection.slt:ee468900ba31ee71  # SELECT r.rngsubtype::regtype::text FROM pg_range r WHERE r.rngtypid = 'int4range'::regtype
-catalog/pg_catalog.slt:41f2057bee0e6dd5  # SELECT pg_get_viewdef('rich'::regclass, true)
 catalog/pg_catalog.slt:7d01c52404c34822  # CREATE FUNCTION double_it(n int) RETURNS int LANGUAGE sql IMMUTABLE AS $$ SELECT n * 2 $$
 catalog/pg_catalog.slt:8a7afb8930dc40b5  # SELECT proname, pronargs, provolatile, prorettype::regtype::text, pg_get_function_arguments(oid), pg_get_function_result(oid)
 catalog/pg_catalog.slt:a085ef479946ad0c  # CREATE TABLE events_2024 PARTITION OF events FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
@@ -19,15 +17,10 @@ catalog/pg_catalog.slt:d26d4fea085e04ff  # SELECT c.relname, c.relkind, c.relisp
 catalog/pg_catalog.slt:48122fca8c801c55  # SELECT pg_get_partkeydef('events'::regclass)
 catalog/psql_describe.slt:bbede3599730d5d7  # SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity,
 catalog/psql_describe.slt:0a56de6a8ba8d11b  # SELECT a.attname,
-catalog/psql_describe.slt:dee11004c6bbafbd  # SELECT r.conname, pg_catalog.pg_get_constraintdef(r.oid, true)
 catalog/psql_describe.slt:55a36843bc50c0ea  # SELECT conname, conrelid::pg_catalog.regclass AS ontable,
 catalog/psql_describe.slt:44733f14a996f863  # SELECT pol.polname FROM pg_catalog.pg_policy pol WHERE pol.polrelid = 'orders'::regclass ORDER BY 1
-catalog/psql_describe.slt:b4a232974cda9996  # SELECT pg_catalog.pg_get_viewdef('big_orders'::regclass, true)
-catalog/regtypes.slt:a9ad1acbbcdab0ae  # SELECT 'text[]'::regtype::text, '_int4'::regtype::text, 'double precision'::regtype::text
-catalog/regtypes.slt:4ceb755fe5cff65e  # SELECT format_type('timestamptz'::regtype, 3), format_type('_text'::regtype, -1)
 catalog/regtypes.slt:e1b41969bcc4d789  # SELECT 'now'::regproc::text, 'lower(text)'::regprocedure::text
 catalog/regtypes.slt:4f75d112acc7d9bf  # SELECT to_regproc('upper')::text, to_regprocedure('abs(integer)')::text
-catalog/regtypes.slt:2fc6c49cbe03bde5  # SELECT pg_table_is_visible('t'::regclass), pg_table_is_visible('other.thing'::regclass)
 catalog/settings.slt:83a5425c178e720d  # UPDATE pg_settings SET setting = 'via_update' WHERE name = 'application_name'
 catalog/settings.slt:77a2ba0cde58e2c2  # SHOW application_name
 ddl/drop.slt:1cfa7e5ee05f912c  # CREATE FUNCTION f_one() RETURNS int LANGUAGE sql AS 'SELECT 1'; CREATE TABLE fdep (a int DEFAULT f_one())
@@ -78,11 +71,6 @@ ddl/views.slt:5f6865c2c4faf673  # SELECT customer, total FROM mv_totals ORDER BY
 ddl/views.slt:5f6865c2c4faf673#2  # SELECT customer, total FROM mv_totals ORDER BY customer
 ddl/views.slt:fb8c7c353fbd2694  # SELECT count(*) FROM mv_empty
 dml/on_conflict.slt:8ce9ce1dd7ed5cb8  # INSERT INTO accounts VALUES (2, 'ALICE@example.COM') ON CONFLICT (lower(email)) DO UPDATE SET email = EXCLUDED.email RETURNING id, email
-functions/arrays.slt:32e8f695cdf0b645  # SELECT array_dims(ARRAY[1, 2, 3]), array_dims(ARRAY[[1, 2], [3, 4]]), array_dims('[2:4]={1,2,3}'::int[]), array_dims(ARRAY[]::int[])
-functions/arrays.slt:2dfed30613a3235b  # SELECT array_lower('[2:4]={1,2,3}'::int[], 1), array_upper('[2:4]={1,2,3}'::int[], 1), array_upper(ARRAY[1, 2], 1), array_lower(ARRAY[]::int[], 1)
-functions/arrays.slt:ff7a90f4845cff74  # SELECT ('[2:4]={1,2,3}'::int[])[2], ('[2:4]={1,2,3}'::int[])[1], '[2:4]={1,2,3}'::int[]
-functions/arrays.slt:c0d77d752209d92f  # SELECT array_fill(7, ARRAY[3]), array_fill(0, ARRAY[2, 2]), array_fill(1, ARRAY[2], ARRAY[5])
-functions/conditional_misc.slt:7e28717042d08aa6  # SELECT generate_subscripts('[3:5]={x,y,z}'::text[], 1), generate_subscripts(ARRAY[1, 2], 1, true)
 functions/conditional_misc.slt:b5355bcb6afee2be  # SELECT pg_get_viewdef('pg_roles'::regclass) IS NOT NULL
 queries/set_operations.slt:6680237cbd789fd6  # SELECT NULL UNION SELECT 1
 session/extensions.slt:b917717b7291b646  # CREATE EXTENSION pgcrypto
@@ -136,11 +124,5 @@ session/roles.slt:dfbf7fb3babe5bd0#2  # DROP ROLE IF EXISTS conf_sess_login
 session/utility.slt:14a255b6d915c7e9  # DO $$ BEGIN PERFORM 1; END $$
 session/utility.slt:6ef5fcb4d663b855  # DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'u') THEN CREATE TABLE u (x int); END IF; END $$
 session/utility.slt:7e9fe260f01363ab  # SELECT to_regclass('u') IS NOT NULL
-types/arrays.slt:59695c5e88ee43b9  # SELECT '[0:2]={a,b,c}'::text[], ('[0:2]={a,b,c}'::text[])[0], array_lower('[0:2]={a,b,c}'::text[], 1)
-types/casts.slt:58960dc407f61ee5  # SELECT 'x'::inet
-types/casts.slt:aa0e6d00a2e1688f  # SELECT '192.168.0.1/24'::inet, '10.0.0.0/8'::cidr, '08:00:2b:01:02:03'::macaddr, '$1,234.50'::money
 types/casts.slt:562a638a088bc3c9  # SELECT 'pg_catalog.lower'::regproc
-types/casts.slt:f8b08fc4c17fd1b3  # SELECT B'1010', B'1010'::bit(6), 'x0F'::bit(8), 5::bit(4), B'1010'::bit(4)::int
-types/casts.slt:93c53cd1f7e466c8  # SELECT B'102'
-types/casts.slt:377d6b8c0e00c1b0  # SELECT B'10101'::bit(3), x'1'::bit(8)
 types/casts.slt:fc3868fddb298ef7  # INSERT INTO c (v) VALUES (B'1'::text || 'abcd')

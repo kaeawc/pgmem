@@ -421,6 +421,13 @@ pub fn resolve_type_name(catalog: &Catalog, t: &pgmem_ir::TypeName) -> SqlResult
             crate::cast::varchar_typmod(*n)
         }
         ("numeric" | "decimal", [p]) => crate::cast::numeric_typmod(*p, 0),
+        ("bit" | "varbit", [-1]) => -1,
+        ("bit" | "varbit", [n]) => {
+            if *n < 1 {
+                return Err(SqlError::syntax(format!("length for type {} must be at least 1", t.name)));
+            }
+            i32::try_from(*n).unwrap_or(i32::MAX)
+        }
         // Fractional-second precision: timestamp(3), time(0), ...
         ("timestamp" | "timestamptz" | "time" | "timetz" | "interval", [p]) => i32::try_from(*p).unwrap_or(-1),
         ("numeric" | "decimal", [p, s]) => {

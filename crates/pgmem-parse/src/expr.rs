@@ -321,6 +321,14 @@ fn lower_value(v: sq::Value) -> SqlResult<Expr> {
             Expr::Param(n)
         }
         sq::Value::DoubleQuotedString(s) => Expr::Column(vec![s]),
+        // `B'1010'` / `X'1F'`: bit string constants, as long as written (`bit` without a
+        // length limit, marked by the -1 modifier).
+        sq::Value::SingleQuotedByteStringLiteral(s) => {
+            Expr::TypedString { ty: TypeName { modifiers: vec![-1], ..TypeName::simple("bit") }, value: s }
+        }
+        sq::Value::HexStringLiteral(s) => {
+            Expr::TypedString { ty: TypeName { modifiers: vec![-1], ..TypeName::simple("bit") }, value: format!("x{s}") }
+        }
         other => return Err(unsupported(&format!("literal {other}"))),
     })
 }
@@ -795,8 +803,11 @@ pub(crate) fn lower_type(dt: &sq::DataType) -> SqlResult<TypeName> {
         D::JSON => simple("json"),
         D::JSONB => simple("jsonb"),
         D::Regclass => simple("regclass"),
-        D::Bit(_) => simple("bit"),
-        D::BitVarying(_) | D::VarBit(_) => simple("varbit"),
+        // A bare `bit` is `bit(1)`; `bit varying` has no limit.
+        D::Bit(n) => TypeName { modifiers: vec![n.map_or(1, |n| i64::try_from(n).unwrap_or(i64::MAX))], ..simple("bit") },
+        D::BitVarying(n) | D::VarBit(n) => {
+            TypeName { modifiers: n.iter().filter_map(|n| i64::try_from(*n).ok()).collect(), ..simple("varbit") }
+        }
         // The quoted name `"char"` is the internal single-byte type, not character(1).
         D::Custom(name, _)
             if name.0.len() == 1 && name.0[0].as_ident().is_some_and(|i| i.quote_style == Some('"') && i.value == "char") =>

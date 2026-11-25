@@ -13,11 +13,102 @@ const INDENT_JOIN: i32 = 4;
 const INDENT_VAR: i32 = 4;
 const INDENT_LIMIT: i32 = 40;
 
-#[derive(Default)]
 pub(super) struct Printer {
     pub buf: String,
     indent: i32,
     varprefix: bool,
+    /// `PRETTYFLAG_PAREN` (`pg_get_viewdef(v, true)` and friends): parentheses only where
+    /// precedence needs them.
+    pretty: bool,
+}
+
+impl Default for Printer {
+    fn default() -> Self {
+        Printer::new(false)
+    }
+}
+
+thread_local! {
+    static PRETTY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with pretty-mode parenthesization on or off.
+pub fn with_pretty<T>(on: bool, f: impl FnOnce() -> T) -> T {
+    let prev = PRETTY.with(|p| p.replace(on));
+    let out = f();
+    PRETTY.with(|p| p.set(prev));
+    out
+}
+
+/// `isSimpleNode`: whether `n`, an argument of `parent`, prints unambiguously without
+/// parentheses in pretty mode. `first` tells whether it is the parent operator's left operand.
+fn is_simple(n: &Node, parent: &Node, first: bool, showimplicit: bool) -> bool {
+    let low = |op: &str| op == "+" || op == "-";
+    let high = |op: &str| op == "*" || op == "/" || op == "%";
+    // Function-like parents and lists separate their arguments; casts do not.
+    let separated = |parent: &Node| {
+        matches!(
+            parent,
+            Node::Func { .. }
+                | Node::And(_)
+                | Node::Or(_)
+                | Node::Not(_)
+                | Node::Array { .. }
+                | Node::Row(_)
+                | Node::Coalesce { .. }
+                | Node::MinMax { .. }
+                | Node::NullIf { .. }
+                | Node::Agg(_)
+                | Node::Subscript { .. }
+        )
+    };
+    match n {
+        Node::Const { .. }
+        | Node::Var { .. }
+        | Node::Param { .. }
+        | Node::Raw { .. }
+        | Node::Func { .. }
+        | Node::Array { .. }
+        | Node::Row(_)
+        | Node::Coalesce { .. }
+        | Node::MinMax { .. }
+        | Node::NullIf { .. }
+        | Node::SqlValue { .. }
+        | Node::Agg(_)
+        | Node::Subscript { .. }
+        | Node::Case { .. } => true,
+        // A hidden implicit coercion prints as its argument; a shown one as `x::type`.
+        Node::Coerce { arg, implicit: true, .. } if !showimplicit => is_simple(arg, parent, first, showimplicit),
+        Node::Coerce { .. } => true,
+        Node::Op { op, left: Some(_), .. } => match parent {
+            Node::Op { op: pop, left: Some(_), .. } => {
+                let (lo, hi) = (low(op), high(op));
+                let (plo, phi) = (low(pop), high(pop));
+                if !(lo || hi) || !(plo || phi) {
+                    return false;
+                }
+                if hi && plo {
+                    return true;
+                }
+                if lo && phi {
+                    return false;
+                }
+                first
+            }
+            _ => separated(parent),
+        },
+        Node::NullTest { .. } | Node::BoolTest { .. } | Node::Distinct { .. } | Node::SubLink { .. } => {
+            !matches!(parent, Node::Op { .. }) && separated(parent)
+        }
+        Node::And(_) | Node::Or(_) | Node::Not(_) => match parent {
+            Node::And(_) | Node::Or(_) => {
+                matches!((n, parent), (Node::Not(_) | Node::And(_), Node::And(_) | Node::Or(_)) | (Node::Or(_), Node::Or(_)))
+            }
+            Node::Not(_) => false,
+            _ => separated(parent),
+        },
+        _ => false,
+    }
 }
 
 /// Prints an expression on its own (top level: implicit coercions hidden).
@@ -61,7 +152,32 @@ pub(super) fn looks_like_function(n: &Node) -> bool {
 
 impl Printer {
     pub fn new(varprefix: bool) -> Printer {
-        Printer { buf: String::new(), indent: 0, varprefix }
+        Printer { buf: String::new(), indent: 0, varprefix, pretty: PRETTY.with(std::cell::Cell::get) }
+    }
+
+    /// `get_rule_expr_paren`: in pretty mode, parentheses unless the argument is simple.
+    fn paren(&mut self, n: &Node, showimplicit: bool, parent: &Node, first: bool) {
+        let wrap = self.pretty && !is_simple(n, parent, first, showimplicit);
+        if wrap {
+            self.push("(");
+        }
+        self.expr(n, showimplicit);
+        if wrap {
+            self.push(")");
+        }
+    }
+
+    /// The opening / closing parenthesis non-pretty mode prints around operators.
+    fn open(&mut self) {
+        if !self.pretty {
+            self.push("(");
+        }
+    }
+
+    fn close(&mut self) {
+        if !self.pretty {
+            self.push(")");
+        }
     }
 
     fn push(&mut self, s: &str) {
@@ -122,39 +238,40 @@ impl Printer {
             }
             Node::Param { n, .. } => self.push(&format!("${n}")),
             Node::Op { op, left, right, .. } => {
-                self.push("(");
+                self.open();
                 if let Some(l) = left {
-                    self.expr(l, true);
+                    self.paren(l, true, n, true);
                     self.push(&format!(" {op} "));
                 } else {
                     self.push(&format!("{op} "));
                 }
-                self.expr(right, true);
-                self.push(")");
+                self.paren(right, true, n, false);
+                self.close();
             }
             Node::Func { name, args, syntax, variadic, .. } => self.func(name, args, *syntax, *variadic),
             Node::Coerce { arg, ty, typmod, implicit } => {
                 if *implicit && !showimplicit {
                     self.expr(arg, false);
                 } else {
-                    self.coercion(arg, ty, *typmod);
+                    self.coercion(arg, ty, *typmod, n);
                 }
             }
             Node::And(args) | Node::Or(args) => {
                 let sep = if matches!(n, Node::And(_)) { " AND " } else { " OR " };
-                self.push("(");
+                self.open();
                 for (i, a) in args.iter().enumerate() {
                     if i > 0 {
                         self.push(sep);
                     }
-                    self.expr(a, false);
+                    self.paren(a, false, n, i == 0);
                 }
-                self.push(")");
+                self.close();
             }
             Node::Not(arg) => {
-                self.push("(NOT ");
-                self.expr(arg, false);
-                self.push(")");
+                self.open();
+                self.push("NOT ");
+                self.paren(arg, false, n, true);
+                self.close();
             }
             _ => self.expr2(n),
         }
@@ -163,31 +280,34 @@ impl Printer {
     fn expr2(&mut self, n: &Node) {
         match n {
             Node::NullTest { arg, negated } => {
-                self.push("(");
-                self.expr(arg, true);
-                self.push(if *negated { " IS NOT NULL)" } else { " IS NULL)" });
+                self.open();
+                self.paren(arg, true, n, true);
+                self.push(if *negated { " IS NOT NULL" } else { " IS NULL" });
+                self.close();
             }
             Node::BoolTest { arg, test } => {
-                self.push("(");
-                self.expr(arg, false);
-                self.push(&format!(" {test})"));
+                self.open();
+                self.paren(arg, false, n, true);
+                self.push(&format!(" {test}"));
+                self.close();
             }
             Node::Distinct { left, right } => {
-                self.push("(");
-                self.expr(left, true);
+                self.open();
+                self.paren(left, true, n, true);
                 self.push(" IS DISTINCT FROM ");
-                self.expr(right, true);
-                self.push(")");
+                self.paren(right, true, n, false);
+                self.close();
             }
             Node::ScalarArrayOp { op, any, left, right } => {
-                self.push("(");
-                self.expr(left, true);
+                self.open();
+                self.paren(left, true, n, true);
                 self.push(&format!(" {op} {} (", if *any { "ANY" } else { "ALL" }));
-                self.expr(right, true);
+                self.paren(right, true, n, false);
                 if let Node::SubLink { kind: SubLinkKind::Expr, ty, .. } = right.as_ref() {
                     self.push(&format!("::{}", format_type(ty, -1)));
                 }
-                self.push("))");
+                self.push(")");
+                self.close();
             }
             Node::Case { arg, whens, default, .. } => self.case(arg.as_deref(), whens, default),
             Node::Coalesce { args, .. } => {
@@ -266,16 +386,16 @@ impl Printer {
     }
 
     /// `get_coercion_expr`: `(arg)::type`, or `literal::type` for an undecorated constant.
-    fn coercion(&mut self, arg: &Node, ty: &Type, typmod: i32) {
+    fn coercion(&mut self, arg: &Node, ty: &Type, typmod: i32, node: &Node) {
         match arg {
             Node::Const { ty: cty, typmod: -1, value } if cty == ty => {
                 let s = const_text(cty, -1, value.as_deref(), -1);
                 self.push(&s);
             }
             _ => {
-                self.push("(");
-                self.expr(arg, false);
-                self.push(")");
+                self.open();
+                self.paren(arg, false, node, true);
+                self.close();
             }
         }
         self.push(&format!("::{}", format_type(ty, typmod)));

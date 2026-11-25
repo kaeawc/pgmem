@@ -8,8 +8,16 @@ use pgmem_types::{Numeric, SqlError, SqlResult, Type, Value, code, compare_value
 
 fn items(v: &Value) -> &[Value] {
     match v {
-        Value::Array(i) => i,
+        Value::Array(i) | Value::BoundedArray(_, i) => i,
         _ => &[],
+    }
+}
+
+/// The lower bound of dimension `k` (0-based).
+fn lower_bound(v: &Value, k: usize) -> i64 {
+    match v {
+        Value::BoundedArray(lb, _) => i64::from(lb.get(k).copied().unwrap_or(1)),
+        _ => 1,
     }
 }
 
@@ -56,7 +64,7 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
             let a = arr_type(&args[0]).ok_or_else(err)?;
             let f = match name {
                 "array_length" => strict("array_length", array_length),
-                "array_upper" => strict("array_upper", array_length),
+                "array_upper" => strict("array_upper", array_upper),
                 _ => strict("array_lower", array_lower),
             };
             resolved(f, vec![a, Type::Int4], Type::Int4)
@@ -79,7 +87,15 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
         "array_dims" if n == 1 => resolved(
             strict("array_dims", |a, _| {
                 let d = dims(&a[0]);
-                Ok(if d.is_empty() { Value::Null } else { Value::Text(d.iter().map(|n| format!("[1:{n}]")).collect()) })
+                let text: String = d
+                    .iter()
+                    .enumerate()
+                    .map(|(k, n)| {
+                        let lo = lower_bound(&a[0], k);
+                        format!("[{lo}:{}]", lo + i64::try_from(*n).unwrap_or(0) - 1)
+                    })
+                    .collect();
+                Ok(if d.is_empty() { Value::Null } else { Value::Text(text) })
             }),
             vec![arr_type(&args[0]).ok_or_else(err)?],
             Type::Text,
@@ -359,7 +375,8 @@ fn generate_subscripts(a: &[Value], _: &EvalCtx) -> SqlResult<Vec<Row>> {
     let d = dims(&a[0]);
     let Some(len) = a[1].as_i64().and_then(|k| usize::try_from(k - 1).ok()).and_then(|k| d.get(k)) else { return Ok(Vec::new()) };
     let reverse = a.get(2).and_then(Value::as_bool) == Some(true);
-    let mut out: Vec<Row> = (1..=*len).map(|i| vec![len_i32(i)]).collect();
+    let lo = lower_bound(&a[0], dim_index(a));
+    let mut out: Vec<Row> = (0..i64::try_from(*len).unwrap_or(0)).map(|i| vec![int4(lo + i)]).collect();
     if reverse {
         out.reverse();
     }
@@ -377,8 +394,20 @@ fn array_length(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     Ok(dim_len(a).map_or(Value::Null, len_i32))
 }
 
+fn dim_index(a: &[Value]) -> usize {
+    a[1].as_i64().and_then(|k| usize::try_from(k - 1).ok()).unwrap_or(0)
+}
+
+fn int4(n: i64) -> Value {
+    Value::Int4(i32::try_from(n).unwrap_or(i32::MAX))
+}
+
 fn array_lower(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
-    Ok(dim_len(a).map_or(Value::Null, |_| Value::Int4(1)))
+    Ok(dim_len(a).map_or(Value::Null, |_| int4(lower_bound(&a[0], dim_index(a)))))
+}
+
+fn array_upper(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    Ok(dim_len(a).map_or(Value::Null, |n| int4(lower_bound(&a[0], dim_index(a)) + i64::try_from(n).unwrap_or(0) - 1)))
 }
 
 fn one_dimensional(v: &Value) -> SqlResult<()> {
@@ -449,10 +478,14 @@ fn array_fill(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
         return Err(SqlError::new(code::NULL_VALUE_NOT_ALLOWED, "dimension array or low bound array cannot be null"));
     }
     let d: Vec<usize> = items(&a[1]).iter().map(|v| v.as_i64().and_then(|n| usize::try_from(n).ok()).unwrap_or(0)).collect();
-    if let Some(lb) = a.get(2)
-        && items(lb).iter().any(|v| v.as_i64() != Some(1))
-    {
-        return Err(SqlError::feature_not_supported("array lower bounds other than 1 are not supported by pgmem"));
+    let lower: Vec<i32> = match a.get(2) {
+        Some(Value::Null) => return Err(SqlError::new(code::NULL_VALUE_NOT_ALLOWED, "dimension array or low bound array cannot be null")),
+        Some(lb) => items(lb).iter().map(|v| v.as_i64().and_then(|n| i32::try_from(n).ok()).unwrap_or(1)).collect(),
+        None => Vec::new(),
+    };
+    if !lower.is_empty() && lower.len() != d.len() {
+        return Err(SqlError::new(code::ARRAY_SUBSCRIPT_ERROR, "wrong number of array subscripts")
+            .with_detail("Low bound array has different size than dimensions array."));
     }
     fn build(v: &Value, d: &[usize]) -> Vec<Value> {
         match d {
@@ -464,7 +497,7 @@ fn array_fill(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     if d.contains(&0) {
         return Ok(Value::Array(Vec::new()));
     }
-    Ok(Value::Array(build(&a[0], &d)))
+    Ok(Value::array_with_bounds(lower, build(&a[0], &d)))
 }
 
 fn trim_array(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {

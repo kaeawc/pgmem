@@ -208,6 +208,7 @@ pub mod code {
     pub const DEPENDENT_OBJECTS_STILL_EXIST: &str = "2BP01";
     pub const INVALID_OBJECT_DEFINITION: &str = "42P17";
     pub const EXCLUSION_VIOLATION: &str = "23P01";
+    pub const STRING_DATA_LENGTH_MISMATCH: &str = "22026";
     pub const PROTOCOL_VIOLATION: &str = "08P01";
     pub const FEATURE_NOT_SUPPORTED: &str = "0A000";
     pub const OBJECT_NOT_IN_PREREQUISITE_STATE: &str = "55000";

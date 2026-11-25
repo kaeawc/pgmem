@@ -64,8 +64,9 @@ fn model<'a>(ctx: &'a EvalCtx) -> Model<'a> {
 fn constraintdef_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
     let m = model(ctx);
     let Some(o) = oid_arg(&a[0]) else { return Ok(Value::Null) };
+    let pretty = a.get(1).and_then(Value::as_bool) == Some(true);
     if let Some(c) = m.constraint_by_oid(o) {
-        return Ok(Value::Text(constraint_def(&m, &c)));
+        return Ok(Value::Text(crate::deparse::with_pretty(pretty, || constraint_def(&m, &c))));
     }
     let domain = m.catalog.types().flat_map(|t| crate::catalog_views::domain_constraints(m.catalog, t)).find(|c| c.oid == o);
     Ok(domain.map_or(Value::Null, |c| Value::Text(c.def())))
@@ -109,7 +110,10 @@ fn viewdef_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
         },
         other => oid_arg(other).and_then(|o| catalog.views().find(|v| v.oid == o).cloned()),
     };
-    Ok(view.map_or(Value::Null, |v| Value::Text(crate::deparse::deparse_view(catalog, &v).unwrap_or_default())))
+    let pretty = a.get(1).and_then(Value::as_bool) == Some(true);
+    Ok(view.map_or(Value::Null, |v| {
+        Value::Text(crate::deparse::with_pretty(pretty, || crate::deparse::deparse_view(catalog, &v)).unwrap_or_default())
+    }))
 }
 
 /// `pg_get_serial_sequence('table', 'column')`: the sequence a serial or identity column
@@ -217,9 +221,19 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
         "col_description" if n == 2 => resolved(strict("col_description", col_description_fn), vec![Oid, Int4], Text),
         "shobj_description" if n == 2 => resolved(strict("shobj_description", |_, _| Ok(Value::Null)), vec![Oid, name_arg], Text),
         "pg_get_userbyid" if n == 1 => resolved(strict("pg_get_userbyid", userbyid_fn), vec![Oid], Type::Name),
-        "pg_table_is_visible" | "pg_type_is_visible" | "pg_function_is_visible" if n == 1 => {
-            resolved(strict("pg_table_is_visible", always_true), vec![Oid], Bool)
-        }
+        "pg_table_is_visible" if n == 1 => resolved(
+            strict("pg_table_is_visible", |a, c| {
+                let Some(o) = oid_arg(&a[0]) else { return Ok(Value::Null) };
+                let cat = c.txn.catalog();
+                Ok(match cat.relation_by_oid(o) {
+                    Some(r) => Value::Bool(cat.relation_visible(r.schema(), r.name())),
+                    None => Value::Null,
+                })
+            }),
+            vec![Oid],
+            Bool,
+        ),
+        "pg_type_is_visible" | "pg_function_is_visible" if n == 1 => resolved(strict("pg_type_is_visible", always_true), vec![Oid], Bool),
         "has_table_privilege"
         | "has_schema_privilege"
         | "has_database_privilege"
