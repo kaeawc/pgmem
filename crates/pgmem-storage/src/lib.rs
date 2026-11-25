@@ -13,6 +13,10 @@
 //! or update the same row: the later COMMIT fails with `40001`, standing in for the row lock
 //! wait Postgres would perform. Sequences are non-transactional, as in Postgres.
 
+pub mod notify;
+
+pub use notify::{Notification, NotifyHub};
+
 use pgmem_catalog::{Catalog, Oid, SequenceDef, TableDef};
 use pgmem_types::{SqlError, SqlResult, Value, code, compare_values};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -69,6 +73,7 @@ pub struct Database {
     commit_lock: Mutex<()>,
     next_row_id: AtomicU64,
     sequences: Mutex<HashMap<Oid, SeqState>>,
+    notify: notify::NotifyHub,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -88,7 +93,13 @@ impl Database {
             commit_lock: Mutex::new(()),
             next_row_id: AtomicU64::new(1),
             sequences: Mutex::new(HashMap::new()),
+            notify: notify::NotifyHub::default(),
         }
+    }
+
+    /// The LISTEN / NOTIFY queue shared by every session.
+    pub fn notifications(&self) -> &notify::NotifyHub {
+        &self.notify
     }
 
     /// The latest committed state.

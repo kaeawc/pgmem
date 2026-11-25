@@ -186,8 +186,6 @@ ddl/indexes.slt:cc9b2bc18077ba1f  # SELECT conname, contype FROM pg_constraint W
 ddl/migrations.slt:6bcf744ad9557798  # SELECT pg_try_advisory_lock(1)
 ddl/migrations.slt:70c4511f72841147  # SELECT pg_advisory_unlock(1), pg_advisory_unlock(1), pg_advisory_unlock(1)
 ddl/migrations.slt:6bd6804ad95baaaa  # SELECT pg_try_advisory_lock(7)
-ddl/migrations.slt:f0d2ff0d744be15f  # BEGIN; LOCK TABLE schema_migrations IN ACCESS EXCLUSIVE MODE; COMMIT
-ddl/migrations.slt:d2566517e7c545a5  # LOCK TABLE schema_migrations
 ddl/migrations.slt:57bc92a514011689  # DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'status') THEN CREATE TYPE status AS ENUM ('a', 'b'); END IF; END $$; DO $$ BEGIN CREATE TYPE status AS ENUM ('a'); EXCEPTION WHEN duplicate_object THEN null; END $$
 ddl/migrations.slt:751b49cfc21be4f7  # DO $$ DECLARE i int; BEGIN FOR i IN 1..3 LOOP INSERT INTO schema_migrations VALUES ('do_' || i); END LOOP; END $$; DO $$ BEGIN EXECUTE 'ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS dirty boolean NOT NULL DEFAULT false'; END $$
 ddl/migrations.slt:d6fca8810f9b16fb  # SELECT version, dirty FROM schema_migrations ORDER BY version
@@ -262,8 +260,6 @@ ddl/views.slt:fb8c7c353fbd2694  # SELECT count(*) FROM mv_empty
 ddl/views.slt:ee61cccb4f6b2ca5  # DROP MATERIALIZED VIEW mv_totals
 ddl/views.slt:c7c87224f956484a  # SELECT matviewname, ispopulated FROM pg_matviews WHERE schemaname = 'public' ORDER BY 1
 dml/delete.slt:9b0637ba937fb2d5  # DELETE FROM book WHERE id = 11 RETURNING old.title, new.title
-dml/delete.slt:26c7890efbcd6381  # DECLARE cur CURSOR FOR SELECT id FROM book WHERE id >= 40 ORDER BY id FOR UPDATE
-dml/delete.slt:32f4a20763dae308  # FETCH 1 FROM cur
 dml/delete.slt:e1f0d2dfc7388255  # DELETE FROM book WHERE CURRENT OF cur RETURNING id
 dml/delete.slt:cc7500f6d2aed8f0  # DELETE FROM book RETURNING id
 dml/merge.slt:630021a9c37cd711  # MERGE INTO stock s USING delivery d ON s.sku = d.sku WHEN MATCHED THEN UPDATE SET qty = s.qty + d.qty WHEN NOT MATCHED THEN INSERT (sku, qty) VALUES (d.sku, d.qty)
@@ -307,8 +303,6 @@ dml/update.slt:430e3fe53e23208c  # UPDATE box SET area = DEFAULT, h = 4 RETURNIN
 dml/update.slt:211eca24903ff49f  # UPDATE emp SET salary = salary * 2 WHERE id = 3 RETURNING old.salary AS before, new.salary AS after
 dml/update.slt:cc89b324fed6651e  # UPDATE emp SET bonus = 9 WHERE id = 4 RETURNING old.bonus, new.bonus, bonus
 dml/update.slt:5946860a82a80411  # UPDATE emp SET salary = salary + 1 WHERE id = 3 RETURNING WITH (OLD AS o, NEW AS n) o.salary, n.salary
-dml/update.slt:474225623ba773a2  # DECLARE c CURSOR FOR SELECT id FROM emp ORDER BY id FOR UPDATE
-dml/update.slt:941338d08c130278  # FETCH 2 FROM c
 dml/update.slt:642e874a1a02056d  # UPDATE emp SET name = 'current' WHERE CURRENT OF c RETURNING id, name
 dml/update.slt:54362fd2aeb66427  # SELECT id, name, dept_id, salary, bonus FROM emp ORDER BY id
 dml/writable_cte.slt:ae4fe533f689c27d  # WITH moved AS (DELETE FROM orders WHERE status = 'done' RETURNING *) INSERT INTO order_archive SELECT * FROM moved RETURNING id, customer
@@ -381,79 +375,6 @@ session/extensions.slt:78c914c21f3e5d24  # SELECT installed_version IS NOT NULL 
 session/extensions.slt:6095da0ee328ac66  # SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'btree_gist'
 session/extensions.slt:b5188c728c7d0a7e  # DROP EXTENSION citext
 session/extensions.slt:adf882d006810dbf  # CREATE EXTENSION no_such_extension
-session/listen_notify.slt:3f5e9931d052f799  # LISTEN events
-session/listen_notify.slt:ae149cb43231ad60  # LISTEN "Mixed Channel"
-session/listen_notify.slt:39616f41bf6e32de  # SELECT pg_listening_channels() ORDER BY 1
-session/listen_notify.slt:5734be85da771c4b  # NOTIFY events
-session/listen_notify.slt:9b0b80cbcd8f1e95  # NOTIFY events, 'hello'
-session/listen_notify.slt:16b8e63f1f9caf5e  # SELECT pg_notify('events', 'from function')
-session/listen_notify.slt:df0b370c71ca12dc  # NOTIFY events, 'from another session'
-session/listen_notify.slt:0005357c2ed595a8  # UNLISTEN events
-session/listen_notify.slt:39616f41bf6e32de#2  # SELECT pg_listening_channels() ORDER BY 1
-session/listen_notify.slt:be2d1a24ad25a7a1  # UNLISTEN *
-session/listen_notify.slt:8e419563e0969584  # SELECT count(*) FROM pg_listening_channels()
-session/listen_notify.slt:cafd539ff2a05658  # UNLISTEN never_listened
-session/listen_notify.slt:df351de7ef736ec8  # LISTEN tx_channel
-session/listen_notify.slt:48606231a96d2d6b  # NOTIFY tx_channel, 'queued'
-session/listen_notify.slt:793455ddd38bb0d7  # NOTIFY tx_channel, 'discarded'
-session/listen_notify.slt:8b8677ba0db2fbe6  # SELECT pg_notification_queue_usage() >= 0
-session/listen_notify.slt:23591b0066dee247  # SELECT pg_notify('ch_' || 1, repeat('x', 10))
-session/listen_notify.slt:c4ede0c6f39f34a7  # SELECT pg_notify('', 'empty channel')
-session/listen_notify.slt:02891cd6858a6d08  # SELECT pg_notify('events', repeat('x', 8000))
-session/prepare_cursor.slt:13b7a44291c712eb  # PREPARE get_item (int) AS SELECT id, name, price FROM items WHERE id = $1
-session/prepare_cursor.slt:2048cf152b234638  # EXECUTE get_item(3)
-session/prepare_cursor.slt:06869ef850e2bc21  # EXECUTE get_item(42)
-session/prepare_cursor.slt:493d6825fde9c7d5  # PREPARE add_item (int, text, numeric) AS INSERT INTO items VALUES ($1, $2, $3)
-session/prepare_cursor.slt:3f53b0572dd688d0  # EXECUTE add_item(11, 'eleven', 9.99)
-session/prepare_cursor.slt:ed59abf842db3275  # EXECUTE get_item(11)
-session/prepare_cursor.slt:2ff955cddfe09216  # PREPARE count_items AS SELECT count(*) FROM items
-session/prepare_cursor.slt:41fc15113ac4659a  # EXECUTE count_items
-session/prepare_cursor.slt:5c8f5bc5196aa3fe  # PREPARE typed_guess AS SELECT $1::int + 1
-session/prepare_cursor.slt:f6caa70e9a9bb286  # EXECUTE typed_guess('41')
-session/prepare_cursor.slt:fbde331c82bbb6ea  # SELECT name, statement, parameter_types::text[], from_sql
-session/prepare_cursor.slt:9b6dd451eef675d3  # PREPARE get_item AS SELECT 1
-session/prepare_cursor.slt:a72504ddf310a870  # EXECUTE get_item
-session/prepare_cursor.slt:353f92e7c67c2eef  # EXECUTE get_item('abc')
-session/prepare_cursor.slt:cecb8be35132babe  # EXECUTE nope
-session/prepare_cursor.slt:33d5a81f489382ab  # DEALLOCATE get_item
-session/prepare_cursor.slt:2041f3152b1d64b6  # EXECUTE get_item(1)
-session/prepare_cursor.slt:33d5a81f489382ab#2  # DEALLOCATE get_item
-session/prepare_cursor.slt:82ce5be0c5004f64  # DEALLOCATE PREPARE count_items
-session/prepare_cursor.slt:edb4abdce917c3e8  # DEALLOCATE ALL
-session/prepare_cursor.slt:b518637e13ae9826  # PREPARE mine AS SELECT 1
-session/prepare_cursor.slt:7e6c478fe94656d5  # EXECUTE mine
-session/prepare_cursor.slt:77a2ba0cde58e2c2  # SHOW application_name
-session/prepare_cursor.slt:fe5e7d646ec8afa9  # SELECT * FROM scratch
-session/prepare_cursor.slt:b78c783660e4d930#2  # DISCARD ALL
-session/prepare_cursor.slt:d481108b69df7115  # DECLARE c CURSOR FOR SELECT id, name FROM items ORDER BY id
-session/prepare_cursor.slt:919e823b7541c0d1  # FETCH 3 FROM c
-session/prepare_cursor.slt:636a704a32ef26af  # FETCH NEXT FROM c
-session/prepare_cursor.slt:529536809d7669a8  # FETCH c
-session/prepare_cursor.slt:9179e1c8af2d1443  # FETCH FORWARD 2 FROM c
-session/prepare_cursor.slt:dbb8dc145ce5037b  # FETCH ALL FROM c
-session/prepare_cursor.slt:636a704a32ef26af#2  # FETCH NEXT FROM c
-session/prepare_cursor.slt:aebf9a9f61992094  # CLOSE c
-session/prepare_cursor.slt:636a704a32ef26af#3  # FETCH NEXT FROM c
-session/prepare_cursor.slt:8b85a79b1d057182  # DECLARE sc SCROLL CURSOR FOR SELECT id FROM items WHERE id <= 5 ORDER BY id
-session/prepare_cursor.slt:5385914c287cad11  # FETCH LAST FROM sc
-session/prepare_cursor.slt:6f949995bdbf5b1f  # FETCH PRIOR FROM sc
-session/prepare_cursor.slt:b69d85d01101f6fd  # FETCH FIRST FROM sc
-session/prepare_cursor.slt:127f63953695bc34  # FETCH ABSOLUTE 4 FROM sc
-session/prepare_cursor.slt:159184083e1ddbac  # FETCH RELATIVE -2 FROM sc
-session/prepare_cursor.slt:abca9a89406ac5f2  # MOVE FORWARD 2 IN sc
-session/prepare_cursor.slt:dcccba148c2fe094  # FETCH NEXT FROM sc
-session/prepare_cursor.slt:d33b9ecb5acb4706  # FETCH BACKWARD 2 FROM sc
-session/prepare_cursor.slt:a8ee3290c07e3c77  # SELECT name, is_holdable, is_scrollable, is_binary FROM pg_cursors ORDER BY name
-session/prepare_cursor.slt:a25bdc44509c972a  # CLOSE ALL
-session/prepare_cursor.slt:fc8b0209f924a3cc  # DECLARE ns NO SCROLL CURSOR FOR SELECT id FROM items ORDER BY id
-session/prepare_cursor.slt:afa19d5e044431c4  # FETCH 2 FROM ns
-session/prepare_cursor.slt:6ff6b995be125bda  # FETCH PRIOR FROM ns
-session/prepare_cursor.slt:1ae332754ea5f2af  # DECLARE h CURSOR WITH HOLD FOR SELECT id FROM items ORDER BY id DESC
-session/prepare_cursor.slt:941333d08c12f9f9  # FETCH 2 FROM h
-session/prepare_cursor.slt:aebf959f61991815  # CLOSE h
-session/prepare_cursor.slt:fed6c2076348bffc  # DECLARE outside CURSOR FOR SELECT 1
-session/prepare_cursor.slt:c14980d96c8ba24e  # DECLARE gone CURSOR FOR SELECT 1
-session/prepare_cursor.slt:c6d687c444c73d48  # FETCH gone
 session/roles.slt:01fc7c3b702d88ac  # DROP ROLE IF EXISTS conf_sess_reader
 session/roles.slt:b8c800a5acda0e0c  # DROP ROLE IF EXISTS conf_sess_writer
 session/roles.slt:dfbf7fb3babe5bd0  # DROP ROLE IF EXISTS conf_sess_login
@@ -479,21 +400,6 @@ session/roles.slt:c212a265a798fcdf  # DROP ROLE conf_sess_writer
 session/roles.slt:c212a265a798fcdf#2  # DROP ROLE conf_sess_writer
 session/roles.slt:4704b79a683ed8c5  # DROP ROLE conf_sess_login
 session/roles.slt:dfbf7fb3babe5bd0#2  # DROP ROLE IF EXISTS conf_sess_login
-session/utility.slt:f742e624a9e4bbd8  # EXPLAIN SELECT * FROM t WHERE id = 1
-session/utility.slt:8a473efd4411b625  # EXPLAIN (COSTS OFF) SELECT * FROM t ORDER BY v
-session/utility.slt:0f527f514dd27c9a  # EXPLAIN ANALYZE SELECT count(*) FROM t
-session/utility.slt:e4a04e0ea4cc7fc4  # EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM t WHERE id < 10
-session/utility.slt:120cbf17470fb996  # EXPLAIN (FORMAT YAML) SELECT 1
-session/utility.slt:982092f9a87e28e6  # EXPLAIN (VERBOSE, COSTS OFF, SUMMARY OFF) INSERT INTO t VALUES (1000, 'x')
-session/utility.slt:272370b23c853b99  # EXPLAIN ANALYZE INSERT INTO t VALUES (1001, 'y')
-session/utility.slt:0194cf09d9a12b3c  # SELECT count(*) FROM t WHERE id = 1001
-session/utility.slt:5b047dc2613c545b  # EXPLAIN SELECT * FROM missing_table
-session/utility.slt:7466d67b461f9c4b  # VACUUM missing_table
-session/utility.slt:376d460e468b0680#2  # VACUUM t
-session/utility.slt:2ee71d3b64c57cf6  # REINDEX TABLE t
-session/utility.slt:efeebe546b210517  # CLUSTER t USING t_pkey
-session/utility.slt:a12925eaf0bc7137  # LOCK TABLE t IN ACCESS SHARE MODE
-session/utility.slt:2586f0a05003d3f8  # LOCK TABLE t IN ACCESS EXCLUSIVE MODE NOWAIT
 session/utility.slt:14a255b6d915c7e9  # DO $$ BEGIN PERFORM 1; END $$
 session/utility.slt:6ef5fcb4d663b855  # DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'u') THEN CREATE TABLE u (x int); END IF; END $$
 session/utility.slt:7e9fe260f01363ab  # SELECT to_regclass('u') IS NOT NULL
@@ -560,11 +466,7 @@ transactions/row_locks.slt:7515fecf15eb0524  # SELECT 1
 transactions/row_locks.slt:6699bac91f9dd928  # SELECT count(*) FROM job FOR UPDATE
 transactions/row_locks.slt:4ac633b3e92d2635  # SELECT DISTINCT state FROM job FOR UPDATE
 transactions/row_locks.slt:0ab9557ef2582a34  # SELECT id FROM job UNION SELECT id FROM job FOR UPDATE
-transactions/row_locks.slt:707c3c130254f777  # LOCK TABLE job IN ACCESS EXCLUSIVE MODE
-transactions/row_locks.slt:32ea2ce78a46e464  # LOCK TABLE job IN SHARE ROW EXCLUSIVE MODE
 transactions/row_locks.slt:ea2921e7144a657d  # LOCK TABLE job IN ROW EXCLUSIVE MODE NOWAIT
-transactions/row_locks.slt:2827d7ccbd18db18  # LOCK TABLE job IN ACCESS SHARE MODE NOWAIT
-transactions/row_locks.slt:9d25e4dc18cf014f  # LOCK TABLE job IN ACCESS EXCLUSIVE MODE NOWAIT
 transactions/serialization.slt:7726cceb577e14ec  # UPDATE item SET n = n + 10 WHERE id = 1
 transactions/serialization.slt:ab5916c5a8dfb1a4  # SELECT 1
 transactions/serialization.slt:b8d5d195739185d4  # DELETE FROM item WHERE id = 2

@@ -8,10 +8,10 @@ and what comes next. Updated with every PR.
 | Metric | Value | How it is measured |
 |---|---|---|
 | pgmem-go parity | **564 / 564** Go tests ported | `scripts/parity.py check` ([PARITY.md](PARITY.md)) |
-| Integration suite on pgmem | **584 / 584** pass | `cargo nextest run -p pgmem --test it` |
-| Integration suite on real PostgreSQL 18 | **584 / 584** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
+| Integration suite on pgmem | **596 / 596** pass | `cargo nextest run -p pgmem --test it` |
+| Integration suite on real PostgreSQL 18 | **596 / 596** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
 | Go pgx example suites (sqlc) against the Rust binary | **27 / 27** pass | `make examples` (CI `pgx-examples`) |
-| **SQL conformance corpus** (3309 records, 9 areas) | **2711 / 3309 (81.9%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
+| **SQL conformance corpus** (3309 records, 9 areas) | **2809 / 3309 (84.9%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
 
 ### Conformance history
 
@@ -34,15 +34,26 @@ and what comes next. Updated with every PR.
 | 2026-11-24 | #120 FULL JOIN USING, set-op typing, WITH TIES, numeric infinity, bytea/uuid functions | 564/564 | 2429/3309 (73.4%) |
 | 2026-11-24 | schemas, search_path, temporary tables | 564/564 | 2467/3309 (74.6%) |
 | 2026-11-24 | #122 json fidelity, jsonpath, SQL/JSON | 564/564 | 2518/3309 (76.1%) |
-| 2026-11-24 | arrays, select-list SRFs, settings, output styles, date/time input, function sweep | 564/564 | 2711/3309 (81.9%) |
+| 2026-11-24 | #123 arrays, select-list SRFs, settings, output styles, date/time input, function sweep | 564/564 | 2711/3309 (81.9%) |
+| 2026-11-25 | session statements: PREPARE/EXECUTE, cursors, LISTEN/NOTIFY, DISCARD, utility statements, transactions per Sync | 564/564 | 2809/3309 (84.9%) |
 
 ## Supported
 
 - **Wire protocol**: protocol 3.0 (3.x and `_pq_` options negotiated down), trust auth, SSL/GSS
   requests refused, simple query (multi-statement implicit transactions), extended query
   (Parse/Bind/Describe/Execute/Close/Sync/Flush, named statements and portals, row-limited
-  Execute with PortalSuspended), skip-until-Sync after errors, ParameterStatus, notices, error
+  Execute with PortalSuspended), one implicit transaction per Sync (an error rolls back the
+  whole pipeline), skip-until-Sync after errors, ParameterStatus, notices,
+  NotificationResponse (delivered between transactions, also to idle connections), error
   fields (SQLSTATE, detail, hint, schema/table/column/constraint).
+- **Session statements**: PREPARE / EXECUTE (assignment coercion of arguments) / DEALLOCATE,
+  sharing one namespace with protocol statements, and `pg_prepared_statements`; cursors
+  (DECLARE [BINARY] [NO] SCROLL [WITH HOLD], FETCH / MOVE in every direction with Postgres'
+  positioning rules, CLOSE, `pg_cursors` incl. protocol portals; closed at transaction end or
+  ROLLBACK TO); LISTEN / UNLISTEN / NOTIFY and `pg_notify` (sent at commit, folded within a
+  transaction, `pg_listening_channels`); DISCARD ALL / PLANS / SEQUENCES / TEMP; EXPLAIN
+  [ANALYZE] (any format; ANALYZE runs the statement); VACUUM / ANALYZE / REINDEX / CLUSTER /
+  CHECKPOINT / LOCK with their existence and transaction-block checks.
 - **Types**: bool, int2/4/8, float4/8, numeric (arbitrary precision, Postgres scale rules),
   text, varchar(n), char(n) (blank-padded, trailing spaces insignificant), name, "char", bytea,
   uuid, date, time, timetz, timestamp, timestamptz, interval, json (input text kept as written;
@@ -122,8 +133,7 @@ and what comes next. Updated with every PR.
 - `pg_proc` and `pg_trigger` have no user rows (no user functions or triggers yet). Deparsed
   definitions follow ruleutils' non-pretty mode; pretty mode (`pg_get_viewdef(v, true)`) does not
   drop redundant parentheses yet.
-- No COPY, LISTEN/NOTIFY, cursors (DECLARE/FETCH), prepared statements via SQL (PREPARE/EXECUTE),
-  stored procedures, triggers, range types, network types (inet, cidr, macaddr), bit strings,
+- No COPY, stored procedures, triggers, range types, network types (inet, cidr, macaddr), bit strings,
   money. Arrays always have lower bound 1 (`'[2:4]={...}'` input is read as `{...}`). Unicode
   normalization (`normalize`, `IS NORMALIZED`) covers ASCII text only. `VARIADIC` needs an
   array known when the statement is bound. Comparison is bytewise, which is what the corpus' `C.UTF-8`
@@ -131,23 +141,23 @@ and what comes next. Updated with every PR.
 - No system columns (`ctid`, `xmin`, `xmax`, `tableoid`), so `RETURNING (xmax = 0)` fails.
 - Concurrent writers never block: where Postgres would wait on a row lock, pgmem detects the
   conflict at COMMIT (40001).
-- Extended-protocol pipelines autocommit per Execute rather than per Sync.
+- Cursors are materialized at DECLARE (volatile functions run then, not at FETCH); no
+  `FOR UPDATE` cursors or `WHERE CURRENT OF`. EXPLAIN reports a single `Result` node: pgmem
+  has no planner.
 
 ## Next
 
 Hill-climb, ordered by conformance records recovered per unit of work and by what blocks real
 clients. Each item names the corpus area it moves (see CONFORMANCE.md for per-file rates).
 
-1. **Session statements**: SQL-level PREPARE/EXECUTE, cursors, LISTEN/NOTIFY, utility
-   statements, extended-protocol transactions per Sync.
-2. **Query statements**: MERGE, writable CTEs, `RETURNING old/new`, GROUPING SETS/ROLLUP/CUBE,
+1. **Query statements**: MERGE, writable CTEs, `RETURNING old/new`, GROUPING SETS/ROLLUP/CUBE,
    window `RANGE` offsets and `EXCLUDE`, CTE `SEARCH`/`CYCLE`, system columns
    (`xmin`/`xmax`/`ctid`/`tableoid`).
-3. **Transactions and constraints**: deferred constraints, per-row unique checks, row locks with
+2. **Transactions and constraints**: deferred constraints, per-row unique checks, row locks with
    NOWAIT/SKIP LOCKED between sessions, advisory locks shared across sessions, READ ONLY
    transactions, SERIALIZABLE write-skew detection, dependency errors (2BP01).
-4. **Types and DDL**: range types (and EXCLUDE constraints), network types, bit strings, array
+3. **Types and DDL**: range types (and EXCLUDE constraints), network types, bit strings, array
    lower bounds, CREATE TABLE LIKE/AS, temp ON COMMIT, pretty deparse.
-5. **Functions/procedures/triggers** (SQL and PL/pgSQL), `DO` blocks — large; most of ddl/migrations.
-6. Roles, extensions (pgcrypto, uuid-ossp, citext), COPY, collations, catalog remainder.
-7. Client matrix in CI: psql, tokio-postgres and sqlx (Go pgx is covered by `examples/`).
+4. **Functions/procedures/triggers** (SQL and PL/pgSQL), `DO` blocks — large; most of ddl/migrations.
+5. Roles, extensions (pgcrypto, uuid-ossp, citext), COPY, collations, catalog remainder.
+6. Client matrix in CI: psql, tokio-postgres and sqlx (Go pgx is covered by `examples/`).

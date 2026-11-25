@@ -11,6 +11,10 @@ use pgmem_types::{SqlError, SqlResult, Type, Value, code};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 
+mod objects;
+
+pub use objects::SessionObjects;
+
 /// The version pgmem reports (`server_version`, `version()`): the Postgres release it targets.
 pub const SERVER_VERSION: &str = "18.0";
 pub const SERVER_VERSION_NUM: &str = "180000";
@@ -58,6 +62,8 @@ pub struct SessionEnv {
     pub txid: i64,
     pub currval: HashMap<Oid, i64>,
     pub lastval: Option<i64>,
+    /// Prepared statements, cursors and LISTEN channels (catalog views read them).
+    pub objects: Arc<SessionObjects>,
 }
 
 impl SessionEnv {
@@ -80,6 +86,7 @@ impl SessionEnv {
             txid: 0,
             currval: HashMap::new(),
             lastval: None,
+            objects: Arc::default(),
         }
     }
 }
@@ -173,6 +180,8 @@ pub struct QueryResult {
     pub notices: Vec<Notice>,
     /// Settings changed by this statement (ParameterStatus to report).
     pub changed_settings: Vec<(String, String)>,
+    /// Rows are sent in binary (a FETCH from a BINARY cursor).
+    pub binary: bool,
 }
 
 /// What a statement will return, known before execution (Describe).
@@ -192,7 +201,7 @@ pub struct Session {
     /// Settings changed inside the transaction block (undone at ROLLBACK; SET LOCAL ones at
     /// any transaction end), with savepoint marks into it.
     setting_undo: Vec<SettingUndo>,
-    setting_marks: Vec<(String, usize)>,
+    setting_marks: Vec<Mark>,
     txn: Option<Txn>,
     status: TxStatus,
     txn_start: i64,
@@ -206,6 +215,26 @@ pub struct Session {
     /// The session's temporary schema (`pg_temp_<pid>`), created with its first temporary
     /// object and dropped with the session.
     pub temp_schema: Option<String>,
+    /// Prepared statements by name (SQL PREPARE and protocol Parse; `""` is the unnamed one).
+    prepared: BTreeMap<String, Arc<crate::portal::PreparedStatement>>,
+    cursors: BTreeMap<String, crate::portal::Cursor>,
+    /// Open extended-protocol portals (listed in `pg_cursors` like SQL cursors).
+    protocol_portals: BTreeMap<String, crate::portal::CursorInfo>,
+    /// Channels this session listens on (as of its last commit).
+    listening: objects::Channels,
+    /// LISTEN / UNLISTEN and notifications queued by the open transaction.
+    pending_listen: Vec<objects::ListenOp>,
+    pending_notify: Vec<(String, String)>,
+    /// Running an extended-protocol implicit transaction, which ends at Sync.
+    pipeline: bool,
+}
+
+/// A savepoint's marks into the transaction's undo and queues.
+struct Mark {
+    name: String,
+    settings: usize,
+    listens: usize,
+    notifies: usize,
 }
 
 impl Session {
@@ -230,6 +259,13 @@ impl Session {
             txid_counter: 1000,
             default_isolation: Isolation::ReadCommitted,
             temp_schema: Some(format!("pg_temp_{backend_pid}")),
+            prepared: BTreeMap::new(),
+            cursors: BTreeMap::new(),
+            protocol_portals: BTreeMap::new(),
+            listening: objects::Channels::new(),
+            pending_listen: Vec::new(),
+            pending_notify: Vec::new(),
+            pipeline: false,
         }
     }
 
@@ -253,6 +289,7 @@ impl Session {
             txid: self.txid_counter,
             currval: self.currval.clone(),
             lastval: self.lastval,
+            objects: self.objects(),
         }
     }
 
@@ -267,14 +304,33 @@ impl Session {
             return Ok(());
         }
         self.implicit_block = false;
+        // The batch's SETs are part of its implicit transaction, even when nothing else
+        // started one.
+        self.end_transaction_settings(!failed);
+        if let Some(txn) = self.txn.take() {
+            self.status = TxStatus::Idle;
+            self.finish_txn(txn, !failed)?;
+        }
+        Ok(())
+    }
+
+    /// An extended-protocol Execute: without an open transaction, the statements up to the
+    /// next Sync share one implicit transaction.
+    pub fn begin_pipeline(&mut self) {
+        if self.txn.is_none() {
+            self.pipeline = true;
+        }
+    }
+
+    /// Sync: commits (or, after an error, rolls back) the implicit transaction.
+    pub fn end_pipeline(&mut self, failed: bool) -> SqlResult<()> {
+        if !std::mem::take(&mut self.pipeline) {
+            return Ok(());
+        }
         if let Some(txn) = self.txn.take() {
             self.status = TxStatus::Idle;
             self.end_transaction_settings(!failed);
-            if failed {
-                txn.rollback();
-            } else {
-                txn.commit()?;
-            }
+            self.finish_txn(txn, !failed)?;
         }
         Ok(())
     }
@@ -344,6 +400,15 @@ impl Session {
 
     /// Analyzes a statement without running it: parameter types and result columns.
     pub fn describe(&self, stmt: &Statement, declared: &[Type]) -> SqlResult<Description> {
+        let d = self.describe_lenient(stmt, declared)?;
+        if let Some(i) = d.param_types.iter().position(|t| *t == Type::Unknown) {
+            return Err(SqlError::new(code::INDETERMINATE_DATATYPE, format!("could not determine data type of parameter ${}", i + 1)));
+        }
+        Ok(d)
+    }
+
+    /// [`Session::describe`], leaving parameters of undetermined type `unknown`.
+    fn describe_lenient(&self, stmt: &Statement, declared: &[Type]) -> SqlResult<Description> {
         let _ctx = pgmem_types::context::enter(self.format_context());
         let catalog = self.catalog_snapshot();
         let binder = Binder::new(&catalog, declared);
@@ -355,12 +420,14 @@ impl Session {
             Statement::Update(u) => returning(bind::bind_update(&binder, u, &ctx)?.returning_cols),
             Statement::Delete(d) => returning(bind::bind_delete(&binder, d, &ctx)?.returning_cols),
             Statement::Show { name } => Some(vec![OutCol::new(setting_display_name(&show_key(name)), Type::Text)]),
+            Statement::Execute { name, .. } => self.prepared.get(name).and_then(|p| p.columns.clone()),
+            Statement::Fetch { name, is_move: false, .. } => Some(self.cursor_columns(name)?),
+            Statement::Explain(e) => {
+                Some(vec![OutCol::new("QUERY PLAN", if e.format == ir::ExplainFormat::Json { Type::Json } else { Type::Text })])
+            }
             _ => None,
         };
         let params = binder.params.borrow().clone();
-        if let Some(i) = params.iter().position(|t| *t == Type::Unknown) {
-            return Err(SqlError::new(code::INDETERMINATE_DATATYPE, format!("could not determine data type of parameter ${}", i + 1)));
-        }
         Ok(Description { param_types: params, columns })
     }
 
@@ -408,27 +475,39 @@ impl Session {
             Statement::Set { name, value, local } => return self.set(name, value, *local),
             Statement::Reset { name } => return self.reset(name.as_deref()),
             Statement::Show { name } => return self.show(name),
+            Statement::Prepare(p) => return self.prepare_sql(p),
+            Statement::Deallocate { name } => return self.deallocate(name.as_deref()),
+            Statement::Fetch { name, direction, is_move } => return self.fetch(name, *direction, *is_move),
+            Statement::CloseCursor { name } => return self.close_cursor(name.as_deref()),
+            Statement::Listen { channel } => return Ok(self.listen(Some((channel.clone(), true)))),
+            Statement::Unlisten { channel } => return Ok(self.listen(channel.clone().map(|c| (c, false)))),
+            Statement::Notify { channel, payload } => return self.notify(channel, payload.as_deref()),
+            Statement::Maintenance { tag, tables, in_block_ok } => return self.maintenance(tag, tables, *in_block_ok),
+            Statement::Lock { tables } => return self.lock_tables(tables),
+            Statement::Discard(k) if *k != ir::DiscardKind::Temp && *k != ir::DiscardKind::All => return self.discard(*k),
             _ => {}
         }
         let implicit = self.ensure_txn();
         let result = self.run_in_txn(stmt, param_types, params);
         match result {
             Ok(r) => {
-                if implicit && !self.implicit_block {
+                if implicit && !self.implicit_block && !self.pipeline {
                     if let Some(txn) = self.txn.take() {
                         self.status = TxStatus::Idle;
-                        txn.commit()?;
+                        self.finish_txn(txn, true)?;
                     }
-                } else if self.status == TxStatus::Idle {
+                } else if self.status == TxStatus::Idle && !self.pipeline {
                     self.status = TxStatus::InBlock;
                 }
                 Ok(r)
             }
             Err(e) => {
-                if (implicit && !self.implicit_block) || self.txn.is_none() {
-                    self.txn = None;
+                if (implicit && !self.implicit_block && !self.pipeline) || self.txn.is_none() {
+                    if let Some(txn) = self.txn.take() {
+                        let _ = self.finish_txn(txn, false);
+                    }
                     self.status = TxStatus::Idle;
-                } else if self.implicit_block {
+                } else if self.implicit_block || self.pipeline {
                     // The simple-query batch is abandoned; end_implicit_block rolls it back.
                 } else {
                     self.status = TxStatus::Failed;
@@ -439,6 +518,13 @@ impl Session {
     }
 
     fn run_in_txn(&mut self, stmt: &Statement, param_types: &[Type], params: &[Value]) -> SqlResult<QueryResult> {
+        match stmt {
+            Statement::Execute { name, args } => return self.execute_prepared(name, args),
+            Statement::DeclareCursor(d) => return self.declare_cursor(d),
+            Statement::Explain(e) => return self.explain(e, param_types, params),
+            Statement::Discard(k) => return self.discard(*k),
+            _ => {}
+        }
         let env = self.env();
         let state = StatementState::default();
         let temp_schema = self.temp_schema.clone();
@@ -511,6 +597,9 @@ impl Session {
             self.lastval = Some(*v);
         }
         drop(produced);
+        for (channel, payload) in state.notifies.take() {
+            self.queue_notification(channel, payload);
+        }
         let mut result = result;
         let pending = state.settings.take();
         if !pending.is_empty() {
@@ -540,12 +629,13 @@ impl Session {
         let warning = |msg: &str, c: &'static str| Notice { severity: "WARNING", code: c, message: msg.to_owned() };
         match t {
             TransactionStmt::Begin { isolation, read_only } => {
-                if self.txn.is_some() && !self.implicit_block {
+                if self.txn.is_some() && !self.implicit_block && !self.pipeline {
                     let mut r = tag("BEGIN");
                     r.notices.push(warning("there is already a transaction in progress", code::ACTIVE_SQL_TRANSACTION));
                     return Ok(r);
                 }
                 self.implicit_block = false;
+                self.pipeline = false;
                 self.ensure_txn();
                 let _ = read_only;
                 if let Some(level) = isolation {
@@ -562,12 +652,13 @@ impl Session {
                 };
                 let failed = self.status == TxStatus::Failed;
                 self.status = TxStatus::Idle;
+                self.pipeline = false;
                 self.end_transaction_settings(!failed);
                 if failed {
-                    txn.rollback();
+                    self.finish_txn(txn, false)?;
                     return Ok(tag("ROLLBACK"));
                 }
-                txn.commit()?;
+                self.finish_txn(txn, true)?;
                 Ok(tag("COMMIT"))
             }
             TransactionStmt::Rollback { .. } => {
@@ -577,8 +668,9 @@ impl Session {
                     return Ok(r);
                 };
                 self.status = TxStatus::Idle;
+                self.pipeline = false;
                 self.end_transaction_settings(false);
-                txn.rollback();
+                self.finish_txn(txn, false)?;
                 Ok(tag("ROLLBACK"))
             }
             TransactionStmt::Savepoint(name) => {
@@ -593,7 +685,12 @@ impl Session {
                         SqlError::new(code::NO_ACTIVE_SQL_TRANSACTION, "SAVEPOINT can only be used in transaction blocks")
                     })?;
                 txn.savepoint(name);
-                self.setting_marks.push((name.clone(), self.setting_undo.len()));
+                self.setting_marks.push(Mark {
+                    name: name.clone(),
+                    settings: self.setting_undo.len(),
+                    listens: self.pending_listen.len(),
+                    notifies: self.pending_notify.len(),
+                });
                 Ok(tag("SAVEPOINT"))
             }
             TransactionStmt::Release(name) => {
@@ -607,7 +704,7 @@ impl Session {
                     SqlError::new(code::NO_ACTIVE_SQL_TRANSACTION, "RELEASE SAVEPOINT can only be used in transaction blocks")
                 })?;
                 txn.release(name)?;
-                if let Some(i) = self.setting_marks.iter().rposition(|(n, _)| n == name) {
+                if let Some(i) = self.setting_marks.iter().rposition(|m| m.name == *name) {
                     self.setting_marks.truncate(i);
                 }
                 Ok(tag("RELEASE"))
@@ -618,8 +715,10 @@ impl Session {
                 })?;
                 txn.rollback_to(name)?;
                 self.status = TxStatus::InBlock;
-                if let Some(i) = self.setting_marks.iter().rposition(|(n, _)| n == name) {
-                    let mark = self.setting_marks[i].1;
+                if let Some(i) = self.setting_marks.iter().rposition(|m| m.name == *name) {
+                    let (mark, listens, notifies) =
+                        (self.setting_marks[i].settings, self.setting_marks[i].listens, self.setting_marks[i].notifies);
+                    self.rollback_objects_to(i, listens, notifies);
                     self.setting_marks.truncate(i + 1);
                     while self.setting_undo.len() > mark {
                         if let Some(u) = self.setting_undo.pop() {
@@ -672,7 +771,7 @@ impl Session {
 
     /// Inside a transaction block (explicit, or a multi-statement simple query).
     fn in_block(&self) -> bool {
-        self.txn.is_some() && (self.status != TxStatus::Idle || self.implicit_block)
+        self.implicit_block || (self.txn.is_some() && self.status != TxStatus::Idle)
     }
 
     fn restore_setting(&mut self, name: &str, old: Option<String>) {
@@ -776,7 +875,7 @@ impl Session {
             self.set_isolation(level)?;
             return Ok(QueryResult { tag: "SET".into(), ..Default::default() });
         }
-        if local && self.txn.is_none() {
+        if local && !self.in_block() {
             // Validated anyway, then ignored outside a transaction block.
             if crate::settings::lookup(&name).is_none() && !crate::settings::is_custom(&name) {
                 return Err(crate::settings::unrecognized(&name));
@@ -1060,6 +1159,7 @@ fn create_schema_with_elements(
 impl Drop for Session {
     /// A session's temporary objects disappear when it ends.
     fn drop(&mut self) {
+        self.unregister_listener();
         self.drop_temp_objects();
     }
 }

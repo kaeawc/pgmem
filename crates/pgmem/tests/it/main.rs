@@ -109,6 +109,7 @@ mod select_star;
 mod serial;
 mod serialization;
 mod server;
+mod session_statements;
 mod setnow;
 mod settings_fidelity;
 mod smoke;

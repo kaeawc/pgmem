@@ -191,6 +191,15 @@ impl Writer {
         self.finish(at);
     }
 
+    /// NotificationResponse (LISTEN / NOTIFY).
+    pub fn notification(&mut self, pid: i32, channel: &str, payload: &str) {
+        let at = self.begin(b'A');
+        self.i32(pid);
+        self.cstr(channel);
+        self.cstr(payload);
+        self.finish(at);
+    }
+
     pub fn ready_for_query(&mut self, status: u8) {
         let at = self.begin(b'Z');
         self.buf.push(status);

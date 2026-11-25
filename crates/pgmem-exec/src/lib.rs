@@ -12,6 +12,7 @@ pub mod dml;
 pub mod eval;
 pub mod funcs;
 pub mod plan;
+pub mod portal;
 pub mod reg;
 pub mod run;
 pub mod session;

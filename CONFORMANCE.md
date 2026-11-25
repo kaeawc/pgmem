@@ -7,19 +7,19 @@ PostgreSQL 18; CI re-verifies every record against PostgreSQL and runs it agains
 A record passes when pgmem returns the same column names, column types and text values, or
 the same SQLSTATE and error message.
 
-pgmem passes **2711 / 3309 records (81.9%)**.
+pgmem passes **2809 / 3309 records (84.9%)**.
 
 | Area | Records | Pass | Rate |
 |---|---:|---:|---:|
 | catalog | 226 | 190 | 84.1% |
 | constraints | 171 | 101 | 59.1% |
-| ddl | 386 | 231 | 59.8% |
-| dml | 282 | 216 | 76.6% |
+| ddl | 386 | 233 | 60.4% |
+| dml | 282 | 220 | 78.0% |
 | functions | 445 | 439 | 98.7% |
 | queries | 440 | 415 | 94.3% |
-| session | 419 | 280 | 66.8% |
+| session | 419 | 368 | 87.8% |
 | smoke | 7 | 7 | 100.0% |
-| transactions | 522 | 444 | 85.1% |
+| transactions | 522 | 448 | 85.8% |
 | types | 411 | 388 | 94.4% |
 
 ## By file
@@ -44,18 +44,18 @@ pgmem passes **2711 / 3309 records (81.9%)**.
 | ddl/generated.slt | 23 | 9 | 39.1% |
 | ddl/identity.slt | 38 | 26 | 68.4% |
 | ddl/indexes.slt | 33 | 26 | 78.8% |
-| ddl/migrations.slt | 58 | 23 | 39.7% |
+| ddl/migrations.slt | 58 | 25 | 43.1% |
 | ddl/schema.slt | 31 | 31 | 100.0% |
 | ddl/sequences.slt | 34 | 21 | 61.8% |
 | ddl/truncate_comment.slt | 14 | 12 | 85.7% |
 | ddl/views.slt | 33 | 5 | 15.2% |
-| dml/delete.slt | 32 | 27 | 84.4% |
+| dml/delete.slt | 32 | 29 | 90.6% |
 | dml/insert.slt | 45 | 45 | 100.0% |
 | dml/merge.slt | 25 | 7 | 28.0% |
 | dml/on_conflict.slt | 45 | 40 | 88.9% |
 | dml/orm_patterns.slt | 29 | 20 | 69.0% |
 | dml/truncate.slt | 37 | 37 | 100.0% |
-| dml/update.slt | 48 | 35 | 72.9% |
+| dml/update.slt | 48 | 37 | 77.1% |
 | dml/writable_cte.slt | 21 | 5 | 23.8% |
 | functions/arrays.slt | 49 | 45 | 91.8% |
 | functions/conditional_misc.slt | 49 | 47 | 95.9% |
@@ -76,17 +76,17 @@ pgmem passes **2711 / 3309 records (81.9%)**.
 | queries/windows.slt | 39 | 30 | 76.9% |
 | session/config_functions.slt | 45 | 45 | 100.0% |
 | session/extensions.slt | 46 | 23 | 50.0% |
-| session/listen_notify.slt | 24 | 5 | 20.8% |
-| session/prepare_cursor.slt | 77 | 23 | 29.9% |
+| session/listen_notify.slt | 24 | 24 | 100.0% |
+| session/prepare_cursor.slt | 77 | 77 | 100.0% |
 | session/roles.slt | 46 | 21 | 45.7% |
 | session/set_show.slt | 133 | 133 | 100.0% |
-| session/utility.slt | 48 | 30 | 62.5% |
+| session/utility.slt | 48 | 45 | 93.8% |
 | smoke/basics.slt | 7 | 7 | 100.0% |
 | transactions/advisory.slt | 38 | 26 | 68.4% |
 | transactions/basics.slt | 84 | 79 | 94.0% |
 | transactions/chain.slt | 28 | 20 | 71.4% |
 | transactions/deferred.slt | 59 | 37 | 62.7% |
-| transactions/row_locks.slt | 61 | 40 | 65.6% |
+| transactions/row_locks.slt | 61 | 44 | 72.1% |
 | transactions/savepoints.slt | 86 | 86 | 100.0% |
 | transactions/serialization.slt | 59 | 49 | 83.1% |
 | transactions/settings.slt | 52 | 52 | 100.0% |

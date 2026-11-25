@@ -2,24 +2,19 @@
 
 use crate::Shared;
 use crate::codec::{Message, Reader, StartupMessage, Writer, read_message, read_startup};
+use pgmem_exec::portal::PreparedStatement;
 use pgmem_exec::session::{is_reported, setting_display_name};
 use pgmem_exec::{OutCol, QueryResult, Session};
-use pgmem_ir::Statement;
 use pgmem_types::{Format, SqlError, SqlResult, Type, Value, code};
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 use tokio::io::{AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
-
-struct Prepared {
-    stmt: Statement,
-    param_types: Vec<Type>,
-    columns: Option<Vec<OutCol>>,
-}
+use tokio::sync::{Notify, mpsc};
 
 struct Portal {
-    stmt: Arc<Prepared>,
+    stmt: Arc<PreparedStatement>,
     params: Vec<Value>,
     result_formats: Vec<i16>,
     result: Option<QueryResult>,
@@ -29,7 +24,6 @@ struct Portal {
 struct Conn {
     session: Session,
     out: Writer,
-    statements: HashMap<String, Arc<Prepared>>,
     portals: HashMap<String, Portal>,
     /// After an error in extended-query mode, messages are discarded until Sync.
     skipping: bool,
@@ -100,9 +94,62 @@ pub async fn handle(stream: TcpStream, shared: Arc<Shared>) -> io::Result<()> {
     out.ready_for_query(b'I');
     wr.write_all(&out.buf).await?;
     wr.flush().await?;
-    let mut conn = Conn { session, out: Writer::default(), statements: HashMap::new(), portals: HashMap::new(), skipping: false };
-    loop {
-        let Some(msg) = read_message(&mut rd).await? else { return Ok(()) };
+    // Notifications for this session wake the connection while it waits for a message.
+    let wake = Arc::new(Notify::new());
+    let waker = Arc::clone(&wake);
+    shared.db.notifications().set_waker(pid, Arc::new(move || waker.notify_one()));
+    // Messages are read by their own task, so waiting for one can be interrupted safely.
+    let (tx, mut rx) = mpsc::channel::<io::Result<Option<crate::codec::Message>>>(16);
+    let reader = tokio::spawn(async move {
+        loop {
+            let msg = read_message(&mut rd).await;
+            let done = !matches!(msg, Ok(Some(_)));
+            if tx.send(msg).await.is_err() || done {
+                return;
+            }
+        }
+    });
+    let mut conn = Conn { session, out: Writer::default(), portals: HashMap::new(), skipping: false };
+    let result = conn.serve(&mut rx, &wake, &mut wr).await;
+    reader.abort();
+    result
+}
+
+impl Conn {
+    async fn serve(
+        &mut self,
+        rx: &mut mpsc::Receiver<io::Result<Option<crate::codec::Message>>>,
+        wake: &Notify,
+        wr: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>,
+    ) -> io::Result<()> {
+        loop {
+            let msg = tokio::select! {
+                msg = rx.recv() => msg,
+                () = wake.notified() => {
+                    // Delivered right away only between transactions.
+                    if self.session.is_idle() {
+                        self.deliver_notifications();
+                        wr.write_all(&self.out.buf).await?;
+                        self.out.buf.clear();
+                        wr.flush().await?;
+                    }
+                    continue;
+                }
+            };
+            let Some(msg) = msg.transpose()?.flatten() else { return Ok(()) };
+            if self.handle_message(msg, wr).await? {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Dispatches one message and writes its output; true when the connection ends.
+    async fn handle_message(
+        &mut self,
+        msg: crate::codec::Message,
+        wr: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>,
+    ) -> io::Result<bool> {
+        let conn = self;
         let keep_going = conn.dispatch(msg);
         if !conn.out.buf.is_empty() {
             wr.write_all(&conn.out.buf).await?;
@@ -113,9 +160,25 @@ pub async fn handle(stream: TcpStream, shared: Arc<Shared>) -> io::Result<()> {
             Flow::Flush => wr.flush().await?,
             Flow::Terminate => {
                 wr.flush().await?;
-                return Ok(());
+                return Ok(true);
             }
         }
+        Ok(false)
+    }
+
+    /// Writes the notifications queued for this session.
+    fn deliver_notifications(&mut self) {
+        for n in self.session.take_notifications() {
+            self.out.notification(n.sender_pid, &n.channel, &n.payload);
+        }
+    }
+
+    /// ReadyForQuery, preceded by any notifications that arrived (between transactions).
+    fn ready(&mut self) {
+        if self.session.is_idle() {
+            self.deliver_notifications();
+        }
+        self.out.ready_for_query(self.session.status().byte());
     }
 }
 
@@ -142,9 +205,13 @@ impl Conn {
             b'E' => self.execute(&msg.body),
             b'C' => self.close(&msg.body),
             b'S' => {
+                if let Err(e) = self.session.end_pipeline(self.skipping) {
+                    self.out.error(&e);
+                }
                 self.skipping = false;
                 self.portals.remove("");
-                self.out.ready_for_query(self.session.status().byte());
+                self.session.close_portal("");
+                self.ready();
                 return Flow::Flush;
             }
             b'H' => return Flow::Flush,
@@ -218,7 +285,7 @@ impl Conn {
             Ok(s) => s,
             Err(e) => {
                 self.out.error(&e);
-                self.out.ready_for_query(self.session.status().byte());
+                self.ready();
                 return;
             }
         };
@@ -226,7 +293,7 @@ impl Conn {
             Ok(s) => s,
             Err(e) => {
                 self.out.error(&e);
-                self.out.ready_for_query(self.session.status().byte());
+                self.ready();
                 return;
             }
         };
@@ -241,10 +308,11 @@ impl Conn {
                         continue;
                     }
                     if r.returns_rows {
-                        self.row_description(&r.columns, &[]);
+                        let formats: &[i16] = if r.binary { &[1] } else { &[] };
+                        self.row_description(&r.columns, formats);
                         let mut err = None;
                         for row in &r.rows {
-                            if let Err(e) = self.data_row(&r.columns, row, &[]) {
+                            if let Err(e) = self.data_row(&r.columns, row, formats) {
                                 err = Some(e);
                                 break;
                             }
@@ -267,7 +335,7 @@ impl Conn {
         if let Err(e) = self.session.end_implicit_block(failed) {
             self.out.error(&e);
         }
-        self.out.ready_for_query(self.session.status().byte());
+        self.ready();
     }
 
     fn parse(&mut self, body: &[u8]) -> SqlResult<()> {
@@ -284,12 +352,11 @@ impl Conn {
                 Type::from_oid(oid).ok_or_else(|| SqlError::new(code::UNDEFINED_OBJECT, format!("type with OID {oid} does not exist")))?
             });
         }
-        if !name.is_empty() && self.statements.contains_key(&name) {
+        if !name.is_empty() && self.session.prepared(&name).is_some() {
             return Err(SqlError::new(code::DUPLICATE_PREPARED_STATEMENT, format!("prepared statement \"{name}\" already exists")));
         }
         let stmt = pgmem_parse::parse_one(&sql)?;
-        let desc = self.session.describe(&stmt, &declared)?;
-        self.statements.insert(name, Arc::new(Prepared { stmt, param_types: desc.param_types, columns: desc.columns }));
+        self.session.prepare_protocol(&name, &sql, stmt, &declared)?;
         self.out.parse_complete();
         Ok(())
     }
@@ -305,10 +372,10 @@ impl Conn {
             param_formats.push(r.i16()?);
         }
         let nparams = usize::try_from(r.i16()?).unwrap_or(0);
-        let stmt =
-            self.statements.get(&stmt_name).cloned().ok_or_else(|| {
-                SqlError::new(code::INVALID_SQL_STATEMENT_NAME, format!("prepared statement \"{stmt_name}\" does not exist"))
-            })?;
+        let stmt = self
+            .session
+            .prepared(&stmt_name)
+            .ok_or_else(|| SqlError::new(code::INVALID_SQL_STATEMENT_NAME, format!("prepared statement \"{stmt_name}\" does not exist")))?;
         if nparams != stmt.param_types.len() {
             return Err(SqlError::new(
                 code::PROTOCOL_VIOLATION,
@@ -342,6 +409,7 @@ impl Conn {
         if !portal.is_empty() && self.portals.contains_key(&portal) {
             return Err(SqlError::new(code::DUPLICATE_CURSOR, format!("cursor \"{portal}\" already exists")));
         }
+        self.session.open_portal(&portal, &stmt.text);
         self.portals.insert(portal, Portal { stmt, params, result_formats, result: None, sent: 0 });
         self.out.bind_complete();
         Ok(())
@@ -353,7 +421,7 @@ impl Conn {
         let name = r.cstr()?;
         match kind {
             b'S' => {
-                let stmt = self.statements.get(&name).cloned().ok_or_else(|| {
+                let stmt = self.session.prepared(&name).ok_or_else(|| {
                     SqlError::new(code::INVALID_SQL_STATEMENT_NAME, format!("prepared statement \"{name}\" does not exist"))
                 })?;
                 let oids: Vec<u32> = stmt.param_types.iter().map(Type::oid).collect();
@@ -392,6 +460,7 @@ impl Conn {
             .ok_or_else(|| SqlError::new(code::INVALID_CURSOR_NAME, format!("portal \"{name}\" does not exist")))?;
         if portal.result.is_none() {
             {
+                self.session.begin_pipeline();
                 let res = self.session.execute(&portal.stmt.stmt, &portal.stmt.param_types, &portal.params)?;
                 self.send_result_preamble(&res);
                 portal.result = Some(res);
@@ -431,10 +500,11 @@ impl Conn {
         let name = r.cstr()?;
         match kind {
             b'S' => {
-                self.statements.remove(&name);
+                self.session.close_prepared(&name);
             }
             b'P' => {
                 self.portals.remove(&name);
+                self.session.close_portal(&name);
             }
             _ => return Err(SqlError::new(code::PROTOCOL_VIOLATION, format!("invalid CLOSE message subtype {kind}"))),
         }
