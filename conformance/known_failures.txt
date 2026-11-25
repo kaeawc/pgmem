@@ -1,19 +1,6 @@
 # Corpus records pgmem fails today, by key (file:hash of the SQL); the first line of the SQL
 # follows for reading. Regenerate with `cargo run -p pgmem-conformance -- --update`.
-catalog/information_schema.slt:bcd84fafea9ffe59  # SELECT c.column_name, e.data_type
 catalog/pg_catalog.slt:a085ef479946ad0c  # CREATE TABLE events_2024 PARTITION OF events FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
 catalog/pg_catalog.slt:d26d4fea085e04ff  # SELECT c.relname, c.relkind, c.relispartition, pg_get_expr(c.relpartbound, c.oid)
 catalog/pg_catalog.slt:48122fca8c801c55  # SELECT pg_get_partkeydef('events'::regclass)
-catalog/psql_describe.slt:bbede3599730d5d7  # SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity,
-catalog/psql_describe.slt:0a56de6a8ba8d11b  # SELECT a.attname,
-catalog/psql_describe.slt:55a36843bc50c0ea  # SELECT conname, conrelid::pg_catalog.regclass AS ontable,
-catalog/psql_describe.slt:44733f14a996f863  # SELECT pol.polname FROM pg_catalog.pg_policy pol WHERE pol.polrelid = 'orders'::regclass ORDER BY 1
-catalog/regtypes.slt:e1b41969bcc4d789  # SELECT 'now'::regproc::text, 'lower(text)'::regprocedure::text
-catalog/regtypes.slt:4f75d112acc7d9bf  # SELECT to_regproc('upper')::text, to_regprocedure('abs(integer)')::text
-catalog/settings.slt:83a5425c178e720d  # UPDATE pg_settings SET setting = 'via_update' WHERE name = 'application_name'
-catalog/settings.slt:77a2ba0cde58e2c2  # SHOW application_name
-dml/on_conflict.slt:8ce9ce1dd7ed5cb8  # INSERT INTO accounts VALUES (2, 'ALICE@example.COM') ON CONFLICT (lower(email)) DO UPDATE SET email = EXCLUDED.email RETURNING id, email
-functions/conditional_misc.slt:b5355bcb6afee2be  # SELECT pg_get_viewdef('pg_roles'::regclass) IS NOT NULL
 queries/set_operations.slt:6680237cbd789fd6  # SELECT NULL UNION SELECT 1
-types/casts.slt:562a638a088bc3c9  # SELECT 'pg_catalog.lower'::regproc
-types/casts.slt:fc3868fddb298ef7  # INSERT INTO c (v) VALUES (B'1'::text || 'abcd')

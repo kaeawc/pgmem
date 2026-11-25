@@ -75,13 +75,12 @@ def generate():
     old = load()
     if not old:
         sys.exit("no manifest to update")
-    lines = [HEADER]
+    # The pgmem-go sources are gone, so the manifest keeps every row it has (it is the record
+    # of those tests) and gains the Go tests still in the tree (the pgx examples) it lacks.
+    rows = dict(old)
     for pkg, f, test in go_tests():
-        prev = old.get((pkg, f, test))
-        if prev:
-            lines.append("\t".join(prev))
-        else:
-            lines.append("\t".join([pkg, f, test, default_location(pkg, f, test), "pending", ""]))
+        rows.setdefault((pkg, f, test), [pkg, f, test, default_location(pkg, f, test), "pending", ""])
+    lines = [HEADER] + ["\t".join(rows[k]) for k in sorted(rows)]
     os.makedirs(os.path.dirname(MANIFEST), exist_ok=True)
     with open(MANIFEST, "w") as fh:
         fh.write("\n".join(lines) + "\n")

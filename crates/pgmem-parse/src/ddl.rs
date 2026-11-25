@@ -102,7 +102,8 @@ fn lower_column_def(c: sq::ColumnDef) -> SqlResult<ColumnDef> {
                 },
             },
             sq::ColumnOption::Identity(_) => ColumnConstraintKind::Identity { always: false, options: Default::default() },
-            sq::ColumnOption::Collation(_) | sq::ColumnOption::Comment(_) => continue,
+            sq::ColumnOption::Collation(n) => ColumnConstraintKind::Collate(object_name(&n)?.base().to_owned()),
+            sq::ColumnOption::Comment(_) => continue,
             other => return Err(unsupported(&format!("column option {other}"))),
         };
         constraints.push(ColumnConstraint { name, kind, timing: ConstraintTiming::default() });

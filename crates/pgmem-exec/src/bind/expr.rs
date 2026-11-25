@@ -178,7 +178,11 @@ fn figure_colname(e: &ir::Expr) -> Option<(String, u8)> {
         // `B'1010'` / `X'1F'` constants (no length limit) are unnamed, like literals.
         ir::Expr::TypedString { ty, .. } if ty.name == "bit" && ty.modifiers == [-1] => None,
         ir::Expr::TypedString { ty, .. } => Some((type_display_name(ty), 1)),
-        ir::Expr::Case { .. } => Some(("case".into(), 1)),
+        // A CASE is named after its ELSE result when that has a real name.
+        ir::Expr::Case { else_result, .. } => match else_result.as_deref().and_then(figure_colname) {
+            Some((name, 2)) => Some((name, 2)),
+            _ => Some(("case".into(), 1)),
+        },
         // `x AT TIME ZONE z` is the function call timezone(z, x).
         ir::Expr::AtTimeZone { .. } => Some(("timezone".into(), 2)),
         ir::Expr::Exists { .. } => Some(("exists".into(), 2)),
@@ -438,7 +442,8 @@ impl Binder<'_> {
             ir::Expr::TypedString { ty, value } => {
                 let (t, typmod) = resolve_type_name(self.catalog, ty)?;
                 if let Type::Reg(_) = t {
-                    let e = Expr::Cast { expr: Box::new(Expr::Const(Value::Text(value.clone()))), to: t.clone(), typmod: -1, explicit: true };
+                    let e =
+                        Expr::Cast { expr: Box::new(Expr::Const(Value::Text(value.clone()))), to: t.clone(), typmod: -1, explicit: true };
                     return Ok((e, t));
                 }
                 let v = cast_value(text::decode(value, &t)?, &t, typmod)?;

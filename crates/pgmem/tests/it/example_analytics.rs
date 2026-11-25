@@ -114,3 +114,24 @@ fn expand_ids() {
     let got: Vec<i64> = c.query(EXPAND_IDS, &[&vec![42i64, 7, 1024]]).expect("ExpandIDs").iter().map(|r| r.get(0)).collect();
     assert_eq!(got, vec![7, 42, 1024]);
 }
+
+/// Port of TestCopy (analytics/copy_test.go): a binary COPY FROM STDIN bulk load, then COPY TO
+/// STDOUT in CSV.
+#[test]
+fn copy() {
+    use postgres::binary_copy::BinaryCopyInWriter;
+    use postgres::types::Type;
+    use std::io::Read;
+    let (_db, mut c) = setup();
+    c.batch_execute("CREATE TABLE scores (id bigint PRIMARY KEY, name text, score int, at timestamptz); SET TIME ZONE 'UTC'")
+        .expect("setup");
+    let at = utc_ts(2024, 7, 15, 12, 0, 0);
+    let sink = c.copy_in("COPY scores (id, name, score, at) FROM STDIN (FORMAT binary)").expect("copy in");
+    let mut w = BinaryCopyInWriter::new(sink, &[Type::INT8, Type::TEXT, Type::INT4, Type::TIMESTAMPTZ]);
+    w.write(&[&1i64, &"alice", &10i32, &at]).expect("row");
+    w.write(&[&2i64, &None::<&str>, &-3i32, &(at + SignedDuration::from_hours(1))]).expect("row");
+    assert_eq!(w.finish().expect("finish"), 2);
+    let mut out = String::new();
+    c.copy_out("COPY scores TO STDOUT WITH (FORMAT csv, HEADER)").expect("copy out").read_to_string(&mut out).expect("read");
+    assert_eq!(out, "id,name,score,at\n1,alice,10,2024-07-15 12:00:00+00\n2,,-3,2024-07-15 13:00:00+00\n");
+}

@@ -373,6 +373,9 @@ fn column_row(ctx: &EvalCtx, m: &Model, s: &Spec, schema: &str, rel: &str, table
         ("is_updatable", yes_no(updatable)),
     ];
     vals.extend(type_columns(&a.ty, a.typmod, &catalog_name(ctx)));
+    if let Some(coll) = a.column.and_then(|c| c.collation.as_deref()) {
+        vals.extend([("collation_catalog", catalog_name(ctx)), ("collation_schema", name("pg_catalog")), ("collation_name", name(coll))]);
+    }
     if let (Some(t), Some(c)) = (table, a.column) {
         if c.generated.is_none()
             && let Ok(Some(d)) = crate::deparse::deparse_default(m.catalog, t, c)

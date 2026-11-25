@@ -70,7 +70,11 @@ impl Session {
         };
         let mut selection = u.selection.clone();
         for a in u.assignments.iter().filter(|a| target(a, "name")) {
-            let same = ir::Expr::Binary { left: Box::new(ir::Expr::Column(vec!["name".into()])), op: "=".into(), right: Box::new(a.value.clone()) };
+            let same = ir::Expr::Binary {
+                left: Box::new(ir::Expr::Column(vec!["name".into()])),
+                op: "=".into(),
+                right: Box::new(a.value.clone()),
+            };
             selection = Some(match selection {
                 Some(s) => ir::Expr::And(Box::new(s), Box::new(same)),
                 None => same,

@@ -394,9 +394,7 @@ fn to_reg_fn(kind: RegKind) -> crate::plan::ScalarFn {
         RegKind::Type => |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Type, ctx.txn.catalog()).unwrap_or(Value::Null)),
         RegKind::Namespace => |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Namespace, ctx.txn.catalog()).unwrap_or(Value::Null)),
         RegKind::Proc => |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Proc, ctx.txn.catalog()).unwrap_or(Value::Null)),
-        RegKind::Procedure => {
-            |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Procedure, ctx.txn.catalog()).unwrap_or(Value::Null))
-        }
+        RegKind::Procedure => |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Procedure, ctx.txn.catalog()).unwrap_or(Value::Null)),
     }
 }
 

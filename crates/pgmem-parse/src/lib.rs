@@ -562,9 +562,18 @@ pub(crate) fn conflict_expr(column: &str) -> Option<String> {
 
 /// `ON CONFLICT (lower(email), id)`: each element that is not a plain column becomes a marker
 /// column (sqlparser takes only column names); the lowering parses the recorded text.
-fn rewrite_conflict_exprs(tokens: &Tokens, sig: &[usize], k: usize, drop: &mut [bool], insert_after: &mut std::collections::HashMap<usize, String>) {
+fn rewrite_conflict_exprs(
+    tokens: &Tokens,
+    sig: &[usize],
+    k: usize,
+    drop: &mut [bool],
+    insert_after: &mut std::collections::HashMap<usize, String>,
+) {
     use sqlparser::tokenizer::Token;
-    if !(is_word(tokens, sig, k, "ON") && is_word(tokens, sig, k + 1, "CONFLICT") && sig.get(k + 2).is_some_and(|&j| tokens[j] == Token::LParen)) {
+    if !(is_word(tokens, sig, k, "ON")
+        && is_word(tokens, sig, k + 1, "CONFLICT")
+        && sig.get(k + 2).is_some_and(|&j| tokens[j] == Token::LParen))
+    {
         return;
     }
     let Some(close) = matching_paren(tokens, sig, k + 2) else { return };
@@ -595,8 +604,8 @@ fn rewrite_conflict_exprs(tokens: &Tokens, sig: &[usize], k: usize, drop: &mut [
             c.push(text);
             c.len() - 1
         });
-        for j in sig[el[0]]..=sig[el[el.len() - 1]] {
-            drop[j] = true;
+        for d in &mut drop[sig[el[0]]..=sig[el[el.len() - 1]]] {
+            *d = true;
         }
         insert_after.insert(sig[el[0] - 1], format!(" {CONFLICT_EXPR_MARKER}{n}"));
     }

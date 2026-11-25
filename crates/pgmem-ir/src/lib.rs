@@ -894,7 +894,11 @@ pub struct OnConflict {
 pub enum ConflictTarget {
     None,
     /// `(col, ..., (expr), ...) [WHERE predicate]`: plain columns and expression elements.
-    Columns { columns: Vec<String>, exprs: Vec<Expr>, selection: Option<Expr> },
+    Columns {
+        columns: Vec<String>,
+        exprs: Vec<Expr>,
+        selection: Option<Expr>,
+    },
     Constraint(String),
 }
 
@@ -1074,6 +1078,8 @@ pub enum ColumnConstraintKind {
     Default(Expr),
     /// `GENERATED ALWAYS AS (expr) STORED`.
     Generated(Expr),
+    /// `COLLATE name`.
+    Collate(String),
     /// `GENERATED {ALWAYS | BY DEFAULT} AS IDENTITY`.
     Identity {
         always: bool,

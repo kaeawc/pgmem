@@ -23,6 +23,7 @@ mod bool_agg;
 mod bytea;
 mod case;
 mod cast;
+mod catalog_lookups;
 mod check;
 mod coalesce_nullif;
 mod column_default;

@@ -48,6 +48,8 @@ pub struct ColumnDef {
     /// Value rows created before this column was added read back as (Postgres'
     /// `attmissingval`): NULL, or the ADD COLUMN ... DEFAULT constant.
     pub missing: Value,
+    /// `COLLATE name` when not the type's default collation.
+    pub collation: Option<String>,
 }
 
 impl ColumnDef {
@@ -63,6 +65,7 @@ impl ColumnDef {
             identity: None,
             dropped: false,
             missing: Value::Null,
+            collation: None,
         }
     }
 }

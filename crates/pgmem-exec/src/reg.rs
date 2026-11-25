@@ -189,7 +189,10 @@ fn lookup_proc(s: &str, catalog: &Catalog) -> SqlResult<Value> {
 fn lookup_procedure(s: &str, catalog: &Catalog) -> SqlResult<Value> {
     let text = s.trim();
     let open = text.find('(').ok_or_else(|| SqlError::new(code::INVALID_TEXT_REPRESENTATION, "expected a left parenthesis"))?;
-    let close = text.rfind(')').filter(|c| *c > open).ok_or_else(|| SqlError::new(code::INVALID_TEXT_REPRESENTATION, "expected a right parenthesis"))?;
+    let close = text
+        .rfind(')')
+        .filter(|c| *c > open)
+        .ok_or_else(|| SqlError::new(code::INVALID_TEXT_REPRESENTATION, "expected a right parenthesis"))?;
     let parts = parse_qualified(&text[..open])?;
     let inner = text[open + 1..close].trim();
     let mut args = Vec::new();
@@ -248,10 +251,8 @@ fn procedure_name(catalog: &Catalog, oid: u32) -> Option<String> {
             (quote_ident(p.name), p.args.clone())
         }
     };
-    let types: Vec<String> = args
-        .iter()
-        .map(|a| crate::funcs::catalog::format_type(*a, -1, catalog).unwrap_or_else(|| a.to_string()))
-        .collect();
+    let types: Vec<String> =
+        args.iter().map(|a| crate::funcs::catalog::format_type(*a, -1, catalog).unwrap_or_else(|| a.to_string())).collect();
     Some(format!("{name}({})", types.join(",")))
 }
 

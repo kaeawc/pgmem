@@ -7,11 +7,11 @@ and what comes next. Updated with every PR.
 
 | Metric | Value | How it is measured |
 |---|---|---|
-| pgmem-go parity | **564 / 564** Go tests ported | `scripts/parity.py check` ([PARITY.md](PARITY.md)) |
-| Integration suite on pgmem | **640 / 640** pass | `cargo nextest run -p pgmem --test it` |
-| Integration suite on real PostgreSQL 18 | **640 / 640** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
-| Go pgx example suites (sqlc) against the Rust binary | **27 / 27** pass | `make examples` (CI `pgx-examples`) |
-| **SQL conformance corpus** (3309 records, 9 areas) | **3292 / 3309 (99.5%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
+| pgmem-go parity | **565 / 565** Go tests ported | `scripts/parity.py check` ([PARITY.md](PARITY.md)) |
+| Integration suite on pgmem | **650 / 650** pass | `cargo nextest run -p pgmem --test it` |
+| Integration suite on real PostgreSQL 18 | **650 / 650** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
+| Go pgx example suites (sqlc) against the Rust binary | **28 / 28** pass | `make examples` (CI `pgx-examples`) |
+| **SQL conformance corpus** (3309 records, 9 areas) | **3305 / 3309 (99.9%)** on pgmem; 3309 / 3309 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
 
 ### Conformance history
 
@@ -45,7 +45,8 @@ and what comes next. Updated with every PR.
 | 2026-11-25 | #131 array lower bounds, bit strings, money, inet/cidr/macaddr, pretty deparse | 564/564 | 3183/3309 (96.2%) |
 | 2026-11-25 | #132 SQL and PL/pgSQL functions and procedures, DO, CALL, triggers | 564/564 | 3240/3309 (97.9%) |
 | 2026-11-25 | #133 roles, memberships, GRANT / REVOKE with enforcement, default privileges, owners | 564/564 | 3265/3309 (98.7%) |
-| 2026-11-25 | extensions: pgcrypto, uuid-ossp, citext, pg_trgm, hstore; range catalog rows | 564/564 | 3292/3309 (99.5%) |
+| 2026-11-25 | #134 extensions: pgcrypto, uuid-ossp, citext, pg_trgm, hstore; range catalog rows | 564/564 | 3292/3309 (99.5%) |
+| 2026-11-25 | COPY (text, CSV, binary; STDIN / STDOUT / files), regproc / regprocedure over builtins, ON CONFLICT on expressions, UPDATE pg_settings, column collations, element_types, system view definitions | 565/565 | 3305/3309 (99.9%) |
 
 ## Supported
 
@@ -55,7 +56,17 @@ and what comes next. Updated with every PR.
   Execute with PortalSuspended), one implicit transaction per Sync (an error rolls back the
   whole pipeline), skip-until-Sync after errors, ParameterStatus, notices,
   NotificationResponse (delivered between transactions, also to idle connections), error
-  fields (SQLSTATE, detail, hint, schema/table/column/constraint).
+  fields (SQLSTATE, detail, hint, schema/table/column/constraint), the COPY sub-protocol
+  (CopyInResponse / CopyOutResponse, CopyData, CopyDone, CopyFail; a simple Query resumes after
+  the copy; Sync and Flush ignored during COPY IN, stray CopyData ignored after a failure).
+- **COPY**: `COPY table [(cols)] | (query) FROM STDIN / TO STDOUT / 'file'` in text, CSV and
+  binary formats with every Postgres 18 option (generic `WITH (...)` and legacy syntax;
+  DELIMITER, NULL, DEFAULT, HEADER [MATCH], QUOTE, ESCAPE, FORCE_QUOTE / FORCE_NOT_NULL /
+  FORCE_NULL with `*`, ENCODING, ON_ERROR IGNORE with LOG_VERBOSITY and REJECT_LIMIT) and
+  `ProcessCopyOptions`' validation messages; text escapes (octal, `\x`), `\.` end markers,
+  line-ending checks, CSV quoting rules, the PGCOPY binary header; COPY FROM inserts through the
+  table's defaults, identity values (GENERATED ALWAYS accepts copied values), constraints and
+  triggers, `WHERE` filters rows; COPY (INSERT ... RETURNING) TO; pgx `CopyFrom` / `CopyTo`.
 - **Session statements**: PREPARE / EXECUTE (assignment coercion of arguments) / DEALLOCATE,
   sharing one namespace with protocol statements, and `pg_prepared_statements`; cursors
   (DECLARE [BINARY] [NO] SCROLL [WITH HOLD], FETCH / MOVE in every direction with Postgres'
@@ -68,7 +79,9 @@ and what comes next. Updated with every PR.
   text, varchar(n), char(n) (blank-padded, trailing spaces insignificant), name, "char", bytea,
   uuid, date, time, timetz, timestamp, timestamptz, interval, json (input text kept as written;
   operators return pieces of it verbatim), jsonb (numbers normalized as numeric), jsonpath
-  (canonical text form), oid, regclass/regtype/regnamespace/regproc (name ↔ OID through the catalog), void,
+  (canonical text form), oid, regclass/regtype/regnamespace/regproc/regprocedure (name ↔ OID
+  through the catalog; builtin functions from Postgres 18's recorded `pg_proc`, overloads
+  reported as 42725, `to_regproc` / `to_regprocedure`), void,
   enums, domains (NOT NULL / CHECK), composite types and table row types, the builtin range and
   multirange types (int4/int8/num/date/ts/tstz; discrete ranges canonical, text and binary I/O,
   ordering, `@>` `<@` `&&` `<<` `>>` `&<` `&>` `-|-` `+` `*` `-`, lower/upper/isempty/..._inc/
@@ -98,7 +111,8 @@ and what comes next. Updated with every PR.
   numeric and date/time keys), EXCLUDE CURRENT ROW / GROUP / TIES, aggregates inside window
   calls (`sum(sum(x)) OVER ()`).
 - **DML**: INSERT (VALUES, SELECT, DEFAULT VALUES, DEFAULT), ON CONFLICT DO NOTHING/DO UPDATE with
-  arbiter inference (partial unique indexes need the matching WHERE), UPDATE ... FROM,
+  arbiter inference over columns and expression keys (`ON CONFLICT (lower(email))`; partial
+  unique indexes need the matching WHERE), UPDATE ... FROM,
   `SET (a, b) = (SELECT ...)`, DELETE ... USING, RETURNING with Postgres 18's `old` / `new`
   (and `RETURNING WITH (OLD AS o, NEW AS n)`), MERGE (MATCHED / NOT MATCHED [BY SOURCE |
   TARGET], DO NOTHING, RETURNING with `merge_action()`), data-modifying WITH queries (run
@@ -203,7 +217,11 @@ and what comes next. Updated with every PR.
   `pg_get_constraintdef`, `pg_get_indexdef`, `pg_get_viewdef` (ruleutils-exact deparser, with
   pretty mode's minimal parentheses),
   `pg_get_serial_sequence`, `obj_description`/`col_description` (COMMENT ON is stored),
-  `to_regclass`, privilege checks; int2vector/oidvector with zero-based subscripts.
+  `to_regclass`, privilege checks; int2vector/oidvector with zero-based subscripts;
+  `information_schema.element_types`, `pg_policy` / `pg_partitioned_table` (empty),
+  `pg_partition_ancestors`, system views' `pg_get_viewdef` (recorded from Postgres 18), `UPDATE
+  pg_settings` (Postgres' rule: `set_config`), column `COLLATE` (C, POSIX, ucs_basic,
+  pg_c_utf8; `attcollation`, information_schema collation columns).
 - **Functions**: string (format with `*` widths, VARIADIC calls, unistr, to_bin/to_oct,
   string_to_table, SIMILAR substring), regex (`~`, regexp_match(es)/replace/count/instr/substr/
   split with Postgres' flags and empty-match rules), LIKE/ILIKE/SIMILAR TO, math (numeric
@@ -236,17 +254,22 @@ and what comes next. Updated with every PR.
   statements in them fail (0A000); CALL, DO and AFTER / statement triggers may modify data.
   Set-returning user functions work in FROM, not in the select list. No transaction control
   inside procedures, no event triggers, no cursors in PL/pgSQL; errors carry no CONTEXT field.
-- `pg_proc` has no rows for builtin functions; `regproc` / `regprocedure` do not resolve
-  builtin function OIDs.
+- `pg_proc` has no rows for builtin functions (regproc / regprocedure resolve them from recorded
+  data).
+- COPY: errors carry no CONTEXT line; PROGRAM is not supported; FREEZE always fails (55000);
+  rows COPY ... WHERE rejects and rows of a failed COPY do not consume sequence values; ON_ERROR
+  IGNORE skips input-conversion errors but not typmod ones (`varchar(n)` too long).
 - Multiranges have I/O, constructors, `@>`, `&&`, lower/upper and range_agg, not the full
   operator set. No user-defined range types.
-- No COPY, stored procedures, triggers. Functions that build arrays from bounded ones (`||`,
+- Functions that build arrays from bounded ones (`||`,
   slices, element assignment) return lower bound 1. Unicode
   normalization (`normalize`, `IS NORMALIZED`) covers ASCII text only. `VARIADIC` needs an
   array known when the statement is bound. Comparison is bytewise, which is what the corpus' `C.UTF-8`
-  database collation does; other collations are not supported.
+  database collation does; column collations are recorded and reported but do not change
+  comparison, and CREATE TABLE AS does not carry them over. No partitioning: PARTITION BY is
+  accepted and ignored (a plain table), PARTITION OF / ATTACH fail with 0A000.
 - `ctid` and `xmin` derive from pgmem's row ids (they change with every row version, but xmin is
-  not the inserting transaction's id); ON CONFLICT targets must be columns (not expressions).
+  not the inserting transaction's id).
   UNION without ORDER BY returns rows in first-seen order where Postgres' hash order can differ.
 - SERIALIZABLE tracks reads and writes per table (Postgres' relation-level predicate locks of
   sequential scans): it catches two-transaction write skew, not longer dependency cycles, and
@@ -263,6 +286,8 @@ and what comes next. Updated with every PR.
 Hill-climb, ordered by conformance records recovered per unit of work and by what blocks real
 clients. Each item names the corpus area it moves (see CONFORMANCE.md for per-file rates).
 
-1. COPY, collations, partitioning, catalog remainder (pg_policy, pg_partition_ancestors,
-   regprocedure, element_types).
+1. Declarative partitioning: PARTITION BY RANGE / LIST / HASH, PARTITION OF, ATTACH / DETACH,
+   row routing and scans of partitioned tables, `pg_partitioned_table`, `relpartbound`,
+   `pg_get_partkeydef`, `pg_partition_tree` (catalog area: the last 3 records besides UNION
+   order).
 2. Client matrix in CI: psql, tokio-postgres and sqlx (Go pgx is covered by `examples/`).
