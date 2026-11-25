@@ -128,6 +128,31 @@ fn letters(privs: Option<&[String]>, object: &GrantObject, sequence: bool) -> Sq
     }
 }
 
+/// Privilege letters in `aclitem` output order (Postgres' ACL bit order).
+const ACL_ORDER: &str = "arwdDxtXUCcTsAm";
+
+/// An object's ACL (`relacl`, ...) as `aclitem` texts: None until something was granted on
+/// it (the default privileges), else the owner's entry then each grantee's (`role=rw*/grantor`).
+pub fn acl_items(catalog: &Catalog, env: &SessionEnv, object: &GrantObject, oid: Oid, sequence: bool) -> Option<Vec<String>> {
+    let grants: Vec<_> = catalog.grants().iter().filter(|g| g.object == *object).collect();
+    if grants.is_empty() {
+        return None;
+    }
+    let owner = owner_of(catalog, env, oid);
+    let letters = |privs: &[char], grantable: &[char]| -> String {
+        ACL_ORDER
+            .chars()
+            .filter(|c| privs.contains(c))
+            .map(|c| if grantable.contains(&c) { format!("{c}*") } else { c.to_string() })
+            .collect()
+    };
+    let mut items = vec![format!("{owner}={}/{owner}", object_privileges(object, sequence))];
+    for g in grants.iter().filter(|g| g.grantee != owner) {
+        items.push(format!("{}={}/{}", g.grantee, letters(&g.privileges, &g.grantable), g.grantor));
+    }
+    Some(items)
+}
+
 /// The owner of an object (the session user when none is recorded).
 pub fn owner_of(catalog: &Catalog, env: &SessionEnv, oid: Oid) -> String {
     catalog.owner(oid).map_or_else(|| env.user.clone(), str::to_owned)

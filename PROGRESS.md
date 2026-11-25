@@ -8,9 +8,10 @@ and what comes next. Updated with every PR.
 | Metric | Value | How it is measured |
 |---|---|---|
 | pgmem-go parity | **565 / 565** Go tests ported | `scripts/parity.py check` ([PARITY.md](PARITY.md)) |
-| Integration suite on pgmem | **653 / 653** pass | `cargo nextest run -p pgmem --test it` |
-| Integration suite on real PostgreSQL 18 | **653 / 653** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
+| Integration suite on pgmem | **654 / 654** pass | `cargo nextest run -p pgmem --test it` |
+| Integration suite on real PostgreSQL 18 | **654 / 654** pass | same suite with `PGMEM_TEST_DSN` (CI `postgres-fidelity`) |
 | Go pgx example suites (sqlc) against the Rust binary | **28 / 28** pass | `make examples` (CI `pgx-examples`) |
+| Client matrix | psql **3 / 3** scripts print exactly what PostgreSQL prints; tokio-postgres **6 / 6** and sqlx **3 / 3** suites pass on pgmem and PostgreSQL | `clients/` (CI `clients`) |
 | **SQL conformance corpus** (3369 records, 9 areas) | **3368 / 3369 (99.97%)** on pgmem; 3369 / 3369 on PostgreSQL 18 | `cargo run -p pgmem-conformance` ([CONFORMANCE.md](CONFORMANCE.md); CI `conformance`, `postgres-fidelity`) |
 
 ### Conformance history
@@ -48,6 +49,7 @@ and what comes next. Updated with every PR.
 | 2026-11-25 | #134 extensions: pgcrypto, uuid-ossp, citext, pg_trgm, hstore; range catalog rows | 564/564 | 3292/3309 (99.5%) |
 | 2026-11-25 | #135 COPY (text, CSV, binary; STDIN / STDOUT / files), regproc / regprocedure over builtins, ON CONFLICT on expressions, UPDATE pg_settings, column collations, element_types, system view definitions | 565/565 | 3305/3309 (99.9%) |
 | 2026-11-25 | #136 declarative partitioning: RANGE / LIST / HASH, sub-partitions, routing, row movement, ATTACH / DETACH, partition catalogs (+60 corpus records) | 565/565 | 3368/3369 (99.97%) |
+| 2026-11-25 | #137 client matrix in CI: psql output against PostgreSQL's, tokio-postgres and sqlx suites; psql \d / \dp / \dD catalog support, user type OIDs in Parse | 565/565 | 3368/3369 (99.97%) |
 
 ## Supported
 
@@ -68,6 +70,12 @@ and what comes next. Updated with every PR.
   line-ending checks, CSV quoting rules, the PGCOPY binary header; COPY FROM inserts through the
   table's defaults, identity values (GENERATED ALWAYS accepts copied values), constraints and
   triggers, `WHERE` filters rows; COPY (INSERT ... RETURNING) TO; pgx `CopyFrom` / `CopyTo`.
+- **Clients** (checked in CI against PostgreSQL): psql's describe commands (`\d`, `\d+`, `\dt`,
+  `\di`, `\dv`, `\ds`, `\dn`, `\dT`, `\dD`, `\df`, `\sf`, `\dp`, `\du`), `\copy`, `\gset`, output
+  formats and error handling print what they print on PostgreSQL; tokio-postgres (typed and
+  binary parameters, pipelining, portals, savepoints, COPY, notifications, error fields); sqlx
+  (pools and statement cache, `FromRow`, enum types resolved through pg_type, json, arrays,
+  transactions, PgListener, COPY); pgx (`examples/`).
 - **Session statements**: PREPARE / EXECUTE (assignment coercion of arguments) / DEALLOCATE,
   sharing one namespace with protocol statements, and `pg_prepared_statements`; cursors
   (DECLARE [BINARY] [NO] SCROLL [WITH HOLD], FETCH / MOVE in every direction with Postgres'
@@ -302,6 +310,7 @@ and what comes next. Updated with every PR.
 Hill-climb, ordered by conformance records recovered per unit of work and by what blocks real
 clients. Each item names the corpus area it moves (see CONFORMANCE.md for per-file rates).
 
-1. Client matrix in CI: psql, tokio-postgres and sqlx (Go pgx is covered by `examples/`).
-2. Known gaps above, by what real test suites hit first: BEFORE row triggers that write,
-   select-list user SRFs, collation-aware comparison, table inheritance.
+1. Known gaps above, by what real test suites hit first: BEFORE row triggers that write,
+   select-list user SRFs, collation-aware comparison, table inheritance, error CONTEXT and
+   position fields (psql's `LINE n:` markers).
+2. More clients in the matrix: JDBC (pgjdbc), node-postgres, psycopg.

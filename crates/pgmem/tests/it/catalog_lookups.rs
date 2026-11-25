@@ -118,3 +118,54 @@ fn on_conflict_expression_keys_and_varchar_assignment() {
     assert_eq!(message(&e), "value too long for type character varying(3)");
     assert_eq!(rows(&mut c, "SELECT ('ab'::text || 'cd')::varchar(3)"), [["abc"]]);
 }
+
+/// What psql's `\d`, `\dp` and `\dD` and sqlx's enum support need from the server.
+#[test]
+fn client_catalog_support() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TYPE mood AS ENUM ('happy', 'sad');
+         CREATE DOMAIN positive AS int CHECK (VALUE > 0);
+         CREATE TABLE notes (id int, m mood, updated timestamptz);
+         CREATE FUNCTION touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+         CREATE TRIGGER notes_touch BEFORE UPDATE ON notes FOR EACH ROW EXECUTE FUNCTION touch();
+         CREATE ROLE note_reader NOLOGIN;",
+    )
+    .expect("setup");
+    let user: String = c.query_one("SELECT current_user::text", &[]).expect("user").get(0);
+    assert_eq!(rows(&mut c, "SELECT relacl IS NULL FROM pg_class WHERE relname = 'notes'"), [["t"]]);
+    c.batch_execute("GRANT SELECT, UPDATE ON notes TO note_reader").expect("grant");
+    assert_eq!(
+        rows(&mut c, "SELECT array_to_string(relacl, ' ') FROM pg_class WHERE relname = 'notes'"),
+        [[format!("{user}=arwdDxtm/{user} note_reader=rw/{user}")]]
+    );
+    assert_eq!(
+        rows(&mut c, "SELECT pg_get_triggerdef(oid), pg_get_triggerdef(oid, true) FROM pg_trigger WHERE tgname = 'notes_touch'"),
+        [[
+            "CREATE TRIGGER notes_touch BEFORE UPDATE ON public.notes FOR EACH ROW EXECUTE FUNCTION touch()",
+            "CREATE TRIGGER notes_touch BEFORE UPDATE ON notes FOR EACH ROW EXECUTE FUNCTION touch()"
+        ]]
+    );
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT pg_get_constraintdef(oid), pg_get_constraintdef(oid, true) FROM pg_constraint WHERE contypid = 'positive'::regtype"
+        ),
+        [["CHECK ((VALUE > 0))", "CHECK (VALUE > 0)"]]
+    );
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT (SELECT count(*) FROM pg_statistic_ext)::text, (SELECT count(*) FROM pg_publication)::text, \
+             pg_relation_is_publishable('notes'::regclass)::text"
+        ),
+        [["0", "0", "true"]]
+    );
+    c.batch_execute("DROP OWNED BY note_reader; DROP ROLE note_reader").expect("cleanup");
+    // A parameter declared with a user type's OID (as sqlx does for enums).
+    let oid: u32 = c.query_one("SELECT 'mood'::regtype::oid", &[]).expect("oid").get(0);
+    let mood =
+        postgres::types::Type::new("mood".into(), oid, postgres::types::Kind::Enum(vec!["happy".into(), "sad".into()]), "public".into());
+    let stmt = c.prepare_typed("SELECT $1::text", std::slice::from_ref(&mood)).expect("prepare with a user type OID");
+    assert_eq!(stmt.params(), [mood]);
+}

@@ -91,6 +91,56 @@ jobs:
         env:
           PGMEM_BIN: ${{ github.workspace }}/target/release/pgmem
 
+  # Client compatibility: psql's output (describe commands, \copy, variables) must match
+  # PostgreSQL's for the same scripts, and the tokio-postgres and sqlx suites (clients/rust, a
+  # crate outside the workspace) pass against both pgmem and PostgreSQL.
+  clients:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: clients
+          workspaces: |
+            . -> target
+            clients/rust -> target
+          cache-on-failure: true
+      - run: cargo build --locked --release -p pgmem
+      - name: Install psql 18
+        run: |
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-client-18
+          echo /usr/lib/postgresql/18/bin >> "$GITHUB_PATH"
+      - run: psql --version
+      - run: clients/psql/compare.sh target/release/pgmem postgres://postgres@127.0.0.1:5432/postgres
+      - run: cargo fmt --manifest-path clients/rust/Cargo.toml --check
+      - run: cargo clippy --locked --manifest-path clients/rust/Cargo.toml --all-targets -- -D warnings
+      - name: tokio-postgres and sqlx against pgmem
+        run: cargo test --locked --manifest-path clients/rust/Cargo.toml
+        env:
+          PGMEM_BIN: ${{ github.workspace }}/target/release/pgmem
+      - name: tokio-postgres and sqlx against PostgreSQL
+        run: cargo test --locked --manifest-path clients/rust/Cargo.toml
+        env:
+          PGMEM_CLIENT_DSN: postgres://postgres@127.0.0.1:5432/postgres
+
   # Dependency policy (deny.toml): one version per crate, RustSec advisories, licenses, sources.
   deny:
     runs-on: ubuntu-latest
