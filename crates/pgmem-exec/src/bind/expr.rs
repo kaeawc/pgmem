@@ -6,7 +6,7 @@ use crate::funcs::{self, EQ, common_type, comparison, resolve_binary, resolve_fu
 use crate::plan::{AggCall, AggKind, Expr, Frame, FrameBound, FrameUnits, SortKey, SubqueryKind, WinCall, WinKind};
 use pgmem_ir as ir;
 use pgmem_types::usertype::RECORD_OID;
-use pgmem_types::{Numeric, SqlError, SqlResult, Type, Value, code, text};
+use pgmem_types::{ErrorRef, Numeric, SqlError, SqlResult, Type, Value, code, text};
 
 pub type Bound = (Expr, Type);
 
@@ -92,7 +92,8 @@ fn coerce_inner(b: &Binder, e: Expr, from: &Type, to: &Type, typmod: i32, contex
             return Ok(if typmod >= 0 { Expr::Cast { expr: Box::new(e), to: to.clone(), typmod, explicit } } else { e });
         }
         (Expr::Const(Value::Text(s)), Type::Unknown) => {
-            let v = text::decode(s, to)?;
+            // Postgres points at the literal when its input function fails.
+            let v = text::decode(s, to).map_err(|e| e.about(ErrorRef::Literal(s.clone())))?;
             return Ok(Expr::Const(cast_value_ctx(v, to, typmod, explicit)?));
         }
         (Expr::Const(Value::Null), _) => return Ok(Expr::Const(Value::Null)),
@@ -447,7 +448,11 @@ impl Binder<'_> {
         }
         match e {
             ir::Expr::Literal(l) => literal(l),
-            ir::Expr::Column(parts) => self.bind_column(parts, ctx),
+            ir::Expr::Column(parts) => self.bind_column(parts, ctx).map_err(|e| {
+                super::about(e, &[code::UNDEFINED_COLUMN, code::AMBIGUOUS_COLUMN, code::UNDEFINED_TABLE], || {
+                    ErrorRef::Column(parts.join("."))
+                })
+            }),
             ir::Expr::Param(n) => {
                 let idx = n - 1;
                 Ok((Expr::Param(idx), self.param_type(idx)))
@@ -587,7 +592,9 @@ impl Binder<'_> {
             }
             ir::Expr::Case { operand, whens, else_result } => self.bind_case(operand.as_deref(), whens, else_result.as_deref(), ctx),
             ir::Expr::Cast { expr, ty } => self.bind_cast(expr, ty, ctx),
-            ir::Expr::Function(f) => self.bind_function(f, ctx),
+            ir::Expr::Function(f) => self.bind_function(f, ctx).map_err(|e| {
+                super::about(e, &[code::UNDEFINED_FUNCTION, code::AMBIGUOUS_FUNCTION], || ErrorRef::Function(f.name.0.join(".")))
+            }),
             ir::Expr::Array(items) => {
                 if items.is_empty() {
                     return Err(SqlError::new(code::INDETERMINATE_DATATYPE, "cannot determine type of empty array")
@@ -778,7 +785,7 @@ impl Binder<'_> {
     }
 
     pub fn apply_binary(&self, op: &str, l: Expr, lt: Type, r: Expr, rt: Type) -> SqlResult<Bound> {
-        let res = resolve_binary(op, &lt, &rt)?;
+        let res = resolve_binary(op, &lt, &rt).map_err(|e| e.about(ErrorRef::Operator(op.to_owned())))?;
         let l = coerce(self, l, &lt, &res.args[0], CoercionContext::Explicit)?;
         let r = coerce(self, r, &rt, &res.args[1], CoercionContext::Explicit)?;
         Ok((fold(Expr::Call { func: res.func, args: vec![l, r] }), res.ret))
