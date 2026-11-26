@@ -356,9 +356,15 @@ impl<'x, 'b, 'a> Interp<'x, 'b, 'a> {
         // A block with handlers runs in a subtransaction: an exception undoes its changes.
         let sp = format!("__pgmem_plpgsql_{}", self.savepoints);
         self.savepoints += 1;
-        if let Exec::Write { txn, .. } = self.exec {
-            txn.savepoint(&sp);
-        }
+        // Reading a query's transaction, the block's writes are those of functions it calls,
+        // made in the transaction's writable copy.
+        let side = match self.exec {
+            Exec::Write { txn, .. } => {
+                txn.savepoint(&sp);
+                false
+            }
+            Exec::Read(c) | Exec::Volatile(c) => c.txn.side_savepoint(&sp)?,
+        };
         let vars_mark = self.vars.len();
         let outcome = (|| {
             for d in &b.decls {
@@ -368,16 +374,20 @@ impl<'x, 'b, 'a> Interp<'x, 'b, 'a> {
         })();
         match outcome {
             Ok(flow) => {
-                if let Exec::Write { txn, .. } = self.exec {
-                    txn.release(&sp)?;
+                match self.exec {
+                    Exec::Write { txn, .. } => txn.release(&sp)?,
+                    Exec::Read(c) | Exec::Volatile(c) => c.txn.side_end(&sp, side, false)?,
                 }
                 self.savepoints -= 1;
                 Ok(flow)
             }
             Err(e) => {
-                if let Exec::Write { txn, .. } = self.exec {
-                    txn.rollback_to(&sp)?;
-                    txn.release(&sp)?;
+                match self.exec {
+                    Exec::Write { txn, .. } => {
+                        txn.rollback_to(&sp)?;
+                        txn.release(&sp)?;
+                    }
+                    Exec::Read(c) | Exec::Volatile(c) => c.txn.side_end(&sp, side, true)?,
                 }
                 self.savepoints -= 1;
                 self.vars.truncate(vars_mark);
