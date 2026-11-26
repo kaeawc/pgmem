@@ -12,6 +12,10 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - `cargo binstall pgmem` installs the prebuilt binary from the GitHub release.
 - `ALTER EXTENSION name UPDATE [TO version]`, `SET SCHEMA schema` and `ADD` / `DROP` of tables, views, sequences, functions, types, domains and schemas. Extension members cannot be dropped on their own (`2BP01`, "extension requires it"), `DROP EXTENSION` removes them, and `pg_extension.extrelocatable` follows the extension. `Catalog::extension_members()` exposes membership for `pg_depend` rows with deptype `e`.
 - `pg_get_keywords()` returns PostgreSQL 18's keyword list (word, catcode, barelabel, catdesc, baredesc).
+- `pg_locks` lists relation locks: the ones queries (with the indexes the planner opens), DML,
+  `LOCK TABLE` and DDL take, at PostgreSQL's lock level for each statement and ALTER TABLE
+  subcommand. They are held to the end of the transaction (or released by `ROLLBACK TO`) and
+  conflict with `LOCK ... NOWAIT` in other sessions.
 
 ### Fixed
 
@@ -44,6 +48,8 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - UNION / INTERSECT / EXCEPT and `SELECT DISTINCT` without ORDER BY return rows in PostgreSQL's
   order (sorted, or hash-table order, as its planner picks) for inputs of constants and VALUES
   lists, instead of first-seen order. Table inputs keep first-seen order.
+- `LOCK TABLE` locks a partitioned table's partitions (not with `ONLY`) and a view's base
+  relations, and refuses sequences and indexes (`42809 cannot lock relation`).
 
 ### Changed
 
