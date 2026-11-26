@@ -380,9 +380,12 @@ fn rename_index(name: &ir::ObjectName, new_name: &str, if_exists: bool, txn: &mu
 /// Views reading a column block DROP COLUMN (CASCADE drops them) and ALTER COLUMN TYPE.
 fn column_view_dependencies(txn: &mut Txn, table: &TableDef, action: &ir::AlterTableAction) -> SqlResult<()> {
     match action {
-        ir::AlterTableAction::DropColumn { name, cascade, .. } if table.column_index(name).is_some() => {
+        ir::AlterTableAction::DropColumn { name, cascade, .. } if let Some(slot) = table.column_index(name) => {
             let views = crate::deps::views_using_column(txn.catalog(), table.oid, name);
+            // The column's privileges go with it.
+            let column = pgmem_catalog::GrantObject::Column(table.oid, i16::try_from(slot + 1).unwrap_or(i16::MAX));
             if views.is_empty() {
+                txn.catalog_mut().drop_grants(|g| g.object == column);
                 return Ok(());
             }
             if !cascade {
@@ -399,6 +402,7 @@ fn column_view_dependencies(txn: &mut Txn, table: &TableDef, action: &ir::AlterT
                 }
             }
             drop_views_cascade(txn, &all, &mut Vec::new());
+            txn.catalog_mut().drop_grants(|g| g.object == column);
             Ok(())
         }
         ir::AlterTableAction::AlterType { column, .. } => match crate::deps::views_using_column(txn.catalog(), table.oid, column).first() {

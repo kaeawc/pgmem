@@ -102,9 +102,87 @@ fn privilege_function(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> 
         "has_table_privilege" => strict("has_table_privilege", |a, c| privilege_check(a, c, PrivKind::Table)),
         "has_sequence_privilege" => strict("has_sequence_privilege", |a, c| privilege_check(a, c, PrivKind::Sequence)),
         "has_schema_privilege" => strict("has_schema_privilege", |a, c| privilege_check(a, c, PrivKind::Schema)),
+        "has_column_privilege" => strict("has_column_privilege", |a, c| column_privilege_check(a, c, false)),
+        "has_any_column_privilege" => strict("has_any_column_privilege", |a, c| column_privilege_check(a, c, true)),
         _ => strict("pg_has_role", |a, c| privilege_check(a, c, PrivKind::Role)),
     };
     resolved(f, targets, Type::Bool)
+}
+
+/// `has_column_privilege([user,] table, column, privileges)` (the column by name or attnum)
+/// and `has_any_column_privilege([user,] table, privileges)`: the table-level privilege, else
+/// one on the column (on any column). NULL for a table OID or an attnum that does not exist.
+fn column_privilege_check(a: &[Value], ctx: &EvalCtx, any: bool) -> SqlResult<Value> {
+    let fixed = if any { 2 } else { 3 };
+    let (user, rest) = match a.len() {
+        n if n == fixed => (crate::roles::current_role(ctx.env), a),
+        n if n == fixed + 1 => (role_arg(&a[0], ctx)?, &a[1..]),
+        _ => return Ok(Value::Null),
+    };
+    let cat = ctx.txn.catalog();
+    let (object, privs) = (&rest[0], &rest[rest.len() - 1]);
+    let raw: Vec<String> = text_arg(privs).split(',').map(|w| w.trim().to_owned()).collect();
+    // (letter, WITH GRANT OPTION)
+    let mut letters = Vec::new();
+    for w in &raw {
+        let word = w.to_lowercase();
+        let bare = word.trim_end_matches(" with grant option").trim();
+        let letter = match bare {
+            "select" => 'r',
+            "insert" => 'a',
+            "update" => 'w',
+            "references" => 'x',
+            _ => return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, format!("unrecognized privilege type: \"{w}\""))),
+        };
+        letters.push((letter, bare.len() < word.trim().len()));
+    }
+    let holds = |object: &pgmem_catalog::GrantObject, (p, grant): (char, bool)| {
+        if grant {
+            crate::roles::has_grant_option(cat, ctx.env, &user, object, p)
+        } else {
+            crate::roles::has_privilege(cat, ctx.env, &user, object, p)
+        }
+    };
+    let rel = match object {
+        Value::Text(t) => match crate::reg::relation_from_text(t, cat)? {
+            Some(r) => r,
+            None if crate::catalog_views::system_relation(None, &crate::funcs::misc::parse_qualified(t)).is_some() => {
+                return Ok(Value::Bool(letters.iter().all(|(c, _)| *c == 'r')));
+            }
+            None => return Err(SqlError::undefined_table(t)),
+        },
+        other => match cat.relation_by_oid(oid_arg(other).unwrap_or(0)) {
+            Some(r) => r,
+            None => {
+                let system = crate::catalog_views::system_relation_by_oid(oid_arg(other).unwrap_or(0)).is_some();
+                return Ok(if system { Value::Bool(letters.iter().all(|(c, _)| *c == 'r')) } else { Value::Null });
+            }
+        },
+    };
+    let rel_oid = rel.oid();
+    if any {
+        let columns = crate::roles::relation_columns(cat, rel_oid);
+        let any_column = |l: (char, bool)| {
+            holds(&pgmem_catalog::GrantObject::Relation(rel_oid), l)
+                || columns.iter().any(|(a, _)| holds(&pgmem_catalog::GrantObject::Column(rel_oid, *a), l))
+        };
+        return Ok(Value::Bool(letters.iter().any(|&l| any_column(l))));
+    }
+    let columns = crate::roles::relation_columns(cat, rel_oid);
+    let attnum = match &rest[1] {
+        Value::Text(n) => match columns.iter().find(|(_, c)| c == n) {
+            Some((a, _)) => *a,
+            None => {
+                return Err(SqlError::new(code::UNDEFINED_COLUMN, format!("column \"{n}\" of relation \"{}\" does not exist", rel.name())));
+            }
+        },
+        other => match other.as_i64().and_then(|n| i16::try_from(n).ok()).filter(|n| columns.iter().any(|(a, _)| a == n)) {
+            Some(a) => a,
+            None => return Ok(Value::Null),
+        },
+    };
+    let object = pgmem_catalog::GrantObject::Column(rel_oid, attnum);
+    Ok(Value::Bool(letters.iter().any(|&l| holds(&object, l))))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -502,6 +580,8 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
         "has_table_privilege" | "has_schema_privilege" | "has_sequence_privilege" | "pg_has_role" if n == 2 || n == 3 => {
             privilege_function(name, args)
         }
+        "has_column_privilege" if n == 3 || n == 4 => privilege_function(name, args),
+        "has_any_column_privilege" if n == 2 || n == 3 => privilege_function(name, args),
         "has_table_privilege"
         | "has_schema_privilege"
         | "has_database_privilege"
