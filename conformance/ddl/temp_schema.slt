@@ -1,0 +1,23 @@
+# The session's temporary schema is created on demand for any object created in pg_temp (#213).
+
+statement ok
+CREATE FUNCTION pg_temp.f() RETURNS int LANGUAGE sql AS 'SELECT 1'
+
+query
+SELECT pg_temp.f(), (SELECT pronamespace = pg_my_temp_schema() FROM pg_proc WHERE proname = 'f')
+----
+f:int4 | ?column?:bool
+1 | t
+
+statement ok
+CREATE TYPE pg_temp.ty AS (a int); CREATE VIEW pg_temp.v AS SELECT 1 AS x; CREATE SEQUENCE pg_temp.sq; CREATE TABLE pg_temp.tt (x int PRIMARY KEY)
+
+query
+SELECT relname, relkind, relpersistence FROM pg_class WHERE relnamespace = pg_my_temp_schema() ORDER BY 1
+----
+relname:name | relkind:char | relpersistence:char
+sq | S | t
+tt | r | t
+tt_pkey | i | t
+ty | c | t
+v | v | t
