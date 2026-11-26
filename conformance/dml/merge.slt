@@ -134,3 +134,71 @@ id:int4 | val:text
 1 | uno
 2 | TWO
 4 | orphan
+
+# MERGE into a partitioned table: matched rows in every leaf, inserts routed, updates that
+# move rows between partitions, tableoid of the leaf in RETURNING
+statement ok
+CREATE TABLE pev (id int NOT NULL, region text NOT NULL, at date NOT NULL, v int DEFAULT 7, PRIMARY KEY (id, region, at)) PARTITION BY LIST (region)
+
+statement ok
+CREATE TABLE pev_eu PARTITION OF pev FOR VALUES IN ('eu') PARTITION BY RANGE (at)
+
+statement ok
+CREATE TABLE pev_eu_24 PARTITION OF pev_eu FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
+
+statement ok
+CREATE TABLE pev_eu_25 PARTITION OF pev_eu FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')
+
+statement ok
+CREATE TABLE pev_us PARTITION OF pev FOR VALUES IN ('us')
+
+statement ok
+INSERT INTO pev VALUES (1, 'eu', '2024-03-01', 1), (2, 'us', '2024-03-01', 2), (3, 'eu', '2025-03-01', 3)
+
+query rowsort
+MERGE INTO pev t USING (VALUES (1, 'us'), (2, 'us'), (4, 'eu'), (3, 'eu')) s(id, r) ON t.id = s.id WHEN MATCHED AND s.id = 1 THEN UPDATE SET region = s.r, v = 10 WHEN MATCHED AND s.id = 2 THEN UPDATE SET v = 20 WHEN MATCHED AND s.id = 3 THEN DELETE WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.r, '2025-05-05') RETURNING merge_action() AS action, t.tableoid::regclass::text AS part, t.*, old.v AS old_v, new.v AS new_v
+----
+action:text | part:text | id:int4 | region:text | at:date | v:int4 | old_v:int4 | new_v:int4
+UPDATE | pev_us | 1 | us | 2024-03-01 | 10 | 1 | 10
+DELETE | pev_eu_25 | 3 | eu | 2025-03-01 | 3 | 3 | NULL
+UPDATE | pev_us | 2 | us | 2024-03-01 | 20 | 2 | 20
+INSERT | pev_eu_25 | 4 | eu | 2025-05-05 | 7 | NULL | 7
+
+query
+SELECT tableoid::regclass::text AS part, * FROM pev ORDER BY id
+----
+part:text | id:int4 | region:text | at:date | v:int4
+pev_us | 1 | us | 2024-03-01 | 10
+pev_us | 2 | us | 2024-03-01 | 20
+pev_eu_25 | 4 | eu | 2025-05-05 | 7
+
+statement error 23514 no partition of relation "pev" found for row
+MERGE INTO pev t USING (VALUES (9, 'mars')) s(id, r) ON t.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.r, '2025-05-05')
+
+statement error 23514 new row for relation "pev_eu" violates partition constraint
+MERGE INTO pev_eu t USING (VALUES (1)) s(id) ON t.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (9, 'us', '2024-01-01')
+
+statement error 23514 new row for relation "pev_us" violates partition constraint
+MERGE INTO pev_us t USING (VALUES (1)) s(id) ON t.id = s.id WHEN MATCHED THEN UPDATE SET region = 'eu'
+
+statement error 23505 duplicate key value violates unique constraint "pev_us_pkey"
+MERGE INTO pev t USING (VALUES (1)) s(id) ON t.id = s.id WHEN MATCHED THEN UPDATE SET id = 2
+
+query rowsort
+MERGE INTO pev t USING (VALUES (1)) s(id) ON t.id = s.id WHEN NOT MATCHED BY SOURCE THEN DELETE RETURNING merge_action() AS action, t.tableoid::regclass::text AS part, t.id
+----
+action:text | part:text | id:int4
+DELETE | pev_eu_25 | 4
+DELETE | pev_us | 2
+
+query
+SELECT tableoid::regclass::text AS part, * FROM pev ORDER BY id
+----
+part:text | id:int4 | region:text | at:date | v:int4
+pev_us | 1 | us | 2024-03-01 | 10
+
+query
+MERGE INTO stock s USING (VALUES ('a')) AS v(sku) ON s.sku = v.sku WHEN MATCHED THEN UPDATE SET note = 'tableoid' RETURNING s.tableoid::regclass::text AS rel, s.sku
+----
+rel:text | sku:text
+stock | a

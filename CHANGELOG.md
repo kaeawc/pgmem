@@ -62,6 +62,10 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
   table. 5,000 inserts in one transaction: 5.5 s → 0.7 s; 5,000 autocommit inserts into a
   5,000-row table: 15.9 s → 0.7 s; 5,000 updates plus 5,000 deletes by primary key in one
   transaction: 52 s → 1.6 s. Cost per statement is now flat (20,000 inserts: 2.7 s).
+- `MERGE` into a partitioned table acts on the rows of its leaf partitions instead of none: inserts
+  are routed to their partition (23514 when none accepts the row), updates move rows across
+  partitions, and a target that is itself a partition enforces its partition constraint.
+  `MERGE ... RETURNING` can read the target's system columns (`tableoid` is the row's leaf).
 
 ### Changed
 
