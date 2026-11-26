@@ -66,6 +66,7 @@ mod extract;
 mod float;
 mod foreign_key;
 mod foreign_key_cascade;
+mod function_attributes;
 mod functions_fidelity;
 mod generate_series;
 mod generated_columns;

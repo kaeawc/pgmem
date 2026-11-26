@@ -361,6 +361,14 @@ pub struct FunctionDef {
     pub volatility: char,
     pub strict: bool,
     pub security_definer: bool,
+    pub leakproof: bool,
+    /// `s` (safe), `r` (restricted) or `u` (unsafe, the default).
+    pub parallel: char,
+    pub cost: f64,
+    /// Estimated result rows (`prorows`): 0 for a function that returns no set.
+    pub rows: f64,
+    /// `proconfig`: `name=value` entries of the function's `SET` options.
+    pub config: Vec<String>,
 }
 
 impl FunctionDef {
