@@ -571,6 +571,12 @@ pub fn resolve_type_name(catalog: &Catalog, t: &pgmem_ir::TypeName) -> SqlResult
     Ok((ty, if t.array_dims > 0 { -1 } else { typmod }))
 }
 
+/// `e` about the reference `subject` when its SQLSTATE is one of `codes` (see
+/// [`SqlError::about`]): the classes Postgres reports at that reference's position.
+pub(crate) fn about(e: SqlError, codes: &[&str], subject: impl FnOnce() -> pgmem_types::ErrorRef) -> SqlError {
+    if codes.contains(&e.code) { e.about(subject()) } else { e }
+}
+
 pub(crate) fn feature(what: &str) -> SqlError {
     SqlError::feature_not_supported(format!("{what} is not supported by pgmem"))
 }
