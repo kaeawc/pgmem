@@ -47,6 +47,8 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
   read by UPDATE ... FROM, DELETE ... USING, subqueries in their WHERE, data-modifying CTEs and
   MERGE are still not checked for SELECT. `ALTER DEFAULT PRIVILEGES` with a column list fails
   with 0LP01, as in PostgreSQL.
+- `RETURNING` of a row that `UPDATE ... FROM` moves to another partition can reference the FROM
+  tables, and its `old` values are the row before the update (it failed with `42P01`).
 
 ## [0.1.1] - 2026-11-25
 
