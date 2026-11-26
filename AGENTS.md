@@ -52,11 +52,14 @@ After any change: `cargo c && cargo lint && cargo t`.
 
 ## Releasing
 
-`scripts/release.sh X.Y.Z` bumps the workspace version (and the `=X.Y.Z` pins on the internal path
-dependencies in root `Cargo.toml`), commits and tags `vX.Y.Z`. Pushing the tag runs
-`.github/workflows/release.yml`: binaries for Linux / macOS / Windows, `cargo publish --workspace`
-to crates.io via trusted publishing (environment `crates-io`), then the GitHub release. All crates
-except `pgmem-conformance` are published and share one version.
+Add user-visible changes to `CHANGELOG.md` under `## [Unreleased]`. `scripts/release.sh X.Y.Z`
+opens a release PR: it bumps the workspace version (and the `=X.Y.Z` pins on the internal path
+dependencies in root `Cargo.toml`) and moves the Unreleased entries under the new version. Merging
+it runs `.github/workflows/release.yml`: binaries for Linux (gnu + musl) / macOS / Windows,
+`scripts/publish.sh` to crates.io via trusted publishing (environment `crates-io`; skips crates
+already published, so reruns are safe), then the tag and GitHub release with the changelog section
+as notes. All crates except `pgmem-conformance` are published and share one version. Run the
+workflow by hand for a dry run.
 
 ## Map
 
