@@ -775,6 +775,7 @@ fn matview_as_view(t: &TableDef) -> Option<ViewDef> {
         query: mv.query.clone(),
         search_path: mv.search_path.clone(),
         check_option: false,
+        reloptions: t.reloptions.clone(),
     })
 }
 
