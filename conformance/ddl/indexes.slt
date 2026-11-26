@@ -130,3 +130,23 @@ ALTER TABLE accounts RENAME COLUMN email TO mail
 
 statement error 23505 duplicate key value violates unique constraint "accounts_email_key"
 INSERT INTO accounts VALUES (9, 'b@x.com', 1, NULL, NULL)
+
+# Covering indexes: INCLUDE columns in the definition and in pg_index
+statement ok
+CREATE TABLE cov (id int, e text, a int, b text); CREATE UNIQUE INDEX cov_expr ON cov (lower(e)) INCLUDE (id) WHERE id > 0; CREATE INDEX cov_two ON cov (a) INCLUDE (id, b); CREATE INDEX cov_plain ON cov (a, b)
+
+query
+SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'cov' ORDER BY indexname
+----
+indexname:name | indexdef:text
+cov_expr | CREATE UNIQUE INDEX cov_expr ON public.cov USING btree (lower(e)) INCLUDE (id) WHERE (id > 0)
+cov_plain | CREATE INDEX cov_plain ON public.cov USING btree (a, b)
+cov_two | CREATE INDEX cov_two ON public.cov USING btree (a) INCLUDE (id, b)
+
+query
+SELECT i.relname, x.indnatts, x.indnkeyatts, array_to_string(x.indkey::int2[], ' ') FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid WHERE x.indrelid = 'cov'::regclass ORDER BY i.relname
+----
+relname:name | indnatts:int2 | indnkeyatts:int2 | array_to_string:text
+cov_expr | 2 | 1 | 0 1
+cov_plain | 2 | 2 | 3 4
+cov_two | 3 | 1 | 3 1 4
