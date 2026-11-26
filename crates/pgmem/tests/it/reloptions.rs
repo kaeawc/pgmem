@@ -522,3 +522,16 @@ fn security_invoker_views_run_with_the_callers_privileges() {
     assert_eq!(message(&e), "permission denied for table t");
     c.batch_execute("RESET ROLE; DROP OWNED BY reloptions_invoker; DROP ROLE reloptions_invoker").expect("cleanup");
 }
+
+#[test]
+fn combined_set_with_attribute_actions() {
+    let (_db, mut c) = setup();
+    c.batch_execute("CREATE TABLE t (id int, c text)").expect("create");
+    c.batch_execute("ALTER TABLE t SET (fillfactor=70), ALTER COLUMN c SET STATISTICS 100, ALTER COLUMN c SET STORAGE external")
+        .expect("combined");
+    assert_eq!(reloptions(&mut c, "t"), "{fillfactor=70}");
+    assert_eq!(
+        rows(&mut c, "SELECT attstattarget::text, attstorage::text FROM pg_attribute WHERE attrelid = 't'::regclass AND attname = 'c'"),
+        vec![vec!["100", "e"]]
+    );
+}
