@@ -11,8 +11,10 @@ use pgmem_types::{SqlError, SqlResult, Type, Value, code};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+mod extmembers;
 mod partitions;
 mod roles;
+pub use extmembers::{ExtMember, ExtMemberClass};
 pub use partitions::{PartitionBound, PartitionKey, PartitionKeyPart, PartitionOf, PartitionStrategy, RangeDatum};
 pub use roles::{DefaultItem, DefaultPrivilege, ExtensionDef, Grant, GrantObject, RoleDef};
 
@@ -626,6 +628,8 @@ pub struct Catalog {
     owners: BTreeMap<Oid, String>,
     /// Installed extensions (plpgsql is implicit).
     extensions: BTreeMap<String, ExtensionDef>,
+    /// Objects attached to an extension (`ALTER EXTENSION ... ADD`), by object OID.
+    ext_members: BTreeMap<Oid, ExtMember>,
     /// `COMMENT ON` text by (classoid, objoid, objsubid), as in `pg_description`.
     comments: BTreeMap<(Oid, Oid, i32), String>,
     /// Partition keys of partitioned tables, by table OID.
@@ -671,6 +675,7 @@ impl Catalog {
             default_privileges: Vec::new(),
             owners: BTreeMap::new(),
             extensions: BTreeMap::new(),
+            ext_members: BTreeMap::new(),
             comments: BTreeMap::new(),
             partition_keys: BTreeMap::new(),
             partition_bounds: BTreeMap::new(),

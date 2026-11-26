@@ -1322,6 +1322,7 @@ fn write_command_name(stmt: &Statement) -> Option<&'static str> {
         Statement::CreateTrigger(_) => "CREATE TRIGGER",
         Statement::DropTrigger { .. } => "DROP TRIGGER",
         Statement::RenameTrigger { .. } => "ALTER TRIGGER",
+        Statement::AlterExtension { .. } => "ALTER EXTENSION",
         Statement::CreateIndex(_) => "CREATE INDEX",
         Statement::CreateSequence(_) => "CREATE SEQUENCE",
         Statement::AlterTable(_) => "ALTER TABLE",

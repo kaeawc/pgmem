@@ -112,6 +112,7 @@ fn comment_target(
 }
 
 pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &SessionEnv, state: &StatementState) -> SqlResult<QueryResult> {
+    crate::ext_alter::check_member_drop(stmt, txn.catalog())?;
     match stmt {
         Statement::Comment { target, name, text } => {
             if let Some((classoid, objoid, subid)) = comment_target(txn.catalog(), target, name)? {
@@ -162,7 +163,10 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
         Statement::CreateExtension { name, if_not_exists, schema, version } => {
             crate::extensions::create_extension(name, *if_not_exists, schema.as_deref(), version.as_deref(), txn)
         }
-        Statement::DropExtension { names, if_exists, cascade } => crate::extensions::drop_extension(names, *if_exists, *cascade, txn),
+        Statement::DropExtension { names, if_exists, cascade } => {
+            crate::extensions::drop_extension(names, *if_exists, *cascade, txn, env, state)
+        }
+        Statement::AlterExtension { name, action } => crate::ext_alter::alter_extension(name, action, txn),
         Statement::CreateRole { name, options, if_not_exists } => crate::roles::create_role(name, options, *if_not_exists, txn, env),
         Statement::AlterRole { name, action } => crate::roles::alter_role(name, action, txn, env),
         Statement::DropRole { names, if_exists } => crate::roles::drop_role(names, *if_exists, txn, env),
@@ -1086,7 +1090,7 @@ pub(crate) fn alter_schema(name: &str, rename_to: &str, txn: &mut Txn) -> SqlRes
 
 /// `ALTER ... SET SCHEMA`: moves a relation or type (a table takes its indexes, row type and
 /// owned sequences along, as `AlterTableNamespace` does).
-fn set_schema(kind: ObjectType, name: &ir::ObjectName, if_exists: bool, schema: &str, txn: &mut Txn) -> SqlResult<QueryResult> {
+pub(crate) fn set_schema(kind: ObjectType, name: &ir::ObjectName, if_exists: bool, schema: &str, txn: &mut Txn) -> SqlResult<QueryResult> {
     let tag_name = match kind {
         ObjectType::Table => "ALTER TABLE",
         ObjectType::View => "ALTER VIEW",
