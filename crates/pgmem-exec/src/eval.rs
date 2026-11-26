@@ -31,11 +31,24 @@ pub struct StatementState {
     /// Notices raised while the statement ran (PL/pgSQL `RAISE NOTICE`, ...).
     pub notices: RefCell<Vec<crate::session::Notice>>,
     /// While an UPDATE of a partitioned table runs on its partitions: rows whose new partition
-    /// key belongs to another partition (partition OID, row id, new row), moved afterwards.
-    pub moved_rows: RefCell<Option<Vec<(Oid, pgmem_storage::RowId, Row)>>>,
+    /// key belongs to another partition, moved afterwards.
+    pub moved_rows: RefCell<Option<Vec<MovedRow>>>,
     /// The leaf partition the next INSERT / UPDATE / DELETE runs on for a statement on its
     /// partitioned table: its statement-level triggers do not fire (`triggers::routed`).
     pub routed_leaf: std::cell::Cell<Option<Oid>>,
+}
+
+/// A row an UPDATE of a partitioned table moves to another partition.
+#[derive(Debug)]
+pub struct MovedRow {
+    /// The partition the row leaves.
+    pub leaf: Oid,
+    pub id: pgmem_storage::RowId,
+    /// Old and new versions, in the leaving partition's layout.
+    pub old: Row,
+    pub new: Row,
+    /// The FROM row it was joined with (empty without FROM), for RETURNING.
+    pub from: Row,
 }
 
 impl StatementState {

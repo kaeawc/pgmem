@@ -343,6 +343,64 @@ fn attached_partition_gets_clones_mapped_by_column_name() {
 }
 
 #[test]
+fn returning_of_moved_rows_sees_from_tables() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE pt (id int, v text) PARTITION BY RANGE (id);
+         CREATE TABLE pt1 PARTITION OF pt FOR VALUES FROM (0) TO (10);
+         CREATE TABLE pt2 PARTITION OF pt FOR VALUES FROM (10) TO (20);
+         INSERT INTO pt VALUES (1, 'a'), (2, 'b'), (3, 'c');
+         CREATE TABLE src (id int, w text);
+         INSERT INTO src VALUES (1, 'x'), (2, 'y'), (3, 'z')",
+    )
+    .expect("schema");
+    // The issue's repro: the row moves from pt1 to pt2.
+    assert_eq!(rows(&mut c, "UPDATE pt SET id = 15 FROM src WHERE pt.id = src.id RETURNING pt.id, src.w").len(), 3);
+    c.batch_execute("DELETE FROM pt; INSERT INTO pt VALUES (1, 'a'), (2, 'b')").expect("reset");
+    assert_eq!(
+        rows(&mut c, "UPDATE pt SET id = 15 FROM src WHERE pt.id = src.id AND src.id = 1 RETURNING pt.id::text, src.w"),
+        vec![vec!["15", "x"]]
+    );
+    // Target columns, FROM columns, expressions mixing both, old / new, tableoid and src.*.
+    assert_eq!(
+        rows(
+            &mut c,
+            "UPDATE pt SET id = pt.id + 10, v = src.w FROM src WHERE pt.id = src.id
+             RETURNING pt.tableoid::regclass::text, pt.id::text, pt.v || src.w, (src.id * 2)::text,
+                       old.id::text, old.v, new.id::text, new.v, src.*"
+        ),
+        vec![vec!["pt2", "12", "yy", "4", "2", "b", "12", "y", "2", "y"]]
+    );
+    assert_eq!(rows(&mut c, "UPDATE pt p SET id = 3 FROM src s WHERE p.id = s.id + 13 RETURNING *"), vec![vec!["3", "a", "2", "y"]]);
+    // Pin: a row that stays in its partition.
+    assert_eq!(
+        rows(&mut c, "UPDATE pt SET v = 'q' FROM src WHERE pt.id = src.id + 9 RETURNING pt.tableoid::regclass::text, pt.*, src.w, old.v"),
+        vec![vec!["pt2", "12", "q", "z", "y"]]
+    );
+}
+
+#[test]
+fn returning_of_rows_moved_into_sub_partitions_sees_from_tables() {
+    let (_db, mut c) = setup();
+    schema(&mut c);
+    c.batch_execute(
+        "INSERT INTO ev (id, region, at, v) VALUES (1, 'us', '2024-03-01', 10), (2, 'eu', '2024-03-01', 20);
+         CREATE TABLE moves (id int, region text, at date, note text);
+         INSERT INTO moves VALUES (1, 'eu', '2025-06-01', 'to eu 25'), (2, 'us', '2024-03-01', 'to us')",
+    )
+    .expect("schema");
+    assert_eq!(
+        rows(
+            &mut c,
+            "WITH u AS (UPDATE ev SET region = m.region, at = m.at, v = ev.v + m.id FROM moves m WHERE ev.id = m.id
+                        RETURNING ev.tableoid::regclass::text AS part, ev.id, ev.v, m.note, old.region AS was, new.at::text AS at)
+             SELECT part, id::text, v::text, note, was, at FROM u ORDER BY id"
+        ),
+        vec![vec!["ev_eu_25", "1", "11", "to eu 25", "us", "2025-06-01"], vec!["ev_us", "2", "22", "to us", "eu", "2024-03-01"]]
+    );
+}
+
+#[test]
 fn partition_of_after_dropped_column() {
     let (_db, mut c) = setup();
     c.batch_execute(
