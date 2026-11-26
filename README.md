@@ -16,10 +16,10 @@ error codes and messages, transaction semantics, constraint enforcement.
 
 ```bash
 cargo add --dev pgmem          # library, for Rust tests
-cargo install pgmem            # the `pgmem` server binary
+cargo binstall pgmem           # the `pgmem` server binary, prebuilt (or: cargo install pgmem)
 ```
 
-Prebuilt binaries for Linux, macOS and Windows are attached to each
+Prebuilt binaries for Linux (glibc and static musl), macOS and Windows are attached to each
 [GitHub release](https://github.com/kaeawc/pgmem/releases).
 
 ## Use it from Rust tests
