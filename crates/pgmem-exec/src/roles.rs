@@ -55,6 +55,7 @@ fn object_privileges(object: &GrantObject, sequence: bool) -> &'static str {
         GrantObject::Database => "CTc",
         GrantObject::Function(_) => "X",
         GrantObject::Type(_) => "U",
+        GrantObject::Column(..) => "arwx",
     }
 }
 
@@ -104,6 +105,7 @@ fn kind_name(object: &GrantObject, sequence: bool) -> &'static str {
         GrantObject::Database => "database",
         GrantObject::Function(_) => "function",
         GrantObject::Type(_) => "type",
+        GrantObject::Column(..) => "column",
     }
 }
 
@@ -155,23 +157,57 @@ pub fn acl_items(catalog: &Catalog, env: &SessionEnv, object: &GrantObject, oid:
         return None;
     }
     let owner = owner_of(catalog, env, oid);
-    let letters = |privs: &[char], grantable: &[char]| -> String {
-        ACL_ORDER
-            .chars()
-            .filter(|c| privs.contains(c))
-            .map(|c| if grantable.contains(&c) { format!("{c}*") } else { c.to_string() })
-            .collect()
-    };
-    let fmt =
-        |g: &pgmem_catalog::Grant| format!("{}={}/{}", acl_name(&g.grantee), letters(&g.privileges, &g.grantable), acl_name(&g.grantor));
     let mut items = Vec::new();
     // An explicit owner entry (from default privileges) keeps its position; otherwise the
     // owner's implicit entry leads.
     if !grants.iter().any(|g| g.grantee == owner) {
         items.push(format!("{}={}/{}", acl_name(&owner), object_privileges(object, sequence), acl_name(&owner)));
     }
-    items.extend(grants.iter().map(|g| fmt(g)));
+    items.extend(grants.iter().map(|g| acl_item(g)));
     Some(items)
+}
+
+/// One `aclitem` text: `grantee=letters/grantor` (`*` after a grantable letter; PUBLIC is an
+/// empty grantee; names quoted as `putid` does).
+fn acl_item(g: &pgmem_catalog::Grant) -> String {
+    let letters: String = ACL_ORDER
+        .chars()
+        .filter(|c| g.privileges.contains(c))
+        .map(|c| if g.grantable.contains(&c) { format!("{c}*") } else { c.to_string() })
+        .collect();
+    format!("{}={letters}/{}", acl_name(&g.grantee), acl_name(&g.grantor))
+}
+
+/// A column's `attacl`: None while nothing is granted on the column itself (column ACLs
+/// carry no owner entry; the owner's rights come from the table's ACL).
+pub fn column_acl_items(catalog: &Catalog, rel: Oid, attnum: i16) -> Option<Vec<String>> {
+    let object = GrantObject::Column(rel, attnum);
+    let items: Vec<String> = catalog.grants().iter().filter(|g| g.object == object).map(acl_item).collect();
+    (!items.is_empty()).then_some(items)
+}
+
+/// The live columns of a table or view, as (attnum, name).
+pub fn relation_columns(catalog: &Catalog, rel: Oid) -> Vec<(i16, String)> {
+    let attnum = |i: usize| i16::try_from(i + 1).unwrap_or(i16::MAX);
+    match catalog.relation_by_oid(rel) {
+        Some(Relation::Table(t)) => t.live_columns().map(|(i, c)| (attnum(i), c.name.clone())).collect(),
+        Some(Relation::View(v)) => v.columns.iter().enumerate().map(|(i, n)| (attnum(i), n.clone())).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether `role` holds privilege `p` on the table `rel` or on at least one of its columns
+/// (`has_any_column_privilege`, and the check for a statement that reads no column).
+pub fn has_any_column_privilege(catalog: &Catalog, env: &SessionEnv, role: &str, rel: Oid, p: char) -> bool {
+    has_privilege(catalog, env, role, &GrantObject::Relation(rel), p)
+        || relation_columns(catalog, rel).iter().any(|(a, _)| column_granted(catalog, role, rel, *a, p))
+}
+
+/// Whether a column-level grant (to `role`, a role it belongs to, or PUBLIC) gives `p`.
+fn column_granted(catalog: &Catalog, role: &str, rel: Oid, attnum: i16, p: char) -> bool {
+    let roles = catalog.roles_of(role);
+    let object = GrantObject::Column(rel, attnum);
+    catalog.grants().iter().any(|g| g.object == object && (g.grantee.is_empty() || roles.contains(&g.grantee)) && g.privileges.contains(&p))
 }
 
 /// The owner of an object (the session user when none is recorded).
@@ -187,7 +223,9 @@ pub fn has_privilege(catalog: &Catalog, env: &SessionEnv, role: &str, object: &G
     }
     let roles = catalog.roles_of(role);
     let owner = match object {
-        GrantObject::Relation(o) | GrantObject::Function(o) | GrantObject::Type(o) => Some(owner_of(catalog, env, *o)),
+        GrantObject::Relation(o) | GrantObject::Function(o) | GrantObject::Type(o) | GrantObject::Column(o, _) => {
+            Some(owner_of(catalog, env, *o))
+        }
         GrantObject::Schema(s) => Some(catalog.schema(s).map_or_else(|| env.user.clone(), |sc| sc.owner.clone())),
         GrantObject::Database => None,
     };
@@ -201,16 +239,48 @@ pub fn has_privilege(catalog: &Catalog, env: &SessionEnv, role: &str, object: &G
         GrantObject::Function(_) => p == 'X',
         GrantObject::Type(_) => p == 'U',
         GrantObject::Database => p == 'c' || p == 'T',
-        GrantObject::Relation(_) => false,
+        GrantObject::Relation(_) | GrantObject::Column(..) => false,
     };
     let revoked_public = catalog.grants().iter().any(|g| g.object == *object && g.grantee == "-revoked:public");
     if public_default && !revoked_public {
         return true;
     }
-    catalog
-        .grants()
-        .iter()
-        .any(|g| g.object == *object && (g.grantee.is_empty() || roles.contains(&g.grantee)) && g.privileges.contains(&p))
+    let held = |object: &GrantObject| {
+        catalog
+            .grants()
+            .iter()
+            .any(|g| g.object == *object && (g.grantee.is_empty() || roles.contains(&g.grantee)) && g.privileges.contains(&p))
+    };
+    match object {
+        // A table-level privilege covers every column.
+        GrantObject::Column(rel, _) => held(&GrantObject::Relation(*rel)) || held(object),
+        _ => held(object),
+    }
+}
+
+/// Whether `role` holds privilege `p` on `object` WITH GRANT OPTION (`... WITH GRANT OPTION`
+/// in the privilege-inquiry functions): owners and superusers do; otherwise a grantable
+/// grant, on the table itself also for a column.
+pub fn has_grant_option(catalog: &Catalog, env: &SessionEnv, role: &str, object: &GrantObject, p: char) -> bool {
+    if is_superuser(catalog, env, role) {
+        return true;
+    }
+    let roles = catalog.roles_of(role);
+    if object.relation_oid().is_some_and(|o| roles.contains(&owner_of(catalog, env, o))) {
+        return true;
+    }
+    let held = |object: &GrantObject| {
+        catalog.grants().iter().any(|g| {
+            g.object == *object
+                && (g.grantee.is_empty() || roles.contains(&g.grantee))
+                && g.privileges.contains(&p)
+                && g.grantable.contains(&p)
+        })
+    };
+    match object {
+        GrantObject::Column(rel, _) => held(&GrantObject::Relation(*rel)) || held(object),
+        _ => held(object),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -364,6 +434,12 @@ fn role_dependencies(catalog: &Catalog, role: &str) -> Vec<String> {
             }
             GrantObject::Database => out.push("privileges for database".to_owned()),
             GrantObject::Type(_) => out.push("privileges for type".to_owned()),
+            GrantObject::Column(o, attnum) => {
+                let column = relation_columns(catalog, *o).into_iter().find(|(a, _)| a == attnum);
+                if let (Some(r), Some((_, column))) = (catalog.relation_by_oid(*o), column) {
+                    out.push(format!("privileges for column {column} of {} {}", relation_kind(&r), r.name()));
+                }
+            }
         }
     }
     for d in catalog.default_privileges() {
@@ -495,12 +571,85 @@ pub(crate) fn grant(g: &ir::GrantStmt, txn: &mut Txn, env: &SessionEnv) -> SqlRe
         .map(|r| if r == "public" { Ok(String::new()) } else { resolve_role(&catalog, env, r) })
         .collect::<SqlResult<_>>()?;
     let me = current_role(env);
+    if !g.columns.is_empty() && !matches!(g.target, ir::GrantTarget::Tables(_) | ir::GrantTarget::AllTablesInSchema(_)) {
+        return Err(SqlError::new(code::INVALID_GRANT_OPERATION, "column privileges are only valid for relations"));
+    }
+    // Privileges with a column list: (letter, columns).
+    let mut column_privs: Vec<(char, &[String])> = Vec::new();
+    let table_words: Option<Vec<String>> = match (&g.privileges, g.columns.first()) {
+        (None, Some(cols)) => {
+            column_privs.extend(object_privileges(&GrantObject::Column(0, 0), false).chars().map(|c| (c, cols.as_slice())));
+            Some(Vec::new())
+        }
+        (Some(ws), Some(_)) => {
+            let mut table = Vec::new();
+            for (w, cols) in ws.iter().zip(&g.columns) {
+                if cols.is_empty() {
+                    table.push(w.clone());
+                    continue;
+                }
+                let c = privilege_letter(w).ok_or_else(|| SqlError::syntax(format!("unrecognized privilege type \"{w}\"")))?;
+                if !object_privileges(&GrantObject::Column(0, 0), false).contains(c) {
+                    return Err(SqlError::new(
+                        code::INVALID_GRANT_OPERATION,
+                        format!("invalid privilege type {} for column", w.to_uppercase()),
+                    ));
+                }
+                column_privs.push((c, cols));
+            }
+            Some(table)
+        }
+        (privs, None) => privs.clone(),
+    };
     for (object, sequence) in target_objects(&catalog, &g.target)? {
-        let privs = letters(g.privileges.as_deref(), &object, sequence)?;
+        let privs = match &table_words {
+            Some(ws) if ws.is_empty() => Vec::new(),
+            ws => letters(ws.as_deref(), &object, sequence)?,
+        };
+        let rel = object.relation_oid().unwrap_or(0);
+        // Column grants: (column object, letters), the columns resolved by name.
+        let mut column_grants: Vec<(GrantObject, Vec<char>)> = Vec::new();
+        if !column_privs.is_empty() {
+            let columns = relation_columns(&catalog, rel);
+            for (c, names) in &column_privs {
+                for n in *names {
+                    let Some((attnum, _)) = columns.iter().find(|(_, cn)| cn == n) else {
+                        let relname = catalog.relation_by_oid(rel).map(|r| r.name().to_owned()).unwrap_or_default();
+                        return Err(SqlError::new(
+                            code::UNDEFINED_COLUMN,
+                            format!("column \"{n}\" of relation \"{relname}\" does not exist"),
+                        ));
+                    };
+                    let object = GrantObject::Column(rel, *attnum);
+                    match column_grants.iter_mut().find(|(o, _)| *o == object) {
+                        Some((_, ls)) if !ls.contains(c) => ls.push(*c),
+                        Some(_) => {}
+                        None => column_grants.push((object, vec![*c])),
+                    }
+                }
+            }
+        }
         let cat = txn.catalog_mut();
         for grantee in &grantees {
+            for (column, ls) in &column_grants {
+                if g.revoke {
+                    cat.revoke(column, grantee, ls, g.grant_option);
+                } else {
+                    cat.grant(column.clone(), grantee, &me, ls, g.grant_option);
+                }
+            }
+            if privs.is_empty() {
+                continue;
+            }
             if g.revoke {
                 cat.revoke(&object, grantee, &privs, g.grant_option);
+                // Revoking a table privilege revokes it from every column too.
+                let column_letters: Vec<char> = privs.iter().copied().filter(|c| "arwx".contains(*c)).collect();
+                if !column_letters.is_empty() && matches!(object, GrantObject::Relation(_)) {
+                    for (attnum, _) in relation_columns(&catalog, rel) {
+                        cat.revoke(&GrantObject::Column(rel, attnum), grantee, &column_letters, g.grant_option);
+                    }
+                }
                 if grantee.is_empty() && matches!(object, GrantObject::Schema(_)) && privs.contains(&'U') {
                     // Revoking PUBLIC's default USAGE on a schema.
                     cat.grant(object.clone(), "-revoked:public", &me, &['U'], false);
@@ -564,6 +713,9 @@ pub(crate) fn alter_default_privileges(
     txn: &mut Txn,
     env: &SessionEnv,
 ) -> SqlResult<QueryResult> {
+    if g.columns.iter().any(|c| !c.is_empty()) {
+        return Err(SqlError::new(code::INVALID_GRANT_OPERATION, "default privileges cannot be set for columns"));
+    }
     let catalog = txn.catalog().clone();
     let probe = match kind {
         'S' => (GrantObject::Relation(0), true),
@@ -731,52 +883,206 @@ fn permission_denied(kind: &str, name: &str) -> SqlError {
     SqlError::new(code::INSUFFICIENT_PRIVILEGE, format!("permission denied for {kind} {name}"))
 }
 
+/// `table`, `view`, `materialized view` or `sequence`, as privilege errors name a relation.
+fn relation_kind(rel: &Relation) -> &'static str {
+    match rel {
+        Relation::Table(t) if t.matview.is_some() => "materialized view",
+        other => other.kind_name(),
+    }
+}
+
+/// A relation privilege the role lacks at table level but may hold on the columns the
+/// statement uses (Postgres' `ExecCheckOneRelPerms`).
+struct ColumnCheck {
+    rel: Oid,
+    kind: &'static str,
+    name: String,
+    privilege: char,
+    /// The DML target's own columns read by WHERE / RETURNING / ON CONFLICT: SELECT is
+    /// needed only when some column is read.
+    only_if_used: bool,
+}
+
 /// Checks the current role may run `stmt`: SELECT on every relation it reads, the DML
-/// privilege on its target. Superusers skip the checks.
-pub(crate) fn check_statement(stmt: &ir::Statement, catalog: &Catalog, env: &SessionEnv) -> SqlResult<()> {
+/// privilege on its target. Superusers skip the checks. Without the table-level privilege,
+/// column privileges decide: the statement is bound (not run) to find the columns it reads,
+/// inserts and updates, and each needs the privilege (a statement that reads no column needs
+/// it on some column).
+pub(crate) fn check_statement(
+    stmt: &ir::Statement,
+    catalog: &Catalog,
+    env: &SessionEnv,
+    param_types: &[pgmem_types::Type],
+) -> SqlResult<()> {
     let role = current_role(env);
     if is_superuser(catalog, env, &role) {
         return Ok(());
     }
-    let check = |name: &ir::ObjectName, p: char| -> SqlResult<()> {
-        let Ok(Some(rel)) = catalog.find_relation(name) else { return Ok(()) };
-        let (kind, oid) = match &rel {
-            Relation::Table(t) if t.matview.is_some() => ("materialized view", t.oid),
-            Relation::Table(t) => ("table", t.oid),
-            Relation::View(v) => ("view", v.oid),
-            Relation::Sequence(s) => ("sequence", s.oid),
-            Relation::Index { .. } => return Ok(()),
-        };
-        if !has_privilege(catalog, env, &role, &GrantObject::Relation(oid), p) {
-            return Err(permission_denied(kind, rel.name()));
-        }
-        Ok(())
-    };
-    let reads = |q: &ir::Query| -> SqlResult<()> {
-        for n in crate::views::referenced_relations(q) {
-            check(&n, 'r')?;
-        }
-        Ok(())
-    };
+    // (relation, privilege) in the order Postgres checks them, then the DML target whose
+    // own columns need SELECT when read.
+    let mut needs: Vec<(&ir::ObjectName, char)> = Vec::new();
+    let reads = |q: &ir::Query| -> Vec<ir::ObjectName> { crate::views::referenced_relations(q) };
+    let mut read_names: Vec<ir::ObjectName> = Vec::new();
+    let mut target: Option<&ir::ObjectName> = None;
     match stmt {
-        ir::Statement::Query(q) => reads(q),
+        ir::Statement::Query(q) => read_names = reads(q),
         ir::Statement::Insert(i) => {
-            check(&i.table, 'a')?;
+            needs.push((&i.table, 'a'));
+            if matches!(&i.on_conflict, Some(ir::OnConflict { action: ir::ConflictAction::Update { .. }, .. })) {
+                needs.push((&i.table, 'w'));
+            }
             if let ir::InsertSource::Query(q) = &i.source {
-                reads(q)?;
+                read_names = reads(q);
             }
-            Ok(())
-        }
-        ir::Statement::Update(u) => check(&u.table, 'w'),
-        ir::Statement::Delete(d) => check(&d.table, 'd'),
-        ir::Statement::Truncate(t) => {
-            for n in &t.tables {
-                check(n, 'D')?;
+            if !i.returning.is_empty() || i.on_conflict.is_some() {
+                target = Some(&i.table);
             }
-            Ok(())
         }
-        _ => Ok(()),
+        ir::Statement::Update(u) => {
+            needs.push((&u.table, 'w'));
+            target = Some(&u.table);
+        }
+        ir::Statement::Delete(d) => {
+            needs.push((&d.table, 'd'));
+            target = Some(&d.table);
+        }
+        ir::Statement::Truncate(t) => needs.extend(t.tables.iter().map(|n| (n, 'D'))),
+        _ => {}
     }
+    needs.extend(read_names.iter().map(|n| (n, 'r')));
+    let mut columns: Vec<ColumnCheck> = Vec::new();
+    for (name, p) in needs {
+        let Ok(Some(rel)) = catalog.find_relation(name) else { continue };
+        if matches!(rel, Relation::Index { .. }) {
+            continue;
+        }
+        let (kind, oid) = (relation_kind(&rel), rel.oid());
+        if has_privilege(catalog, env, &role, &GrantObject::Relation(oid), p) {
+            continue;
+        }
+        if "rawx".contains(p) && !matches!(rel, Relation::Sequence(_)) && has_any_column_privilege(catalog, env, &role, oid, p) {
+            columns.push(ColumnCheck { rel: oid, kind, name: rel.name().to_owned(), privilege: p, only_if_used: false });
+            continue;
+        }
+        return Err(permission_denied(kind, rel.name()));
+    }
+    // A view target written by INSTEAD OF triggers (or not automatically updatable) is not
+    // bound onto a base table: its columns come from the statement's column names.
+    let trigger_view = target_view_columns(stmt, catalog);
+    if let Some(name) = target
+        && trigger_view.is_none()
+        && let Ok(Some(rel @ (Relation::Table(_) | Relation::View(_)))) = catalog.find_relation(name)
+        && !has_privilege(catalog, env, &role, &GrantObject::Relation(rel.oid()), 'r')
+    {
+        columns.push(ColumnCheck {
+            rel: rel.oid(),
+            kind: relation_kind(&rel),
+            name: rel.name().to_owned(),
+            privilege: 'r',
+            only_if_used: true,
+        });
+    }
+    if columns.is_empty() {
+        return Ok(());
+    }
+    let deny = |c: &ColumnCheck| permission_denied(c.kind, &c.name);
+    let binder = crate::bind::Binder::new(catalog, param_types);
+    binder.record_column_use();
+    let top = crate::bind::Level::new(crate::bind::Scope::default());
+    let ctx = crate::bind::Ctx::new(&top);
+    let bound = if let Some(uses) = &trigger_view {
+        for &(rel, attnum, p) in uses {
+            binder.note_use(rel, attnum, p);
+        }
+        match stmt {
+            ir::Statement::Insert(i) => match &i.source {
+                ir::InsertSource::Query(q) => binder.bind_query(q, &ctx).map(drop),
+                _ => Ok(()),
+            },
+            _ => Ok(()),
+        }
+    } else if crate::statement::leading_with(stmt).is_some() {
+        crate::statement::describe_with(stmt, &binder, &ctx).map(drop)
+    } else {
+        match stmt {
+            ir::Statement::Query(q) => binder.bind_query(q, &ctx).map(drop),
+            ir::Statement::Insert(i) => crate::bind::bind_insert(&binder, i, &ctx).map(drop),
+            ir::Statement::Update(u) => crate::bind::bind_update(&binder, u, &ctx).map(drop),
+            ir::Statement::Delete(d) => crate::bind::bind_delete(&binder, d, &ctx).map(drop),
+            _ => Ok(()),
+        }
+    };
+    // A statement that fails to bind reports that, as Postgres reports parse-analysis errors
+    // before permission errors.
+    bound?;
+    let used = binder.column_use();
+    for c in &columns {
+        let mut cols: Vec<i16> = used.iter().filter(|(rel, _, p)| *rel == c.rel && *p == c.privilege).map(|(_, a, _)| *a).collect();
+        cols.sort_unstable();
+        cols.dedup();
+        if cols.is_empty() {
+            if c.only_if_used || has_any_column_privilege(catalog, env, &role, c.rel, c.privilege) {
+                continue;
+            }
+            return Err(deny(c));
+        }
+        // System columns (attnum < 0) have no column grants here: table-level only.
+        if cols.iter().any(|&a| a <= 0 || !column_granted(catalog, &role, c.rel, a, c.privilege)) {
+            return Err(deny(c));
+        }
+    }
+    Ok(())
+}
+
+/// For INSERT / UPDATE / DELETE on a view with an INSTEAD OF trigger for it, or one that is
+/// not automatically updatable: the view columns it inserts or updates, by name (Postgres' insertedCols / updatedCols on the view).
+fn target_view_columns(stmt: &ir::Statement, catalog: &Catalog) -> Option<Vec<(Oid, i16, char)>> {
+    let name = match stmt {
+        ir::Statement::Insert(i) => &i.table,
+        ir::Statement::Update(u) => &u.table,
+        ir::Statement::Delete(d) => &d.table,
+        _ => return None,
+    };
+    let Ok(Some(Relation::View(v))) = catalog.find_relation(name) else { return None };
+    // The executor runs INSTEAD OF row triggers rather than writing the base table.
+    let instead = catalog.table_triggers(v.oid).iter().any(|t| {
+        t.enabled != 'D'
+            && t.timing == pgmem_catalog::TriggerTiming::InsteadOf
+            && match stmt {
+                ir::Statement::Insert(_) => t.insert,
+                ir::Statement::Update(_) => t.update.is_some(),
+                _ => t.delete,
+            }
+    });
+    if !instead && !matches!(crate::views::resolve(catalog, &v), Ok(Err(_))) {
+        return None;
+    }
+    let columns = relation_columns(catalog, v.oid);
+    let attnum = |n: &str| columns.iter().find(|(_, c)| c == n).map(|(a, _)| *a);
+    let uses = match stmt {
+        ir::Statement::Insert(i) => {
+            let names: Vec<i16> = if i.columns.is_empty() {
+                let n = match &i.source {
+                    ir::InsertSource::Values(rows) => rows.first().map_or(0, Vec::len),
+                    ir::InsertSource::Query(_) => columns.len(),
+                    ir::InsertSource::DefaultValues => 0,
+                };
+                columns.iter().take(n).map(|(a, _)| *a).collect()
+            } else {
+                i.columns.iter().filter_map(|c| attnum(c)).collect()
+            };
+            names.into_iter().map(|a| (v.oid, a, 'a')).collect()
+        }
+        ir::Statement::Update(u) => u
+            .assignments
+            .iter()
+            .flat_map(|a| a.columns.iter())
+            .filter_map(|c| c.first().and_then(|n| attnum(n)))
+            .map(|a| (v.oid, a, 'w'))
+            .collect(),
+        _ => Vec::new(),
+    };
+    Some(uses)
 }
 
 /// Validates `SET ROLE name` (22023 for an unknown role, 42501 without membership).

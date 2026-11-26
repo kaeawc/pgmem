@@ -104,6 +104,7 @@ pub static DEFS: &[Def] = &[
     def!("domains", 13_118, DOMAINS, domains),
     def!("domain_constraints", 13_119, DOMAIN_CONSTRAINTS, domain_constraints),
     def!("element_types", 13_120, ELEMENT_TYPES, element_types),
+    def!("role_column_grants", 13_121, COLUMN_PRIVILEGES, role_column_grants),
 ];
 
 /// `element_types`: the element type of each array-typed column, domain and routine
@@ -676,25 +677,77 @@ fn table_privileges(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     Ok(rows)
 }
 
+/// `column_privileges`: each column privilege, from the table's ACL (its default, the
+/// owner's, while nothing was granted) and from the column's own `attacl`, without
+/// duplicates; rows whose grantor and grantee are both roles the current user does not
+/// belong to are hidden, unless the grantee is PUBLIC.
 fn column_privileges(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    column_privilege_rows(ctx, true)
+}
+
+/// `role_column_grants`: [`column_privileges`] whose grantor or grantee is an enabled role.
+fn role_column_grants(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    column_privilege_rows(ctx, false)
+}
+
+fn column_privilege_rows(ctx: &EvalCtx, public_visible: bool) -> SqlResult<Vec<Row>> {
+    use pgmem_catalog::GrantObject;
     let m = snapshot(ctx);
     let s = Spec::parse(COLUMN_PRIVILEGES);
-    let user = &ctx.env.user;
+    let me = crate::roles::current_role(ctx.env);
+    let mine = m.catalog.roles_of(&me);
+    let superuser = crate::roles::is_superuser(m.catalog, ctx.env, &me);
+    let enabled = |r: &str| superuser || mine.iter().any(|x| x == r);
+    let rels: Vec<(u32, String, String)> = m
+        .tables()
+        .into_iter()
+        .filter(|t| t.matview.is_none())
+        .map(|t| (t.oid, t.schema.clone(), t.name.clone()))
+        .chain(m.views().into_iter().map(|v| (v.oid, v.schema.clone(), v.name.clone())))
+        .collect();
+    // (grantor, grantee, column, privilege letter, grantable) per relation.
     let mut rows = Vec::new();
-    for t in m.tables() {
-        for (_, c) in t.live_columns() {
-            for p in ["INSERT", "SELECT", "UPDATE", "REFERENCES"] {
-                rows.push(s.row(vec![
-                    ("grantor", name(user)),
-                    ("grantee", name(user)),
-                    ("table_catalog", catalog_name(ctx)),
-                    ("table_schema", name(&t.schema)),
-                    ("table_name", name(&t.name)),
-                    ("column_name", name(&c.name)),
-                    ("privilege_type", txt(p)),
-                    ("is_grantable", yes_no(true)),
-                ]));
+    for (oid, schema, rel) in rels {
+        let owner = crate::roles::owner_of(m.catalog, ctx.env, oid);
+        let columns = crate::roles::relation_columns(m.catalog, oid);
+        let mut entries: Vec<(String, String, String, char, bool)> = Vec::new();
+        let mut push = |e: (String, String, String, char, bool)| {
+            if !entries.contains(&e) {
+                entries.push(e);
             }
+        };
+        for (_, col) in &columns {
+            for p in "arwx".chars() {
+                push((owner.clone(), owner.clone(), col.clone(), p, true));
+            }
+        }
+        for g in m.catalog.grants().iter().filter(|g| g.grantee != owner && g.object.relation_oid() == Some(oid)) {
+            let cols: Vec<&String> = match g.object {
+                GrantObject::Relation(_) => columns.iter().map(|(_, c)| c).collect(),
+                GrantObject::Column(_, attnum) => columns.iter().filter(|(a, _)| *a == attnum).map(|(_, c)| c).collect(),
+                _ => Vec::new(),
+            };
+            for col in cols {
+                for p in "arwx".chars().filter(|p| g.privileges.contains(p)) {
+                    push((g.grantor.clone(), g.grantee.clone(), col.clone(), p, g.grantable.contains(&p)));
+                }
+            }
+        }
+        for (grantor, grantee, col, p, grantable) in entries {
+            let visible = enabled(&grantor) || (!grantee.is_empty() && enabled(&grantee)) || (public_visible && grantee.is_empty());
+            if !visible {
+                continue;
+            }
+            rows.push(s.row(vec![
+                ("grantor", name(&grantor)),
+                ("grantee", name(if grantee.is_empty() { "PUBLIC" } else { &grantee })),
+                ("table_catalog", catalog_name(ctx)),
+                ("table_schema", name(&schema)),
+                ("table_name", name(&rel)),
+                ("column_name", name(&col)),
+                ("privilege_type", txt(crate::roles::privilege_name(p))),
+                ("is_grantable", yes_no(grantable)),
+            ]));
         }
     }
     Ok(rows)
