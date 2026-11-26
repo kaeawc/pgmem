@@ -31,6 +31,14 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - `pg_get_indexdef` and `pg_indexes.indexdef` print `INCLUDE (...)` for covering indexes, and `pg_index.indnatts`, `indnkeyatts`, `indkey` and `pg_class.relnatts` count the INCLUDE columns like PostgreSQL.
 - Storage parameters are stored and validated like PostgreSQL: `WITH (...)` on tables, indexes, views and materialized views, `ALTER TABLE / INDEX / VIEW / MATERIALIZED VIEW ... SET / RESET (...)`, `pg_class.reloptions`, `pg_get_indexdef` (`WITH (fillfactor='70')`) and `information_schema.views.check_option` (including `WITH CHECK OPTION` and `check_option`). `security_invoker` is stored but not yet enforced.
 - Row triggers on a partitioned table are cloned to its partitions (existing, created, attached and sub-partitions; `pg_trigger.tgparentid`) and fire on the leaf partition. The clones follow the parent trigger through `DROP TRIGGER`, `ALTER TRIGGER ... RENAME`, `ENABLE` / `DISABLE` and `CREATE OR REPLACE TRIGGER`, cannot be dropped or renamed on their own, and go with `DETACH PARTITION`. Statement triggers of a partitioned table fire for statements on it, and its partitions' statement triggers no longer do.
+- `pg_depend` records the dependencies Postgres records for user objects (objects on their schema,
+  row and array types, view and materialized-view rules on the columns, functions and types they
+  use, constraints and indexes on their columns, foreign keys on the referenced index, defaults on
+  sequences and columns, `OWNED BY` sequences, triggers, partitions, column and function types,
+  domains). New `pg_rewrite` (one `_RETURN` rule per view and materialized view; `ev_action` holds
+  the view's SQL text, not Postgres' node tree), `pg_class.relhasrules`, row-type array types in
+  `pg_type`, and `pg_describe_object`, `pg_identify_object`, `pg_identify_object_as_address`.
+  Toast tables and the internal triggers of foreign keys are not modelled.
 
 ### Changed
 
