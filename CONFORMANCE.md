@@ -47,7 +47,7 @@ pgmem passes **3527 / 3528 records (100.0%)**.
 | ddl/identity.slt | 38 | 38 | 100.0% |
 | ddl/indexes.slt | 36 | 36 | 100.0% |
 | ddl/migrations.slt | 58 | 58 | 100.0% |
-| ddl/partitioning.slt | 75 | 75 | 100.0% |
+| ddl/partitioning.slt | 89 | 89 | 100.0% |
 | ddl/schema.slt | 31 | 31 | 100.0% |
 | ddl/sequences.slt | 34 | 34 | 100.0% |
 | ddl/triggers.slt | 17 | 17 | 100.0% |
