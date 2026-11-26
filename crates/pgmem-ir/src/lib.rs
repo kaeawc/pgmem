@@ -1565,6 +1565,32 @@ pub enum AlterTableAction {
         name: String,
         timing: ConstraintTiming,
     },
+    /// `ALTER COLUMN c SET STATISTICS n`.
+    SetStatistics {
+        column: String,
+        target: i64,
+    },
+    /// `ALTER COLUMN c SET STORAGE {PLAIN | EXTERNAL | EXTENDED | MAIN | DEFAULT}` (the name
+    /// as written, lower case).
+    SetStorage {
+        column: String,
+        storage: String,
+    },
+    /// `ALTER COLUMN c SET COMPRESSION {method | DEFAULT}`.
+    SetCompression {
+        column: String,
+        method: String,
+    },
+    /// `REPLICA IDENTITY {DEFAULT | FULL | NOTHING | USING INDEX i}`: `kind` is the
+    /// `relreplident` letter (`i` with `index`).
+    ReplicaIdentity {
+        kind: char,
+        index: Option<String>,
+    },
+    /// `CLUSTER ON index` / `SET WITHOUT CLUSTER` (None).
+    ClusterOn(Option<String>),
+    /// `SET LOGGED` (false) / `SET UNLOGGED` (true).
+    SetUnlogged(bool),
 }
 
 #[derive(Clone, Debug, PartialEq)]

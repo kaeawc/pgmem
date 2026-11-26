@@ -412,7 +412,7 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("relhasrules", boolean(t.matview.is_some())),
                 ("relchecks", int2(checks)),
                 ("relhastriggers", boolean(triggers.contains(&t.oid) || !m.catalog.table_triggers(t.oid).is_empty())),
-                ("relreplident", ch('d')),
+                ("relreplident", ch(t.replident)),
                 (
                     "relpersistence",
                     ch(if t.schema.starts_with("pg_temp_") {
@@ -511,12 +511,14 @@ fn att_row(s: &Spec, relid: u32, a: &Att) -> Row {
         ("attndims", int2(usize::from(matches!(a.ty, Type::Array(_))))),
         ("attbyval", boolean(byval)),
         ("attalign", ch(align)),
-        ("attstorage", ch(storage)),
+        ("attstorage", ch(column.and_then(|c| c.storage).unwrap_or(storage))),
+        ("attcompression", ch(column.and_then(|c| c.compression).unwrap_or('\0'))),
         ("attnotnull", boolean(a.not_null)),
         ("attisdropped", boolean(a.dropped)),
         ("attcollation", oid(collation)),
     ];
     if let Some(c) = column {
+        vals.push(("attstattarget", c.stattarget.map_or(Value::Null, Value::Int2)));
         vals.push(("atthasdef", boolean(!c.dropped && (c.default.is_some() || c.generated.is_some()))));
         vals.push(("atthasmissing", boolean(!c.missing.is_null())));
         vals.push(("attidentity", ch(model::identity_char(Some(c)))));
@@ -836,6 +838,7 @@ fn user_type_rows(s: &Spec, catalog: &pgmem_catalog::Catalog, t: &pgmem_catalog:
                     indexes: vec![],
                     matview: None,
                     unlogged: false,
+                    replident: 'd',
                     reloptions: Vec::new(),
                 };
                 let mut col = pgmem_catalog::ColumnDef::new("value", base.clone());
@@ -934,6 +937,8 @@ fn pg_index(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("indisunique", boolean(idx.unique)),
                 ("indnullsnotdistinct", boolean(idx.nulls_not_distinct)),
                 ("indisprimary", boolean(idx.primary)),
+                ("indisclustered", boolean(idx.clustered)),
+                ("indisreplident", boolean(idx.replica)),
                 ("indkey", Value::Array(keys)),
                 ("indcollation", Value::Array(collations)),
                 ("indclass", Value::Array(vec![oid(0); nkey])),
