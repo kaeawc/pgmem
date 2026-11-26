@@ -10,6 +10,7 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 
 - Static Linux binaries (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) on each release.
 - `cargo binstall pgmem` installs the prebuilt binary from the GitHub release.
+- `ALTER EXTENSION name UPDATE [TO version]`, `SET SCHEMA schema` and `ADD` / `DROP` of tables, views, sequences, functions, types, domains and schemas. Extension members cannot be dropped on their own (`2BP01`, "extension requires it"), `DROP EXTENSION` removes them, and `pg_extension.extrelocatable` follows the extension. `Catalog::extension_members()` exposes membership for `pg_depend` rows with deptype `e`.
 - `pg_get_keywords()` returns PostgreSQL 18's keyword list (word, catcode, barelabel, catdesc, baredesc).
 - `pg_locks` lists relation locks: the ones queries (with the indexes the planner opens), DML,
   `LOCK TABLE` and DDL take, at PostgreSQL's lock level for each statement and ALTER TABLE
@@ -51,6 +52,8 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
   lists, instead of first-seen order. Table inputs keep first-seen order.
 - `LOCK TABLE` locks a partitioned table's partitions (not with `ONLY`) and a view's base
   relations, and refuses sequences and indexes (`42809 cannot lock relation`).
+- `regrole` input and output (`'role'::regrole`, `to_regrole()`, casts to and from `oid`), `pg_class.relowner` for objects owned by other roles, and the `pg_policies` view (empty until row-level security exists).
+- `ALTER DEFAULT PRIVILEGES [FOR ROLE r] [IN SCHEMA s]` is stored in `pg_default_acl` (as in Postgres, global entries start from the hard-wired defaults and vanish when equal to them) and applied to tables, views and sequences created afterwards by that role.
 
 ### Changed
 
@@ -61,6 +64,7 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 ### Fixed
 
 - `pg_get_triggerdef` schema-qualifies the trigger function when its schema is not on `search_path`, and quotes its name.
+- Partitioned indexes: `CREATE INDEX ... ON ONLY` and `ALTER INDEX ... ATTACH PARTITION` (with Postgres' checks and errors); partition indexes are attached to their parent (`pg_inherits`, `relispartition`, `pg_partition_tree` / `pg_partition_ancestors` / `pg_partition_root`), `pg_index.indisvalid` is false until every partition has one, `CREATE INDEX` on a partitioned table and `ATTACH PARTITION` reuse a matching index of the partition, and `pg_get_indexdef` prints `ON ONLY` for an index on a partitioned table.
 - `ALTER TRIGGER ... RENAME TO`, and `ALTER TABLE ... ENABLE REPLICA | ALWAYS TRIGGER` (`pg_trigger.tgenabled` `O`/`D`/`R`/`A`); triggers fire according to `session_replication_role`.
 - `CREATE TABLE ... PARTITION OF` builds the partition from the parent's live columns only, as
   PostgreSQL does: a partition created after a parent `DROP COLUMN` no longer copies the dropped

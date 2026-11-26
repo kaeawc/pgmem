@@ -1,0 +1,97 @@
+# ALTER EXTENSION: UPDATE, SET SCHEMA, ADD / DROP of member objects.
+
+statement ok
+CREATE EXTENSION citext VERSION '1.4'
+
+query
+SELECT extversion, extrelocatable FROM pg_extension WHERE extname = 'citext'
+----
+extversion:text | extrelocatable:bool
+1.4 | t
+
+statement ok
+ALTER EXTENSION citext UPDATE
+
+statement ok
+ALTER EXTENSION citext UPDATE
+
+statement error 22023 extension "citext" has no update path from version "1.8" to version "1.5"
+ALTER EXTENSION citext UPDATE TO '1.5'
+
+statement error 22023 extension "citext" has no update path from version "1.8" to version "9.9"
+ALTER EXTENSION citext UPDATE TO '9.9'
+
+statement error 42704 extension "nope" does not exist
+ALTER EXTENSION nope UPDATE
+
+statement error 0A000 extension "plpgsql" does not support SET SCHEMA
+ALTER EXTENSION plpgsql SET SCHEMA public
+
+statement ok
+CREATE SCHEMA s1
+
+statement ok
+ALTER EXTENSION citext SET SCHEMA s1
+
+statement ok
+ALTER EXTENSION citext SET SCHEMA s1
+
+query
+SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'citext'
+----
+extnamespace:text
+s1
+
+statement error 3F000 schema "nope" does not exist
+ALTER EXTENSION citext SET SCHEMA nope
+
+statement ok
+CREATE TABLE t1 (a serial PRIMARY KEY)
+
+statement ok
+CREATE VIEW v1 AS SELECT 1 AS a
+
+statement error 42809 "t1" is not a view
+ALTER EXTENSION citext ADD VIEW t1
+
+statement error 42P01 relation "nope" does not exist
+ALTER EXTENSION citext ADD TABLE nope
+
+statement ok
+ALTER EXTENSION citext ADD TABLE t1
+
+statement error 55000 table t1 is already a member of extension "citext"
+ALTER EXTENSION citext ADD TABLE t1
+
+statement error 55000 view v1 is not a member of extension "citext"
+ALTER EXTENSION citext DROP VIEW v1
+
+statement error 2BP01 cannot drop table t1 because extension citext requires it
+DROP TABLE t1
+
+statement ok
+ALTER EXTENSION citext DROP TABLE t1
+
+statement error 55000 table t1 is not a member of extension "citext"
+ALTER EXTENSION citext DROP TABLE t1
+
+statement ok
+ALTER EXTENSION citext ADD TABLE t1
+
+statement ok
+CREATE TABLE s1.t2 (a int)
+
+statement ok
+ALTER EXTENSION citext ADD TABLE s1.t2
+
+statement error 2BP01 cannot drop table s1.t2 because extension citext requires it
+DROP TABLE s1.t2
+
+statement ok
+DROP EXTENSION citext
+
+query
+SELECT count(*) FROM pg_class WHERE relname IN ('t1', 't2')
+----
+count:int8
+0

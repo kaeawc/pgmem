@@ -7,17 +7,17 @@ PostgreSQL 18; CI re-verifies every record against PostgreSQL and runs it agains
 A record passes when pgmem returns the same column names, column types and text values, or
 the same SQLSTATE and error message.
 
-pgmem passes **3792 / 3792 records (100.0%)**.
+pgmem passes **3891 / 3891 records (100.0%)**.
 
 | Area | Records | Pass | Rate |
 |---|---:|---:|---:|
-| catalog | 269 | 269 | 100.0% |
+| catalog | 317 | 317 | 100.0% |
 | constraints | 171 | 171 | 100.0% |
-| ddl | 606 | 606 | 100.0% |
+| ddl | 628 | 628 | 100.0% |
 | dml | 282 | 282 | 100.0% |
 | functions | 534 | 534 | 100.0% |
 | queries | 461 | 461 | 100.0% |
-| session | 482 | 482 | 100.0% |
+| session | 511 | 511 | 100.0% |
 | smoke | 7 | 7 | 100.0% |
 | transactions | 569 | 569 | 100.0% |
 | types | 411 | 411 | 100.0% |
@@ -34,6 +34,7 @@ pgmem passes **3792 / 3792 records (100.0%)**.
 | catalog/orm_reflection.slt | 35 | 35 | 100.0% |
 | catalog/pg_catalog.slt | 58 | 58 | 100.0% |
 | catalog/psql_describe.slt | 22 | 22 | 100.0% |
+| catalog/regrole_default_acl.slt | 48 | 48 | 100.0% |
 | catalog/regtypes.slt | 33 | 33 | 100.0% |
 | catalog/settings.slt | 15 | 15 | 100.0% |
 | constraints/check_notnull.slt | 35 | 35 | 100.0% |
@@ -49,7 +50,7 @@ pgmem passes **3792 / 3792 records (100.0%)**.
 | ddl/identity.slt | 38 | 38 | 100.0% |
 | ddl/indexes.slt | 36 | 36 | 100.0% |
 | ddl/migrations.slt | 58 | 58 | 100.0% |
-| ddl/partitioning.slt | 89 | 89 | 100.0% |
+| ddl/partitioning.slt | 111 | 111 | 100.0% |
 | ddl/reloptions.slt | 53 | 53 | 100.0% |
 | ddl/schema.slt | 31 | 31 | 100.0% |
 | ddl/sequences.slt | 34 | 34 | 100.0% |
@@ -86,6 +87,7 @@ pgmem passes **3792 / 3792 records (100.0%)**.
 | queries/subqueries.slt | 39 | 39 | 100.0% |
 | queries/where_operators.slt | 51 | 51 | 100.0% |
 | queries/windows.slt | 39 | 39 | 100.0% |
+| session/alter_extension.slt | 29 | 29 | 100.0% |
 | session/column_privileges.slt | 63 | 63 | 100.0% |
 | session/config_functions.slt | 45 | 45 | 100.0% |
 | session/extensions.slt | 46 | 46 | 100.0% |
