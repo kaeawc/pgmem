@@ -45,6 +45,7 @@ mod distinct;
 mod distinct_on;
 mod drop_table;
 mod embedded;
+mod error_position;
 mod example_analytics;
 mod example_blog;
 mod example_chat;
