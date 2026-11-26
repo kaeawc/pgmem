@@ -83,7 +83,7 @@ pub struct Context {
 pub struct SearchPath {
     /// The setting's entries, unquoted (`"$user"` stays `$user`).
     pub entries: Vec<String>,
-    /// The session user (`$user`).
+    /// The current role (`$user`).
     pub user: String,
     /// The session's temporary schema (`pg_temp_N`), once it has one.
     pub temp_schema: Option<String>,

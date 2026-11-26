@@ -23,6 +23,11 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - `ALTER FUNCTION ... [NO] DEPENDS ON EXTENSION`: recorded in `pg_depend` (`x`), and dropping the extension drops the function.
 - `information_schema.routines` has PostgreSQL's 82 columns (`routine_body` is `SQL` for SQL functions; `is_null_call`, `sql_data_access`, `parameter_style`, `type_udt_*`, ...), lists only routines the current user owns or may execute, and shows `routine_definition` to the owner only.
 - `pg_constraint.connamespace` is the namespace of the owning table or domain instead of always `public`.
+- Ownership is enforced: ALTER, DROP, COMMENT ON and CREATE OR REPLACE of a function, procedure, table, view, materialized view, sequence, index, trigger, type, domain, schema or extension by a role that is neither its owner, a member of the owning role nor a superuser fail with `42501 must be owner of <kind> <name>` (PostgreSQL's wording per statement, e.g. `relation t` for DROP TRIGGER and COMMENT ON COLUMN, `type d` for domains). `OWNER TO` also needs membership in the new owner (`must be able to SET ROLE "r"`) and the new owner's CREATE on the schema. Types, domains, extensions and schemas created under `SET ROLE` are owned by that role.
+- CREATE TRIGGER needs TRIGGER on the table and EXECUTE on the trigger function; REFRESH MATERIALIZED VIEW needs MAINTAIN.
+- After `SET ROLE`, `$user` in `search_path` is the current role, schemas the role has no USAGE on drop out of the search path, and a qualified name in one fails with `42501 permission denied for schema s`.
+- DROP EXTENSION checks what depends on the functions marked `DEPENDS ON EXTENSION` (column defaults, triggers): `2BP01 cannot drop extension x because other objects depend on it` with PostgreSQL's DETAIL and HINT, and CASCADE drops them; DROP FUNCTION ... CASCADE drops dependent triggers too.
+- `ALTER SEQUENCE ... OWNER TO` parses; `pg_tables.tableowner` shows the table's owner.
 - `pg_get_indexdef` and `pg_indexes.indexdef` print `INCLUDE (...)` for covering indexes, and `pg_index.indnatts`, `indnkeyatts`, `indkey` and `pg_class.relnatts` count the INCLUDE columns like PostgreSQL.
 
 ### Changed

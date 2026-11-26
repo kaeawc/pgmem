@@ -102,3 +102,39 @@ fn citext_trgm_and_hstore() {
         [["\"a\"=>\"1\", \"b\"=>\"2\"", "{\"a\": \"1\", \"b\": null}"]]
     );
 }
+
+/// Functions marked DEPENDS ON EXTENSION go with the extension, but what depends on them
+/// (column defaults, triggers) blocks DROP EXTENSION unless CASCADE drops it too (#234).
+#[test]
+fn drop_extension_checks_dependents_of_member_functions() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE EXTENSION hstore;
+         CREATE FUNCTION xdf() RETURNS int LANGUAGE sql AS 'select 1';
+         ALTER FUNCTION xdf() DEPENDS ON EXTENSION hstore;
+         CREATE TABLE xdt (id int DEFAULT xdf());
+         CREATE FUNCTION xdtf() RETURNS trigger LANGUAGE plpgsql AS 'begin return new; end';
+         ALTER FUNCTION xdtf() DEPENDS ON EXTENSION hstore;
+         CREATE TABLE xdu (id int);
+         CREATE TRIGGER xdtr BEFORE INSERT ON xdu FOR EACH ROW EXECUTE FUNCTION xdtf()",
+    )
+    .expect("setup");
+    let e = expect_code(c.batch_execute("DROP EXTENSION hstore"), "2BP01");
+    let db = e.as_db_error().expect("db error");
+    assert_eq!(db.message(), "cannot drop extension hstore because other objects depend on it");
+    assert_eq!(
+        db.detail(),
+        Some("default value for column id of table xdt depends on function xdf()\ntrigger xdtr on table xdu depends on function xdtf()")
+    );
+    assert_eq!(db.hint(), Some("Use DROP ... CASCADE to drop the dependent objects too."));
+    c.batch_execute("DROP EXTENSION hstore CASCADE").expect("cascade");
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT (SELECT count(*) FROM pg_trigger WHERE tgname = 'xdtr'), (SELECT count(*) FROM pg_proc WHERE proname IN ('xdf', 'xdtf')),
+                    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'xdt' AND column_default IS NOT NULL)"
+        ),
+        [["0", "0", "0"]]
+    );
+    c.batch_execute("INSERT INTO xdu VALUES (1); INSERT INTO xdt DEFAULT VALUES").expect("tables still work");
+}

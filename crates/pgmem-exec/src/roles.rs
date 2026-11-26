@@ -828,6 +828,13 @@ pub(crate) fn alter_owner(
         }
     };
     set_owner(txn, env, oid, owner)?;
+    if object == ir::OwnedObject::Schema
+        && let Some(mut def) = txn.catalog_mut().drop_schema(name.base())
+    {
+        // The schema's own owner (nspowner, privilege checks) changes too.
+        def.owner = resolve_role(&catalog, env, owner)?;
+        txn.catalog_mut().create_schema(def)?;
+    }
     Ok(tag(what))
 }
 
@@ -870,6 +877,7 @@ pub(crate) fn check_statement(
     env: &SessionEnv,
     param_types: &[pgmem_types::Type],
 ) -> SqlResult<()> {
+    crate::ownership::check_ddl(stmt, catalog, env)?;
     let role = current_role(env);
     if is_superuser(catalog, env, &role) {
         return Ok(());
@@ -1056,6 +1064,11 @@ fn public_default_letter(object: &GrantObject) -> Option<char> {
 /// function f`, or `procedure p`).
 pub(crate) fn check_execute(catalog: &Catalog, env: &SessionEnv, def: &pgmem_catalog::FunctionDef) -> SqlResult<()> {
     let role = current_role(env);
+    // A function in a schema the role may not use was named qualified (the search path
+    // skips such schemas): USAGE is checked first, as name lookup does.
+    if catalog.schema(&def.schema).is_some() && !has_privilege(catalog, env, &role, &GrantObject::Schema(def.schema.clone()), 'U') {
+        return Err(permission_denied("schema", &def.schema));
+    }
     if has_privilege(catalog, env, &role, &GrantObject::Function(def.oid), 'X') {
         return Ok(());
     }

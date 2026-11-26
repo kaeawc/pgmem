@@ -1376,7 +1376,7 @@ fn pg_tables(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             s.row(vec![
                 ("schemaname", name(&t.schema)),
                 ("tablename", name(&t.name)),
-                ("tableowner", name(&ctx.env.user)),
+                ("tableowner", name(&crate::roles::owner_of(m.catalog, ctx.env, t.oid))),
                 ("hasindexes", boolean(!t.indexes.is_empty())),
                 ("hastriggers", boolean(triggers.contains(&t.oid))),
             ])

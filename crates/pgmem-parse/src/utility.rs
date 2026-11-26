@@ -112,7 +112,8 @@ pub(crate) fn try_parse(p: &mut Parser) -> Result<Option<Utility>, ParserError> 
         p.next_token();
         return alter_constraint(p).map(Some);
     }
-    if word_at(p, 0, "ALTER") && word_at(p, 1, "SEQUENCE") {
+    // `ALTER SEQUENCE name OWNER TO role` is parsed with the other OWNER TO forms.
+    if word_at(p, 0, "ALTER") && word_at(p, 1, "SEQUENCE") && !sequence_owner_to_ahead(p) {
         p.next_token();
         p.next_token();
         return alter_sequence(p).map(Some);
@@ -328,6 +329,15 @@ fn set_constraints(p: &mut Parser) -> Result<Utility, ParserError> {
 }
 
 /// Whether `ALTER TABLE [IF EXISTS] [ONLY] name ALTER CONSTRAINT` comes next.
+/// `ALTER SEQUENCE [IF EXISTS] name OWNER TO ...`.
+fn sequence_owner_to_ahead(p: &Parser) -> bool {
+    let mut n = if word_at(p, 2, "IF") && word_at(p, 3, "EXISTS") { 5 } else { 3 };
+    while p.peek_nth_token(n).token == Token::Period {
+        n += 2;
+    }
+    word_at(p, n, "OWNER") && word_at(p, n + 1, "TO")
+}
+
 fn alter_constraint_ahead(p: &Parser) -> bool {
     let mut n = 2;
     if word_at(p, n, "IF") && word_at(p, n + 1, "EXISTS") {
