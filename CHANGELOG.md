@@ -15,6 +15,7 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 
 ### Fixed
 
+- Errors carry PostgreSQL's `position` field (`P`, the 1-based character offset into the query string, shown by psql as `LINE n:` with a caret) for syntax errors and for undefined columns, relations and functions, missing FROM-clause entries, ambiguous columns, undefined operators and invalid literal input, in simple and extended (`Parse`) queries; a statement of a multi-statement query is located in the whole string. Errors inside function and `DO` bodies carry none.
 - Binary `COPY ... TO STDOUT` sends the file header in the first row's CopyData message, as PostgreSQL does (psycopg could not read binary COPY rows).
 - `Describe` of a portal named after a `DECLARE`d cursor returns its row description (psycopg server-side cursors failed with "portal does not exist").
 - Function attributes are stored and shown: `SECURITY DEFINER`, `SET param = value` (`pg_proc.proconfig`), `PARALLEL`, `COST`, `ROWS` and `LEAKPROOF` appear in `pg_proc` and `pg_get_functiondef` as PostgreSQL prints them (procedures use `$procedure$`), and a function's `SET` options apply during its call.
