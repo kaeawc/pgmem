@@ -291,6 +291,10 @@ impl Writer {
     pub fn error(&mut self, e: &SqlError) {
         let severity = if e.code == "57P01" { "FATAL" } else { "ERROR" };
         let mut extra: Vec<(u8, &str)> = Vec::new();
+        let position = e.position().map(|p| p.to_string());
+        if let Some(p) = &position {
+            extra.push((b'P', p.as_str()));
+        }
         if let Some(f) = e.fields() {
             for (k, v) in [(b's', &f.schema), (b't', &f.table), (b'c', &f.column), (b'n', &f.constraint)] {
                 if let Some(v) = v {
