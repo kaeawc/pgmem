@@ -125,34 +125,43 @@ fn role_options(p: &mut Parser) -> Result<RoleOptions, ParserError> {
     }
 }
 
-/// Privilege keywords up to ON (None: ALL [PRIVILEGES]); column lists are skipped.
-fn privileges(p: &mut Parser) -> Result<Option<Vec<String>>, ParserError> {
+/// Privilege keywords up to ON (None: ALL [PRIVILEGES]) and their column lists (one per
+/// privilege; empty when none has a list).
+type Privileges = (Option<Vec<String>>, Vec<Vec<String>>);
+
+fn privileges(p: &mut Parser) -> Result<Privileges, ParserError> {
     if eat(p, "ALL") {
         let _ = eat(p, "PRIVILEGES");
-        if p.consume_token(&Token::LParen) {
-            while !p.consume_token(&Token::RParen) {
-                p.next_token();
-            }
-        }
-        return Ok(None);
+        let cols = column_list(p)?;
+        return Ok((None, if cols.is_empty() { Vec::new() } else { vec![cols] }));
     }
     let mut out = Vec::new();
+    let mut columns = Vec::new();
     loop {
         let w = match p.next_token().token {
             Token::Word(w) => w.value.to_lowercase(),
             other => return p.expected("a privilege", sqlparser::tokenizer::TokenWithSpan::wrap(other)),
         };
         out.push(if w == "temp" { "temporary".to_owned() } else { w });
-        if p.consume_token(&Token::LParen) {
-            while !p.consume_token(&Token::RParen) {
-                p.next_token();
-            }
-        }
+        columns.push(column_list(p)?);
         if !p.consume_token(&Token::Comma) {
             break;
         }
     }
-    Ok(Some(out))
+    if columns.iter().all(Vec::is_empty) {
+        columns.clear();
+    }
+    Ok((Some(out), columns))
+}
+
+/// An optional `(col, ...)` after a privilege.
+fn column_list(p: &mut Parser) -> Result<Vec<String>, ParserError> {
+    if !p.consume_token(&Token::LParen) {
+        return Ok(Vec::new());
+    }
+    let out = ident_list(p)?;
+    p.expect_token(&Token::RParen)?;
+    Ok(out)
 }
 
 fn name_list(p: &mut Parser) -> Result<Vec<sq::ObjectName>, ParserError> {
@@ -295,7 +304,7 @@ fn grant_or_revoke(p: &mut Parser, revoke: bool) -> Result<RoleStmt, ParserError
         }
         return Ok(RoleStmt::Lowered(Statement::GrantRole { roles, members, admin, revoke }));
     }
-    let privileges = privileges(p)?;
+    let (privileges, columns) = privileges(p)?;
     expect(p, "ON")?;
     let (target, functions) = target(p)?;
     if revoke {
@@ -311,7 +320,7 @@ fn grant_or_revoke(p: &mut Parser, revoke: bool) -> Result<RoleStmt, ParserError
             break;
         }
     }
-    let mut stmt = GrantStmt { privileges, target, grantees, grant_option, revoke, cascade: false };
+    let mut stmt = GrantStmt { privileges, columns, target, grantees, grant_option, revoke, cascade: false };
     while !matches!(p.peek_token().token, Token::EOF | Token::SemiColon) {
         if eat(p, "WITH") {
             expect(p, "GRANT")?;
@@ -432,7 +441,7 @@ pub(crate) fn try_parse(p: &mut Parser) -> Result<Option<RoleStmt>, ParserError>
             expect(p, "FOR")?;
             true
         };
-        let privileges = privileges(p)?;
+        let (privileges, columns) = privileges(p)?;
         expect(p, "ON")?;
         let kind = match p.next_token().token {
             Token::Word(w) => match w.value.to_lowercase().as_str() {
@@ -451,7 +460,7 @@ pub(crate) fn try_parse(p: &mut Parser) -> Result<Option<RoleStmt>, ParserError>
             expect(p, "TO")?;
         }
         let grantees = role_list(p)?;
-        let mut stmt = GrantStmt { privileges, target: GrantTarget::Other, grantees, grant_option, revoke, cascade: false };
+        let mut stmt = GrantStmt { privileges, columns, target: GrantTarget::Other, grantees, grant_option, revoke, cascade: false };
         while !matches!(p.peek_token().token, Token::EOF | Token::SemiColon) {
             if eat(p, "WITH") {
                 expect(p, "GRANT")?;
