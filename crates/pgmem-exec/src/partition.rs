@@ -691,13 +691,20 @@ pub(crate) fn create_partition(
         check_default_rows(txn, &parent, &bound, &ectx)?;
         bound
     };
-    // The partition has the parent's columns (physical layout included), CHECK and foreign key
-    // constraints, and its own copies of the parent's indexes.
+    // The partition has the parent's live columns (not its dropped slots, so attnums may
+    // differ from the parent's), CHECK and foreign key constraints, and its own copies of the
+    // parent's indexes. `slots[parent slot]` is the partition's slot for that column.
+    let mut slots = vec![None; parent.columns.len()];
+    for (i, (slot, _)) in parent.live_columns().enumerate() {
+        slots[slot] = Some(i);
+    }
+    let slot_of = |s: usize| slots.get(s).copied().flatten();
+    let map = |cols: &[usize]| cols.iter().filter_map(|c| slot_of(*c)).collect::<Vec<usize>>();
     let mut table = TableDef {
         oid: 0,
         schema,
         name: name.clone(),
-        columns: parent.columns.clone(),
+        columns: parent.live_columns().map(|(_, c)| c.clone()).collect(),
         constraints: parent
             .constraints
             .iter()
@@ -705,6 +712,10 @@ pub(crate) fn create_partition(
             .cloned()
             .map(|mut c| {
                 c.oid = 0;
+                if let ConstraintKind::ForeignKey { columns, delete_set_columns, .. } = &mut c.kind {
+                    *columns = map(columns);
+                    *delete_set_columns = map(delete_set_columns);
+                }
                 c
             })
             .collect(),
@@ -716,7 +727,7 @@ pub(crate) fn create_partition(
     for c in &ct.columns {
         apply_column_options(&mut table, c)?;
     }
-    clone_indexes(&catalog, &parent, &mut table, &|s| Some(s));
+    clone_indexes(&catalog, &parent, &mut table, &slot_of);
     let sub_key = ct.options.partition_by.as_ref().map(|p| bind_key(&b, &table, p)).transpose()?;
     let cat = txn.catalog_mut();
     crate::ddl::assign_oids(cat, &mut table);
