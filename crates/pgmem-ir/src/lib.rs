@@ -301,10 +301,10 @@ pub enum Statement {
         names: Vec<ObjectName>,
         deferred: bool,
     },
-    /// `LOCK [TABLE] name, ... [IN mode MODE] [NOWAIT]`: `mode` from 1 (ACCESS SHARE) to 8
-    /// (ACCESS EXCLUSIVE, the default).
+    /// `LOCK [TABLE] [ONLY] name, ... [IN mode MODE] [NOWAIT]`: `mode` from 1 (ACCESS SHARE)
+    /// to 8 (ACCESS EXCLUSIVE, the default); each table with whether ONLY was given.
     Lock {
-        tables: Vec<ObjectName>,
+        tables: Vec<(ObjectName, bool)>,
         mode: u8,
         nowait: bool,
     },

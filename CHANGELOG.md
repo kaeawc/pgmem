@@ -11,6 +11,10 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - Static Linux binaries (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) on each release.
 - `cargo binstall pgmem` installs the prebuilt binary from the GitHub release.
 - `pg_get_keywords()` returns PostgreSQL 18's keyword list (word, catcode, barelabel, catdesc, baredesc).
+- `pg_locks` lists relation locks: the ones queries (with the indexes the planner opens), DML,
+  `LOCK TABLE` and DDL take, at PostgreSQL's lock level for each statement and ALTER TABLE
+  subcommand. They are held to the end of the transaction (or released by `ROLLBACK TO`) and
+  conflict with `LOCK ... NOWAIT` in other sessions.
 - `CREATE STATISTICS` (and `ALTER` / `DROP` / `COMMENT ON STATISTICS`): the object is stored, listed in `pg_statistic_ext`, printed by `pg_get_statisticsobjdef`, `pg_get_statisticsobjdef_columns` and `pg_get_statisticsobjdef_expressions`, shown in psql's `\d` footer, and dropped with its table or a referenced column. No statistics are gathered.
 - `CREATE CAST` (`WITH FUNCTION`, `WITHOUT FUNCTION`, `WITH INOUT`, `AS ASSIGNMENT | IMPLICIT`) and `DROP CAST`, with `pg_cast` listing PostgreSQL 18's builtin casts alongside user ones. Casts apply to `::` and `CAST` (and to assignments and implicit coercions of the expression itself, not to operator or function argument resolution).
 
@@ -45,6 +49,8 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - UNION / INTERSECT / EXCEPT and `SELECT DISTINCT` without ORDER BY return rows in PostgreSQL's
   order (sorted, or hash-table order, as its planner picks) for inputs of constants and VALUES
   lists, instead of first-seen order. Table inputs keep first-seen order.
+- `LOCK TABLE` locks a partitioned table's partitions (not with `ONLY`) and a view's base
+  relations, and refuses sequences and indexes (`42809 cannot lock relation`).
 
 ### Changed
 

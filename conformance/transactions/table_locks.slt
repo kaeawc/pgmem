@@ -1,0 +1,202 @@
+# Relation locks: LOCK TABLE, the locks queries, DML and DDL take, and pg_locks
+statement ok
+CREATE TABLE lk_t (id int PRIMARY KEY, v text); CREATE INDEX lk_t_v ON lk_t (v); CREATE TABLE lk_u (id int PRIMARY KEY, t_id int); CREATE VIEW lk_vw AS SELECT * FROM lk_t; CREATE TABLE lk_p (id int PRIMARY KEY) PARTITION BY RANGE (id); CREATE TABLE lk_p1 PARTITION OF lk_p FOR VALUES FROM (0) TO (10)
+
+# A query locks the tables it reads, with their indexes, and a view with its base tables
+statement ok
+BEGIN
+
+statement ok
+SELECT * FROM lk_vw
+
+query
+SELECT relation::regclass::text AS relation, mode, granted FROM pg_locks WHERE pid = pg_backend_pid() AND locktype = 'relation' AND relation <> 'pg_locks'::regclass ORDER BY relation::regclass::text COLLATE "C", mode COLLATE "C"
+----
+relation:text | mode:text | granted:bool
+lk_t | AccessShareLock | t
+lk_t_pkey | AccessShareLock | t
+lk_t_v | AccessShareLock | t
+lk_vw | AccessShareLock | t
+
+statement ok
+ROLLBACK
+
+# Querying pg_locks locks pg_locks
+statement ok
+BEGIN
+
+query
+SELECT mode, granted, fastpath FROM pg_locks WHERE pid = pg_backend_pid() AND relation = 'pg_locks'::regclass
+----
+mode:text | granted:bool | fastpath:bool
+AccessShareLock | t | t
+
+statement ok
+ROLLBACK
+
+# DML: INSERT locks its target, UPDATE and DELETE its indexes too; FOR SHARE takes ROW SHARE
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO lk_u SELECT id, id FROM lk_t
+
+statement ok
+UPDATE lk_t SET v = 'x'
+
+statement ok
+SELECT * FROM lk_u FOR SHARE
+
+query
+SELECT relation::regclass::text AS relation, mode, granted FROM pg_locks WHERE pid = pg_backend_pid() AND locktype = 'relation' AND relation <> 'pg_locks'::regclass ORDER BY relation::regclass::text COLLATE "C", mode COLLATE "C"
+----
+relation:text | mode:text | granted:bool
+lk_t | AccessShareLock | t
+lk_t | RowExclusiveLock | t
+lk_t_pkey | AccessShareLock | t
+lk_t_pkey | RowExclusiveLock | t
+lk_t_v | AccessShareLock | t
+lk_t_v | RowExclusiveLock | t
+lk_u | RowExclusiveLock | t
+lk_u | RowShareLock | t
+lk_u_pkey | RowShareLock | t
+
+statement ok
+ROLLBACK
+
+# LOCK: a view with its base table, a partitioned table with its partitions, ONLY, once per mode
+statement ok
+BEGIN
+
+statement ok
+LOCK lk_vw IN SHARE MODE
+
+statement ok
+LOCK TABLE lk_p IN ROW SHARE MODE
+
+statement ok
+LOCK ONLY lk_p IN EXCLUSIVE MODE; LOCK lk_u IN SHARE UPDATE EXCLUSIVE MODE; LOCK lk_u IN SHARE UPDATE EXCLUSIVE MODE
+
+query
+SELECT relation::regclass::text AS relation, mode, granted FROM pg_locks WHERE pid = pg_backend_pid() AND locktype = 'relation' AND relation <> 'pg_locks'::regclass ORDER BY relation::regclass::text COLLATE "C", mode COLLATE "C"
+----
+relation:text | mode:text | granted:bool
+lk_p | ExclusiveLock | t
+lk_p | RowShareLock | t
+lk_p1 | RowShareLock | t
+lk_t | ShareLock | t
+lk_u | ShareUpdateExclusiveLock | t
+lk_vw | ShareLock | t
+
+statement ok
+ROLLBACK
+
+# ROLLBACK TO releases the locks taken after the savepoint
+statement ok
+BEGIN
+
+statement ok
+LOCK lk_u IN SHARE MODE; SAVEPOINT a; LOCK lk_t; ROLLBACK TO a
+
+query
+SELECT relation::regclass::text AS relation, mode, granted FROM pg_locks WHERE pid = pg_backend_pid() AND locktype = 'relation' AND relation <> 'pg_locks'::regclass ORDER BY relation::regclass::text COLLATE "C", mode COLLATE "C"
+----
+relation:text | mode:text | granted:bool
+lk_u | ShareLock | t
+
+statement ok
+ROLLBACK
+
+# Relations LOCK refuses
+statement ok
+BEGIN
+
+statement error 42809 cannot lock relation "lk_t_pkey"
+LOCK lk_t_pkey
+
+statement ok
+ROLLBACK
+
+# A DML lock in another session conflicts with LOCK ... NOWAIT
+statement ok
+BEGIN; INSERT INTO lk_u VALUES (1, 1)
+
+connection b
+statement ok
+BEGIN
+
+connection b
+statement ok
+LOCK lk_u IN ROW EXCLUSIVE MODE NOWAIT
+
+connection b
+statement error 55P03 could not obtain lock on relation "lk_u"
+LOCK lk_u IN SHARE MODE NOWAIT
+
+connection b
+statement ok
+ROLLBACK
+
+statement ok
+ROLLBACK
+
+# DDL lock levels
+statement ok
+BEGIN
+
+statement ok
+ALTER TABLE lk_u ADD COLUMN z int
+
+statement ok
+CREATE INDEX lk_u_t_id ON lk_t (v)
+
+query
+SELECT relation::regclass::text AS relation, mode, granted FROM pg_locks WHERE pid = pg_backend_pid() AND locktype = 'relation' AND relation <> 'pg_locks'::regclass ORDER BY relation::regclass::text COLLATE "C", mode COLLATE "C"
+----
+relation:text | mode:text | granted:bool
+lk_t | ShareLock | t
+lk_u | AccessExclusiveLock | t
+lk_u_t_id | AccessExclusiveLock | t
+
+statement ok
+ROLLBACK
+
+statement ok
+BEGIN
+
+statement ok
+ALTER TABLE lk_u ADD CONSTRAINT lk_fk FOREIGN KEY (t_id) REFERENCES lk_t NOT VALID
+
+query
+SELECT relation::regclass::text AS relation, mode, granted FROM pg_locks WHERE pid = pg_backend_pid() AND locktype = 'relation' AND relation <> 'pg_locks'::regclass ORDER BY relation::regclass::text COLLATE "C", mode COLLATE "C"
+----
+relation:text | mode:text | granted:bool
+lk_t | AccessShareLock | t
+lk_t | ShareRowExclusiveLock | t
+lk_t_pkey | AccessShareLock | t
+lk_u | AccessShareLock | t
+lk_u | ShareRowExclusiveLock | t
+
+statement ok
+ROLLBACK
+
+statement ok
+BEGIN
+
+statement ok
+ANALYZE lk_u
+
+statement ok
+COMMENT ON TABLE lk_t IS 'x'
+
+query
+SELECT relation::regclass::text AS relation, mode, granted FROM pg_locks WHERE pid = pg_backend_pid() AND locktype = 'relation' AND relation <> 'pg_locks'::regclass ORDER BY relation::regclass::text COLLATE "C", mode COLLATE "C"
+----
+relation:text | mode:text | granted:bool
+lk_t | ShareUpdateExclusiveLock | t
+lk_u | ShareUpdateExclusiveLock | t
+lk_u_pkey | AccessShareLock | t
+pg_description | RowExclusiveLock | t
+
+statement ok
+ROLLBACK
