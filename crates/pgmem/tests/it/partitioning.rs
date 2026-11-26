@@ -40,7 +40,14 @@ fn routing_and_constraints() {
     assert_eq!(rows(&mut c, "SELECT string_agg(id::text, ',' ORDER BY id) FROM ev_eu"), [["1,3"]]);
     // Moving rows between partitions, through the partitioned table.
     assert_eq!(rows(&mut c, "UPDATE ev SET region = 'us' WHERE id = 3 RETURNING tableoid::regclass::text, id::text"), [["ev_us", "3"]]);
-    assert_eq!(rows(&mut c, "UPDATE ev SET at = '2025-06-01' WHERE id = 1 RETURNING tableoid::regclass::text"), [["ev_eu_25"]]);
+    assert_eq!(
+        rows(
+            &mut c,
+            "UPDATE ev SET at = '2025-06-01' WHERE id = 1
+             RETURNING tableoid::regclass::text, old.tableoid::regclass::text, new.tableoid::regclass::text"
+        ),
+        [["ev_eu_25", "ev_eu_24", "ev_eu_25"]]
+    );
     let e = expect_code(c.batch_execute("UPDATE ev_us SET region = 'eu'"), "23514");
     assert_eq!(message(&e), "new row for relation \"ev_us\" violates partition constraint");
     // Unique keys are per partition and named after it.

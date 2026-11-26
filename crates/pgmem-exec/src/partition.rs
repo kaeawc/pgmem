@@ -1077,26 +1077,31 @@ pub(crate) fn exec_update(
             let inserted_cols = if returning.is_empty() {
                 Vec::new()
             } else {
+                // Its system columns follow, for `new.ctid`, `new.tableoid`, ...
                 target
                     .live_columns()
-                    .map(|(_, c)| ir::SelectItem::Expr { expr: ir::Expr::Column(vec![c.name.clone()]), alias: None })
+                    .map(|(_, c)| c.name.as_str())
+                    .chain(crate::bind::SYSTEM_COLUMNS.iter().map(|(n, _)| *n))
+                    .map(|n| ir::SelectItem::Expr { expr: ir::Expr::Column(vec![n.to_owned()]), alias: None })
                     .collect()
             };
             let mut r = routed(state, target.oid, || insert_into(&target, vec![target_row], &alias, None, inserted_cols, txn, env, state))?;
             r.tag = "UPDATE 1".into();
             if !returning.is_empty() {
                 let mut rows = Vec::new();
-                for inserted in std::mem::take(&mut r.rows) {
+                for mut inserted in std::mem::take(&mut r.rows) {
+                    let new_system = inserted.split_off(live.len());
                     let mut leaf_row: Row = vec![Value::Null; target.columns.len()];
                     for (slot, v) in live.iter().zip(inserted) {
                         leaf_row[*slot] = v;
                     }
                     let new = remap(&leaf_row, &target, root);
                     let old = remap(&m.old, &leaf, root);
+                    let old_system = crate::dml::system_values(m.leaf, Some(m.id), 0);
                     let mut current = new.clone();
-                    current.extend(crate::dml::system_values(target.oid, None, 0));
+                    current.extend(new_system.iter().cloned());
                     current.extend(m.from.iter().cloned());
-                    let out = crate::dml::returning_row(&current, Some(&old), Some(&new), root.columns.len());
+                    let out = crate::dml::returning_row(&current, Some((&old, &old_system)), Some((&new, &new_system)), root.columns.len());
                     let ectx = EvalCtx::new(txn, params, env, state);
                     rows.push(returning.iter().map(|e| eval(e, &out, &ectx)).collect::<SqlResult<Vec<_>>>()?);
                 }

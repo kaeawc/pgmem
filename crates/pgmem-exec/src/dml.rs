@@ -5,7 +5,7 @@
 //! final state and applies them to the transaction.
 
 use crate::bind::dml::{RowRules, UniqueCheck};
-use crate::bind::{Binder, DeletePlan, InsertPlan, InsertRows, UpdatePlan};
+use crate::bind::{Binder, DeletePlan, InsertPlan, InsertRows, SYSTEM_COLUMNS, UpdatePlan};
 use crate::eval::{EvalCtx, StatementState, eval, eval_pred};
 use crate::plan::Row;
 use crate::run::run;
@@ -574,19 +574,25 @@ fn referential_actions(
 }
 
 /// The row RETURNING is evaluated over: the statement's row, then the old and the new
-/// version of the target row (all NULL when there is none).
-pub(crate) fn returning_row(current: &[Value], old: Option<&Row>, new: Option<&Row>, width: usize) -> Row {
+/// version of the target row with its system columns (all NULL when there is none).
+pub(crate) fn returning_row(current: &[Value], old: Option<(&Row, &[Value])>, new: Option<(&Row, &[Value])>, width: usize) -> Row {
     let mut out = current.to_vec();
     for version in [old, new] {
         match version {
-            Some(r) => {
+            Some((r, system)) => {
                 out.extend(r.iter().take(width).cloned());
                 out.extend(std::iter::repeat_n(Value::Null, width.saturating_sub(r.len())));
+                out.extend(system.iter().cloned());
             }
-            None => out.extend(std::iter::repeat_n(Value::Null, width)),
+            None => out.extend(std::iter::repeat_n(Value::Null, width + SYSTEM_COLUMNS.len())),
         }
     }
     out
+}
+
+/// The system columns of the statement's target row in `combined` (target ++ system ++ ...).
+fn system_of(combined: &[Value], width: usize) -> &[Value] {
+    &combined[width..width + SYSTEM_COLUMNS.len()]
 }
 
 fn identity_always_error(col: &str) -> SqlError {
@@ -765,7 +771,8 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
                                 // The locked-then-updated row version: xmax is the updating transaction.
                                 let mut current = new_row.clone();
                                 current.extend(system_values(table.oid, Some(id), env.txid));
-                                let r = returning_row(&current, Some(&existing_row), Some(&new_row), width);
+                                let system = system_of(&current, width);
+                                let r = returning_row(&current, Some((&existing_row, system)), Some((&new_row, system)), width);
                                 returning_rows.push(plan.returning.iter().map(|e| eval(e, &r, &ctx)).collect::<SqlResult<Vec<_>>>()?);
                             }
                             effects.push(Effect::Update(id, existing_row, new_row));
@@ -783,7 +790,7 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
             if !plan.returning.is_empty() {
                 let mut current = row.clone();
                 current.extend(system_values(table.oid, None, 0));
-                let r = returning_row(&current, None, Some(&row), width);
+                let r = returning_row(&current, None, Some((&row, system_of(&current, width))), width);
                 returning_rows.push(plan.returning.iter().map(|e| eval(e, &r, &ctx)).collect::<SqlResult<Vec<_>>>()?);
             }
             pending.push(row.clone());
@@ -953,7 +960,8 @@ pub fn exec_update(plan: &UpdatePlan, txn: &mut Txn, params: &[Value], env: &Ses
             if !plan.returning.is_empty() {
                 let mut out_row = new_row.clone();
                 out_row.extend(combined.iter().skip(width).cloned());
-                let out_row = returning_row(&out_row, Some(&old), Some(&new_row), width);
+                let system = system_of(&combined, width);
+                let out_row = returning_row(&out_row, Some((&old, system)), Some((&new_row, system)), width);
                 returning_rows.push(plan.returning.iter().map(|e| eval(e, &out_row, &ctx)).collect::<SqlResult<Vec<_>>>()?);
             }
             changes.push((id, old, new_row));
@@ -1010,7 +1018,8 @@ pub fn exec_delete(plan: &DeletePlan, txn: &mut Txn, params: &[Value], env: &Ses
                 }
             }
             if !plan.returning.is_empty() {
-                let r = returning_row(&combined, Some(&row), None, table.columns.len());
+                let width = table.columns.len();
+                let r = returning_row(&combined, Some((&row, system_of(&combined, width))), None, width);
                 returning_rows.push(plan.returning.iter().map(|e| eval(e, &r, &ctx)).collect::<SqlResult<Vec<_>>>()?);
             }
             targets.push((id, row));
