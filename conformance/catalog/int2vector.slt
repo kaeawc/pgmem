@@ -1,0 +1,74 @@
+# int2vector / oidvector output, casts and subscripts; mixed column / expression index keys.
+
+statement ok
+CREATE TABLE t (a int, b text, c int)
+
+statement ok
+CREATE INDEX i_mix ON t (a, lower(b))
+
+statement ok
+CREATE INDEX i_expr_first ON t (lower(b), c)
+
+statement ok
+CREATE INDEX i_cols ON t (a, c)
+
+query
+SELECT indkey::text, indkey::int2[]::text, indoption::text, pg_get_expr(indexprs, indrelid) FROM pg_index WHERE indexrelid = 'i_mix'::regclass
+----
+indkey:text | indkey:text | indoption:text | pg_get_expr:text
+1 0 | [0:1]={1,0} | 0 0 | lower(b)
+
+query
+SELECT indkey::text, indkey::int2[]::text, indoption::text, pg_get_expr(indexprs, indrelid) FROM pg_index WHERE indexrelid = 'i_expr_first'::regclass
+----
+indkey:text | indkey:text | indoption:text | pg_get_expr:text
+0 3 | [0:1]={0,3} | 0 0 | lower(b)
+
+query
+SELECT indkey::text, indkey::int2[]::text, indoption::text, pg_get_expr(indexprs, indrelid) FROM pg_index WHERE indexrelid = 'i_cols'::regclass
+----
+indkey:text | indkey:text | indoption:text | pg_get_expr:text
+1 3 | [0:1]={1,3} | 0 0 | NULL
+
+query
+SELECT indkey FROM pg_index WHERE indexrelid = 'i_mix'::regclass
+----
+indkey:int2vector
+1 0
+
+query
+SELECT indkey[0], indkey[1] FROM pg_index WHERE indexrelid = 'i_mix'::regclass
+----
+indkey:int2 | indkey:int2
+1 | 0
+
+query
+SELECT a.attname FROM pg_index x JOIN pg_attribute a ON a.attrelid = x.indrelid AND a.attnum = ANY (x.indkey) WHERE x.indexrelid = 'i_mix'::regclass
+----
+attname:name
+a
+
+query
+SELECT '3 1 4'::int2vector::text, '3 1 4'::int2vector::int2[]::text, '1 2'::oidvector::text, ''::int2vector::int2[]::text
+----
+text:text | text:text | text:text | text:text
+3 1 4 | [0:2]={3,1,4} | 1 2 | {}
+
+statement ok
+CREATE FUNCTION vec_f(int, text) RETURNS int LANGUAGE sql AS 'SELECT 1'
+
+query
+SELECT proargtypes::text, proargtypes::oid[]::text FROM pg_proc WHERE proname = 'vec_f'
+----
+proargtypes:text | proargtypes:text
+23 25 | [0:1]={23,25}
+
+statement error 22P02 invalid input syntax for type smallint: "x"
+SELECT 'x'::int2vector
+
+query
+SELECT pg_get_indexdef('i_mix'::regclass), pg_get_indexdef('i_mix'::regclass, 2, false)
+----
+pg_get_indexdef:text | pg_get_indexdef:text
+CREATE INDEX i_mix ON public.t USING btree (a, lower(b)) | lower(b)
+
