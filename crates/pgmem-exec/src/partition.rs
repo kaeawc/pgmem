@@ -8,9 +8,10 @@ use crate::cast::CoercionContext;
 use crate::eval::{EvalCtx, StatementState, eval};
 use crate::plan::Row;
 use crate::session::{QueryResult, SessionEnv};
+use crate::triggers::{Event, routed};
 use pgmem_catalog::{
     Catalog, ColumnDef, ConstraintKind, IndexDef, PartitionBound, PartitionKey, PartitionKeyPart, PartitionOf, PartitionStrategy,
-    RangeDatum, Relation, TableDef,
+    RangeDatum, Relation, TableDef, TriggerTiming,
 };
 use pgmem_ir::{self as ir, Statement};
 use pgmem_storage::{RowId, Txn};
@@ -724,7 +725,9 @@ pub(crate) fn create_partition(
     cat.set_partition_of(oid, Some(PartitionOf { parent: parent.oid, bound }));
     cat.set_partition_key(oid, sub_key);
     txn.created_table(oid);
-    let qualified = txn.catalog().table_by_oid(oid).map(|t| t.qualified()).ok_or_else(|| SqlError::internal("partition vanished"))?;
+    let created = txn.catalog().table_by_oid(oid).cloned().ok_or_else(|| SqlError::internal("partition vanished"))?;
+    crate::triggers::clone_to_partition(txn, parent.oid, &created)?;
+    let qualified = created.qualified();
     for con in &ct.constraints {
         let action = ir::AlterTableAction::AddConstraint(con.clone());
         crate::ddl::alter_table_action(txn, &qualified, &action, env, state)?;
@@ -806,6 +809,7 @@ pub(crate) fn attach(
     let q = def.qualified();
     cat.replace_table(&q, def);
     cat.set_partition_of(part.oid, Some(PartitionOf { parent: parent.oid, bound }));
+    crate::triggers::clone_to_partition(txn, parent.oid, &part)?;
     Ok(())
 }
 
@@ -856,6 +860,7 @@ pub(crate) fn detach(parent_name: &pgmem_catalog::QualName, partition: &ir::Obje
         ));
     }
     txn.catalog_mut().set_partition_of(part.oid, None);
+    crate::triggers::drop_partition_clones(txn, part.oid);
     Ok(())
 }
 
@@ -953,6 +958,7 @@ pub(crate) fn exec_insert(
     stripped.on_conflict = None;
     let plan = crate::bind::bind_insert(binder, &stripped, ctx)?;
     let columns = if i.returning.is_empty() { Vec::new() } else { crate::bind::bind_insert(binder, i, ctx)?.returning_cols };
+    crate::triggers::root_statement(txn, root, Event::Insert, TriggerTiming::Before, None, env, state)?;
     let rows = crate::dml::insert_preview(&plan, txn, params, env, state)?;
     let catalog = Arc::new(txn.catalog().clone());
     let b = Binder::new(&catalog, &[]);
@@ -970,8 +976,11 @@ pub(crate) fn exec_insert(
     let alias = i.alias.clone().unwrap_or_else(|| root.name.clone());
     let mut results = Vec::new();
     for (leaf, rows) in groups {
-        results.push(insert_into(&leaf, rows, &alias, i.on_conflict.clone(), i.returning.clone(), txn, env, state)?);
+        let on_conflict = i.on_conflict.clone();
+        let r = routed(state, leaf.oid, || insert_into(&leaf, rows, &alias, on_conflict, i.returning.clone(), txn, env, state))?;
+        results.push(r);
     }
+    crate::triggers::root_statement(txn, root, Event::Insert, TriggerTiming::After, None, env, state)?;
     Ok(combine(results, "INSERT", columns))
 }
 
@@ -990,6 +999,8 @@ pub(crate) fn exec_update(
 ) -> SqlResult<QueryResult> {
     let columns = if u.returning.is_empty() { Vec::new() } else { crate::bind::bind_update(binder, u, ctx)?.returning_cols };
     let alias = u.alias.clone().unwrap_or_else(|| root.name.clone());
+    let set_columns: Vec<String> = u.assignments.iter().flat_map(|a| a.columns.iter().filter_map(|c| c.first().cloned())).collect();
+    crate::triggers::root_statement(txn, root, Event::Update, TriggerTiming::Before, Some(&set_columns), env, state)?;
     let owner = state.moved_rows.borrow().is_none();
     if owner {
         *state.moved_rows.borrow_mut() = Some(Vec::new());
@@ -1000,7 +1011,8 @@ pub(crate) fn exec_update(
         let mut lu = u.clone();
         lu.table = leaf_name(leaf);
         lu.alias = Some(alias.clone());
-        let r = crate::statement::exec_statement(&Statement::Update(Box::new(lu)), binder, ctx, txn, params, env, state);
+        let stmt = Statement::Update(Box::new(lu));
+        let r = routed(state, leaf.oid, || crate::statement::exec_statement(&stmt, binder, ctx, txn, params, env, state));
         match r {
             Ok(r) => results.push(r),
             Err(e) => {
@@ -1023,11 +1035,13 @@ pub(crate) fn exec_update(
                 let ectx = EvalCtx::new(txn, params, env, state);
                 route(&catalog, &b, root, &root_row, &ectx)?
             };
-            let mut r = insert_into(&target, vec![target_row], &alias, None, u.returning.clone(), txn, env, state)?;
+            let mut r =
+                routed(state, target.oid, || insert_into(&target, vec![target_row], &alias, None, u.returning.clone(), txn, env, state))?;
             r.tag = "UPDATE 1".into();
             results.push(r);
         }
     }
+    crate::triggers::root_statement(txn, root, Event::Update, TriggerTiming::After, Some(&set_columns), env, state)?;
     Ok(combine(results, "UPDATE", columns))
 }
 
@@ -1045,13 +1059,16 @@ pub(crate) fn exec_delete(
 ) -> SqlResult<QueryResult> {
     let columns = if d.returning.is_empty() { Vec::new() } else { crate::bind::bind_delete(binder, d, ctx)?.returning_cols };
     let alias = d.alias.clone().unwrap_or_else(|| root.name.clone());
+    crate::triggers::root_statement(txn, root, Event::Delete, TriggerTiming::Before, None, env, state)?;
     let mut results = Vec::new();
     for leaf in txn.catalog().partition_leaves(root.oid) {
         let mut ld = d.clone();
         ld.table = leaf_name(&leaf);
         ld.alias = Some(alias.clone());
-        results.push(crate::statement::exec_statement(&Statement::Delete(Box::new(ld)), binder, ctx, txn, params, env, state)?);
+        let stmt = Statement::Delete(Box::new(ld));
+        results.push(routed(state, leaf.oid, || crate::statement::exec_statement(&stmt, binder, ctx, txn, params, env, state))?);
     }
+    crate::triggers::root_statement(txn, root, Event::Delete, TriggerTiming::After, None, env, state)?;
     Ok(combine(results, "DELETE", columns))
 }
 

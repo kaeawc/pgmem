@@ -33,6 +33,9 @@ pub struct StatementState {
     /// While an UPDATE of a partitioned table runs on its partitions: rows whose new partition
     /// key belongs to another partition (partition OID, row id, new row), moved afterwards.
     pub moved_rows: RefCell<Option<Vec<(Oid, pgmem_storage::RowId, Row)>>>,
+    /// The leaf partition the next INSERT / UPDATE / DELETE runs on for a statement on its
+    /// partitioned table: its statement-level triggers do not fire (`triggers::routed`).
+    pub routed_leaf: std::cell::Cell<Option<Oid>>,
 }
 
 impl StatementState {
