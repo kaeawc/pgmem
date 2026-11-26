@@ -395,3 +395,224 @@ fn returning_old_new_system_columns() {
         [["rp2", "rp1"]]
     );
 }
+
+#[test]
+fn before_row_trigger_writes_another_table() {
+    // #174: a BEFORE row trigger may modify other tables (BEFORE UPDATE and DELETE too).
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE a (x int); CREATE TABLE log (m text);
+         CREATE FUNCTION tf() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+           INSERT INTO log VALUES (TG_OP || ' ' || coalesce(NEW.x, OLD.x));
+           IF TG_OP = 'DELETE' THEN RETURN OLD; END IF; RETURN NEW; END $$;
+         CREATE TRIGGER t BEFORE INSERT OR UPDATE OR DELETE ON a FOR EACH ROW EXECUTE FUNCTION tf();
+         INSERT INTO a VALUES (1), (2); UPDATE a SET x = x + 10 WHERE x = 1; DELETE FROM a WHERE x = 2",
+    )
+    .expect("BEFORE trigger writes");
+    assert_eq!(rows(&mut c, "SELECT m FROM log ORDER BY m"), [["DELETE 2"], ["INSERT 1"], ["INSERT 2"], ["UPDATE 11"]]);
+    assert_eq!(rows(&mut c, "SELECT x FROM a"), [["11"]]);
+    // A failed statement undoes the trigger's writes with it.
+    c.batch_execute("CREATE TABLE b (x int CHECK (x > 0)); CREATE TRIGGER tb BEFORE INSERT ON b FOR EACH ROW EXECUTE FUNCTION tf()")
+        .expect("b");
+    expect_code(c.batch_execute("INSERT INTO b VALUES (-1)"), "23514");
+    assert_eq!(rows(&mut c, "SELECT count(*) FROM log"), [["4"]]);
+}
+
+#[test]
+fn volatile_functions_in_queries_write() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE a (x int); CREATE TABLE log (m text); INSERT INTO a VALUES (1), (2);
+         CREATE FUNCTION f() RETURNS int LANGUAGE plpgsql AS $$ BEGIN INSERT INTO log VALUES ('f'); RETURN (SELECT count(*) FROM log); END $$;
+         CREATE FUNCTION g() RETURNS int LANGUAGE plpgsql AS $$ BEGIN INSERT INTO a VALUES (100); RETURN 1; END $$;
+         CREATE FUNCTION sq() RETURNS int LANGUAGE sql AS $$ INSERT INTO log VALUES ('sq'); SELECT count(*)::int FROM log $$",
+    )
+    .expect("setup");
+    // Each call sees the writes of the calls before it.
+    assert_eq!(rows(&mut c, "SELECT f(), f()"), [["1", "2"]]);
+    assert_eq!(rows(&mut c, "SELECT sq()"), [["3"]]);
+    // The calling statement keeps its snapshot: it does not see rows its functions added.
+    assert_eq!(rows(&mut c, "SELECT g(), (SELECT count(*) FROM a) FROM a"), [["1", "2"], ["1", "2"]]);
+    assert_eq!(rows(&mut c, "SELECT count(*) FROM a"), [["4"]]);
+    c.batch_execute("INSERT INTO a VALUES (g()); CREATE TABLE d (x int DEFAULT f()); INSERT INTO d DEFAULT VALUES")
+        .expect("VALUES / DEFAULT");
+    assert_eq!(rows(&mut c, "SELECT count(*) FROM a"), [["6"]]);
+    assert_eq!(rows(&mut c, "SELECT x FROM d"), [["4"]]);
+    assert_eq!(rows(&mut c, "SELECT count(*) FROM log WHERE m = 'f'"), [["3"]]);
+    // Writes inside an explicit transaction roll back with it.
+    c.batch_execute("BEGIN; SELECT f(); ROLLBACK").expect("rollback");
+    assert_eq!(rows(&mut c, "SELECT count(*) FROM log"), [["4"]]);
+}
+
+#[test]
+fn non_volatile_functions_cannot_write() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE log (m text);
+         CREATE FUNCTION s() RETURNS int STABLE LANGUAGE plpgsql AS $$ BEGIN INSERT INTO log VALUES ('s'); RETURN 1; END $$;
+         CREATE FUNCTION ss() RETURNS int STABLE LANGUAGE sql AS $$ INSERT INTO log VALUES ('s') RETURNING 1 $$;
+         CREATE FUNCTION im() RETURNS int IMMUTABLE LANGUAGE plpgsql AS $$ BEGIN UPDATE log SET m = m; RETURN 1; END $$;
+         CREATE FUNCTION sd() RETURNS int STABLE LANGUAGE plpgsql AS $$ BEGIN DELETE FROM log; RETURN 1; END $$;
+         CREATE FUNCTION stf() RETURNS trigger STABLE LANGUAGE plpgsql AS $$ BEGIN INSERT INTO log VALUES ('x'); RETURN NEW; END $$;
+         CREATE TABLE b (x int); CREATE TRIGGER t AFTER INSERT ON b FOR EACH ROW EXECUTE FUNCTION stf()",
+    )
+    .expect("setup");
+    for (sql, msg) in [
+        ("SELECT s()", "INSERT is not allowed in a non-volatile function"),
+        ("SELECT ss()", "INSERT is not allowed in a non-volatile function"),
+        ("SELECT im()", "UPDATE is not allowed in a non-volatile function"),
+        ("SELECT sd()", "DELETE is not allowed in a non-volatile function"),
+        ("INSERT INTO b VALUES (1)", "INSERT is not allowed in a non-volatile function"),
+    ] {
+        let e = expect_code(c.batch_execute(sql), "0A000");
+        assert_eq!(message(&e), msg, "{sql}");
+    }
+    assert_eq!(rows(&mut c, "SELECT count(*) FROM log"), [["0"]]);
+}
+
+#[test]
+fn function_writes_in_read_only_transactions() {
+    // Writes by functions, triggers, CALL and DO obey READ ONLY like top-level statements.
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE log (m text);
+         CREATE FUNCTION f() RETURNS int LANGUAGE plpgsql AS $$ BEGIN INSERT INTO log VALUES ('f'); RETURN 1; END $$;
+         CREATE FUNCTION fs() RETURNS int LANGUAGE sql AS $$ INSERT INTO log VALUES ('f') RETURNING 1 $$;
+         CREATE FUNCTION fd() RETURNS int LANGUAGE plpgsql AS $$ BEGIN DROP TABLE log; RETURN 1; END $$;
+         CREATE PROCEDURE p() LANGUAGE plpgsql AS $$ BEGIN INSERT INTO log VALUES ('p'); END $$;
+         CREATE TEMP TABLE tmp (x int);
+         CREATE FUNCTION ft() RETURNS int LANGUAGE plpgsql AS $$ BEGIN INSERT INTO tmp VALUES (1); RETURN (SELECT count(*) FROM tmp); END $$;
+         CREATE FUNCTION trg() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO log VALUES ('t'); RETURN NEW; END $$;
+         CREATE TABLE tgt (x int);
+         CREATE TRIGGER t BEFORE INSERT ON tmp FOR EACH ROW WHEN (NEW.x > 1) EXECUTE FUNCTION trg()",
+    )
+    .expect("setup");
+    for (sql, what) in [
+        ("BEGIN READ ONLY; SELECT f()", "INSERT"),
+        ("BEGIN READ ONLY; SELECT fs()", "INSERT"),
+        ("BEGIN READ ONLY; SELECT fd()", "DROP TABLE"),
+        ("BEGIN; SET TRANSACTION READ ONLY; SELECT f()", "INSERT"),
+        ("BEGIN READ ONLY; INSERT INTO tmp VALUES (2)", "INSERT"),
+        ("BEGIN READ ONLY; CALL p()", "INSERT"),
+        ("BEGIN READ ONLY; DO $$ BEGIN INSERT INTO log VALUES ('d'); END $$", "INSERT"),
+        ("BEGIN READ ONLY; CREATE TEMP TABLE t2 (x int)", "CREATE TABLE"),
+    ] {
+        let e = expect_code(c.batch_execute(sql), "25006");
+        assert_eq!(message(&e), format!("cannot execute {what} in a read-only transaction"), "{sql}");
+        c.batch_execute("ROLLBACK").expect("rollback");
+    }
+    c.batch_execute("SET default_transaction_read_only = on").expect("SET");
+    let e = expect_code(c.batch_execute("SELECT f()"), "25006");
+    assert_eq!(message(&e), "cannot execute INSERT in a read-only transaction");
+    // Writes to temporary tables are allowed.
+    assert_eq!(rows(&mut c, "SELECT ft()"), [["1"]]);
+    c.batch_execute("INSERT INTO tmp VALUES (1); SET default_transaction_read_only = off").expect("temp writes");
+    assert_eq!(rows(&mut c, "SELECT count(*) FROM log"), [["0"]]);
+    assert_eq!(rows(&mut c, "SELECT count(*) FROM tmp"), [["2"]]);
+}
+
+#[test]
+fn exception_blocks_undo_function_writes() {
+    // A handled exception rolls back the writes made inside its block, also by volatile
+    // functions a non-volatile caller (or a volatile one called from a query) ran there.
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE log (m text);
+         CREATE FUNCTION vf() RETURNS int LANGUAGE plpgsql AS $$ BEGIN INSERT INTO log VALUES ('vf'); RAISE EXCEPTION 'boom'; END $$;
+         CREATE FUNCTION vok() RETURNS int LANGUAGE plpgsql AS $$ BEGIN INSERT INTO log VALUES ('ok'); RETURN 1; END $$;
+         CREATE FUNCTION sf() RETURNS int STABLE LANGUAGE plpgsql AS $$ BEGIN PERFORM vok();
+           BEGIN PERFORM vok(); PERFORM vf(); EXCEPTION WHEN raise_exception THEN RETURN 0; END; RETURN 1; END $$;
+         CREATE FUNCTION wf() RETURNS int LANGUAGE plpgsql AS $$ BEGIN INSERT INTO log VALUES ('w1');
+           BEGIN INSERT INTO log VALUES ('w2'); PERFORM vf(); EXCEPTION WHEN raise_exception THEN INSERT INTO log VALUES ('caught'); END;
+           RETURN 1; END $$;
+         CREATE FUNCTION wf2() RETURNS int LANGUAGE plpgsql AS $$ BEGIN
+           BEGIN INSERT INTO log VALUES ('x1'); RAISE EXCEPTION 'b'; EXCEPTION WHEN raise_exception THEN NULL; END; RETURN 1; END $$",
+    )
+    .expect("setup");
+    assert_eq!(rows(&mut c, "SELECT sf()"), [["0"]]);
+    assert_eq!(rows(&mut c, "SELECT m FROM log ORDER BY m"), [["ok"]]);
+    c.batch_execute("DELETE FROM log").expect("delete");
+    assert_eq!(rows(&mut c, "SELECT wf()"), [["1"]]);
+    assert_eq!(rows(&mut c, "SELECT m FROM log ORDER BY m"), [["caught"], ["w1"]]);
+    c.batch_execute("DELETE FROM log").expect("delete");
+    assert_eq!(rows(&mut c, "SELECT wf2()"), [["1"]]);
+    assert_eq!(rows(&mut c, "SELECT count(*) FROM log"), [["0"]]);
+}
+
+#[test]
+fn before_triggers_that_only_set_columns_stay_cheap() {
+    // A volatile BEFORE trigger that writes nothing must not copy the transaction's changes
+    // (here 50,000 rows of another table) for every row it fires on.
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE big (x int); CREATE TABLE ev (id int, at text);
+         CREATE FUNCTION stamp() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.at := 'now'; RETURN NEW; END $$;
+         CREATE TRIGGER s BEFORE INSERT ON ev FOR EACH ROW EXECUTE FUNCTION stamp()",
+    )
+    .expect("setup");
+    let batch: String = (0..1000).map(|i| format!("INSERT INTO ev VALUES ({i});")).collect();
+    let start = std::time::Instant::now();
+    c.batch_execute(&format!("BEGIN; INSERT INTO big SELECT g FROM generate_series(1, 50000) g; {batch} COMMIT")).expect("inserts");
+    let elapsed = start.elapsed();
+    assert_eq!(rows(&mut c, "SELECT count(*), min(at) FROM ev"), [["1000", "now"]]);
+    assert!(elapsed < std::time::Duration::from_secs(5), "1,000 trigger inserts took {elapsed:?}");
+}
+
+#[test]
+fn row_movement_inside_before_update_triggers() {
+    // A BEFORE UPDATE trigger moving rows of another partitioned table keeps both moves apart.
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE pa (k int, v int) PARTITION BY RANGE (k);
+         CREATE TABLE pa1 PARTITION OF pa FOR VALUES FROM (0) TO (10);
+         CREATE TABLE pa2 PARTITION OF pa FOR VALUES FROM (10) TO (100);
+         CREATE TABLE pb (k int) PARTITION BY RANGE (k);
+         CREATE TABLE pb1 PARTITION OF pb FOR VALUES FROM (0) TO (10);
+         CREATE TABLE pb2 PARTITION OF pb FOR VALUES FROM (10) TO (100);
+         INSERT INTO pa VALUES (1, 0), (2, 0); INSERT INTO pb VALUES (1), (2);
+         CREATE FUNCTION mv() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN UPDATE pb SET k = k + 10 WHERE k < 10; RETURN NEW; END $$;
+         CREATE TRIGGER t BEFORE UPDATE ON pa1 FOR EACH ROW EXECUTE FUNCTION mv();
+         UPDATE pa SET k = k + 10",
+    )
+    .expect("update");
+    assert_eq!(rows(&mut c, "SELECT tableoid::regclass::text, k, v FROM pa ORDER BY k"), [["pa2", "11", "0"], ["pa2", "12", "0"]]);
+    assert_eq!(rows(&mut c, "SELECT tableoid::regclass::text, k FROM pb ORDER BY k"), [["pb2", "11"], ["pb2", "12"]]);
+}
+
+#[test]
+fn rollback_restores_sequences_reset_by_functions() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE s (id int GENERATED BY DEFAULT AS IDENTITY, v int); INSERT INTO s (v) VALUES (1), (2), (3);
+         CREATE FUNCTION rs() RETURNS int LANGUAGE plpgsql AS $$ BEGIN ALTER SEQUENCE s_id_seq RESTART WITH 50; RETURN 1; END $$",
+    )
+    .expect("setup");
+    c.batch_execute("BEGIN; TRUNCATE s RESTART IDENTITY; SELECT rs(); ROLLBACK").expect("rollback");
+    assert_eq!(rows(&mut c, "INSERT INTO s (v) VALUES (4) RETURNING id"), [["4"]]);
+}
+
+#[test]
+fn utility_statements_in_non_volatile_functions() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE log (m text);
+         CREATE FUNCTION sdrop() RETURNS int STABLE LANGUAGE plpgsql AS $$ BEGIN DROP TABLE log; RETURN 1; END $$;
+         CREATE FUNCTION sidx() RETURNS int STABLE LANGUAGE plpgsql AS $$ BEGIN CREATE INDEX ON log (m); RETURN 1; END $$;
+         CREATE FUNCTION salter() RETURNS int STABLE LANGUAGE plpgsql AS $$ BEGIN ALTER TABLE log ADD COLUMN z int; RETURN 1; END $$;
+         CREATE FUNCTION scomment() RETURNS int STABLE LANGUAGE plpgsql AS $$ BEGIN COMMENT ON TABLE log IS 'x'; RETURN 1; END $$;
+         CREATE FUNCTION struncate() RETURNS int STABLE LANGUAGE sql AS $$ TRUNCATE log; SELECT 1 $$;
+         CREATE FUNCTION scf() RETURNS int STABLE LANGUAGE plpgsql AS $$ BEGIN CREATE FUNCTION zz() RETURNS int LANGUAGE sql AS 'SELECT 1'; RETURN 1; END $$",
+    )
+    .expect("setup");
+    for (sql, what) in [
+        ("SELECT sdrop()", "DROP TABLE"),
+        ("SELECT sidx()", "CREATE INDEX"),
+        ("SELECT salter()", "ALTER TABLE"),
+        ("SELECT scomment()", "COMMENT"),
+        ("SELECT struncate()", "TRUNCATE TABLE"),
+        ("SELECT scf()", "CREATE FUNCTION"),
+    ] {
+        let e = expect_code(c.batch_execute(sql), "0A000");
+        assert_eq!(message(&e), format!("{what} is not allowed in a non-volatile function"), "{sql}");
+    }
+}
