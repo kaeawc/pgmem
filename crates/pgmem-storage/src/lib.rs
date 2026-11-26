@@ -166,6 +166,8 @@ impl Database {
             frozen: None,
             savepoints: Vec::new(),
             seq_undo: SeqUndo { db: Arc::clone(self), entries: Vec::new() },
+            side: std::cell::RefCell::new(None),
+            forked: false,
         }
     }
 
@@ -331,16 +333,111 @@ pub struct Txn {
     frozen: Option<HashMap<Oid, TableChanges>>,
     savepoints: Vec<Savepoint>,
     seq_undo: SeqUndo,
+    /// Writes made by volatile functions a statement called while it read this transaction
+    /// ([`Txn::with_side`]): applied on this transaction's next change, so the calling
+    /// statement keeps its snapshot.
+    side: std::cell::RefCell<Option<Box<Txn>>>,
+    /// A [`Txn::with_side`] copy: dropping it releases nothing (the transaction owns its locks).
+    forked: bool,
 }
 
 impl Txn {
+    /// Runs `f` on a writable copy of this transaction while a statement reads it: a volatile
+    /// function called from a query may modify data. Later calls during the same statement
+    /// see the copy's changes; the statement itself does not (its snapshot is fixed). The
+    /// copy replaces this transaction's state on its next change ([`Txn::settle`]), which
+    /// is sound because a transaction cannot change while it is borrowed for reading.
+    pub fn with_side<R>(&self, f: impl FnOnce(&mut Txn) -> SqlResult<R>) -> SqlResult<R> {
+        let mut side = self.side.try_borrow_mut().map_err(|_| SqlError::internal("nested write in a function call"))?;
+        let fork = side.get_or_insert_with(|| {
+            Box::new(Txn {
+                id: self.id,
+                held_rows: std::cell::RefCell::new(Vec::new()),
+                snapshot_seq: self.snapshot_seq,
+                reads: std::cell::RefCell::new(BTreeSet::new()),
+                writes: self.writes.clone(),
+                db: Arc::clone(&self.db),
+                isolation: self.isolation,
+                base: Arc::clone(&self.base),
+                started: self.started,
+                catalog: self.catalog.clone(),
+                catalog_base_version: self.catalog_base_version,
+                changes: self.changes.clone(),
+                frozen: None,
+                savepoints: Vec::new(),
+                seq_undo: SeqUndo { db: Arc::clone(&self.db), entries: Vec::new() },
+                side: std::cell::RefCell::new(None),
+                forked: true,
+            })
+        });
+        f(fork)
+    }
+
+    /// Whether functions have written through [`Txn::with_side`] since this transaction's
+    /// last change.
+    pub fn has_side(&self) -> bool {
+        self.side.try_borrow().map_or(true, |s| s.is_some())
+    }
+
+    /// Starts a PL/pgSQL exception block that runs while a statement reads this transaction:
+    /// writes functions make in it go to the [`Txn::with_side`] copy, which gets savepoint
+    /// `name` if it exists. Returns whether it did; pass that to [`Txn::side_end`].
+    pub fn side_savepoint(&self, name: &str) -> SqlResult<bool> {
+        let mut side = self.side.try_borrow_mut().map_err(|_| SqlError::internal("nested write in a function call"))?;
+        Ok(match side.as_mut() {
+            Some(fork) => {
+                fork.savepoint(name);
+                true
+            }
+            None => false,
+        })
+    }
+
+    /// Ends a [`Txn::side_savepoint`] block: keeps its writes, or undoes them (`rollback`)
+    /// like the subtransaction Postgres runs the block in.
+    pub fn side_end(&self, name: &str, existed: bool, rollback: bool) -> SqlResult<()> {
+        let mut side = self.side.try_borrow_mut().map_err(|_| SqlError::internal("nested write in a function call"))?;
+        match side.as_mut() {
+            Some(fork) if existed => {
+                if rollback {
+                    fork.rollback_to(name)?;
+                }
+                fork.release(name)
+            }
+            // The copy was made inside the block: all of it is the block's.
+            _ if rollback => {
+                side.take();
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Takes over the changes functions made through [`Txn::with_side`].
+    fn settle(&mut self) {
+        let Some(mut fork) = self.side.get_mut().take() else { return };
+        fork.settle();
+        self.changes = std::mem::take(&mut fork.changes);
+        self.catalog = fork.catalog.take();
+        self.catalog_base_version = fork.catalog_base_version;
+        self.writes = std::mem::take(&mut fork.writes);
+        self.base = Arc::clone(&fork.base);
+        self.started = fork.started;
+        self.snapshot_seq = fork.snapshot_seq;
+        self.held_rows.get_mut().append(fork.held_rows.get_mut());
+        self.reads.get_mut().append(fork.reads.get_mut());
+        self.seq_undo.entries.append(&mut fork.seq_undo.entries);
+    }
+
     /// Until [`Txn::thaw_reads`], reads see this transaction's changes as of now; writes and
     /// the `*_latest` reads (constraint checks) see everything.
     pub fn freeze_reads(&mut self) {
+        self.settle();
         self.frozen = Some(self.changes.clone());
     }
 
     pub fn thaw_reads(&mut self) {
+        self.settle();
         self.frozen = None;
     }
 
@@ -363,6 +460,7 @@ impl Txn {
 
     /// `ALTER SEQUENCE ... RESTART [WITH at]`.
     pub fn restart_sequence(&mut self, seq: &SequenceDef, at: Option<i64>) {
+        self.settle();
         let prev = self.db.restart_sequence(seq, at);
         self.seq_undo.entries.push((seq.oid, prev));
     }
@@ -383,6 +481,7 @@ impl Txn {
     /// Call at the start of every statement: READ COMMITTED refreshes its snapshot, the
     /// stricter levels take theirs on the first statement only.
     pub fn begin_statement(&mut self) {
+        self.settle();
         if !self.started || self.isolation == Isolation::ReadCommitted {
             self.base = self.db.current();
         }
@@ -416,6 +515,7 @@ impl Txn {
 
     /// A mutable catalog for DDL. The first call copies the visible catalog.
     pub fn catalog_mut(&mut self) -> &mut Catalog {
+        self.settle();
         if self.catalog.is_none() {
             self.catalog_base_version = self.base.catalog_version;
             self.catalog = Some((*self.base.catalog).clone());
@@ -446,6 +546,7 @@ impl Txn {
     }
 
     pub fn insert(&mut self, table: Oid, row: Row) -> RowId {
+        self.settle();
         self.writes.insert(table);
         let id = self.db.alloc_row_id();
         self.changes.entry(table).or_default().inserted.insert(id, row);
@@ -453,6 +554,7 @@ impl Txn {
     }
 
     pub fn delete(&mut self, table: Oid, id: RowId) {
+        self.settle();
         self.writes.insert(table);
         let ch = self.changes.entry(table).or_default();
         if ch.inserted.remove(&id).is_none() {
@@ -469,6 +571,7 @@ impl Txn {
     /// Rewrites every visible row of a table in place, keeping row ids (used by ALTER TABLE
     /// operations that change the physical row shape inside this transaction).
     pub fn rewrite(&mut self, table: Oid, mut f: impl FnMut(&mut Row)) {
+        self.settle();
         let rows = self.scan(table);
         let ch = self.changes.entry(table).or_default();
         ch.truncated = true;
@@ -481,6 +584,7 @@ impl Txn {
     }
 
     pub fn truncate(&mut self, table: Oid) {
+        self.settle();
         let ch = self.changes.entry(table).or_default();
         ch.truncated = true;
         ch.inserted.clear();
@@ -489,10 +593,12 @@ impl Txn {
 
     /// Marks a table created by this transaction (no committed rows can be visible).
     pub fn created_table(&mut self, table: Oid) {
+        self.settle();
         self.changes.entry(table).or_default().truncated = true;
     }
 
     pub fn savepoint(&mut self, name: &str) {
+        self.settle();
         self.savepoints.push(Savepoint {
             name: name.to_owned(),
             row_locks: self.held_rows.borrow().len(),
@@ -511,6 +617,7 @@ impl Txn {
 
     /// ROLLBACK TO: restores the state at the savepoint, which stays defined.
     pub fn rollback_to(&mut self, name: &str) -> SqlResult<()> {
+        self.settle();
         let idx = self.find_savepoint(name)?;
         let sp = self.savepoints[idx].clone();
         self.catalog = sp.catalog;
@@ -524,6 +631,7 @@ impl Txn {
 
     /// RELEASE: forgets the savepoint and every later one; effects are kept.
     pub fn release(&mut self, name: &str) -> SqlResult<()> {
+        self.settle();
         let idx = self.find_savepoint(name)?;
         self.savepoints.truncate(idx);
         Ok(())
@@ -531,6 +639,7 @@ impl Txn {
 
     /// Applies this transaction's effects to the latest committed state.
     pub fn commit(mut self) -> SqlResult<()> {
+        self.settle();
         let undo = std::mem::take(&mut self.seq_undo.entries);
         let result = self.commit_changes();
         if result.is_err() {
@@ -665,6 +774,11 @@ pub enum LockWait {
 
 impl Drop for Txn {
     fn drop(&mut self) {
+        // An unsettled copy's sequence undo runs first: it holds the later states.
+        drop(self.side.get_mut().take());
+        if self.forked {
+            return;
+        }
         self.db.locks.release_all(self.id);
         if self.isolation == Isolation::Serializable {
             let mut ssi = lock(&self.db.ssi);

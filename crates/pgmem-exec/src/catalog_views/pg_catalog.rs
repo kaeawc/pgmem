@@ -440,6 +440,7 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             vec![
                 ("reltype", oid(rowtype_oid(v.oid))),
                 ("relacl", acl(ctx, &m, v.oid, false)),
+                temp_persistence(&v.schema),
                 ("relhasrules", boolean(true)),
                 ("reloptions", crate::reloptions::as_value(&v.reloptions)),
             ],
@@ -453,12 +454,13 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             m.namespace(&seq.schema),
             'S',
             3,
-            vec![("relfilenode", oid(seq.oid)), ("relacl", acl(ctx, &m, seq.oid, true))],
+            vec![("relfilenode", oid(seq.oid)), ("relacl", acl(ctx, &m, seq.oid, true)), temp_persistence(&seq.schema)],
         ));
     }
     for t in m.catalog.types() {
         if let pgmem_catalog::TypeDefKind::Composite { fields, relid } = &t.kind {
-            rows.push(class_row(&s, *relid, &t.name, m.namespace(&t.schema), 'c', fields.len(), vec![("reltype", oid(t.oid))]));
+            let extra = vec![("reltype", oid(t.oid)), temp_persistence(&t.schema)];
+            rows.push(class_row(&s, *relid, &t.name, m.namespace(&t.schema), 'c', fields.len(), extra));
         }
     }
     for (t, idx) in m.indexes() {
@@ -474,6 +476,7 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             vec![
                 ("relam", oid(403)),
                 ("relfilenode", oid(if partitioned { 0 } else { idx.oid })),
+                temp_persistence(&t.schema),
                 ("reloptions", crate::reloptions::as_value(&idx.reloptions)),
             ],
         ));
@@ -485,6 +488,11 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         rows.push(class_row(&s, d.oid, d.name, ns, d.kind, natts, extra));
     }
     Ok(rows)
+}
+
+/// `relpersistence` of a relation in `schema`: `t` in a session's temporary schema.
+fn temp_persistence(schema: &str) -> (&'static str, Value) {
+    ("relpersistence", ch(if schema.starts_with("pg_temp_") { 't' } else { 'p' }))
 }
 
 /// Tables with foreign keys in either direction (Postgres implements them with triggers).

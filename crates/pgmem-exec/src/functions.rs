@@ -3,8 +3,9 @@
 //!
 //! A call is planned as an ordinary [`crate::plan::Expr::Call`] of [`call_scalar`] (or a
 //! function scan of [`call_set`]) whose first argument is the function's OID; the body is
-//! parsed and bound when the call runs. Functions called from a query see the query's
-//! transaction read-only; CALL, DO and triggers may modify data.
+//! parsed and bound when the call runs. Volatile functions may modify data wherever they
+//! are called (from a query they write through [`pgmem_storage::Txn::with_side`]); stable and
+//! immutable ones run read-only, as in Postgres.
 
 use crate::bind::{Binder, Ctx, Level, Scope};
 use crate::cast::{CoercionContext, can_coerce};
@@ -584,68 +585,118 @@ pub fn result_columns(def: &FunctionDef) -> Vec<(String, Type)> {
 // Running
 // ---------------------------------------------------------------------------------------------
 
-/// Where a function body runs: read-only inside a query, or with the transaction writable
-/// (CALL, DO, triggers).
+/// Where a function body runs: read-only (a stable or immutable function), with the
+/// transaction writable, or reading a query's transaction and writing through
+/// [`pgmem_storage::Txn::with_side`] (a volatile function called from a query).
 pub enum Exec<'b, 'a> {
     Read(&'b EvalCtx<'a>),
-    Write { txn: &'b mut Txn, env: &'b SessionEnv, state: &'b StatementState },
+    Write {
+        txn: &'b mut Txn,
+        env: &'b SessionEnv,
+        state: &'b StatementState,
+    },
+    /// Reads go to the query's transaction until the first write makes the writable copy, so
+    /// a volatile function that writes nothing (a BEFORE trigger setting `NEW` columns) costs
+    /// no copy.
+    Volatile(&'b EvalCtx<'a>),
 }
 
 impl Exec<'_, '_> {
     pub fn txn(&self) -> &Txn {
         match self {
-            Exec::Read(c) => c.txn,
+            Exec::Read(c) | Exec::Volatile(c) => c.txn,
             Exec::Write { txn, .. } => txn,
         }
     }
 
     pub fn env(&self) -> &SessionEnv {
         match self {
-            Exec::Read(c) => c.env,
+            Exec::Read(c) | Exec::Volatile(c) => c.env,
             Exec::Write { env, .. } => env,
         }
     }
 
     pub fn state(&self) -> &StatementState {
         match self {
-            Exec::Read(c) => c.state,
+            Exec::Read(c) | Exec::Volatile(c) => c.state,
             Exec::Write { state, .. } => state,
         }
     }
 
-    /// Runs one statement with `params` ($1, $2, ... of `types`).
-    pub fn statement(&mut self, stmt: &ir::Statement, types: &[Type], params: &[Value]) -> SqlResult<QueryResult> {
-        let catalog = self.txn().catalog().clone();
-        let binder = Binder::new(&catalog, types);
-        let top = Level::new(Scope::default());
-        let ctx = Ctx::new(&top);
+    /// Runs `f` (the body of `def`) writable if `def` is volatile, read-only otherwise.
+    pub(crate) fn for_function<R>(&mut self, def: &FunctionDef, f: impl FnOnce(&mut Exec) -> SqlResult<R>) -> SqlResult<R> {
+        let volatile = def.volatility == 'v';
         match self {
-            Exec::Read(c) => match stmt {
-                ir::Statement::Query(q) if crate::statement::leading_with(stmt).is_none() => {
-                    let bound = binder.bind_query(q, &ctx)?;
-                    let ectx = EvalCtx::new(c.txn, params, c.env, c.state);
-                    let rows = crate::run::run(&bound.rel, &ectx)?;
-                    Ok(QueryResult {
-                        tag: format!("SELECT {}", rows.len()),
-                        columns: bound.columns,
-                        returns_rows: true,
-                        rows,
-                        ..Default::default()
-                    })
-                }
-                _ => Err(SqlError::feature_not_supported(
-                    "pgmem runs functions called from a query read-only: data-modifying statements are supported in CALL, DO and triggers",
-                )),
-            },
+            Exec::Read(c) if volatile => f(&mut Exec::Volatile(c)),
+            Exec::Volatile(c) if !volatile => f(&mut Exec::Read(c)),
+            Exec::Write { txn, env, state } if !volatile => {
+                let ctx = EvalCtx::new(txn, &[], env, state);
+                f(&mut Exec::Read(&ctx))
+            }
+            _ => f(self),
+        }
+    }
+
+    /// Runs one statement with `params` ($1, $2, ... of `types`). It caches its own CTEs and
+    /// subqueries, and collects its own partition row movement: the calling statement's are
+    /// set aside (CTE and subquery ids come from another binder).
+    pub fn statement(&mut self, stmt: &ir::Statement, types: &[Type], params: &[Value]) -> SqlResult<QueryResult> {
+        let state = self.state();
+        let saved = (state.ctes.take(), state.subqueries.take(), state.moved_rows.take());
+        let result = self.statement_inner(stmt, types, params);
+        let state = self.state();
+        *state.ctes.borrow_mut() = saved.0;
+        *state.subqueries.borrow_mut() = saved.1;
+        *state.moved_rows.borrow_mut() = saved.2;
+        result
+    }
+
+    fn statement_inner(&mut self, stmt: &ir::Statement, types: &[Type], params: &[Value]) -> SqlResult<QueryResult> {
+        let plain_query = matches!(stmt, ir::Statement::Query(_)) && crate::statement::leading_with(stmt).is_none();
+        match self {
+            Exec::Read(c) if plain_query => read_query(stmt, types, params, c),
+            Exec::Read(_) => Err(match crate::session::command_name(stmt) {
+                Some(what) => SqlError::feature_not_supported(format!("{what} is not allowed in a non-volatile function")),
+                None => SqlError::feature_not_supported("pgmem runs this statement only in volatile functions"),
+            }),
+            Exec::Volatile(c) if plain_query && !c.txn.has_side() => read_query(stmt, types, params, c),
+            Exec::Volatile(c) => {
+                let (env, state) = (c.env, c.state);
+                c.txn.with_side(|txn| Exec::Write { txn, env, state }.statement_inner(stmt, types, params))
+            }
             Exec::Write { txn, env, state } => {
                 if matches!(stmt, ir::Statement::Transaction(_)) {
                     return Err(SqlError::new(code::INVALID_TRANSACTION_TERMINATION, "invalid transaction termination"));
                 }
+                if env.setting("transaction_read_only").is_some_and(|v| v == "on")
+                    && let Some(what) =
+                        crate::session::read_only_violation(stmt, txn.catalog(), pgmem_types::context::search_path().temp_schema.as_deref())
+                {
+                    return Err(SqlError::new(
+                        code::READ_ONLY_SQL_TRANSACTION,
+                        format!("cannot execute {what} in a read-only transaction"),
+                    ));
+                }
                 txn.begin_statement();
-                crate::statement::exec_statement(stmt, &binder, &ctx, txn, params, env, state)
+                let catalog = txn.catalog().clone();
+                let binder = Binder::new(&catalog, types);
+                let top = Level::new(Scope::default());
+                crate::statement::exec_statement(stmt, &binder, &Ctx::new(&top), txn, params, env, state)
             }
         }
     }
+}
+
+/// Runs a plain query of a function body on the calling statement's transaction.
+fn read_query(stmt: &ir::Statement, types: &[Type], params: &[Value], c: &EvalCtx) -> SqlResult<QueryResult> {
+    let ir::Statement::Query(q) = stmt else { return Err(SqlError::internal("not a query")) };
+    let catalog = c.txn.catalog().clone();
+    let binder = Binder::new(&catalog, types);
+    let top = Level::new(Scope::default());
+    let bound = binder.bind_query(q, &Ctx::new(&top))?;
+    let ectx = EvalCtx::new(c.txn, params, c.env, c.state);
+    let rows = crate::run::run(&bound.rel, &ectx)?;
+    Ok(QueryResult { tag: format!("SELECT {}", rows.len()), columns: bound.columns, returns_rows: true, rows, ..Default::default() })
 }
 
 /// The names of the input arguments (`$n` for unnamed ones), with their types.
@@ -694,6 +745,10 @@ pub fn run_function(def: &FunctionDef, args: &[Value], exec: &mut Exec) -> SqlRe
             let ctx = EvalCtx { txn: c.txn, params: c.params, env: &env, state: c.state, outer: c.outer.clone() };
             run_function_in(def, args, &mut Exec::Read(&ctx))
         }
+        Exec::Volatile(c) => {
+            let ctx = EvalCtx { txn: c.txn, params: c.params, env: &env, state: c.state, outer: c.outer.clone() };
+            run_function_in(def, args, &mut Exec::Volatile(&ctx))
+        }
         Exec::Write { txn, state, .. } => run_function_in(def, args, &mut Exec::Write { txn, env: &env, state }),
     }
 }
@@ -703,10 +758,10 @@ fn run_function_in(def: &FunctionDef, args: &[Value], exec: &mut Exec) -> SqlRes
     if def.strict && args.iter().any(Value::is_null) {
         return Ok(if def.returns_set() { Vec::new() } else { vec![vec![Value::Null]] });
     }
-    let rows = match def.language.as_str() {
-        "plpgsql" => crate::plpgsql::run_function(def, args, exec)?,
-        _ => run_sql(def, args, exec)?,
-    };
+    let rows = exec.for_function(def, |exec| match def.language.as_str() {
+        "plpgsql" => crate::plpgsql::run_function(def, args, exec),
+        _ => run_sql(def, args, exec),
+    })?;
     let coerce_row = |row: Row, types: &[Type]| -> SqlResult<Row> {
         row.into_iter().zip(types).map(|(v, t)| crate::cast::cast_value(v, t, -1)).collect()
     };
