@@ -191,6 +191,8 @@ pub type SrfResolution = (Vec<Type>, Vec<Type>, SrfFn);
 pub fn srf_column_names(name: &str) -> Option<&'static [&'static str]> {
     match name {
         "pg_partition_tree" => Some(&["relid", "parentrelid", "isleaf", "level"]),
+        "pg_identify_object" => Some(&["type", "schema", "name", "identity"]),
+        "pg_identify_object_as_address" => Some(&["type", "object_names", "object_args"]),
         _ => None,
     }
 }
@@ -274,6 +276,14 @@ pub fn resolve_srf(name: &str, args: &[Type]) -> SqlResult<Option<SrfResolution>
         "pg_partition_tree" if args.len() == 1 => {
             let reg = Type::Reg(pgmem_types::RegKind::Class);
             Ok(Some((vec![reg.clone(), reg.clone(), Type::Bool, Type::Int4], vec![reg], crate::partition::tree_srf)))
+        }
+        "pg_identify_object" if args.len() == 3 => {
+            Ok(Some((vec![Type::Text; 4], vec![Type::Oid, Type::Oid, Type::Int4], crate::catalog_views::identify_object_srf)))
+        }
+        "pg_identify_object_as_address" if args.len() == 3 => {
+            let names = Type::array_of(Type::Text);
+            let outs = vec![Type::Text, names.clone(), names];
+            Ok(Some((outs, vec![Type::Oid, Type::Oid, Type::Int4], crate::catalog_views::identify_object_as_address_srf)))
         }
         "string_to_table" if args.len() == 2 || args.len() == 3 => {
             Ok(Some((vec![Type::Text], vec![Type::Text; args.len()], string_to_table)))

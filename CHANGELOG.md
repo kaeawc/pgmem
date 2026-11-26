@@ -14,6 +14,14 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 ### Fixed
 
 - `pg_constraint.connamespace` is the namespace of the owning table or domain instead of always `public`.
+- `pg_depend` records the dependencies Postgres records for user objects (objects on their schema,
+  row and array types, view and materialized-view rules on the columns, functions and types they
+  use, constraints and indexes on their columns, foreign keys on the referenced index, defaults on
+  sequences and columns, `OWNED BY` sequences, triggers, partitions, column and function types,
+  domains). New `pg_rewrite` (one `_RETURN` rule per view and materialized view; `ev_action` holds
+  the view's SQL text, not Postgres' node tree), `pg_class.relhasrules`, row-type array types in
+  `pg_type`, and `pg_describe_object`, `pg_identify_object`, `pg_identify_object_as_address`.
+  Toast tables and the internal triggers of foreign keys are not modelled.
 
 ### Changed
 

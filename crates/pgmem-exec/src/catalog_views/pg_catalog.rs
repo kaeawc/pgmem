@@ -1,8 +1,8 @@
 //! `pg_catalog` relations.
 
 use super::model::{
-    self, ATTRDEF_CLASS_OID, Att, C_COLLATION_OID, CLASS_CLASS_OID, CONSTRAINT_CLASS_OID, DEFAULT_COLLATION_OID,
-    INFORMATION_SCHEMA_NAMESPACE_OID, Model, PG_DATABASE_OWNER_OID, SUPERUSER_OID, attrdef_oid, rowtype_oid,
+    self, Att, C_COLLATION_OID, CLASS_CLASS_OID, CONSTRAINT_CLASS_OID, DEFAULT_COLLATION_OID, INFORMATION_SCHEMA_NAMESPACE_OID, Model,
+    PG_DATABASE_OWNER_OID, SUPERUSER_OID, attrdef_oid, rowtype_oid,
 };
 use super::{Def, Spec, boolean, ch, int2, int4, name, oid, rows_of, snapshot, txt};
 use crate::eval::EvalCtx;
@@ -79,7 +79,8 @@ pub(super) const PG_PROC: &str = "oid:oid, proname:name, pronamespace:oid, proow
     proallargtypes:oid[], proargmodes:\"char\"[], proargnames:text[], proargdefaults:pg_node_tree, protrftypes:oid[], prosrc:text, \
     probin:text, prosqlbody:pg_node_tree, proconfig:text[], proacl:aclitem[]";
 const PG_ENUM: &str = "oid:oid, enumtypid:oid, enumsortorder:float4, enumlabel:name";
-const PG_DEPEND: &str = "classid:oid, objid:oid, objsubid:int4, refclassid:oid, refobjid:oid, refobjsubid:int4, deptype:\"char\"";
+pub(super) const PG_DEPEND: &str =
+    "classid:oid, objid:oid, objsubid:int4, refclassid:oid, refobjid:oid, refobjsubid:int4, deptype:\"char\"";
 const PG_POLICY: &str = "oid:oid, polname:name, polrelid:oid, polcmd:\"char\", polpermissive:bool, polroles:oid[], \
     polqual:pg_node_tree, polwithcheck:pg_node_tree";
 const PG_PARTITIONED_TABLE: &str = "partrelid:oid, partstrat:\"char\", partnatts:int2, partdefid:oid, partattrs:int2vector, \
@@ -133,7 +134,8 @@ pub static DEFS: &[Def] = &[
     def!("pg_extension", 3079, 'r', PG_EXTENSION, pg_extension),
     def!("pg_proc", 1255, 'r', PG_PROC, super::routines::pg_proc),
     def!("pg_enum", 3501, 'r', PG_ENUM, pg_enum),
-    def!("pg_depend", 2608, 'r', PG_DEPEND, pg_depend),
+    def!("pg_depend", 2608, 'r', PG_DEPEND, super::depend::pg_depend),
+    def!("pg_rewrite", 2618, 'r', super::depend::PG_REWRITE, super::depend::pg_rewrite),
     def!("pg_inherits", 2611, 'r', PG_INHERITS, pg_inherits),
     def!("pg_policy", 3256, 'r', PG_POLICY, empty),
     def!("pg_statistic_ext", 3381, 'r', PG_STATISTIC_EXT, empty),
@@ -406,6 +408,7 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("relispartition", boolean(bound.is_some())),
                 ("relpartbound", bound.map_or(Value::Null, txt)),
                 ("relhasindex", boolean(!t.indexes.is_empty())),
+                ("relhasrules", boolean(t.matview.is_some())),
                 ("relchecks", int2(checks)),
                 ("relhastriggers", boolean(triggers.contains(&t.oid) || !m.catalog.table_triggers(t.oid).is_empty())),
                 ("relreplident", ch('d')),
@@ -430,7 +433,7 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             m.namespace(&v.schema),
             'v',
             v.columns.len(),
-            vec![("reltype", oid(rowtype_oid(v.oid))), ("relacl", acl(ctx, &m, v.oid, false))],
+            vec![("reltype", oid(rowtype_oid(v.oid))), ("relacl", acl(ctx, &m, v.oid, false)), ("relhasrules", boolean(true))],
         ));
     }
     for seq in m.sequences() {
@@ -619,6 +622,7 @@ fn pg_type(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             ("typcategory", ch('C')),
             ("typdelim", ch(',')),
             ("typrelid", oid(relid)),
+            ("typarray", oid(super::depend::rowtype_array_oid(relid))),
             ("typinput", regproc("record_in")),
             ("typoutput", regproc("record_out")),
             ("typreceive", regproc("record_recv")),
@@ -627,6 +631,27 @@ fn pg_type(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             ("typmodout", regproc("-")),
             ("typsubscript", regproc("-")),
             ("typanalyze", regproc("-")),
+            ("typalign", ch('d')),
+            ("typstorage", ch('x')),
+        ]));
+        // ... and its array type.
+        rows.push(s.row(vec![
+            ("oid", oid(super::depend::rowtype_array_oid(relid))),
+            ("typname", name(&format!("_{relname}"))),
+            ("typnamespace", oid(m.namespace(schema))),
+            ("typlen", Value::Int2(-1)),
+            ("typbyval", boolean(false)),
+            ("typcategory", ch('A')),
+            ("typdelim", ch(',')),
+            ("typelem", oid(rowtype_oid(relid))),
+            ("typinput", regproc("array_in")),
+            ("typoutput", regproc("array_out")),
+            ("typreceive", regproc("array_recv")),
+            ("typsend", regproc("array_send")),
+            ("typmodin", regproc("-")),
+            ("typmodout", regproc("-")),
+            ("typsubscript", regproc("array_subscript_handler")),
+            ("typanalyze", regproc("array_typanalyze")),
             ("typalign", ch('d')),
             ("typstorage", ch('x')),
         ]));
@@ -1275,42 +1300,6 @@ fn pg_available_extensions(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             })
             .collect()
     }))
-}
-
-fn pg_depend(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
-    let m = snapshot(ctx);
-    let s = Spec::parse(PG_DEPEND);
-    let mut rows = Vec::new();
-    // Sequences owned by columns: 'a' (serial) or 'i' (identity).
-    for seq in m.sequences() {
-        let Some((tname, cname)) = &seq.owned_by else { continue };
-        let Some(t) = m.catalog.table(&seq.schema, tname) else { continue };
-        let Some(attnum) = t.column_index(cname).map(|i| i + 1) else { continue };
-        let identity = t.columns.get(attnum - 1).is_some_and(|c| c.identity.is_some());
-        rows.push(s.row(vec![
-            ("classid", oid(CLASS_CLASS_OID)),
-            ("objid", oid(seq.oid)),
-            ("objsubid", Value::Int4(0)),
-            ("refclassid", oid(CLASS_CLASS_OID)),
-            ("refobjid", oid(t.oid)),
-            ("refobjsubid", int4(i64::try_from(attnum).unwrap_or(0))),
-            ("deptype", ch(if identity { 'i' } else { 'a' })),
-        ]));
-    }
-    // Indexes backing constraints.
-    for c in m.constraints().iter().filter(|c| matches!(c.contype, 'p' | 'u') && c.conindid != 0) {
-        rows.push(s.row(vec![
-            ("classid", oid(CLASS_CLASS_OID)),
-            ("objid", oid(c.conindid)),
-            ("objsubid", Value::Int4(0)),
-            ("refclassid", oid(CONSTRAINT_CLASS_OID)),
-            ("refobjid", oid(c.oid)),
-            ("refobjsubid", Value::Int4(0)),
-            ("deptype", ch('i')),
-        ]));
-    }
-    let _ = ATTRDEF_CLASS_OID;
-    Ok(rows)
 }
 
 fn pg_sequence(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
