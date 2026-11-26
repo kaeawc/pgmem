@@ -53,6 +53,11 @@ fn successor(v: &Value) -> SqlResult<Value> {
     })
 }
 
+/// `daterange_canonical` leaves `infinity` / `-infinity` bounds as they are.
+fn steps(v: &Value) -> bool {
+    !matches!(v, Value::Date(d) if *d == crate::datetime::DATE_INFINITY || *d == crate::datetime::DATE_NEG_INFINITY)
+}
+
 /// Builds a range as `make_range` does: checks the bounds' order, canonicalizes discrete
 /// ranges and collapses empty ones.
 pub fn make(subtype: &Type, lower: Option<Value>, upper: Option<Value>, lower_inc: bool, upper_inc: bool) -> SqlResult<Range> {
@@ -72,18 +77,24 @@ pub fn make(subtype: &Type, lower: Option<Value>, upper: Option<Value>, lower_in
     if is_discrete(subtype) {
         if let Some(l) = &lower
             && !lower_inc
+            && steps(l)
         {
             lower = Some(successor(l)?);
             lower_inc = true;
         }
         if let Some(u) = &upper
             && upper_inc
+            && steps(u)
         {
             upper = Some(successor(u)?);
             upper_inc = false;
         }
         if let (Some(l), Some(u)) = (&lower, &upper)
-            && compare_values(l, u)? != Ordering::Less
+            && match compare_values(l, u)? {
+                Ordering::Less => false,
+                Ordering::Equal => !(lower_inc && upper_inc),
+                Ordering::Greater => true,
+            }
         {
             return Ok(Range::empty(subtype));
         }
@@ -505,4 +516,95 @@ pub fn of(v: &Value) -> SqlResult<&Range> {
         Value::Range(r) => Ok(r),
         _ => Err(SqlError::internal("range value expected")),
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Multirange operators (`multirangetypes.c`)
+// ---------------------------------------------------------------------------------------------
+
+/// `a - b` as up to two pieces (`range_minus_internal` without the contiguity check).
+fn minus_pieces(a: &Range, b: &Range) -> SqlResult<Vec<Range>> {
+    if a.empty || b.empty || !overlaps(a, b)? {
+        return Ok(vec![a.clone()]);
+    }
+    let mut out = Vec::new();
+    if cmp_bounds(lower_of(a), lower_of(b))? == Ordering::Less {
+        let left = Range { upper: b.lower.clone(), upper_inc: !b.lower_inc, ..a.clone() };
+        out.push(canonical(&a.sub, left)?);
+    }
+    if cmp_bounds(upper_of(a), upper_of(b))? == Ordering::Greater {
+        let right = Range { lower: b.upper.clone(), lower_inc: !b.upper_inc, ..a.clone() };
+        out.push(canonical(&a.sub, right)?);
+    }
+    Ok(out)
+}
+
+/// `multirange + multirange`.
+pub fn multi_union(a: &[Range], b: &[Range]) -> SqlResult<Vec<Range>> {
+    normalize(a.iter().chain(b).cloned().collect())
+}
+
+/// `multirange * multirange`.
+pub fn multi_intersect(a: &[Range], b: &[Range]) -> SqlResult<Vec<Range>> {
+    let mut out = Vec::new();
+    for x in a {
+        for y in b {
+            out.push(intersect(x, y)?);
+        }
+    }
+    normalize(out)
+}
+
+/// `multirange - multirange`.
+pub fn multi_minus(a: &[Range], b: &[Range]) -> SqlResult<Vec<Range>> {
+    let mut out = Vec::new();
+    for x in a {
+        let mut pieces = vec![x.clone()];
+        for y in b {
+            let mut next = Vec::new();
+            for p in &pieces {
+                next.extend(minus_pieces(p, y)?);
+            }
+            pieces = next;
+        }
+        out.extend(pieces);
+    }
+    normalize(out)
+}
+
+/// The smallest range containing every range of a multirange (empty for an empty one).
+pub fn hull(rs: &[Range], sub: &Type) -> SqlResult<Range> {
+    match (rs.first(), rs.last()) {
+        (Some(f), Some(l)) => union(f, l, false),
+        _ => Ok(Range::empty(sub)),
+    }
+}
+
+/// Whether every range of `b` lies inside one range of `a` (`@>` between multiranges).
+pub fn multi_contains(a: &[Range], b: &[Range]) -> SqlResult<bool> {
+    for y in b {
+        let mut inside = false;
+        for x in a {
+            if contains(x, y)? {
+                inside = true;
+                break;
+            }
+        }
+        if !inside {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Whether any range of `a` overlaps any range of `b`.
+pub fn multi_overlaps(a: &[Range], b: &[Range]) -> SqlResult<bool> {
+    for x in a {
+        for y in b {
+            if overlaps(x, y)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }

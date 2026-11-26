@@ -670,7 +670,14 @@ fn varlena_type_row(
     elem: u32,
     array: u32,
     io: &str,
+    align: char,
 ) -> Row {
+    let analyze = match io {
+        "array" => "array_typanalyze",
+        "range" => "range_typanalyze",
+        "multirange" => "multirange_typanalyze",
+        _ => "-",
+    };
     s.row(vec![
         ("oid", oid(o)),
         ("typname", name(typname)),
@@ -689,8 +696,8 @@ fn varlena_type_row(
         ("typmodin", regproc("-")),
         ("typmodout", regproc("-")),
         ("typsubscript", regproc(if category == 'A' { "array_subscript_handler" } else { "-" })),
-        ("typanalyze", regproc("-")),
-        ("typalign", ch('i')),
+        ("typanalyze", regproc(analyze)),
+        ("typalign", ch(align)),
         ("typstorage", ch('x')),
     ])
 }
@@ -698,11 +705,14 @@ fn varlena_type_row(
 /// The builtin range and multirange types and their arrays.
 fn range_type_rows(s: &Spec) -> Vec<Row> {
     let mut rows = Vec::new();
-    for (_, r, m, ra, ma, rname, mname) in pgmem_types::range::RANGES {
-        rows.push(varlena_type_row(s, *r, rname, PG_CATALOG_NAMESPACE_OID, 'r', 'R', 0, *ra, "range"));
-        rows.push(varlena_type_row(s, *m, mname, PG_CATALOG_NAMESPACE_OID, 'm', 'R', 0, *ma, "multirange"));
-        rows.push(varlena_type_row(s, *ra, &format!("_{rname}"), PG_CATALOG_NAMESPACE_OID, 'b', 'A', *r, 0, "array"));
-        rows.push(varlena_type_row(s, *ma, &format!("_{mname}"), PG_CATALOG_NAMESPACE_OID, 'b', 'A', *m, 0, "array"));
+    for (sub, r, m, ra, ma, rname, mname) in pgmem_types::range::RANGES {
+        // A range is aligned like its subtype, at least int ('i').
+        let align = if matches!(sub, Type::Int8 | Type::Timestamp | Type::Timestamptz) { 'd' } else { 'i' };
+        let ns = PG_CATALOG_NAMESPACE_OID;
+        rows.push(varlena_type_row(s, *r, rname, ns, 'r', 'R', 0, *ra, "range", align));
+        rows.push(varlena_type_row(s, *m, mname, ns, 'm', 'R', 0, *ma, "multirange", align));
+        rows.push(varlena_type_row(s, *ra, &format!("_{rname}"), ns, 'b', 'A', *r, 0, "array", align));
+        rows.push(varlena_type_row(s, *ma, &format!("_{mname}"), ns, 'b', 'A', *m, 0, "array", align));
     }
     rows
 }
@@ -715,8 +725,8 @@ fn extension_type_rows(s: &Spec, m: &Model) -> Vec<Row> {
     {
         let Some(e) = m.catalog.extension(ext) else { continue };
         let ns = m.namespace(&e.schema);
-        rows.push(varlena_type_row(s, o, typname, ns, 'b', category, 0, o + 1, typname));
-        rows.push(varlena_type_row(s, o + 1, &format!("_{typname}"), ns, 'b', 'A', o, 0, "array"));
+        rows.push(varlena_type_row(s, o, typname, ns, 'b', category, 0, o + 1, typname, 'i'));
+        rows.push(varlena_type_row(s, o + 1, &format!("_{typname}"), ns, 'b', 'A', o, 0, "array", 'i'));
     }
     rows
 }
@@ -725,7 +735,7 @@ fn pg_range(_: &EvalCtx) -> SqlResult<Vec<Row>> {
     Ok(rows_of(PG_RANGE, |s| {
         pgmem_types::range::RANGES
             .iter()
-            .map(|(sub, r, m, ..)| {
+            .map(|(sub, r, m, _, _, rname, _)| {
                 let discrete = matches!(sub, Type::Int4 | Type::Int8 | Type::Date);
                 let canonical =
                     if discrete { format!("{}_canonical", Type::Range(Box::new(sub.clone())).typname()) } else { "-".to_owned() };
@@ -734,9 +744,9 @@ fn pg_range(_: &EvalCtx) -> SqlResult<Vec<Row>> {
                     ("rngsubtype", oid(sub.oid())),
                     ("rngmultitypid", oid(*m)),
                     ("rngcollation", oid(0)),
-                    ("rngsubopc", oid(0)),
+                    ("rngsubopc", oid(default_opclass(403, sub))),
                     ("rngcanonical", regproc(&canonical)),
-                    ("rngsubdiff", regproc("-")),
+                    ("rngsubdiff", regproc(&format!("{rname}_subdiff"))),
                 ])
             })
             .collect()

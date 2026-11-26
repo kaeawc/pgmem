@@ -74,6 +74,8 @@ pub fn cast_context(from: &Type, to: &Type) -> Option<CoercionContext> {
         (Int4 | Int8 | Numeric, Money) | (Money, Numeric) | (Inet, Cidr) | (MacAddr, MacAddr8) | (MacAddr8, MacAddr) => Assignment,
         // Row constructors convert to any composite type; every composite is a record.
         (Record, Composite(_)) | (Composite(_), Record) => Implicit,
+        // A range converts to its multirange (`int4multirange(int4range)`) when asked.
+        (Range(a), Multirange(b)) if a == b => Explicit,
         _ => return None,
     })
 }
@@ -176,6 +178,7 @@ fn convert(v: Value, to: &Type) -> SqlResult<Value> {
     }
     Ok(match (v, to) {
         (V::Text(s) | V::Json(s), t) => text::decode(&s, t)?,
+        (V::Range(r), Type::Multirange(sub)) => V::Multirange((**sub).clone(), pgmem_types::range::normalize(vec![*r])?),
         (V::Bit(b), Type::Bit | Type::VarBit) => V::Bit(b),
         (V::Bit(b), t @ (Type::Int4 | Type::Int8)) => {
             let width = if *t == Type::Int4 { 32 } else { 64 };

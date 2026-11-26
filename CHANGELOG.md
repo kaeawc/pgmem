@@ -11,9 +11,11 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - Static Linux binaries (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) on each release.
 - `cargo binstall pgmem` installs the prebuilt binary from the GitHub release.
 - `pg_get_keywords()` returns PostgreSQL 18's keyword list (word, catcode, barelabel, catdesc, baredesc).
+- Multirange `+`, `*` and `-`, the range/multirange forms of `@>`, `<@`, `<<`, `>>`, `&<`, `&>` and `-|-`, `unnest(multirange)`, `range_cmp` / `multirange_cmp` and the `range::multirange` cast (part of #116).
 
 ### Fixed
 
+- Range types follow PostgreSQL more closely (part of #116): `daterange` keeps `infinity` bounds inclusive, `@>` / `<@` with an element need the exact subtype and range constructors take only implicit casts, `min` / `max` reject ranges, `range || text` concatenates, and `pg_range.rngsubopc` / `rngsubdiff` and the range rows' `pg_type.typalign` / `typanalyze` match PostgreSQL.
 - Function attributes are stored and shown: `SECURITY DEFINER`, `SET param = value` (`pg_proc.proconfig`), `PARALLEL`, `COST`, `ROWS` and `LEAKPROOF` appear in `pg_proc` and `pg_get_functiondef` as PostgreSQL prints them (procedures use `$procedure$`), and a function's `SET` options apply during its call.
 - `ALTER FUNCTION / PROCEDURE / ROUTINE` supports `SET` / `RESET`, `[EXTERNAL] SECURITY`, volatility, `[NOT] LEAKPROOF`, `STRICT` / `CALLED ON NULL INPUT`, `PARALLEL`, `COST`, `ROWS`, `RENAME TO` and `SET SCHEMA`.
 - `pg_constraint.connamespace` is the namespace of the owning table or domain instead of always `public`.
