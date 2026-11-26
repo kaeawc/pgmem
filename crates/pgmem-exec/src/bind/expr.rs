@@ -705,6 +705,7 @@ impl Binder<'_> {
             }
             if let Some(i) = found {
                 let t = scope.cols[i].ty.clone();
+                self.note_read(&scope.cols[i]);
                 if depth == 0 {
                     return Ok((Expr::Col(i), t));
                 }
@@ -763,6 +764,9 @@ impl Binder<'_> {
         }
         let positions = level.scope.qualified_star(name);
         let cols: Vec<&super::ScopeCol> = positions.iter().map(|&i| &level.scope.cols[i]).collect();
+        for c in &cols {
+            self.note_read(c);
+        }
         let fields = positions.iter().map(|&i| if depth == 0 { Expr::Col(i) } else { Expr::Outer { depth, idx: i } }).collect();
         let types = cols.iter().map(|c| c.ty.clone()).collect();
         let table = cols.first().map(|c| c.table_oid).filter(|&t| t != 0 && cols.iter().all(|c| c.table_oid == t));
