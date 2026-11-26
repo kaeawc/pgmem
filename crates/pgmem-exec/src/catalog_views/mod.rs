@@ -23,7 +23,7 @@ pub use model::{
     ATTRDEF_CLASS_OID, CLASS_CLASS_OID, CONSTRAINT_CLASS_OID, INFORMATION_SCHEMA_NAMESPACE_OID, Model, NAMESPACE_CLASS_OID, PROC_CLASS_OID,
     TRIGGER_CLASS_OID, constraint_def, index_def, not_null_constraint_name, sequence_type,
 };
-pub use pg_catalog::{DomainCon, available_extension, domain_constraints, predefined_role, type_storage};
+pub use pg_catalog::{DomainCon, available_extension, domain_constraints, predefined_role, predefined_role_name, type_storage};
 
 pub struct VirtualTable {
     pub columns: Vec<(String, Type)>,
@@ -125,6 +125,16 @@ pub fn defs() -> impl Iterator<Item = &'static Def> {
 /// Builtin functions recorded from Postgres 18's `pg_proc` (pg_catalog): oid, name, argument
 /// type OIDs.
 const PG_PROC_DATA: &str = include_str!("pg_proc.tsv");
+
+/// Whether pg_catalog has a builtin function `name` taking exactly these argument types.
+pub fn builtin_function_exists(name: &str, args: &[pgmem_types::Type]) -> bool {
+    let want: Vec<String> = args.iter().map(|t| t.oid().to_string()).collect();
+    let want = want.join(" ");
+    PG_PROC_DATA.lines().any(|l| {
+        let mut it = l.split('\t');
+        it.nth(1) == Some(name) && it.next().unwrap_or("") == want
+    })
+}
 
 /// Every builtin type's name and `format_type` text, recorded from Postgres 18 (`oid`,
 /// `typname`, `format_type(oid, NULL)`), for the types pgmem does not model.

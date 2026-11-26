@@ -537,11 +537,24 @@ fn userbyid_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
 
 fn to_reg_fn(kind: RegKind) -> crate::plan::ScalarFn {
     match kind {
-        RegKind::Class => |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Class, ctx.txn.catalog()).unwrap_or(Value::Null)),
-        RegKind::Type => |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Type, ctx.txn.catalog()).unwrap_or(Value::Null)),
-        RegKind::Namespace => |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Namespace, ctx.txn.catalog()).unwrap_or(Value::Null)),
-        RegKind::Proc => |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Proc, ctx.txn.catalog()).unwrap_or(Value::Null)),
-        RegKind::Procedure => |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Procedure, ctx.txn.catalog()).unwrap_or(Value::Null)),
+        RegKind::Class => {
+            |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Class, ctx.txn.catalog(), &ctx.env.user).unwrap_or(Value::Null))
+        }
+        RegKind::Type => {
+            |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Type, ctx.txn.catalog(), &ctx.env.user).unwrap_or(Value::Null))
+        }
+        RegKind::Namespace => {
+            |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Namespace, ctx.txn.catalog(), &ctx.env.user).unwrap_or(Value::Null))
+        }
+        RegKind::Role => {
+            |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Role, ctx.txn.catalog(), &ctx.env.user).unwrap_or(Value::Null))
+        }
+        RegKind::Proc => {
+            |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Proc, ctx.txn.catalog(), &ctx.env.user).unwrap_or(Value::Null))
+        }
+        RegKind::Procedure => {
+            |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Procedure, ctx.txn.catalog(), &ctx.env.user).unwrap_or(Value::Null))
+        }
     }
 }
 
@@ -597,11 +610,31 @@ fn partition_function(name: &str, n: usize) -> SqlResult<Option<Resolved>> {
     }
 }
 
+/// The `to_reg*` family: text name to reg* object, NULL when it does not exist.
+fn reg_function(name: &str, n: usize) -> SqlResult<Option<Resolved>> {
+    let (fname, kind) = match name {
+        "to_regclass" => ("to_regclass", RegKind::Class),
+        "to_regtype" => ("to_regtype", RegKind::Type),
+        "to_regnamespace" => ("to_regnamespace", RegKind::Namespace),
+        "to_regrole" => ("to_regrole", RegKind::Role),
+        "to_regproc" => ("to_regproc", RegKind::Proc),
+        "to_regprocedure" => ("to_regprocedure", RegKind::Procedure),
+        _ => return Ok(None),
+    };
+    if n != 1 {
+        return Ok(None);
+    }
+    resolved(strict(fname, to_reg_fn(kind)), vec![Type::Text], Type::Reg(kind))
+}
+
 pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
     use Type::{Bool, Int4, Oid, Text};
     let n = args.len();
     let name_arg = Type::Name;
     if let Some(r) = partition_function(name, n)? {
+        return Ok(Some(r));
+    }
+    if let Some(r) = reg_function(name, n)? {
         return Ok(Some(r));
     }
     match name {
@@ -659,15 +692,6 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
         {
             let targets = args.iter().map(|t| if *t == Type::Unknown { Text } else { t.clone() }).collect();
             resolved(strict("has_privilege", always_true), targets, Bool)
-        }
-        "to_regclass" if n == 1 => resolved(strict("to_regclass", to_reg_fn(RegKind::Class)), vec![Text], Type::Reg(RegKind::Class)),
-        "to_regtype" if n == 1 => resolved(strict("to_regtype", to_reg_fn(RegKind::Type)), vec![Text], Type::Reg(RegKind::Type)),
-        "to_regnamespace" if n == 1 => {
-            resolved(strict("to_regnamespace", to_reg_fn(RegKind::Namespace)), vec![Text], Type::Reg(RegKind::Namespace))
-        }
-        "to_regproc" if n == 1 => resolved(strict("to_regproc", to_reg_fn(RegKind::Proc)), vec![Text], Type::Reg(RegKind::Proc)),
-        "to_regprocedure" if n == 1 => {
-            resolved(strict("to_regprocedure", to_reg_fn(RegKind::Procedure)), vec![Text], Type::Reg(RegKind::Procedure))
         }
         "pg_relation_size" | "pg_total_relation_size" | "pg_table_size" | "pg_indexes_size" if n == 1 => {
             resolved(strict("pg_relation_size", relation_size_fn), vec![Type::Reg(RegKind::Class)], Type::Int8)

@@ -8,13 +8,15 @@
 use pgmem_ir::Expr;
 use pgmem_types::usertype::{EnumLabel, Field, UserKind, UserType};
 use pgmem_types::{SqlError, SqlResult, Type, Value, code};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+mod extmembers;
 mod partitions;
 mod roles;
+pub use extmembers::{ExtMember, ExtMemberClass};
 pub use partitions::{PartitionBound, PartitionKey, PartitionKeyPart, PartitionOf, PartitionStrategy, RangeDatum};
-pub use roles::{DefaultPrivilege, ExtensionDef, Grant, GrantObject, RoleDef};
+pub use roles::{DefaultItem, DefaultPrivilege, ExtensionDef, Grant, GrantObject, RoleDef};
 
 pub type Oid = u32;
 
@@ -196,6 +198,29 @@ pub struct IndexDef {
     pub replica: bool,
     /// `pg_class.reloptions` (`name=value`, in Postgres' order); empty means NULL.
     pub reloptions: Vec<String>,
+}
+
+impl IndexDef {
+    /// `pg_index.indkey`: per key, the attnum of a plain column and 0 for an expression.
+    /// A mixed index stores every key in `exprs`; its bare-column keys are plain columns.
+    pub fn key_attnums(&self, table: &TableDef) -> Vec<usize> {
+        if self.exprs.is_empty() {
+            return self.columns.iter().map(|c| c + 1).collect();
+        }
+        self.exprs.iter().map(|e| Self::plain_column(table, e).map_or(0, |c| c + 1)).collect()
+    }
+
+    /// The keys that are real expressions (`pg_index.indexprs`), leaving out bare columns.
+    pub fn true_exprs<'a>(&'a self, table: &'a TableDef) -> impl Iterator<Item = &'a Expr> {
+        self.exprs.iter().filter(move |e| Self::plain_column(table, e).is_none())
+    }
+
+    fn plain_column(table: &TableDef, e: &Expr) -> Option<usize> {
+        match e {
+            Expr::Column(parts) if parts.len() == 1 => table.column_index(&parts[0]),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -626,12 +651,18 @@ pub struct Catalog {
     owners: BTreeMap<Oid, String>,
     /// Installed extensions (plpgsql is implicit).
     extensions: BTreeMap<String, ExtensionDef>,
+    /// Objects attached to an extension (`ALTER EXTENSION ... ADD`), by object OID.
+    ext_members: BTreeMap<Oid, ExtMember>,
     /// `COMMENT ON` text by (classoid, objoid, objsubid), as in `pg_description`.
     comments: BTreeMap<(Oid, Oid, i32), String>,
     /// Partition keys of partitioned tables, by table OID.
     partition_keys: BTreeMap<Oid, PartitionKey>,
     /// Partitions' parents and bounds, by partition OID.
     partition_bounds: BTreeMap<Oid, PartitionOf>,
+    /// Partition indexes' parent indexes (`pg_inherits` of indexes), by child index OID.
+    index_parents: BTreeMap<Oid, Oid>,
+    /// Partitioned indexes not yet valid (`CREATE INDEX ... ON ONLY` before every partition has one).
+    invalid_indexes: BTreeSet<Oid>,
     next_oid: Oid,
 }
 
@@ -667,9 +698,12 @@ impl Catalog {
             default_privileges: Vec::new(),
             owners: BTreeMap::new(),
             extensions: BTreeMap::new(),
+            ext_members: BTreeMap::new(),
             comments: BTreeMap::new(),
             partition_keys: BTreeMap::new(),
             partition_bounds: BTreeMap::new(),
+            index_parents: BTreeMap::new(),
+            invalid_indexes: BTreeSet::new(),
             next_oid: FIRST_USER_OID,
         }
     }
@@ -964,14 +998,25 @@ impl Catalog {
     }
 
     /// ruleutils' `FunctionIsVisible` for a function `f`: the first schema on the search path
-    /// with a function of that name and argument types holds `f`.
-    pub fn function_visible(&self, f: &FunctionDef) -> bool {
+    /// with a function of that name and argument types holds `f`. Functions are never looked up
+    /// in the temporary schema, and pg_catalog (searched in its path position) holds the builtins:
+    /// `builtin(name, input_types)` says whether one with that signature exists.
+    pub fn function_visible(&self, f: &FunctionDef, builtin: &dyn Fn(&str, &[Type]) -> bool) -> bool {
         let types = f.input_types();
+        let temp = pgmem_types::context::search_path().temp_schema;
         for e in self.search_path() {
-            if let PathEntry::Schema(s) = e
-                && self.functions.values().any(|g| g.schema == s && g.name == f.name && g.input_types() == types)
-            {
-                return s == f.schema;
+            match e {
+                PathEntry::System => {
+                    if builtin(&f.name, &types) {
+                        return false;
+                    }
+                }
+                PathEntry::Schema(s) if temp.as_deref() == Some(s.as_str()) => {}
+                PathEntry::Schema(s) => {
+                    if self.functions.values().any(|g| g.schema == s && g.name == f.name && g.input_types() == types) {
+                        return s == f.schema;
+                    }
+                }
             }
         }
         false
@@ -1124,8 +1169,12 @@ impl Catalog {
         if name.0.len() > 1 {
             return in_schema(&self.resolve_schema_name(&name.0[name.0.len() - 2]));
         }
+        let temp = pgmem_types::context::search_path().temp_schema;
         for e in self.search_path() {
-            if let PathEntry::Schema(s) = e {
+            // Functions are never resolved through pg_temp implicitly.
+            if let PathEntry::Schema(s) = e
+                && temp.as_deref() != Some(s.as_str())
+            {
                 let found = in_schema(&s);
                 if !found.is_empty() {
                     return found;
@@ -1225,6 +1274,9 @@ impl Catalog {
         let dropped = self.tables.remove(name)?;
         self.partition_keys.remove(&dropped.oid);
         self.partition_bounds.remove(&dropped.oid);
+        for idx in &dropped.indexes {
+            self.forget_index(idx.oid);
+        }
         self.triggers.retain(|_, t| t.table != dropped.oid);
         self.grants.retain(|g| g.object.relation_oid() != Some(dropped.oid));
         self.owners.remove(&dropped.oid);

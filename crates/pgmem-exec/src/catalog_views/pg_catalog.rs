@@ -83,6 +83,9 @@ pub(super) const PG_DEPEND: &str =
     "classid:oid, objid:oid, objsubid:int4, refclassid:oid, refobjid:oid, refobjsubid:int4, deptype:\"char\"";
 const PG_POLICY: &str = "oid:oid, polname:name, polrelid:oid, polcmd:\"char\", polpermissive:bool, polroles:oid[], \
     polqual:pg_node_tree, polwithcheck:pg_node_tree";
+const PG_DEFAULT_ACL: &str = "oid:oid, defaclrole:oid, defaclnamespace:oid, defaclobjtype:\"char\", defaclacl:aclitem[]";
+const PG_POLICIES: &str = "schemaname:name, tablename:name, policyname:name, permissive:text, roles:name[], cmd:text, qual:text, \
+    with_check:text";
 const PG_PARTITIONED_TABLE: &str = "partrelid:oid, partstrat:\"char\", partnatts:int2, partdefid:oid, partattrs:int2vector, \
     partclass:oidvector, partcollation:oidvector, partexprs:pg_node_tree";
 const PG_STATISTIC_EXT: &str = "oid:oid, stxrelid:oid, stxname:name, stxnamespace:oid, stxowner:oid, stxkeys:int2vector, \
@@ -137,6 +140,7 @@ pub static DEFS: &[Def] = &[
     def!("pg_depend", 2608, 'r', PG_DEPEND, super::depend::pg_depend),
     def!("pg_rewrite", 2618, 'r', super::depend::PG_REWRITE, super::depend::pg_rewrite),
     def!("pg_inherits", 2611, 'r', PG_INHERITS, pg_inherits),
+    def!("pg_default_acl", 826, 'r', PG_DEFAULT_ACL, pg_default_acl),
     def!("pg_policy", 3256, 'r', PG_POLICY, empty),
     def!("pg_statistic_ext", 3381, 'r', PG_STATISTIC_EXT, empty),
     def!("pg_publication", 6104, 'r', PG_PUBLICATION, empty),
@@ -159,14 +163,17 @@ pub static DEFS: &[Def] = &[
     def!("pg_cursors", 12_011, 'v', PG_CURSORS, pg_cursors),
     def!("pg_locks", 12_012, 'v', PG_LOCKS, pg_locks),
     def!("pg_stat_activity", 12_013, 'v', PG_STAT_ACTIVITY, pg_stat_activity),
+    def!("pg_policies", 12_014, 'v', PG_POLICIES, empty),
 ];
 
 fn pg_inherits(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let m = snapshot(ctx);
     Ok(rows_of(PG_INHERITS, |s| {
+        let indexes = m.indexes().into_iter().filter_map(|(_, i)| m.catalog.index_parent(i.oid).map(|p| (i.oid, p)));
         m.tables()
             .into_iter()
             .filter_map(|t| m.catalog.partition_of(t.oid).map(|of| (t.oid, of.parent)))
+            .chain(indexes)
             .map(|(child, parent)| {
                 s.row(vec![
                     ("inhrelid", oid(child)),
@@ -280,6 +287,43 @@ fn pg_partitioned_table(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             ]));
         }
         rows
+    }))
+}
+
+/// `ALTER DEFAULT PRIVILEGES` entries; each ACL lists PUBLIC first, then grantees by role OID.
+fn pg_default_acl(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let m = snapshot(ctx);
+    let role_oid = |name: &str| if name.is_empty() { 0 } else { crate::reg::role_oid(m.catalog, &ctx.env.user, name).unwrap_or(0) };
+    let mut entries: Vec<_> = m.catalog.default_privileges().iter().collect();
+    entries.sort_by(|a, b| (role_oid(&a.role), &a.schema, a.kind).cmp(&(role_oid(&b.role), &b.schema, b.kind)));
+    Ok(rows_of(PG_DEFAULT_ACL, |s| {
+        entries
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                let mut items: Vec<_> = d.items.iter().collect();
+                items.sort_by_key(|x| role_oid(&x.grantee));
+                let acl = items
+                    .iter()
+                    .map(|x| {
+                        let privs: String = "arwdDxtXUCcTsAm"
+                            .chars()
+                            .filter(|c| x.privileges.contains(c))
+                            .map(|c| if x.grantable.contains(&c) { format!("{c}*") } else { c.to_string() })
+                            .collect();
+                        let who = if x.grantee.is_empty() { String::new() } else { crate::roles::acl_name(&x.grantee) };
+                        Value::Text(format!("{who}={privs}/{}", crate::roles::acl_name(&d.role)))
+                    })
+                    .collect();
+                s.row(vec![
+                    ("oid", oid(u32::try_from(70_000 + i).unwrap_or(70_000))),
+                    ("defaclrole", oid(role_oid(&d.role))),
+                    ("defaclnamespace", oid(d.schema.as_deref().map_or(0, |sc| m.namespace(sc)))),
+                    ("defaclobjtype", ch(d.kind)),
+                    ("defaclacl", Value::Array(acl)),
+                ])
+            })
+            .collect()
     }))
 }
 
@@ -473,6 +517,7 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             vec![
                 ("relam", oid(403)),
                 ("relfilenode", oid(if partitioned { 0 } else { idx.oid })),
+                ("relispartition", boolean(m.catalog.index_parent(idx.oid).is_some())),
                 temp_persistence(&t.schema),
                 ("reloptions", crate::reloptions::as_value(&idx.reloptions)),
             ],
@@ -483,6 +528,19 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         let natts = Spec::parse(d.spec).columns().len();
         let extra = if d.kind == 'r' { vec![("relam", oid(2)), ("relfilenode", oid(d.oid))] } else { vec![] };
         rows.push(class_row(&s, d.oid, d.name, ns, d.kind, natts, extra));
+    }
+    // Owners other than the session user.
+    let cols = s.columns();
+    if let (Some(oid_col), Some(owner_col)) = (cols.iter().position(|(n, _)| n == "oid"), cols.iter().position(|(n, _)| n == "relowner")) {
+        for row in &mut rows {
+            let owner = match &row[oid_col] {
+                Value::Oid(o) => m.catalog.owner(*o).and_then(|n| crate::reg::role_oid(m.catalog, &ctx.env.user, n)),
+                _ => None,
+            };
+            if let Some(o) = owner {
+                row[owner_col] = oid(o);
+            }
+        }
     }
     Ok(rows)
 }
@@ -922,19 +980,22 @@ fn pg_index(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     Ok(m.indexes()
         .into_iter()
         .map(|(t, idx)| {
-            let mut keys: Vec<Value> = idx.columns.iter().map(|c| int2(c + 1)).collect();
-            keys.extend(idx.exprs.iter().map(|_| Value::Int2(0)));
-            let collations: Vec<Value> = idx
-                .columns
+            let attnums = idx.key_attnums(t);
+            let mut keys: Vec<Value> = attnums.iter().map(|a| int2(*a)).collect();
+            let collations: Vec<Value> = attnums
                 .iter()
-                .map(|c| oid(t.columns.get(*c).map_or(0, |col| if col.ty.is_string() { DEFAULT_COLLATION_OID } else { 0 })))
-                .chain(idx.exprs.iter().map(|_| oid(0)))
+                .map(|a| {
+                    oid(a
+                        .checked_sub(1)
+                        .and_then(|c| t.columns.get(c))
+                        .map_or(0, |col| if col.ty.is_string() { DEFAULT_COLLATION_OID } else { 0 }))
+                })
                 .collect();
             let nkey = keys.len();
             keys.extend(idx.include.iter().map(|c| int2(c + 1)));
             let n = keys.len();
             let exprs = (!idx.exprs.is_empty()).then(|| {
-                idx.exprs.iter().map(|e| crate::deparse::deparse_expr(m.catalog, t, e).unwrap_or_default()).collect::<Vec<_>>().join(", ")
+                idx.true_exprs(t).map(|e| crate::deparse::deparse_expr(m.catalog, t, e).unwrap_or_default()).collect::<Vec<_>>().join(", ")
             });
             let pred = idx.predicate.as_ref().map(|p| crate::deparse::deparse_predicate(m.catalog, t, p).unwrap_or_default());
             s.row(vec![
@@ -945,6 +1006,7 @@ fn pg_index(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("indisunique", boolean(idx.unique)),
                 ("indnullsnotdistinct", boolean(idx.nulls_not_distinct)),
                 ("indisprimary", boolean(idx.primary)),
+                ("indisvalid", boolean(m.catalog.index_valid(idx.oid))),
                 ("indisclustered", boolean(idx.clustered)),
                 ("indisreplident", boolean(idx.replica)),
                 ("indkey", Value::Array(keys)),
@@ -1187,6 +1249,15 @@ pub fn predefined_role(name: &str) -> Option<u32> {
     })
 }
 
+/// A predefined role's name by OID.
+pub fn predefined_role_name(oid: u32) -> Option<&'static str> {
+    PG_ROLES_DATA.lines().filter(|l| !l.is_empty()).find_map(|l| {
+        let mut f = l.split('\t');
+        let o = f.next()?;
+        (o.parse() == Ok(oid)).then(|| f.next()).flatten()
+    })
+}
+
 /// (oid, name, super, inherit, createrole, createdb, canlogin, replication, bypassrls,
 /// connection limit): the session user, the predefined roles, then created roles.
 fn roles(ctx: &EvalCtx) -> Vec<(u32, String, [bool; 7], i32)> {
@@ -1306,7 +1377,7 @@ fn pg_extension(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("extname", name(&e.name)),
                 ("extnamespace", oid(m.namespace(&e.schema))),
                 ("extversion", txt(e.version.clone())),
-                ("extrelocatable", boolean(true)),
+                ("extrelocatable", boolean(crate::ext_alter::relocatable(&e.name))),
             ]));
         }
         rows

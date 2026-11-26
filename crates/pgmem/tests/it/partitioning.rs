@@ -156,6 +156,195 @@ fn hash_partitions_foreign_keys_and_copy() {
     assert_eq!(message(&e), "cannot copy from partitioned table \"acct\"");
 }
 
+/// Each index on the tables of `like`: name, relkind, relispartition, indisvalid, parent index.
+fn index_state(c: &mut postgres::Client, like: &str) -> Vec<Vec<String>> {
+    rows(
+        c,
+        &format!(
+            "SELECT c.relname::text, c.relkind::text, c.relispartition::text, i.indisvalid::text,
+                    coalesce((SELECT inhparent::regclass::text FROM pg_inherits WHERE inhrelid = c.oid), '-')
+               FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+              WHERE c.relnamespace = 'public'::regnamespace AND c.relname LIKE '{like}' ORDER BY 1"
+        ),
+    )
+}
+
+fn detail(e: &postgres::Error) -> Option<String> {
+    e.as_db_error().and_then(|d| d.detail()).map(str::to_owned)
+}
+
+#[test]
+fn create_index_on_only_and_attach_partition() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE m (a int, b int) PARTITION BY RANGE (a);
+         CREATE TABLE m1 PARTITION OF m FOR VALUES FROM (0) TO (10);
+         CREATE TABLE m2 PARTITION OF m FOR VALUES FROM (10) TO (20);
+         CREATE INDEX mi ON ONLY m (b)",
+    )
+    .expect("on only");
+    assert_eq!(index_state(&mut c, "m%"), [["mi", "I", "false", "false", "-"]]);
+    assert_eq!(rows(&mut c, "SELECT pg_get_indexdef('mi'::regclass)"), [["CREATE INDEX mi ON ONLY public.m USING btree (b)"]]);
+    c.batch_execute("CREATE INDEX m1i ON m1 (b); ALTER INDEX mi ATTACH PARTITION m1i").expect("attach");
+    assert_eq!(index_state(&mut c, "m%"), [["m1i", "i", "true", "true", "mi"], ["mi", "I", "false", "false", "-"]]);
+    // Attaching again to the same parent is a no-op.
+    c.batch_execute("ALTER INDEX mi ATTACH PARTITION m1i").expect("reattach");
+    let e = {
+        c.batch_execute("CREATE INDEX m2a ON m2 (a)").expect("m2a");
+        expect_code(c.batch_execute("ALTER INDEX mi ATTACH PARTITION m2a"), "42P17")
+    };
+    assert_eq!(message(&e), "cannot attach index \"m2a\" as a partition of index \"mi\"");
+    assert_eq!(detail(&e).as_deref(), Some("The index definitions do not match."));
+    let e = {
+        c.batch_execute("CREATE INDEX m1j ON m1 (b)").expect("m1j");
+        expect_code(c.batch_execute("ALTER INDEX mi ATTACH PARTITION m1j"), "55000")
+    };
+    assert_eq!(message(&e), "cannot attach index \"m1j\" as a partition of index \"mi\"");
+    assert_eq!(detail(&e).as_deref(), Some("Another index is already attached for partition \"m1\"."));
+    let e = expect_code(c.batch_execute("ALTER INDEX mi ATTACH PARTITION mi"), "55000");
+    assert_eq!(detail(&e).as_deref(), Some("Index \"mi\" is not an index on any partition of table \"m\"."));
+    let e = expect_code(c.batch_execute("ALTER INDEX m ATTACH PARTITION m1i"), "42809");
+    assert_eq!(message(&e), "\"m\" is not an index");
+    let e = expect_code(c.batch_execute("ALTER INDEX m1i ATTACH PARTITION m1i"), "42809");
+    assert_eq!(message(&e), "ALTER action ATTACH PARTITION cannot be performed on relation \"m1i\"");
+    let e = expect_code(c.batch_execute("ALTER INDEX mi ATTACH PARTITION m1"), "42P17");
+    assert_eq!(message(&e), "\"m1\" is not an index");
+    expect_code(c.batch_execute("ALTER INDEX mi ATTACH PARTITION nope"), "42P01");
+    let e = expect_code(c.batch_execute("DROP INDEX m1i"), "2BP01");
+    assert_eq!(message(&e), "cannot drop index m1i because index mi requires it");
+    // The last partition's index makes the parent valid.
+    c.batch_execute("CREATE INDEX m2i ON m2 (b); ALTER INDEX mi ATTACH PARTITION m2i").expect("attach m2i");
+    assert_eq!(rows(&mut c, "SELECT indisvalid::text FROM pg_index WHERE indexrelid = 'mi'::regclass"), [["true"]]);
+    assert_eq!(
+        rows(&mut c, "SELECT relid::text, coalesce(parentrelid::text, '-'), isleaf::text, level::text FROM pg_partition_tree('mi')"),
+        [["mi", "-", "false", "0"], ["m1i", "mi", "true", "1"], ["m2i", "mi", "true", "1"]]
+    );
+    assert_eq!(rows(&mut c, "SELECT relid::text FROM pg_partition_ancestors('m1i')"), [["m1i"], ["mi"]]);
+    assert_eq!(rows(&mut c, "SELECT pg_partition_root('m2i')::text"), [["mi"]]);
+    // Dropping the parent drops the attached indexes, not the others.
+    c.batch_execute("DROP INDEX mi").expect("drop parent");
+    assert_eq!(
+        rows(&mut c, "SELECT relname::text FROM pg_class WHERE relname LIKE 'm%' AND relkind IN ('i', 'I') ORDER BY 1"),
+        [["m1j"], ["m2a"]]
+    );
+    // ON ONLY on a partitioned table without partitions is valid; on a plain table it is a plain index.
+    c.batch_execute("CREATE TABLE e (a int) PARTITION BY LIST (a); CREATE INDEX ei ON ONLY e (a); CREATE TABLE t (a int); CREATE INDEX ti ON ONLY t (a)")
+        .expect("empty");
+    assert_eq!(index_state(&mut c, "%i"), [["ei", "I", "false", "true", "-"], ["ti", "i", "false", "true", "-"]]);
+}
+
+#[test]
+fn partitioned_index_hierarchies() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE p (a int, b int) PARTITION BY RANGE (a);
+         CREATE TABLE p1 PARTITION OF p FOR VALUES FROM (0) TO (10);
+         CREATE TABLE p2 PARTITION OF p FOR VALUES FROM (10) TO (20) PARTITION BY LIST (b);
+         CREATE TABLE p21 PARTITION OF p2 FOR VALUES IN (1);
+         CREATE TABLE p22 PARTITION OF p2 FOR VALUES IN (2);
+         CREATE INDEX mine ON p1 (b);
+         CREATE INDEX mine2 ON p1 (b);
+         CREATE INDEX ON p (b)",
+    )
+    .expect("schema");
+    // A regular CREATE INDEX adopts one matching index per partition and creates the rest.
+    assert_eq!(
+        index_state(&mut c, "%"),
+        [
+            ["mine", "i", "true", "true", "p_b_idx"],
+            ["mine2", "i", "false", "true", "-"],
+            ["p21_b_idx", "i", "true", "true", "p2_b_idx"],
+            ["p22_b_idx", "i", "true", "true", "p2_b_idx"],
+            ["p2_b_idx", "I", "true", "true", "p_b_idx"],
+            ["p_b_idx", "I", "false", "true", "-"],
+        ]
+    );
+    // Validity propagates up a multi-level hierarchy once every level is complete.
+    c.batch_execute(
+        "CREATE INDEX q ON ONLY p (a);
+         CREATE INDEX q2 ON ONLY p2 (a);
+         ALTER INDEX q ATTACH PARTITION q2;
+         CREATE INDEX q1 ON p1 (a);
+         ALTER INDEX q ATTACH PARTITION q1;
+         CREATE INDEX q21 ON p21 (a);
+         ALTER INDEX q2 ATTACH PARTITION q21",
+    )
+    .expect("levels");
+    let e = {
+        c.batch_execute("CREATE INDEX r0 ON ONLY p (a)").expect("r0");
+        expect_code(c.batch_execute("ALTER INDEX r0 ATTACH PARTITION q2"), "55000")
+    };
+    assert_eq!(detail(&e).as_deref(), Some("Index \"q2\" is already attached to another index."));
+    c.batch_execute("DROP INDEX r0").expect("drop r0");
+    assert_eq!(
+        index_state(&mut c, "q%"),
+        [
+            ["q", "I", "false", "false", "-"],
+            ["q1", "i", "true", "true", "q"],
+            ["q2", "I", "true", "false", "q"],
+            ["q21", "i", "true", "true", "q2"],
+        ]
+    );
+    c.batch_execute("CREATE INDEX q22 ON p22 (a); ALTER INDEX q2 ATTACH PARTITION q22").expect("q22");
+    assert_eq!(
+        rows(&mut c, "SELECT indisvalid::text FROM pg_index WHERE indexrelid IN ('q'::regclass, 'q2'::regclass)"),
+        [["true"], ["true"]]
+    );
+    // ATTACH PARTITION adopts a matching index and creates the missing ones; DETACH unlinks them.
+    c.batch_execute(
+        "CREATE TABLE p3 (a int, b int); CREATE INDEX p3b ON p3 (b); ALTER TABLE p ATTACH PARTITION p3 FOR VALUES FROM (20) TO (30)",
+    )
+    .expect("attach");
+    assert_eq!(index_state(&mut c, "p3%"), [["p3_a_idx", "i", "true", "true", "q"], ["p3b", "i", "true", "true", "p_b_idx"]]);
+    c.batch_execute("ALTER TABLE p DETACH PARTITION p3").expect("detach");
+    assert_eq!(index_state(&mut c, "p3%"), [["p3_a_idx", "i", "false", "true", "-"], ["p3b", "i", "false", "true", "-"]]);
+    c.batch_execute("DROP INDEX p3b").expect("detached index drops");
+    // A new partition gets an attached copy of an invalid parent index, which stays invalid.
+    c.batch_execute("CREATE INDEX r ON ONLY p (a, b); CREATE TABLE p4 PARTITION OF p FOR VALUES FROM (40) TO (50)").expect("p4");
+    assert_eq!(index_state(&mut c, "p4_a_b_idx"), [["p4_a_b_idx", "i", "true", "true", "r"]]);
+    assert_eq!(rows(&mut c, "SELECT indisvalid::text FROM pg_index WHERE indexrelid = 'r'::regclass"), [["false"]]);
+    // Two identical parent indexes get one partition index each.
+    c.batch_execute("CREATE TABLE x (a int) PARTITION BY LIST (a); CREATE TABLE x1 PARTITION OF x FOR VALUES IN (1); CREATE INDEX ON x (a); CREATE INDEX ON x (a)")
+        .expect("dupes");
+    assert_eq!(
+        index_state(&mut c, "x%"),
+        [
+            ["x1_a_idx", "i", "true", "true", "x_a_idx"],
+            ["x1_a_idx1", "i", "true", "true", "x_a_idx1"],
+            ["x_a_idx", "I", "false", "true", "-"],
+            ["x_a_idx1", "I", "false", "true", "-"],
+        ]
+    );
+}
+
+#[test]
+fn partitioned_key_indexes_are_attached() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE u (a int NOT NULL, b int NOT NULL, PRIMARY KEY (a)) PARTITION BY RANGE (a);
+         CREATE TABLE u1 PARTITION OF u FOR VALUES FROM (0) TO (10);
+         ALTER TABLE u ADD CONSTRAINT u_ab UNIQUE (a, b);
+         CREATE TABLE u2 (a int NOT NULL, b int NOT NULL);
+         ALTER TABLE u ATTACH PARTITION u2 FOR VALUES FROM (10) TO (20)",
+    )
+    .expect("schema");
+    assert_eq!(
+        index_state(&mut c, "u%"),
+        [
+            ["u1_a_b_key", "i", "true", "true", "u_ab"],
+            ["u1_pkey", "i", "true", "true", "u_pkey"],
+            ["u2_a_b_key", "i", "true", "true", "u_ab"],
+            ["u2_pkey", "i", "true", "true", "u_pkey"],
+            ["u_ab", "I", "false", "true", "-"],
+            ["u_pkey", "I", "false", "true", "-"],
+        ]
+    );
+    let e = expect_code(c.batch_execute("CREATE UNIQUE INDEX u_a ON ONLY u (a); ALTER INDEX u_a ATTACH PARTITION u1_pkey"), "55000");
+    assert_eq!(detail(&e).as_deref(), Some("Index \"u1_pkey\" is already attached to another index."));
+    let e = expect_code(c.batch_execute("DROP INDEX u1_pkey"), "2BP01");
+    assert_eq!(message(&e), "cannot drop index u1_pkey because index u_pkey requires it");
+}
+
 fn hint(e: &postgres::Error) -> String {
     e.as_db_error().and_then(|d| d.hint()).unwrap_or_default().to_owned()
 }
