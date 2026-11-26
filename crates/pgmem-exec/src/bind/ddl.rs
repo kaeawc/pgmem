@@ -182,7 +182,8 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
         }
     }
     // Constraints, column-level first (in column order), then table-level.
-    let mut pending: Vec<(Option<String>, ir::TableConstraintKind, bool, ir::ConstraintTiming)> = Vec::new();
+    type Pending<'a> = (Option<String>, ir::TableConstraintKind, bool, ir::ConstraintTiming, &'a [ir::RelOption]);
+    let mut pending: Vec<Pending> = Vec::new();
     for c in &ct.columns {
         for con in &c.constraints {
             let kind = match &con.kind {
@@ -196,17 +197,17 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
                 }
                 _ => continue,
             };
-            pending.push((con.name.clone(), kind, true, con.timing));
+            pending.push((con.name.clone(), kind, true, con.timing, &con.reloptions));
         }
     }
     for con in &ct.constraints {
-        pending.push((con.name.clone(), con.kind.clone(), false, con.timing));
+        pending.push((con.name.clone(), con.kind.clone(), false, con.timing, &con.reloptions));
     }
     for (name, kind, timing) in likes.constraints {
-        pending.push((name, kind, false, timing));
+        pending.push((name, kind, false, timing, &[]));
     }
-    for (cname, kind, column_level, timing) in pending {
-        add_constraint(b, &mut table, cname, &kind, column_level, &mut taken, timing)?;
+    for (cname, kind, column_level, timing, reloptions) in pending {
+        add_constraint(b, &mut table, cname, &kind, column_level, &mut taken, (timing, reloptions))?;
     }
     for li in &likes.indexes {
         let idx = super::like::build_index(b, &table, li, &mut taken)?;
@@ -286,7 +287,7 @@ pub fn add_constraint(
     kind: &ir::TableConstraintKind,
     column_level: bool,
     taken: &mut Vec<String>,
-    timing: ir::ConstraintTiming,
+    (timing, reloptions): (ir::ConstraintTiming, &[ir::RelOption]),
 ) -> SqlResult<()> {
     let catalog = b.catalog;
     let tname = table.name.clone();
@@ -312,7 +313,7 @@ pub fn add_constraint(
     match kind {
         ir::TableConstraintKind::Exclude { method, elements, predicate } => {
             let method = method.clone().unwrap_or_else(|| "btree".into());
-            add_exclusion(b, table, cname, &method, elements.clone(), predicate.clone(), None, taken, &used, timing)?;
+            add_exclusion(b, table, cname, &method, elements.clone(), predicate.clone(), None, taken, &used, (timing, reloptions))?;
         }
         ir::TableConstraintKind::Temporal { primary, columns } => {
             let n = columns.len();
@@ -336,7 +337,7 @@ pub fn add_constraint(
                     table.columns[slot].not_null = true;
                 }
             }
-            add_exclusion(b, table, cname, "gist", elements, None, Some(*primary), taken, &used, timing)?;
+            add_exclusion(b, table, cname, "gist", elements, None, Some(*primary), taken, &used, (timing, reloptions))?;
         }
         ir::TableConstraintKind::UsingIndex { primary, index } => {
             let pos = table
@@ -434,7 +435,7 @@ pub fn add_constraint(
                 primary,
                 nulls_not_distinct,
                 predicate: None,
-                reloptions: Vec::new(),
+                reloptions: crate::reloptions::create(crate::reloptions::Target::Index(Some("btree")), reloptions)?,
             });
             let ckind = if primary {
                 ConstraintKind::PrimaryKey { columns: idx_cols }
@@ -590,7 +591,11 @@ pub fn bind_create_view(b: &Binder, cv: &ir::CreateView) -> SqlResult<ViewDef> {
     }
     let reloptions = crate::reloptions::create(crate::reloptions::Target::View, &opts)?;
     let check_option = reloptions.iter().any(|o| o.starts_with("check_option="));
-    Ok(ViewDef { oid: 0, schema, name, columns, query: (*cv.query).clone(), search_path, check_option, reloptions })
+    let def = ViewDef { oid: 0, schema, name, columns, query: (*cv.query).clone(), search_path, check_option, reloptions };
+    if check_option {
+        crate::views::check_option_allowed(b.catalog, &def)?;
+    }
+    Ok(def)
 }
 
 pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(QualName, IndexDef)>> {
@@ -740,9 +745,9 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
     let mut def = table.clone();
     let not_found = |c: &str| SqlError::undefined_column(&format!("\"{c}\" of relation \"{tname}\""));
     match action {
-        ir::AlterTableAction::AttachPartition { .. } | ir::AlterTableAction::DetachPartition { .. } => {
-            Err(SqlError::internal("ATTACH / DETACH PARTITION are applied by the executor"))
-        }
+        ir::AlterTableAction::AttachPartition { .. }
+        | ir::AlterTableAction::DetachPartition { .. }
+        | ir::AlterTableAction::RelOptions { .. } => Err(SqlError::internal("ATTACH / DETACH PARTITION are applied by the executor")),
         ir::AlterTableAction::AddColumn { if_not_exists, column } => {
             if def.column_index(&column.name).is_some() {
                 if *if_not_exists {
@@ -823,7 +828,7 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
                     }
                     _ => continue,
                 };
-                add_constraint(b, &mut def, con.name.clone(), &kind, true, &mut taken, con.timing)?;
+                add_constraint(b, &mut def, con.name.clone(), &kind, true, &mut taken, (con.timing, &con.reloptions))?;
             }
             let validate = if needs_rewrite { Validation::ConvertColumn { slot, using: generated } } else { Validation::None };
             Ok(AlterOutcome::Replace { def: Box::new(def), rename_from: None, sequences, validate })
@@ -982,7 +987,7 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
             }
             let mut taken = Vec::new();
             let before = def.constraints.len();
-            add_constraint(b, &mut def, con.name.clone(), &con.kind, false, &mut taken, con.timing)?;
+            add_constraint(b, &mut def, con.name.clone(), &con.kind, false, &mut taken, (con.timing, &con.reloptions))?;
             // NOT VALID skips the existing rows (new ones are checked).
             let validate = match def.constraints.get(before) {
                 Some(c) if !con.timing.not_valid => Validation::Constraint(c.name.clone()),
@@ -1080,7 +1085,7 @@ fn add_exclusion(
     temporal: Option<bool>,
     taken: &mut Vec<String>,
     used: &[String],
-    timing: ir::ConstraintTiming,
+    (timing, reloptions): (ir::ConstraintTiming, &[ir::RelOption]),
 ) -> SqlResult<()> {
     if !["btree", "hash", "gist", "spgist", "gin", "brin"].contains(&method) {
         return Err(SqlError::new(code::UNDEFINED_OBJECT, format!("access method \"{method}\" does not exist")));
@@ -1125,6 +1130,7 @@ fn add_exclusion(
     if table.indexes.iter().any(|i| i.name == name) || b.catalog.relation(&table.schema, &name).is_some() {
         return Err(SqlError::new(code::DUPLICATE_TABLE, format!("relation \"{name}\" already exists")));
     }
+    let index_reloptions = crate::reloptions::create(crate::reloptions::Target::Index(Some(method)), reloptions)?;
     taken.push(name.clone());
     let plain: Option<Vec<usize>> = elements
         .iter()
@@ -1143,7 +1149,7 @@ fn add_exclusion(
         primary: false,
         nulls_not_distinct: false,
         predicate: predicate.clone(),
-        reloptions: Vec::new(),
+        reloptions: index_reloptions,
     });
     table.constraints.push(Constraint {
         oid: 0,

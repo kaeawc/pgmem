@@ -227,6 +227,10 @@ fn alter_rel_options(p: &mut Parser) -> Result<Option<Utility>, ParserError> {
         (O::View, 2)
     } else if word_at(p, 1, "MATERIALIZED") && word_at(p, 2, "VIEW") {
         (O::MaterializedView, 3)
+    } else if word_at(p, 1, "TABLE") {
+        // sqlparser reads `RESET (name, ...)` of a table, but not `RESET (name = value)`, which
+        // Postgres rejects at execution.
+        (O::Table, 2)
     } else {
         return Ok(None);
     };
@@ -239,6 +243,28 @@ fn alter_rel_options(p: &mut Parser) -> Result<Option<Utility>, ParserError> {
     }
     if !((word_at(p, n, "SET") || word_at(p, n, "RESET")) && p.peek_nth_token(n + 1).token == Token::LParen) {
         return Ok(None);
+    }
+    if object == O::Table {
+        // Only a statement of just `RESET (...)`: combined actions go through sqlparser.
+        let mut depth = 0usize;
+        let mut m = n + 1;
+        loop {
+            match p.peek_nth_token(m).token {
+                Token::LParen => depth += 1,
+                Token::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                Token::EOF => return Ok(None),
+                _ => {}
+            }
+            m += 1;
+        }
+        if !word_at(p, n, "RESET") || !matches!(p.peek_nth_token(m + 1).token, Token::SemiColon | Token::EOF) {
+            return Ok(None);
+        }
     }
     for _ in 0..(if object == O::MaterializedView { 3 } else { 2 }) {
         p.next_token();

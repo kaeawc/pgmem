@@ -896,6 +896,7 @@ pub(crate) fn check_statement(
         ir::Statement::Truncate(t) => needs.extend(t.tables.iter().map(|n| (n, 'D'))),
         _ => {}
     }
+    let read_names = crate::views::with_invoker_reads(catalog, read_names);
     needs.extend(read_names.iter().map(|n| (n, 'r')));
     let mut columns: Vec<ColumnCheck> = Vec::new();
     for (name, p) in needs {
