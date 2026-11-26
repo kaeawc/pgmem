@@ -5,7 +5,7 @@
 //! final state and applies them to the transaction.
 
 use crate::bind::dml::{RowRules, UniqueCheck};
-use crate::bind::{Binder, DeletePlan, InsertPlan, InsertRows, UpdatePlan};
+use crate::bind::{Binder, DeletePlan, InsertPlan, InsertRows, SYSTEM_COLUMNS, UpdatePlan};
 use crate::eval::{EvalCtx, StatementState, eval, eval_pred};
 use crate::plan::Row;
 use crate::run::run;
@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 mod exclusion;
+mod indexed;
 
 use crate::functions::Exec;
 use crate::triggers::{self, Event};
@@ -343,22 +344,42 @@ fn check_foreign_keys(table: &TableDef, rows: &[&Row], txn: &Txn, own_final: Opt
             }
         }
         let parent = txn.catalog().table_q(ref_table).cloned().ok_or_else(|| SqlError::undefined_table(&ref_table.name))?;
-        let parent_rows: Vec<Row> = if parent.oid == table.oid {
-            own_final.map_or_else(
-                || txn.scan_latest(parent.oid).into_iter().map(|(_, r)| r).collect(),
-                |rows| rows.iter().map(|(_, r)| r.clone()).collect(),
-            )
-        } else {
-            crate::partition::latest_rows(txn, &parent)
-        };
+        let partitioned = txn.catalog().is_partitioned(parent.oid);
+        // Every parent row, read only when an index lookup does not find the key.
+        let mut parent_rows: Option<Vec<Row>> = None;
+        let ref_key = |p: &Row| ref_columns.iter().map(|c| p.get(*c).cloned().unwrap_or(Value::Null)).collect::<Vec<_>>();
         for row in rows {
             let key: Vec<Value> = columns.iter().map(|c| row.get(*c).cloned().unwrap_or(Value::Null)).collect();
             if key.iter().any(Value::is_null) {
                 continue;
             }
-            let found = parent_rows
-                .iter()
-                .any(|p| key_equal(&key, &ref_columns.iter().map(|c| p.get(*c).cloned().unwrap_or(Value::Null)).collect::<Vec<_>>()));
+            let indexed = !partitioned
+                && txn.lookup_latest(&parent, ref_columns, &key).into_iter().any(|(_, mut p)| {
+                    pad(&mut p, &parent);
+                    key_equal(&key, &ref_key(&p))
+                });
+            let found = indexed
+                || parent_rows
+                    .get_or_insert_with(|| {
+                        if parent.oid == table.oid {
+                            own_final.map_or_else(
+                                || {
+                                    txn.scan_latest(parent.oid)
+                                        .into_iter()
+                                        .map(|(_, mut r)| {
+                                            pad(&mut r, &parent);
+                                            r
+                                        })
+                                        .collect()
+                                },
+                                |rows| rows.iter().map(|(_, r)| r.clone()).collect(),
+                            )
+                        } else {
+                            crate::partition::latest_rows(txn, &parent)
+                        }
+                    })
+                    .iter()
+                    .any(|p| key_equal(&key, &ref_key(p)));
             if !found {
                 let names: Vec<&str> = columns.iter().map(|c| table.columns[*c].name.as_str()).collect();
                 let vals: Vec<String> = key.iter().map(display).collect();
@@ -416,7 +437,18 @@ fn referential_actions(
         let (removed_up, replaced_up) = (up(removed), up(replaced));
         referential_actions(txn, &parent, &removed_up, &replaced_up, is_delete, depth + 1, ck)?;
     }
-    let children: Vec<Arc<TableDef>> = txn.catalog().tables().cloned().collect();
+    let qualified = table.qualified();
+    let children: Vec<Arc<TableDef>> = txn
+        .catalog()
+        .tables()
+        .filter(|t| {
+            t.constraints.iter().any(|c| matches!(&c.kind, ConstraintKind::ForeignKey { ref_table, .. } if *ref_table == qualified))
+        })
+        .cloned()
+        .collect();
+    if children.is_empty() {
+        return Ok(());
+    }
     let parent_now: Vec<Row> = crate::partition::latest_rows(txn, table);
     for child in children {
         for con in &child.constraints {
@@ -583,19 +615,25 @@ fn referential_actions(
 }
 
 /// The row RETURNING is evaluated over: the statement's row, then the old and the new
-/// version of the target row (all NULL when there is none).
-pub(crate) fn returning_row(current: &[Value], old: Option<&Row>, new: Option<&Row>, width: usize) -> Row {
+/// version of the target row with its system columns (all NULL when there is none).
+pub(crate) fn returning_row(current: &[Value], old: Option<(&Row, &[Value])>, new: Option<(&Row, &[Value])>, width: usize) -> Row {
     let mut out = current.to_vec();
     for version in [old, new] {
         match version {
-            Some(r) => {
+            Some((r, system)) => {
                 out.extend(r.iter().take(width).cloned());
                 out.extend(std::iter::repeat_n(Value::Null, width.saturating_sub(r.len())));
+                out.extend(system.iter().cloned());
             }
-            None => out.extend(std::iter::repeat_n(Value::Null, width)),
+            None => out.extend(std::iter::repeat_n(Value::Null, width + SYSTEM_COLUMNS.len())),
         }
     }
     out
+}
+
+/// The system columns of the statement's target row in `combined` (target ++ system ++ ...).
+fn system_of(combined: &[Value], width: usize) -> &[Value] {
+    &combined[width..width + SYSTEM_COLUMNS.len()]
 }
 
 fn identity_always_error(col: &str) -> SqlError {
@@ -690,17 +728,10 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
     {
         let ctx = EvalCtx::new(txn, params, env, state);
         let sources = insert_sources(plan, &ctx)?;
-        let existing: Vec<(RowId, Row)> = txn
-            .scan_latest(table.oid)
-            .into_iter()
-            .map(|(id, mut r)| {
-                pad(&mut r, &table);
-                (id, r)
-            })
-            .collect();
+        let indexed = indexed::usable(&plan.rules, txn);
+        let mut current = indexed::Existing::new(&table, indexed, txn);
         let mut pending: Vec<Row> = Vec::new();
         let mut updated_ids: HashSet<RowId> = HashSet::new();
-        let mut current: Vec<(RowId, Row)> = existing.clone();
         for src in sources {
             let mut row = source_row(plan, &table, src, &ctx)?;
             if !trig.before_row.is_empty() {
@@ -721,11 +752,9 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
                 let mut conflict: Option<(Option<RowId>, Row)> = None;
                 'find: for a in arbiters {
                     let Some(k) = unique_key(a, &row, &ctx)? else { continue };
-                    for (id, r) in &current {
-                        if unique_key(a, r, &ctx)?.as_ref() == Some(&k) {
-                            conflict = Some((Some(*id), r.clone()));
-                            break 'find;
-                        }
+                    if let Some((id, r)) = current.first_match(a, &k, &row, &ctx)? {
+                        conflict = Some((Some(id), r));
+                        break 'find;
                     }
                     for r in &pending {
                         if unique_key(a, r, &ctx)?.as_ref() == Some(&k) {
@@ -778,16 +807,13 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
                             check_not_null(&table, &new_row)?;
                             check_checks(&plan.rules, &new_row, &ctx)?;
                             updated_ids.insert(id);
-                            for entry in current.iter_mut() {
-                                if entry.0 == id {
-                                    entry.1 = new_row.clone();
-                                }
-                            }
+                            current.updated.insert(id, new_row.clone());
                             if !plan.returning.is_empty() {
                                 // The locked-then-updated row version: xmax is the updating transaction.
                                 let mut current = new_row.clone();
                                 current.extend(system_values(table.oid, Some(id), env.txid));
-                                let r = returning_row(&current, Some(&existing_row), Some(&new_row), width);
+                                let system = system_of(&current, width);
+                                let r = returning_row(&current, Some((&existing_row, system)), Some((&new_row, system)), width);
                                 returning_rows.push(plan.returning.iter().map(|e| eval(e, &r, &ctx)).collect::<SqlResult<Vec<_>>>()?);
                             }
                             effects.push(Effect::Update(id, existing_row, new_row));
@@ -805,21 +831,26 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
             if !plan.returning.is_empty() {
                 let mut current = row.clone();
                 current.extend(system_values(table.oid, None, 0));
-                let r = returning_row(&current, None, Some(&row), width);
+                let r = returning_row(&current, None, Some((&row, system_of(&current, width))), width);
                 returning_rows.push(plan.returning.iter().map(|e| eval(e, &r, &ctx)).collect::<SqlResult<Vec<_>>>()?);
             }
             pending.push(row.clone());
             effects.push(Effect::Insert(row));
         }
         // Unique validation over the final state.
-        let mut final_rows = current;
-        let mut changed: HashSet<RowId> = updated_ids;
-        for (i, r) in pending.iter().enumerate() {
-            let fake = u64::MAX - u64::try_from(i).unwrap_or(0);
-            changed.insert(fake);
-            final_rows.push((fake, r.clone()));
+        if indexed {
+            let changed: Vec<&Row> = current.updated.values().chain(&pending).collect();
+            indexed::check_uniques_where(&plan.rules, &updated_ids, &changed, &ctx, |_| true)?;
+        } else {
+            let mut final_rows = current.into_all().unwrap_or_default();
+            let mut changed: HashSet<RowId> = updated_ids;
+            for (i, r) in pending.iter().enumerate() {
+                let fake = u64::MAX - u64::try_from(i).unwrap_or(0);
+                changed.insert(fake);
+                final_rows.push((fake, r.clone()));
+            }
+            check_uniques(&plan.rules, &final_rows, &changed, &ctx)?;
         }
-        check_uniques(&plan.rules, &final_rows, &changed, &ctx)?;
     }
     // Phase 2: apply.
     let mut count = 0u64;
@@ -841,16 +872,8 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
         }
         count += 1;
     }
-    let final_rows: Vec<(RowId, Row)> = txn
-        .scan_latest(table.oid)
-        .into_iter()
-        .map(|(id, mut r)| {
-            pad(&mut r, &table);
-            (id, r)
-        })
-        .collect();
     let ck = Checks { env, state };
-    check_foreign_keys(&table, &changed_rows.iter().collect::<Vec<_>>(), txn, Some(&final_rows), ck)?;
+    check_foreign_keys(&table, &changed_rows.iter().collect::<Vec<_>>(), txn, None, ck)?;
     referential_actions(txn, &table, &old_versions, &updated_new, false, 0, ck)?;
     for row in changed_rows.iter().filter(|_| !trig.after_row.is_empty()) {
         let mut exec = Exec::Write { txn, env, state };
@@ -873,7 +896,11 @@ fn matching_rows(
         None => None,
     };
     let mut out = Vec::new();
-    for (id, mut row) in ctx.txn.scan(table.oid) {
+    let rows = match (&extra_rows, filter.and_then(|f| indexed::probe(table, f, ctx))) {
+        (None, Some((slot, v))) => ctx.txn.lookup(table, &[slot], &[v]),
+        _ => ctx.txn.scan(table.oid),
+    };
+    for (id, mut row) in rows {
         pad(&mut row, table);
         // The statement's row: the target row, its system columns, then any FROM / USING row.
         let mut target = row.clone();
@@ -905,6 +932,24 @@ fn matching_rows(
         }
     }
     Ok(out)
+}
+
+/// UPDATE's unique validation over every row: non-deferrable indexes row by row, deferrable
+/// ones over the post-update table (or at commit).
+fn check_uniques_full(rules: &RowRules, changes: &[(RowId, Row, Row)], changed_ids: &HashSet<RowId>, ctx: &EvalCtx) -> SqlResult<()> {
+    let mut final_rows: Vec<(RowId, Row)> = ctx
+        .txn
+        .scan_latest(rules.table.oid)
+        .into_iter()
+        .filter(|(id, _)| !changed_ids.contains(id))
+        .map(|(id, mut r)| {
+            pad(&mut r, &rules.table);
+            (id, r)
+        })
+        .collect();
+    check_uniques_per_row(rules, &final_rows, changes, ctx)?;
+    final_rows.extend(changes.iter().map(|(id, _, n)| (*id, n.clone())));
+    check_uniques_where(rules, &final_rows, changed_ids, ctx, |u| deferrable(rules, u))
 }
 
 pub fn exec_update(plan: &UpdatePlan, txn: &mut Txn, params: &[Value], env: &SessionEnv, state: &StatementState) -> SqlResult<DmlResult> {
@@ -956,7 +1001,8 @@ pub fn exec_update(plan: &UpdatePlan, txn: &mut Txn, params: &[Value], env: &Ses
             if !plan.returning.is_empty() {
                 let mut out_row = new_row.clone();
                 out_row.extend(combined.iter().skip(width).cloned());
-                let out_row = returning_row(&out_row, Some(&old), Some(&new_row), width);
+                let system = system_of(&combined, width);
+                let out_row = returning_row(&out_row, Some((&old, system)), Some((&new_row, system)), width);
                 returning_rows.push(plan.returning.iter().map(|e| eval(e, &out_row, &ctx)).collect::<SqlResult<Vec<_>>>()?);
             }
             changes.push((id, old, new_row));
@@ -964,19 +1010,13 @@ pub fn exec_update(plan: &UpdatePlan, txn: &mut Txn, params: &[Value], env: &Ses
         // Unique validation: non-deferrable indexes row by row, deferrable ones over the
         // post-update table (or at commit).
         let changed_ids: HashSet<RowId> = changes.iter().map(|(id, _, _)| *id).collect();
-        let mut final_rows: Vec<(RowId, Row)> = ctx
-            .txn
-            .scan_latest(table.oid)
-            .into_iter()
-            .filter(|(id, _)| !changed_ids.contains(id))
-            .map(|(id, mut r)| {
-                pad(&mut r, &table);
-                (id, r)
-            })
-            .collect();
-        check_uniques_per_row(&plan.rules, &final_rows, &changes, &ctx)?;
-        final_rows.extend(changes.iter().map(|(id, _, n)| (*id, n.clone())));
-        check_uniques_where(&plan.rules, &final_rows, &changed_ids, &ctx, |u| deferrable(&plan.rules, u))?;
+        if indexed::usable(&plan.rules, txn) {
+            indexed::check_uniques_per_row(&plan.rules, &changes, &ctx)?;
+            let changed: Vec<&Row> = changes.iter().map(|(_, _, n)| n).collect();
+            indexed::check_uniques_where(&plan.rules, &changed_ids, &changed, &ctx, |u| deferrable(&plan.rules, u))?;
+        } else {
+            check_uniques_full(&plan.rules, &changes, &changed_ids, &ctx)?;
+        }
     }
     let count = changes.len() as u64;
     let mut old_versions = Vec::new();
@@ -992,16 +1032,8 @@ pub fn exec_update(plan: &UpdatePlan, txn: &mut Txn, params: &[Value], env: &Ses
         new_versions.push(new.clone());
         txn.update(table.oid, id, new);
     }
-    let final_rows: Vec<(RowId, Row)> = txn
-        .scan_latest(table.oid)
-        .into_iter()
-        .map(|(id, mut r)| {
-            pad(&mut r, &table);
-            (id, r)
-        })
-        .collect();
     let ck = Checks { env, state };
-    check_foreign_keys(&table, &new_versions.iter().collect::<Vec<_>>(), txn, Some(&final_rows), ck)?;
+    check_foreign_keys(&table, &new_versions.iter().collect::<Vec<_>>(), txn, None, ck)?;
     referential_actions(txn, &table, &old_versions, &new_versions, false, 0, ck)?;
     for (old, new) in old_versions.iter().zip(&new_versions).filter(|_| !trig.after_row.is_empty()) {
         let mut exec = Exec::Write { txn, env, state };
@@ -1027,7 +1059,8 @@ pub fn exec_delete(plan: &DeletePlan, txn: &mut Txn, params: &[Value], env: &Ses
                 }
             }
             if !plan.returning.is_empty() {
-                let r = returning_row(&combined, Some(&row), None, table.columns.len());
+                let width = table.columns.len();
+                let r = returning_row(&combined, Some((&row, system_of(&combined, width))), None, width);
                 returning_rows.push(plan.returning.iter().map(|e| eval(e, &r, &ctx)).collect::<SqlResult<Vec<_>>>()?);
             }
             targets.push((id, row));

@@ -83,10 +83,15 @@ pub(super) const PG_DEPEND: &str =
     "classid:oid, objid:oid, objsubid:int4, refclassid:oid, refobjid:oid, refobjsubid:int4, deptype:\"char\"";
 const PG_POLICY: &str = "oid:oid, polname:name, polrelid:oid, polcmd:\"char\", polpermissive:bool, polroles:oid[], \
     polqual:pg_node_tree, polwithcheck:pg_node_tree";
+const PG_DEFAULT_ACL: &str = "oid:oid, defaclrole:oid, defaclnamespace:oid, defaclobjtype:\"char\", defaclacl:aclitem[]";
+const PG_POLICIES: &str = "schemaname:name, tablename:name, policyname:name, permissive:text, roles:name[], cmd:text, qual:text, \
+    with_check:text";
 const PG_PARTITIONED_TABLE: &str = "partrelid:oid, partstrat:\"char\", partnatts:int2, partdefid:oid, partattrs:int2vector, \
     partclass:oidvector, partcollation:oidvector, partexprs:pg_node_tree";
 const PG_STATISTIC_EXT: &str = "oid:oid, stxrelid:oid, stxname:name, stxnamespace:oid, stxowner:oid, stxkeys:int2vector, \
     stxstattarget:int2, stxkind:\"char\"[], stxexprs:pg_node_tree";
+const PG_CAST: &str = "oid:oid, castsource:oid, casttarget:oid, castfunc:oid, castcontext:\"char\", castmethod:\"char\"";
+const PG_CAST_DATA: &str = include_str!("pg_cast.tsv");
 const PG_PUBLICATION: &str = "oid:oid, pubname:name, pubowner:oid, puballtables:bool, pubinsert:bool, pubupdate:bool, pubdelete:bool, \
     pubtruncate:bool, pubviaroot:bool, pubgencols:\"char\"";
 const PG_PUBLICATION_NAMESPACE: &str = "oid:oid, pnpubid:oid, pnnspid:oid";
@@ -137,8 +142,10 @@ pub static DEFS: &[Def] = &[
     def!("pg_depend", 2608, 'r', PG_DEPEND, super::depend::pg_depend),
     def!("pg_rewrite", 2618, 'r', super::depend::PG_REWRITE, super::depend::pg_rewrite),
     def!("pg_inherits", 2611, 'r', PG_INHERITS, pg_inherits),
+    def!("pg_default_acl", 826, 'r', PG_DEFAULT_ACL, pg_default_acl),
     def!("pg_policy", 3256, 'r', PG_POLICY, empty),
-    def!("pg_statistic_ext", 3381, 'r', PG_STATISTIC_EXT, empty),
+    def!("pg_statistic_ext", 3381, 'r', PG_STATISTIC_EXT, pg_statistic_ext),
+    def!("pg_cast", 2605, 'r', PG_CAST, pg_cast),
     def!("pg_publication", 6104, 'r', PG_PUBLICATION, empty),
     def!("pg_publication_namespace", 6237, 'r', PG_PUBLICATION_NAMESPACE, empty),
     def!("pg_publication_rel", 6106, 'r', PG_PUBLICATION_REL, empty),
@@ -159,14 +166,17 @@ pub static DEFS: &[Def] = &[
     def!("pg_cursors", 12_011, 'v', PG_CURSORS, pg_cursors),
     def!("pg_locks", 12_012, 'v', PG_LOCKS, pg_locks),
     def!("pg_stat_activity", 12_013, 'v', PG_STAT_ACTIVITY, pg_stat_activity),
+    def!("pg_policies", 12_014, 'v', PG_POLICIES, empty),
 ];
 
 fn pg_inherits(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let m = snapshot(ctx);
     Ok(rows_of(PG_INHERITS, |s| {
+        let indexes = m.indexes().into_iter().filter_map(|(_, i)| m.catalog.index_parent(i.oid).map(|p| (i.oid, p)));
         m.tables()
             .into_iter()
             .filter_map(|t| m.catalog.partition_of(t.oid).map(|of| (t.oid, of.parent)))
+            .chain(indexes)
             .map(|(child, parent)| {
                 s.row(vec![
                     ("inhrelid", oid(child)),
@@ -280,6 +290,43 @@ fn pg_partitioned_table(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             ]));
         }
         rows
+    }))
+}
+
+/// `ALTER DEFAULT PRIVILEGES` entries; each ACL lists PUBLIC first, then grantees by role OID.
+fn pg_default_acl(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let m = snapshot(ctx);
+    let role_oid = |name: &str| if name.is_empty() { 0 } else { crate::reg::role_oid(m.catalog, &ctx.env.user, name).unwrap_or(0) };
+    let mut entries: Vec<_> = m.catalog.default_privileges().iter().collect();
+    entries.sort_by(|a, b| (role_oid(&a.role), &a.schema, a.kind).cmp(&(role_oid(&b.role), &b.schema, b.kind)));
+    Ok(rows_of(PG_DEFAULT_ACL, |s| {
+        entries
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                let mut items: Vec<_> = d.items.iter().collect();
+                items.sort_by_key(|x| role_oid(&x.grantee));
+                let acl = items
+                    .iter()
+                    .map(|x| {
+                        let privs: String = "arwdDxtXUCcTsAm"
+                            .chars()
+                            .filter(|c| x.privileges.contains(c))
+                            .map(|c| if x.grantable.contains(&c) { format!("{c}*") } else { c.to_string() })
+                            .collect();
+                        let who = if x.grantee.is_empty() { String::new() } else { crate::roles::acl_name(&x.grantee) };
+                        Value::Text(format!("{who}={privs}/{}", crate::roles::acl_name(&d.role)))
+                    })
+                    .collect();
+                s.row(vec![
+                    ("oid", oid(u32::try_from(70_000 + i).unwrap_or(70_000))),
+                    ("defaclrole", oid(role_oid(&d.role))),
+                    ("defaclnamespace", oid(d.schema.as_deref().map_or(0, |sc| m.namespace(sc)))),
+                    ("defaclobjtype", ch(d.kind)),
+                    ("defaclacl", Value::Array(acl)),
+                ])
+            })
+            .collect()
     }))
 }
 
@@ -473,6 +520,7 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             vec![
                 ("relam", oid(403)),
                 ("relfilenode", oid(if partitioned { 0 } else { idx.oid })),
+                ("relispartition", boolean(m.catalog.index_parent(idx.oid).is_some())),
                 temp_persistence(&t.schema),
                 ("reloptions", crate::reloptions::as_value(&idx.reloptions)),
             ],
@@ -483,6 +531,19 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         let natts = Spec::parse(d.spec).columns().len();
         let extra = if d.kind == 'r' { vec![("relam", oid(2)), ("relfilenode", oid(d.oid))] } else { vec![] };
         rows.push(class_row(&s, d.oid, d.name, ns, d.kind, natts, extra));
+    }
+    // Owners other than the session user.
+    let cols = s.columns();
+    if let (Some(oid_col), Some(owner_col)) = (cols.iter().position(|(n, _)| n == "oid"), cols.iter().position(|(n, _)| n == "relowner")) {
+        for row in &mut rows {
+            let owner = match &row[oid_col] {
+                Value::Oid(o) => m.catalog.owner(*o).and_then(|n| crate::reg::role_oid(m.catalog, &ctx.env.user, n)),
+                _ => None,
+            };
+            if let Some(o) = owner {
+                row[owner_col] = oid(o);
+            }
+        }
     }
     Ok(rows)
 }
@@ -922,19 +983,22 @@ fn pg_index(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     Ok(m.indexes()
         .into_iter()
         .map(|(t, idx)| {
-            let mut keys: Vec<Value> = idx.columns.iter().map(|c| int2(c + 1)).collect();
-            keys.extend(idx.exprs.iter().map(|_| Value::Int2(0)));
-            let collations: Vec<Value> = idx
-                .columns
+            let attnums = idx.key_attnums(t);
+            let mut keys: Vec<Value> = attnums.iter().map(|a| int2(*a)).collect();
+            let collations: Vec<Value> = attnums
                 .iter()
-                .map(|c| oid(t.columns.get(*c).map_or(0, |col| if col.ty.is_string() { DEFAULT_COLLATION_OID } else { 0 })))
-                .chain(idx.exprs.iter().map(|_| oid(0)))
+                .map(|a| {
+                    oid(a
+                        .checked_sub(1)
+                        .and_then(|c| t.columns.get(c))
+                        .map_or(0, |col| if col.ty.is_string() { DEFAULT_COLLATION_OID } else { 0 }))
+                })
                 .collect();
             let nkey = keys.len();
             keys.extend(idx.include.iter().map(|c| int2(c + 1)));
             let n = keys.len();
             let exprs = (!idx.exprs.is_empty()).then(|| {
-                idx.exprs.iter().map(|e| crate::deparse::deparse_expr(m.catalog, t, e).unwrap_or_default()).collect::<Vec<_>>().join(", ")
+                idx.true_exprs(t).map(|e| crate::deparse::deparse_expr(m.catalog, t, e).unwrap_or_default()).collect::<Vec<_>>().join(", ")
             });
             let pred = idx.predicate.as_ref().map(|p| crate::deparse::deparse_predicate(m.catalog, t, p).unwrap_or_default());
             s.row(vec![
@@ -945,6 +1009,7 @@ fn pg_index(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("indisunique", boolean(idx.unique)),
                 ("indnullsnotdistinct", boolean(idx.nulls_not_distinct)),
                 ("indisprimary", boolean(idx.primary)),
+                ("indisvalid", boolean(m.catalog.index_valid(idx.oid))),
                 ("indisclustered", boolean(idx.clustered)),
                 ("indisreplident", boolean(idx.replica)),
                 ("indkey", Value::Array(keys)),
@@ -956,6 +1021,65 @@ fn pg_index(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             ])
         })
         .collect())
+}
+
+/// `pg_statistic_ext`: the extended statistics objects.
+fn pg_statistic_ext(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let cat = ctx.txn.catalog();
+    let s = Spec::parse(PG_STATISTIC_EXT);
+    let all = roles(ctx);
+    Ok(cat
+        .statistics()
+        .map(|st| {
+            let owner = crate::roles::owner_of(cat, ctx.env, st.oid);
+            let owner_oid = all.iter().find(|(_, n, _, _)| *n == owner).map_or(SUPERUSER_OID, |(o, _, _, _)| *o);
+            let exprs = crate::statistics::expressions(cat, st.oid).map(|e| e.join(", "));
+            s.row(vec![
+                ("oid", oid(st.oid)),
+                ("stxrelid", oid(st.table)),
+                ("stxname", name(&st.name)),
+                ("stxnamespace", oid(cat.namespace_oid(&st.schema).unwrap_or(0))),
+                ("stxowner", oid(owner_oid)),
+                ("stxkeys", int2_array(&st.columns.iter().map(|c| c + 1).collect::<Vec<_>>())),
+                ("stxstattarget", st.target.map_or(Value::Null, Value::Int2)),
+                ("stxkind", Value::Array(st.kinds.iter().map(|k| Value::Text(k.to_string())).collect())),
+                ("stxexprs", exprs.map_or(Value::Null, txt)),
+            ])
+        })
+        .collect())
+}
+
+/// `pg_cast`: the builtin casts recorded from Postgres 18 and the ones `CREATE CAST` made.
+fn pg_cast(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let s = Spec::parse(PG_CAST);
+    let mut rows: Vec<Row> = PG_CAST_DATA
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            let n = |i: usize| f.get(i).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+            let c = |i: usize| f.get(i).and_then(|v| v.chars().next()).unwrap_or('e');
+            s.row(vec![
+                ("oid", oid(n(0))),
+                ("castsource", oid(n(1))),
+                ("casttarget", oid(n(2))),
+                ("castfunc", oid(n(3))),
+                ("castcontext", ch(c(4))),
+                ("castmethod", ch(c(5))),
+            ])
+        })
+        .collect();
+    for c in ctx.txn.catalog().casts() {
+        rows.push(s.row(vec![
+            ("oid", oid(c.oid)),
+            ("castsource", oid(c.source.oid())),
+            ("casttarget", oid(c.target.oid())),
+            ("castfunc", oid(c.function.unwrap_or(0))),
+            ("castcontext", ch(c.context)),
+            ("castmethod", ch(c.method)),
+        ]));
+    }
+    Ok(rows)
 }
 
 fn int2_array(attnums: &[usize]) -> Value {
@@ -1187,6 +1311,15 @@ pub fn predefined_role(name: &str) -> Option<u32> {
     })
 }
 
+/// A predefined role's name by OID.
+pub fn predefined_role_name(oid: u32) -> Option<&'static str> {
+    PG_ROLES_DATA.lines().filter(|l| !l.is_empty()).find_map(|l| {
+        let mut f = l.split('\t');
+        let o = f.next()?;
+        (o.parse() == Ok(oid)).then(|| f.next()).flatten()
+    })
+}
+
 /// (oid, name, super, inherit, createrole, createdb, canlogin, replication, bypassrls,
 /// connection limit): the session user, the predefined roles, then created roles.
 fn roles(ctx: &EvalCtx) -> Vec<(u32, String, [bool; 7], i32)> {
@@ -1306,7 +1439,7 @@ fn pg_extension(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("extname", name(&e.name)),
                 ("extnamespace", oid(m.namespace(&e.schema))),
                 ("extversion", txt(e.version.clone())),
-                ("extrelocatable", boolean(true)),
+                ("extrelocatable", boolean(crate::ext_alter::relocatable(&e.name))),
             ]));
         }
         rows
@@ -1546,11 +1679,26 @@ fn pg_cursors(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     }))
 }
 
-/// Advisory locks of every session (other lock types are not tracked).
+/// Relation locks and advisory locks of every session (row locks, which Postgres keeps in
+/// the tuples, are not listed; virtual and transaction ID locks are not tracked).
 fn pg_locks(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let relations = ctx.txn.database().relation_locks();
     let held = ctx.txn.database().advisory().held();
     Ok(rows_of(PG_LOCKS, |s| {
-        held.iter()
+        let relation_rows = relations.iter().map(|l| {
+            s.row(vec![
+                ("locktype", txt("relation")),
+                ("database", oid(5)),
+                ("relation", oid(l.relation)),
+                ("pid", Value::Int4(l.pid)),
+                ("mode", txt(pgmem_storage::locks::table_mode_name(l.mode))),
+                ("granted", boolean(true)),
+                // Postgres takes the weak modes through the backend's fast-path slots.
+                ("fastpath", boolean(l.mode <= crate::lock_levels::ROW_EXCLUSIVE)),
+            ])
+        });
+        let advisory_rows: Vec<Row> = held
+            .iter()
             .map(|l| {
                 s.row(vec![
                     ("locktype", txt("advisory")),
@@ -1564,7 +1712,8 @@ fn pg_locks(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                     ("fastpath", boolean(false)),
                 ])
             })
-            .collect()
+            .collect();
+        relation_rows.chain(advisory_rows).collect()
     }))
 }
 
@@ -1585,4 +1734,12 @@ fn pg_stat_activity(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             ("backend_type", txt("client backend")),
         ])]
     }))
+}
+
+/// Whether Postgres has a builtin `pg_cast` row from type OID `source` to `target`.
+pub fn builtin_cast_exists(source: u32, target: u32) -> bool {
+    PG_CAST_DATA.lines().any(|l| {
+        let mut f = l.split('\t').skip(1);
+        f.next().and_then(|v| v.parse().ok()) == Some(source) && f.next().and_then(|v| v.parse().ok()) == Some(target)
+    })
 }

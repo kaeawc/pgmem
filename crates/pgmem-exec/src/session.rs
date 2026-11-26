@@ -478,7 +478,9 @@ impl Session {
         }
         self.txn_start = self.clock.now_micros();
         self.txid_counter += 1;
-        self.txn = Some(self.db.begin(self.default_isolation));
+        let mut txn = self.db.begin(self.default_isolation);
+        txn.set_backend_pid(self.backend_pid);
+        self.txn = Some(txn);
         let read_only = self.settings.get("default_transaction_read_only").is_some_and(|v| v == "on");
         self.set_read_only(read_only);
         true
@@ -618,13 +620,23 @@ impl Session {
             _ => stmt,
         };
         let catalog = Arc::new(txn.catalog().clone());
-        let binder = Binder::new(&catalog, param_types);
+        // A plain view's query is only analyzed, not planned: lock_levels locks what it reads.
+        let binder = match stmt {
+            Statement::CreateView(cv) if !cv.materialized => Binder::new(&catalog, param_types),
+            _ => Binder::new(&catalog, param_types).with_locker(txn.locker()),
+        };
         let top = Level::new(Scope::default());
         let ctx = Ctx::new(&top);
         crate::roles::check_statement(stmt, &catalog, &env, param_types)?;
+        for (oid, mode) in crate::lock_levels::ddl_locks(stmt, &catalog) {
+            txn.lock_relation(oid, mode);
+        }
         let result = crate::detail_privileges::as_viewer(&catalog, &env, stmt, || {
             crate::statement::exec_statement(stmt, &binder, &ctx, txn, params, &env, &state)
         })?;
+        for (oid, mode) in crate::lock_levels::created_locks(stmt, &catalog, txn.catalog()) {
+            txn.lock_relation(oid, mode);
+        }
         // New relations: their owner (when not the session user) and default privileges.
         let created = match stmt {
             Statement::CreateTable(ct) => Some((&ct.name, 'r')),
@@ -642,6 +654,16 @@ impl Session {
             }
             let schema = rel.schema().to_owned();
             crate::roles::apply_defaults(txn, &env, rel.oid(), &schema, kind);
+            // Serial / identity sequences are created with their table.
+            if let Relation::Table(t) = &rel {
+                let seqs: Vec<(Oid, String)> = txn.catalog().owned_sequences(t).map(|q| (q.oid, q.schema.clone())).collect();
+                for (oid, schema) in seqs {
+                    if role != env.user {
+                        txn.catalog_mut().set_owner(oid, Some(&role));
+                    }
+                    crate::roles::apply_defaults(txn, &env, oid, &schema, 'S');
+                }
+            }
         }
         if let Statement::CreateTable(ct) = stmt
             && ct.options.on_commit != ir::OnCommit::PreserveRows
@@ -1292,7 +1314,7 @@ fn write_command_name(stmt: &Statement) -> Option<&'static str> {
         Statement::CreateView(_) => "CREATE VIEW",
         Statement::RefreshMatview { .. } => "REFRESH MATERIALIZED VIEW",
         Statement::RenameView { .. } => "ALTER VIEW",
-        Statement::RenameIndex { .. } => "ALTER INDEX",
+        Statement::RenameIndex { .. } | Statement::AttachIndexPartition { .. } => "ALTER INDEX",
         Statement::AlterRelOptions { object, .. } => crate::reloptions::alter_tag(*object),
         Statement::AlterSequence { .. } => "ALTER SEQUENCE",
         Statement::CreateFunction(cf) if cf.procedure => "CREATE PROCEDURE",
@@ -1302,6 +1324,12 @@ fn write_command_name(stmt: &Statement) -> Option<&'static str> {
         Statement::CreateTrigger(_) => "CREATE TRIGGER",
         Statement::DropTrigger { .. } => "DROP TRIGGER",
         Statement::RenameTrigger { .. } => "ALTER TRIGGER",
+        Statement::AlterExtension { .. } => "ALTER EXTENSION",
+        Statement::AlterStatistics { .. } => "ALTER STATISTICS",
+        Statement::CreateCast(_) => "CREATE CAST",
+        Statement::CreateStatistics(_) => "CREATE STATISTICS",
+        Statement::DropCast { .. } => "DROP CAST",
+        Statement::DropStatistics { .. } => "DROP STATISTICS",
         Statement::CreateIndex(_) => "CREATE INDEX",
         Statement::CreateSequence(_) => "CREATE SEQUENCE",
         Statement::AlterTable(_) => "ALTER TABLE",

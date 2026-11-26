@@ -134,3 +134,287 @@ id:int4 | val:text
 1 | uno
 2 | TWO
 4 | orphan
+
+# MERGE into a partitioned table: matched rows in every leaf, inserts routed, updates that
+# move rows between partitions, tableoid of the leaf in RETURNING
+statement ok
+CREATE TABLE pev (id int NOT NULL, region text NOT NULL, at date NOT NULL, v int DEFAULT 7, PRIMARY KEY (id, region, at)) PARTITION BY LIST (region)
+
+statement ok
+CREATE TABLE pev_eu PARTITION OF pev FOR VALUES IN ('eu') PARTITION BY RANGE (at)
+
+statement ok
+CREATE TABLE pev_eu_24 PARTITION OF pev_eu FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
+
+statement ok
+CREATE TABLE pev_eu_25 PARTITION OF pev_eu FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')
+
+statement ok
+CREATE TABLE pev_us PARTITION OF pev FOR VALUES IN ('us')
+
+statement ok
+INSERT INTO pev VALUES (1, 'eu', '2024-03-01', 1), (2, 'us', '2024-03-01', 2), (3, 'eu', '2025-03-01', 3)
+
+query rowsort
+MERGE INTO pev t USING (VALUES (1, 'us'), (2, 'us'), (4, 'eu'), (3, 'eu')) s(id, r) ON t.id = s.id WHEN MATCHED AND s.id = 1 THEN UPDATE SET region = s.r, v = 10 WHEN MATCHED AND s.id = 2 THEN UPDATE SET v = 20 WHEN MATCHED AND s.id = 3 THEN DELETE WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.r, '2025-05-05') RETURNING merge_action() AS action, t.tableoid::regclass::text AS part, t.*, old.v AS old_v, new.v AS new_v
+----
+action:text | part:text | id:int4 | region:text | at:date | v:int4 | old_v:int4 | new_v:int4
+UPDATE | pev_us | 1 | us | 2024-03-01 | 10 | 1 | 10
+DELETE | pev_eu_25 | 3 | eu | 2025-03-01 | 3 | 3 | NULL
+UPDATE | pev_us | 2 | us | 2024-03-01 | 20 | 2 | 20
+INSERT | pev_eu_25 | 4 | eu | 2025-05-05 | 7 | NULL | 7
+
+query
+SELECT tableoid::regclass::text AS part, * FROM pev ORDER BY id
+----
+part:text | id:int4 | region:text | at:date | v:int4
+pev_us | 1 | us | 2024-03-01 | 10
+pev_us | 2 | us | 2024-03-01 | 20
+pev_eu_25 | 4 | eu | 2025-05-05 | 7
+
+statement error 23514 no partition of relation "pev" found for row
+MERGE INTO pev t USING (VALUES (9, 'mars')) s(id, r) ON t.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.r, '2025-05-05')
+
+statement error 23514 new row for relation "pev_eu" violates partition constraint
+MERGE INTO pev_eu t USING (VALUES (1)) s(id) ON t.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (9, 'us', '2024-01-01')
+
+statement error 23514 new row for relation "pev_us" violates partition constraint
+MERGE INTO pev_us t USING (VALUES (1)) s(id) ON t.id = s.id WHEN MATCHED THEN UPDATE SET region = 'eu'
+
+statement error 23505 duplicate key value violates unique constraint "pev_us_pkey"
+MERGE INTO pev t USING (VALUES (1)) s(id) ON t.id = s.id WHEN MATCHED THEN UPDATE SET id = 2
+
+query rowsort
+MERGE INTO pev t USING (VALUES (1)) s(id) ON t.id = s.id WHEN NOT MATCHED BY SOURCE THEN DELETE RETURNING merge_action() AS action, t.tableoid::regclass::text AS part, t.id
+----
+action:text | part:text | id:int4
+DELETE | pev_eu_25 | 4
+DELETE | pev_us | 2
+
+query
+SELECT tableoid::regclass::text AS part, * FROM pev ORDER BY id
+----
+part:text | id:int4 | region:text | at:date | v:int4
+pev_us | 1 | us | 2024-03-01 | 10
+
+query
+MERGE INTO stock s USING (VALUES ('a')) AS v(sku) ON s.sku = v.sku WHEN MATCHED THEN UPDATE SET note = 'tableoid' RETURNING s.tableoid::regclass::text AS rel, s.sku
+----
+rel:text | sku:text
+stock | a
+
+# Triggers: the target's statement triggers for every action type listed (BEFORE: INSERT,
+# UPDATE, DELETE; AFTER: DELETE, UPDATE, INSERT), row triggers per row; BEFORE row triggers
+# change NEW or skip the row
+statement ok
+CREATE TABLE tacct (id int PRIMARY KEY, bal int, trail text NOT NULL DEFAULT '')
+
+statement ok
+CREATE TABLE tlog (n serial, what text)
+
+statement ok
+INSERT INTO tacct VALUES (1, 10, ''), (2, 20, ''), (3, 30, '')
+
+statement ok
+CREATE FUNCTION tmark() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF TG_OP = 'DELETE' THEN IF OLD.id = 3 THEN RETURN NULL; END IF; RETURN OLD; END IF; IF NEW.bal < 0 THEN RETURN NULL; END IF; NEW.trail := NEW.trail || TG_OP || ';'; RETURN NEW; END $$
+
+statement ok
+CREATE FUNCTION tlogit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF TG_LEVEL = 'STATEMENT' THEN INSERT INTO tlog (what) VALUES (TG_WHEN || ' ' || TG_OP); ELSIF TG_OP = 'DELETE' THEN INSERT INTO tlog (what) VALUES (concat_ws(' ', TG_NAME, TG_OP, OLD.id)); ELSE INSERT INTO tlog (what) VALUES (concat_ws(' ', TG_NAME, TG_OP, NEW.id, NEW.bal, NEW.trail)); END IF; RETURN NULL; END $$
+
+statement ok
+CREATE TRIGGER b_row BEFORE INSERT OR UPDATE OR DELETE ON tacct FOR EACH ROW EXECUTE FUNCTION tmark()
+
+statement ok
+CREATE TRIGGER a_row AFTER INSERT OR UPDATE OR DELETE ON tacct FOR EACH ROW EXECUTE FUNCTION tlogit()
+
+statement ok
+CREATE TRIGGER a_big AFTER UPDATE ON tacct FOR EACH ROW WHEN (NEW.bal > 100) EXECUTE FUNCTION tlogit()
+
+statement ok
+CREATE TRIGGER b_stmt BEFORE INSERT OR UPDATE OR DELETE ON tacct FOR EACH STATEMENT EXECUTE FUNCTION tlogit()
+
+statement ok
+CREATE TRIGGER a_stmt AFTER INSERT OR UPDATE OR DELETE ON tacct FOR EACH STATEMENT EXECUTE FUNCTION tlogit()
+
+query
+MERGE INTO tacct a USING (VALUES (1, 500)) s(id, d) ON a.id = s.id WHEN MATCHED THEN UPDATE SET bal = a.bal + s.d WHEN NOT MATCHED BY SOURCE AND a.id = 2 THEN DELETE WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.d) RETURNING merge_action() AS action, a.*
+----
+action:text | id:int4 | bal:int4 | trail:text
+UPDATE | 1 | 510 | UPDATE;
+DELETE | 2 | 20 | (empty)
+
+query
+SELECT what FROM tlog ORDER BY n
+----
+what:text
+BEFORE INSERT
+BEFORE UPDATE
+BEFORE DELETE
+a_big UPDATE 1 510 UPDATE;
+a_row UPDATE 1 510 UPDATE;
+a_row DELETE 2
+AFTER DELETE
+AFTER UPDATE
+AFTER INSERT
+
+statement ok
+TRUNCATE tlog
+
+query
+MERGE INTO tacct a USING (VALUES (1, -1), (3, 0), (4, 4), (5, -5)) s(id, d) ON a.id = s.id WHEN MATCHED AND s.id = 3 THEN DELETE WHEN MATCHED THEN UPDATE SET bal = s.d WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.d) RETURNING merge_action() AS action, a.*
+----
+action:text | id:int4 | bal:int4 | trail:text
+INSERT | 4 | 4 | INSERT;
+
+query
+SELECT what FROM tlog ORDER BY n
+----
+what:text
+BEFORE INSERT
+BEFORE UPDATE
+BEFORE DELETE
+a_row INSERT 4 4 INSERT;
+AFTER DELETE
+AFTER UPDATE
+AFTER INSERT
+
+query
+SELECT * FROM tacct ORDER BY id
+----
+id:int4 | bal:int4 | trail:text
+1 | 510 | UPDATE;
+3 | 30 | (empty)
+4 | 4 | INSERT;
+
+statement ok
+TRUNCATE tlog
+
+statement ok
+MERGE INTO tacct a USING (VALUES (9)) s(id) ON a.id = s.id WHEN MATCHED THEN UPDATE SET bal = 0
+
+statement ok
+MERGE INTO tacct a USING (VALUES (1)) s(id) ON a.id = s.id WHEN MATCHED THEN DO NOTHING
+
+query
+SELECT what FROM tlog ORDER BY n
+----
+what:text
+BEFORE UPDATE
+AFTER UPDATE
+
+# UPDATE OF matches the columns of every UPDATE action listed
+statement ok
+CREATE TRIGGER of_trail AFTER UPDATE OF trail ON tacct FOR EACH ROW EXECUTE FUNCTION tlogit()
+
+statement ok
+TRUNCATE tlog
+
+statement ok
+MERGE INTO tacct a USING (VALUES (4, 7)) s(id, d) ON a.id = s.id WHEN MATCHED AND s.d = 0 THEN UPDATE SET trail = 'x' WHEN MATCHED THEN UPDATE SET bal = s.d
+
+statement ok
+MERGE INTO tacct a USING (VALUES (4, 8)) s(id, d) ON a.id = s.id WHEN MATCHED THEN UPDATE SET bal = s.d
+
+query
+SELECT what FROM tlog ORDER BY n
+----
+what:text
+BEFORE UPDATE
+a_row UPDATE 4 7 INSERT;UPDATE;
+of_trail UPDATE 4 7 INSERT;UPDATE;
+AFTER UPDATE
+BEFORE UPDATE
+a_row UPDATE 4 8 INSERT;UPDATE;UPDATE;
+AFTER UPDATE
+
+# Partitioned target: its statement triggers, the leaves' row triggers; a row moving to
+# another partition is deleted from one leaf and inserted into the other
+statement ok
+CREATE TABLE tpart (id int, v int) PARTITION BY RANGE (id)
+
+statement ok
+CREATE TABLE tpart1 PARTITION OF tpart FOR VALUES FROM (0) TO (10)
+
+statement ok
+CREATE TABLE tpart2 PARTITION OF tpart FOR VALUES FROM (10) TO (20)
+
+statement ok
+INSERT INTO tpart VALUES (1, 1), (2, 2)
+
+statement ok
+CREATE FUNCTION tplog() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO tlog (what) VALUES (concat_ws(' ', TG_TABLE_NAME, TG_WHEN, TG_LEVEL, TG_OP)); IF TG_OP = 'DELETE' THEN RETURN OLD; END IF; RETURN NEW; END $$
+
+statement ok
+CREATE FUNCTION tpbump() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.v := NEW.v + 100; RETURN NEW; END $$
+
+statement ok
+CREATE TRIGGER s1 BEFORE INSERT OR UPDATE OR DELETE ON tpart FOR EACH STATEMENT EXECUTE FUNCTION tplog()
+
+statement ok
+CREATE TRIGGER s2 AFTER INSERT OR UPDATE OR DELETE ON tpart FOR EACH STATEMENT EXECUTE FUNCTION tplog()
+
+statement ok
+CREATE TRIGGER l1s BEFORE INSERT OR UPDATE OR DELETE ON tpart1 FOR EACH STATEMENT EXECUTE FUNCTION tplog()
+
+statement ok
+CREATE TRIGGER l1a AFTER INSERT OR UPDATE OR DELETE ON tpart1 FOR EACH ROW EXECUTE FUNCTION tplog()
+
+statement ok
+CREATE TRIGGER l2a AFTER INSERT OR UPDATE OR DELETE ON tpart2 FOR EACH ROW EXECUTE FUNCTION tplog()
+
+statement ok
+CREATE TRIGGER l2b BEFORE INSERT ON tpart2 FOR EACH ROW EXECUTE FUNCTION tpbump()
+
+statement ok
+TRUNCATE tlog
+
+query rowsort
+MERGE INTO tpart t USING (VALUES (1), (2), (13)) s(id) ON t.id = s.id WHEN MATCHED AND s.id = 1 THEN UPDATE SET id = 15 WHEN MATCHED THEN UPDATE SET v = 3 WHEN NOT MATCHED THEN INSERT VALUES (s.id, 0) RETURNING merge_action() AS action, old.tableoid::regclass::text AS old_part, new.tableoid::regclass::text AS new_part, t.*
+----
+action:text | old_part:text | new_part:text | id:int4 | v:int4
+UPDATE | tpart1 | tpart2 | 15 | 101
+UPDATE | tpart1 | tpart1 | 2 | 3
+INSERT | NULL | tpart2 | 13 | 100
+
+query rowsort
+SELECT what FROM tlog
+----
+what:text
+tpart BEFORE STATEMENT INSERT
+tpart BEFORE STATEMENT UPDATE
+tpart1 AFTER ROW DELETE
+tpart2 AFTER ROW INSERT
+tpart1 AFTER ROW UPDATE
+tpart2 AFTER ROW INSERT
+tpart AFTER STATEMENT UPDATE
+tpart AFTER STATEMENT INSERT
+
+query
+SELECT tableoid::regclass::text AS part, * FROM tpart ORDER BY id
+----
+part:text | id:int4 | v:int4
+tpart1 | 2 | 3
+tpart2 | 13 | 100
+tpart2 | 15 | 101
+
+statement error 23514 new row for relation "tpart1" violates partition constraint
+CREATE FUNCTION tpshift() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.id := NEW.id + 10; RETURN NEW; END $$; CREATE TRIGGER l1shift BEFORE INSERT ON tpart1 FOR EACH ROW EXECUTE FUNCTION tpshift(); MERGE INTO tpart t USING (VALUES (5)) s(id) ON t.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (s.id, 0)
+
+# old / new carry system columns in every DML statement's RETURNING
+query
+INSERT INTO tacct VALUES (50, 0) RETURNING old.tableoid::regclass::text AS old_rel, new.tableoid::regclass::text AS new_rel, old.ctid IS NULL AS no_old
+----
+old_rel:text | new_rel:text | no_old:bool
+NULL | tacct | t
+
+query
+UPDATE tacct SET bal = 1 WHERE id = 50 RETURNING old.tableoid::regclass::text AS old_rel, new.tableoid::regclass::text AS new_rel
+----
+old_rel:text | new_rel:text
+tacct | tacct
+
+query
+DELETE FROM tacct WHERE id = 50 RETURNING old.tableoid::regclass::text AS old_rel, new.tableoid::regclass::text AS new_rel, new.xmin IS NULL AS no_new
+----
+old_rel:text | new_rel:text | no_new:bool
+tacct | NULL | t

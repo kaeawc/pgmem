@@ -270,6 +270,103 @@ SELECT count(*) FROM pg_class WHERE relname LIKE 'orders_p%'
 count:int8
 0
 
+# Partitioned indexes: CREATE INDEX ON ONLY, ALTER INDEX ATTACH PARTITION, validity.
+statement ok
+CREATE TABLE pidx (a int, b int) PARTITION BY RANGE (a)
+
+statement ok
+CREATE TABLE pidx1 PARTITION OF pidx FOR VALUES FROM (0) TO (10)
+
+statement ok
+CREATE TABLE pidx2 PARTITION OF pidx FOR VALUES FROM (10) TO (20)
+
+statement ok
+CREATE INDEX pidx_b ON ONLY pidx (b)
+
+query
+SELECT c.relname, c.relkind, c.relispartition, i.indisvalid FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid WHERE c.relname LIKE 'pidx%' ORDER BY 1
+----
+relname:name | relkind:char | relispartition:bool | indisvalid:bool
+pidx_b | I | f | f
+
+query
+SELECT pg_get_indexdef('pidx_b'::regclass)
+----
+pg_get_indexdef:text
+CREATE INDEX pidx_b ON ONLY public.pidx USING btree (b)
+
+statement ok
+CREATE INDEX pidx1_b ON pidx1 (b)
+
+statement ok
+ALTER INDEX pidx_b ATTACH PARTITION pidx1_b
+
+query
+SELECT inhrelid::regclass, inhparent::regclass, inhseqno FROM pg_inherits WHERE inhparent = 'pidx_b'::regclass
+----
+inhrelid:regclass | inhparent:regclass | inhseqno:int4
+pidx1_b | pidx_b | 1
+
+statement ok
+CREATE INDEX pidx2_a ON pidx2 (a)
+
+statement error 42P17 cannot attach index "pidx2_a" as a partition of index "pidx_b"
+ALTER INDEX pidx_b ATTACH PARTITION pidx2_a
+
+statement ok
+CREATE INDEX pidx2_b ON pidx2 (b)
+
+statement ok
+ALTER INDEX pidx_b ATTACH PARTITION pidx2_b
+
+query
+SELECT c.relname, c.relispartition, i.indisvalid FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid WHERE c.relname LIKE 'pidx%' ORDER BY 1
+----
+relname:name | relispartition:bool | indisvalid:bool
+pidx1_b | t | t
+pidx2_a | f | t
+pidx2_b | t | t
+pidx_b | f | t
+
+query
+SELECT relid, parentrelid, isleaf, level FROM pg_partition_tree('pidx_b')
+----
+relid:regclass | parentrelid:regclass | isleaf:bool | level:int4
+pidx_b | NULL | f | 0
+pidx1_b | pidx_b | t | 1
+pidx2_b | pidx_b | t | 1
+
+statement error 2BP01 cannot drop index pidx1_b because index pidx_b requires it
+DROP INDEX pidx1_b
+
+statement error 42809 ALTER action ATTACH PARTITION cannot be performed on relation "pidx1_b"
+ALTER INDEX pidx1_b ATTACH PARTITION pidx2_a
+
+statement ok
+CREATE INDEX ON pidx (a)
+
+query
+SELECT c.relname, (SELECT inhparent::regclass::text FROM pg_inherits WHERE inhrelid = c.oid) FROM pg_class c WHERE c.relname LIKE 'pidx%a%' AND c.relkind IN ('i', 'I') ORDER BY 1
+----
+relname:name | inhparent:text
+pidx1_a_idx | pidx_a_idx
+pidx2_a | pidx_a_idx
+pidx_a_idx | NULL
+
+statement ok
+DROP INDEX pidx_b
+
+query
+SELECT relname FROM pg_class WHERE relname LIKE 'pidx%' AND relkind IN ('i', 'I') ORDER BY 1
+----
+relname:name
+pidx1_a_idx
+pidx2_a
+pidx_a_idx
+
+statement ok
+DROP TABLE pidx
+
 # RETURNING of rows an UPDATE ... FROM moves to another partition sees the FROM tables.
 statement ok
 CREATE TABLE mv (id int, v text) PARTITION BY RANGE (id)

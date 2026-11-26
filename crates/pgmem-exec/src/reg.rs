@@ -14,6 +14,9 @@ const NAMESPACES: &[(&str, u32)] = &[
     ("information_schema", crate::catalog_views::INFORMATION_SCHEMA_NAMESPACE_OID),
 ];
 
+/// The session user's OID (the bootstrap superuser).
+const BOOTSTRAP_ROLE_OID: u32 = 10;
+
 /// Splits a possibly qualified, possibly quoted name (`public."My Table"`) into folded parts.
 pub fn parse_qualified(s: &str) -> SqlResult<Vec<String>> {
     let invalid = || SqlError::new(code::INVALID_NAME, "invalid name syntax");
@@ -67,7 +70,7 @@ fn namespace_name(oid: u32) -> Option<&'static str> {
 }
 
 /// The output text of a reg* OID: the object's name, or the number when there is none.
-pub fn reg_name(kind: RegKind, oid: u32, catalog: &Catalog) -> String {
+pub fn reg_name(kind: RegKind, oid: u32, catalog: &Catalog, user: &str) -> String {
     if oid == 0 {
         return "-".to_owned();
     }
@@ -78,6 +81,7 @@ pub fn reg_name(kind: RegKind, oid: u32, catalog: &Catalog) -> String {
             .or_else(|| crate::catalog_views::system_relation_by_oid(oid).map(system_display)),
         RegKind::Type => Type::from_oid(oid).map(|t| t.name()),
         RegKind::Namespace => namespace_name(oid).map(quote_ident).or_else(|| catalog.schema_by_oid(oid).map(|sc| quote_ident(&sc.name))),
+        RegKind::Role => role_name(catalog, oid, user),
         RegKind::Proc => proc_name(catalog, oid),
         RegKind::Procedure => procedure_name(catalog, oid),
     };
@@ -152,6 +156,38 @@ fn lookup_namespace(s: &str, catalog: &Catalog) -> SqlResult<Value> {
     Ok(Value::Reg(RegKind::Namespace, oid, quote_ident(name)))
 }
 
+/// `regrolein`: a role name (one part; quoting preserves case).
+fn lookup_role(s: &str, catalog: &Catalog, user: &str) -> SqlResult<Value> {
+    let parts = parse_qualified(s)?;
+    let [name] = parts.as_slice() else {
+        return Err(SqlError::new(code::INVALID_NAME, "invalid name syntax"));
+    };
+    let oid = role_oid(catalog, user, name);
+    let oid = oid.ok_or_else(|| SqlError::new(code::UNDEFINED_OBJECT, format!("role \"{name}\" does not exist")))?;
+    Ok(Value::Reg(RegKind::Role, oid, quote_ident(name)))
+}
+
+/// A role's OID by name (the session user is the bootstrap superuser).
+pub fn role_oid(catalog: &Catalog, user: &str, name: &str) -> Option<u32> {
+    if name == user {
+        return Some(BOOTSTRAP_ROLE_OID);
+    }
+    catalog.role(name).map(|r| r.oid).or_else(|| crate::catalog_views::predefined_role(name))
+}
+
+/// `regroleout`: the role's name, or its number once it is gone.
+fn role_name(catalog: &Catalog, oid: u32, user: &str) -> Option<String> {
+    if oid == BOOTSTRAP_ROLE_OID {
+        return Some(quote_ident(user));
+    }
+    let name = catalog
+        .roles()
+        .find(|r| r.oid == oid)
+        .map(|r| r.name.clone())
+        .or_else(|| crate::catalog_views::predefined_role_name(oid).map(str::to_owned))?;
+    Some(quote_ident(&name))
+}
+
 /// The functions (user ones and builtins) a possibly qualified name finds: (oid, argument
 /// type OIDs).
 fn functions_named(parts: &[String], catalog: &Catalog) -> Vec<(u32, Vec<u32>)> {
@@ -180,7 +216,7 @@ fn lookup_proc(s: &str, catalog: &Catalog) -> SqlResult<Value> {
     let parts = parse_qualified(s)?;
     match functions_named(&parts, catalog).as_slice() {
         [] => Err(no_function(s)),
-        [(oid, _)] => Ok(Value::Reg(RegKind::Proc, *oid, reg_name(RegKind::Proc, *oid, catalog))),
+        [(oid, _)] => Ok(Value::Reg(RegKind::Proc, *oid, reg_name(RegKind::Proc, *oid, catalog, ""))),
         _ => Err(SqlError::new(code::AMBIGUOUS_FUNCTION, format!("more than one function named \"{}\"", s.trim()))),
     }
 }
@@ -225,7 +261,7 @@ fn lookup_procedure(s: &str, catalog: &Catalog) -> SqlResult<Value> {
         }
     }
     let found = functions_named(&parts, catalog).into_iter().find(|(_, a)| *a == args).ok_or_else(|| no_function(s))?;
-    Ok(Value::Reg(RegKind::Procedure, found.0, reg_name(RegKind::Procedure, found.0, catalog)))
+    Ok(Value::Reg(RegKind::Procedure, found.0, reg_name(RegKind::Procedure, found.0, catalog, "")))
 }
 
 /// `regprocout`: the function's name, schema-qualified when the name alone is ambiguous.
@@ -257,8 +293,8 @@ fn procedure_name(catalog: &Catalog, oid: u32) -> Option<String> {
 }
 
 /// Converts a value to a reg* type (`'t'::regclass`, `16384::regclass`, `oid::regtype`).
-pub fn to_reg(v: Value, kind: RegKind, catalog: &Catalog) -> SqlResult<Value> {
-    let from_oid = |oid: u32| Value::Reg(kind, oid, reg_name(kind, oid, catalog));
+pub fn to_reg(v: Value, kind: RegKind, catalog: &Catalog, user: &str) -> SqlResult<Value> {
+    let from_oid = |oid: u32| Value::Reg(kind, oid, reg_name(kind, oid, catalog, user));
     match v {
         Value::Null => Ok(Value::Null),
         Value::Oid(o) | Value::Reg(_, o, _) => Ok(from_oid(o)),
@@ -279,6 +315,7 @@ pub fn to_reg(v: Value, kind: RegKind, catalog: &Catalog) -> SqlResult<Value> {
                 RegKind::Class => lookup_class(&s, catalog),
                 RegKind::Type => lookup_type(&s, catalog),
                 RegKind::Namespace => lookup_namespace(&s, catalog),
+                RegKind::Role => lookup_role(&s, catalog, user),
                 RegKind::Proc => lookup_proc(&s, catalog),
                 RegKind::Procedure => lookup_procedure(&s, catalog),
             }

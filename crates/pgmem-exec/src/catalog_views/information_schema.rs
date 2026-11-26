@@ -702,8 +702,11 @@ fn table_privilege_rows(ctx: &EvalCtx, public_visible: bool) -> SqlResult<Vec<Ro
                 rows.push(row(&owner, &owner, &schema, &rel, p, true));
             }
         }
-        for g in
-            m.catalog.grants().iter().filter(|g| g.object == pgmem_catalog::GrantObject::Relation(oid) && visible(&g.grantor, &g.grantee))
+        for g in m
+            .catalog
+            .grants()
+            .iter()
+            .filter(|g| g.object == pgmem_catalog::GrantObject::Relation(oid) && g.grantee != owner && visible(&g.grantor, &g.grantee))
         {
             for c in "arwdDxt".chars().filter(|c| g.privileges.contains(c)) {
                 rows.push(row(&g.grantor, &g.grantee, &schema, &rel, crate::roles::privilege_name(c), g.grantable.contains(&c)));
