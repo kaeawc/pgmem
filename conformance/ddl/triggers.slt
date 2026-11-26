@@ -1,0 +1,77 @@
+# Triggers: pg_get_triggerdef function qualification, ALTER TRIGGER RENAME, ENABLE / DISABLE modes.
+
+statement ok
+CREATE SCHEMA app; CREATE SCHEMA "Odd s"
+
+statement ok
+CREATE FUNCTION app.touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$; CREATE FUNCTION public.pt() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$; CREATE FUNCTION "Odd s"."My F"() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$
+
+statement ok
+CREATE TABLE app.t (id int)
+
+statement ok
+CREATE TRIGGER tr BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION app.touch(); CREATE TRIGGER tr2 BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION public.pt(); CREATE TRIGGER tr3 BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION "Odd s"."My F"()
+
+query
+SELECT tgname, pg_get_triggerdef(oid), pg_get_triggerdef(oid, true) FROM pg_trigger WHERE tgrelid = 'app.t'::regclass ORDER BY 1
+----
+tgname:name | pg_get_triggerdef:text | pg_get_triggerdef:text
+tr | CREATE TRIGGER tr BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION app.touch() | CREATE TRIGGER tr BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION app.touch()
+tr2 | CREATE TRIGGER tr2 BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION pt() | CREATE TRIGGER tr2 BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION pt()
+tr3 | CREATE TRIGGER tr3 BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION "Odd s"."My F"() | CREATE TRIGGER tr3 BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION "Odd s"."My F"()
+
+statement ok
+SET search_path = app, public
+
+query
+SELECT tgname, pg_get_triggerdef(oid), pg_get_triggerdef(oid, true) FROM pg_trigger WHERE tgrelid = 'app.t'::regclass ORDER BY 1
+----
+tgname:name | pg_get_triggerdef:text | pg_get_triggerdef:text
+tr | CREATE TRIGGER tr BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION touch() | CREATE TRIGGER tr BEFORE UPDATE ON t FOR EACH ROW EXECUTE FUNCTION touch()
+tr2 | CREATE TRIGGER tr2 BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION pt() | CREATE TRIGGER tr2 BEFORE UPDATE ON t FOR EACH ROW EXECUTE FUNCTION pt()
+tr3 | CREATE TRIGGER tr3 BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION "Odd s"."My F"() | CREATE TRIGGER tr3 BEFORE UPDATE ON t FOR EACH ROW EXECUTE FUNCTION "Odd s"."My F"()
+
+statement ok
+ALTER TRIGGER tr ON app.t RENAME TO tr_new
+
+statement ok
+ALTER TABLE app.t DISABLE TRIGGER tr2; ALTER TABLE app.t ENABLE REPLICA TRIGGER tr3; ALTER TABLE app.t ENABLE ALWAYS TRIGGER tr_new
+
+query
+SELECT tgname, tgenabled FROM pg_trigger WHERE tgrelid = 'app.t'::regclass ORDER BY 1
+----
+tgname:name | tgenabled:char
+tr2 | D
+tr3 | R
+tr_new | A
+
+statement ok
+ALTER TABLE app.t DISABLE TRIGGER USER
+
+query
+SELECT tgname, tgenabled FROM pg_trigger WHERE tgrelid = 'app.t'::regclass ORDER BY 1
+----
+tgname:name | tgenabled:char
+tr2 | D
+tr3 | D
+tr_new | D
+
+statement ok
+ALTER TABLE app.t ENABLE TRIGGER ALL
+
+query
+SELECT tgname, tgenabled FROM pg_trigger WHERE tgrelid = 'app.t'::regclass ORDER BY 1
+----
+tgname:name | tgenabled:char
+tr2 | O
+tr3 | O
+tr_new | O
+
+statement error 42704 trigger "nope" for table "t" does not exist
+ALTER TRIGGER nope ON app.t RENAME TO x
+
+statement error 42710 trigger "tr3" for relation "t" already exists
+ALTER TRIGGER tr2 ON app.t RENAME TO tr3
+
+statement error 42704 trigger "nope" for table "t" does not exist
+ALTER TABLE app.t ENABLE TRIGGER nope

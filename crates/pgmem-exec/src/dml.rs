@@ -32,12 +32,12 @@ struct Triggers {
 }
 
 impl Triggers {
-    fn load(txn: &Txn, table: &TableDef, event: Event, updated: Option<&[String]>) -> Triggers {
+    fn load(txn: &Txn, table: &TableDef, event: Event, updated: Option<&[String]>, env: &SessionEnv) -> Triggers {
         Triggers {
-            before_row: triggers::load(txn, table, event, TriggerTiming::Before, true, updated),
-            after_row: triggers::load(txn, table, event, TriggerTiming::After, true, updated),
-            before_stmt: triggers::load(txn, table, event, TriggerTiming::Before, false, updated),
-            after_stmt: triggers::load(txn, table, event, TriggerTiming::After, false, updated),
+            before_row: triggers::load(txn, table, event, TriggerTiming::Before, true, updated, env),
+            after_row: triggers::load(txn, table, event, TriggerTiming::After, true, updated, env),
+            before_stmt: triggers::load(txn, table, event, TriggerTiming::Before, false, updated, env),
+            after_stmt: triggers::load(txn, table, event, TriggerTiming::After, false, updated, env),
         }
     }
 
@@ -632,7 +632,7 @@ pub(crate) fn insert_preview(
 pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &SessionEnv, state: &StatementState) -> SqlResult<DmlResult> {
     let table = Arc::clone(&plan.rules.table);
     let width = table.columns.len();
-    let trig = Triggers::load(txn, &table, Event::Insert, None);
+    let trig = Triggers::load(txn, &table, Event::Insert, None, env);
     let is_partition = txn.catalog().partition_of(table.oid).is_some();
     trig.statement(TriggerTiming::Before, &table, Event::Insert, txn, env, state)?;
     // Phase 1: compute rows (reads only).
@@ -865,7 +865,7 @@ fn matching_rows(
 pub fn exec_update(plan: &UpdatePlan, txn: &mut Txn, params: &[Value], env: &SessionEnv, state: &StatementState) -> SqlResult<DmlResult> {
     let table = Arc::clone(&plan.rules.table);
     let set_columns: Vec<String> = plan.assignments.iter().map(|(slot, _)| table.columns[*slot].name.clone()).collect();
-    let trig = Triggers::load(txn, &table, Event::Update, Some(&set_columns));
+    let trig = Triggers::load(txn, &table, Event::Update, Some(&set_columns), env);
     let is_partition = txn.catalog().partition_of(table.oid).is_some();
     trig.statement(TriggerTiming::Before, &table, Event::Update, txn, env, state)?;
     let mut changes: Vec<(RowId, Row, Row)> = Vec::new();
@@ -967,7 +967,7 @@ pub fn exec_update(plan: &UpdatePlan, txn: &mut Txn, params: &[Value], env: &Ses
 
 pub fn exec_delete(plan: &DeletePlan, txn: &mut Txn, params: &[Value], env: &SessionEnv, state: &StatementState) -> SqlResult<DmlResult> {
     let table = Arc::clone(&plan.table);
-    let trig = Triggers::load(txn, &table, Event::Delete, None);
+    let trig = Triggers::load(txn, &table, Event::Delete, None, env);
     trig.statement(TriggerTiming::Before, &table, Event::Delete, txn, env, state)?;
     let mut targets = Vec::new();
     let mut returning_rows = Vec::new();

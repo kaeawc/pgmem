@@ -993,7 +993,7 @@ fn target_view_columns(stmt: &ir::Statement, catalog: &Catalog) -> Option<Vec<(O
     let Ok(Some(Relation::View(v))) = catalog.find_relation(name) else { return None };
     // The executor runs INSTEAD OF row triggers rather than writing the base table.
     let instead = catalog.table_triggers(v.oid).iter().any(|t| {
-        t.enabled
+        t.enabled != 'D'
             && t.timing == pgmem_catalog::TriggerTiming::InsteadOf
             && match stmt {
                 ir::Statement::Insert(_) => t.insert,
