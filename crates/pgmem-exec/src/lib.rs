@@ -18,6 +18,7 @@ pub mod eval;
 mod extensions;
 pub mod funcs;
 pub mod functions;
+pub mod lock_levels;
 mod hashorder;
 mod inherit;
 pub mod partition;

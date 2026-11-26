@@ -11,6 +11,10 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - Static Linux binaries (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) on each release.
 - `cargo binstall pgmem` installs the prebuilt binary from the GitHub release.
 - `pg_get_keywords()` returns PostgreSQL 18's keyword list (word, catcode, barelabel, catdesc, baredesc).
+- `pg_locks` lists relation locks: the ones queries (with the indexes the planner opens), DML,
+  `LOCK TABLE` and DDL take, at PostgreSQL's lock level for each statement and ALTER TABLE
+  subcommand. They are held to the end of the transaction (or released by `ROLLBACK TO`) and
+  conflict with `LOCK ... NOWAIT` in other sessions.
 - Table inheritance (part of #141): `CREATE TABLE ... INHERITS (parent, ...)` merges columns like PostgreSQL (its NOTICEs, type / collation / default conflict errors) and inherits CHECK and NOT NULL constraints and defaults (`CHECK ... NO INHERIT` excepted); scans of a parent include its children (with their `tableoid`) unless `ONLY` is given (`parent*` too), `UPDATE`, `DELETE` and `TRUNCATE` recurse unless `ONLY`, and `INSERT` stays in the named table. `ALTER TABLE` `ADD` / `DROP` / `RENAME COLUMN`, `ALTER COLUMN TYPE`, `SET` / `DROP DEFAULT`, `SET` / `DROP NOT NULL` and `ADD` / `DROP` / `RENAME CONSTRAINT` recurse with PostgreSQL's rules and errors (inherited columns and constraints cannot be dropped or renamed in a child), `ALTER TABLE ... INHERIT / NO INHERIT` checks compatibility, and `DROP TABLE` of a parent needs `CASCADE`. `pg_inherits`, `pg_class.relhassubclass`, `pg_attribute.attislocal` / `attinhcount`, `pg_constraint.conislocal` / `coninhcount` / `connoinherit` and `pg_depend` report it; views print `FROM ONLY`. Not yet: `NOT NULL ... NO INHERIT`, MERGE into a parent.
 
 ### Fixed
@@ -45,6 +49,8 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - UNION / INTERSECT / EXCEPT and `SELECT DISTINCT` without ORDER BY return rows in PostgreSQL's
   order (sorted, or hash-table order, as its planner picks) for inputs of constants and VALUES
   lists, instead of first-seen order. Table inputs keep first-seen order.
+- `LOCK TABLE` locks a partitioned table's partitions (not with `ONLY`) and a view's base
+  relations, and refuses sequences and indexes (`42809 cannot lock relation`).
 
 ### Changed
 

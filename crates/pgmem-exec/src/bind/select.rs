@@ -247,8 +247,13 @@ impl Binder<'_> {
         locking: &[ir::LockClause],
         ctx: &Ctx,
     ) -> SqlResult<(BoundQuery, usize)> {
-        // FROM
-        let (mut rel, scope) = self.bind_from(&s.from, ctx)?;
+        // FROM (the tables FOR UPDATE / SHARE applies to take ROW SHARE locks)
+        let (mut rel, scope) = if locking.is_empty() {
+            self.bind_from(&s.from, ctx)?
+        } else {
+            let targets = locking.iter().flat_map(|l| l.of.iter().map(|n| n.base().to_owned())).collect();
+            self.with_row_share(Some(targets), || self.bind_from(&s.from, ctx))?
+        };
         let lock_junk = lock_targets(&scope, locking)?;
         if let Some(l) = locking.first() {
             let what = if !matches!(s.distinct, ir::Distinct::All) {
@@ -1052,6 +1057,7 @@ impl Binder<'_> {
             )
             .with_hint("Use the REFRESH MATERIALIZED VIEW command.")),
             Some(Relation::Table(def)) => {
+                self.lock_table_and_indexes(&def, self.read_lock_mode(&qualifier));
                 let mut cols = Vec::new();
                 let mut slots = Vec::new();
                 let mut missing = Vec::new();
@@ -1078,6 +1084,8 @@ impl Binder<'_> {
                 Ok((Rel::Scan { table: def.oid, slots, missing, system: true, inherit: !only }, Scope::from_cols(cols)))
             }
             Some(Relation::View(view)) => {
+                let mode = self.read_lock_mode(&qualifier);
+                self.lock(view.oid, mode);
                 let top = Level::new(Scope::default());
                 let vctx = Ctx::new(&top);
                 // The view's query runs with its owner's privileges.
@@ -1100,6 +1108,7 @@ impl Binder<'_> {
                 Ok((bound.rel, Scope::from_cols(cols)))
             }
             Some(Relation::Sequence(seq)) => {
+                self.lock(seq.oid, self.read_lock_mode(&qualifier));
                 // SELECT * FROM seq: last_value, log_cnt, is_called.
                 let cols = vec![
                     ScopeCol::new(Some(qualifier.clone()), "last_value", Type::Int8),
@@ -1128,6 +1137,9 @@ impl Binder<'_> {
 
     fn bind_virtual(&self, schema: &str, name: &str, qualifier: &str, alias: Option<&ir::TableAlias>) -> SqlResult<(Rel, Scope)> {
         let view = crate::catalog_views::lookup(schema, name).ok_or_else(|| SqlError::undefined_table(&format!("{schema}.{name}")))?;
+        if let Some(def) = crate::catalog_views::system_relation(Some(schema), name) {
+            self.lock(def.oid, self.read_lock_mode(qualifier));
+        }
         let mut cols: Vec<ScopeCol> = view.columns.into_iter().map(|(n, t)| ScopeCol::new(Some(qualifier.to_owned()), n, t)).collect();
         if let Some(a) = alias {
             apply_column_aliases(&mut cols, &a.columns, &a.name)?;
