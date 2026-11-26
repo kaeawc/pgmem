@@ -103,7 +103,18 @@ fn create_from_query(
     let oid = txn.catalog_mut().alloc_oid();
     let matview = matview
         .then(|| Box::new(MatView { query: query.clone(), search_path: binder.catalog.resolved_search_path(), populated: with_data }));
-    let def = TableDef { oid, schema, name: base, columns, constraints: Vec::new(), indexes: Vec::new(), matview, unlogged, reloptions };
+    let def = TableDef {
+        oid,
+        schema,
+        name: base,
+        columns,
+        constraints: Vec::new(),
+        indexes: Vec::new(),
+        matview,
+        unlogged,
+        replident: 'd',
+        reloptions,
+    };
     txn.catalog_mut().create_table(def)?;
     txn.created_table(oid);
     let count = rows.len();
