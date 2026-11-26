@@ -203,6 +203,7 @@ pub(crate) fn lower_create_table(ct: sq::CreateTable) -> SqlResult<CreateTable> 
         likes: Vec::new(),
         column_names: crate::take_ctas_columns(name.base()),
         partition_by: ct.partition_by.map(|e| partition_spec(*e)).transpose()?,
+        reloptions: with_options(&ct.table_options)?,
         partition_of: match (&ct.partition_of, ct.for_values) {
             (Some(parent), Some(bound)) => Some((object_name(parent)?, partition_bound(bound)?)),
             (Some(_), None) => return Err(SqlError::syntax("syntax error at end of input")),
@@ -270,9 +271,11 @@ fn like_clause(spec: &str, position: usize) -> SqlResult<pgmem_ir::LikeClause> {
 
 pub(crate) fn lower_create_view(cv: sq::CreateView) -> SqlResult<CreateView> {
     let name = object_name(&cv.name)?;
-    let (check_option, with_data) = crate::take_view_options(name.base());
+    let (check_option, check_local, with_data) = crate::take_view_options(name.base());
     Ok(CreateView {
         check_option,
+        check_local,
+        reloptions: with_options(&cv.options)?,
         with_data,
         name,
         or_replace: cv.or_replace,
@@ -293,6 +296,7 @@ pub(crate) fn lower_create_index(ci: sq::CreateIndex) -> SqlResult<CreateIndex> 
         concurrently: ci.concurrently,
         predicate: ci.predicate.map(lower_expr).transpose()?,
         nulls_not_distinct: ci.nulls_distinct == Some(false),
+        reloptions: ci.with.iter().map(index_rel_option).collect::<SqlResult<Vec<_>>>()?,
         method: ci.using.map(|u| match u {
             sq::IndexType::Custom(i) => ident(&i),
             other => other.to_string().to_lowercase(),
@@ -460,4 +464,79 @@ pub(crate) fn lower_alter_table(at: sq::AlterTable) -> SqlResult<AlterTable> {
         }
     }
     Ok(AlterTable { name: object_name(&at.name)?, if_exists: at.if_exists, actions })
+}
+
+/// The `WITH (...)` storage parameters of a CREATE TABLE / VIEW.
+fn with_options(o: &sq::CreateTableOptions) -> SqlResult<Vec<pgmem_ir::RelOption>> {
+    match o {
+        sq::CreateTableOptions::With(v) => v.iter().map(rel_option).collect(),
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// A storage parameter name: `name` or `namespace.name`, folded like identifiers.
+fn rel_option_name(name: &sq::ObjectName) -> SqlResult<(Option<String>, String)> {
+    let parts =
+        name.0.iter().map(|p| p.as_ident().map(ident).ok_or_else(|| SqlError::syntax("syntax error"))).collect::<SqlResult<Vec<_>>>()?;
+    match <[String; 1]>::try_from(parts) {
+        Ok([n]) => Ok((None, n)),
+        Err(parts) => match <[String; 2]>::try_from(parts) {
+            Ok([ns, n]) => Ok((Some(ns), n)),
+            Err(_) => Err(SqlError::syntax("syntax error")),
+        },
+    }
+}
+
+/// A storage parameter's value as written: numbers and strings as their text, a bare word as
+/// itself, `true` / `false` as such.
+fn rel_option_value(e: &sq::Expr) -> SqlResult<String> {
+    match e {
+        sq::Expr::Value(v) => match &v.value {
+            sq::Value::Number(n, _) => Ok(n.clone()),
+            sq::Value::SingleQuotedString(s) => Ok(s.clone()),
+            sq::Value::Boolean(b) => Ok(b.to_string()),
+            _ => Err(SqlError::syntax("syntax error")),
+        },
+        sq::Expr::Identifier(i) => Ok(ident(i)),
+        sq::Expr::UnaryOp { op: sq::UnaryOperator::Minus, expr } => Ok(format!("-{}", rel_option_value(expr)?)),
+        sq::Expr::UnaryOp { op: sq::UnaryOperator::Plus, expr } => rel_option_value(expr),
+        _ => Err(SqlError::syntax("syntax error")),
+    }
+}
+
+/// One `name [= value]` element of a table / view / ALTER option list.
+pub(crate) fn rel_option(o: &sq::SqlOption) -> SqlResult<pgmem_ir::RelOption> {
+    match o {
+        sq::SqlOption::KeyValue { key, value } => {
+            let (namespace, name) = rel_option_name(key)?;
+            Ok(pgmem_ir::RelOption { namespace, name, value: Some(rel_option_value(value)?) })
+        }
+        sq::SqlOption::Ident(key) => {
+            let (namespace, name) = rel_option_name(key)?;
+            Ok(pgmem_ir::RelOption { namespace, name, value: None })
+        }
+        _ => Err(SqlError::syntax("syntax error")),
+    }
+}
+
+/// An element of CREATE INDEX's `WITH (...)` list, which sqlparser reads as expressions.
+fn index_rel_option(e: &sq::Expr) -> SqlResult<pgmem_ir::RelOption> {
+    match e {
+        sq::Expr::BinaryOp { left, op: sq::BinaryOperator::Eq, right } => {
+            let (namespace, name) = expr_option_name(left)?;
+            Ok(pgmem_ir::RelOption { namespace, name, value: Some(rel_option_value(right)?) })
+        }
+        other => {
+            let (namespace, name) = expr_option_name(other)?;
+            Ok(pgmem_ir::RelOption { namespace, name, value: None })
+        }
+    }
+}
+
+fn expr_option_name(e: &sq::Expr) -> SqlResult<(Option<String>, String)> {
+    match e {
+        sq::Expr::Identifier(i) => Ok((None, ident(i))),
+        sq::Expr::CompoundIdentifier(p) if p.len() == 2 => Ok((Some(ident(&p[0])), ident(&p[1]))),
+        _ => Err(SqlError::syntax("syntax error")),
+    }
 }
