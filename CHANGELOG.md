@@ -11,6 +11,10 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - Static Linux binaries (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) on each release.
 - `cargo binstall pgmem` installs the prebuilt binary from the GitHub release.
 - `pg_get_keywords()` returns PostgreSQL 18's keyword list (word, catcode, barelabel, catdesc, baredesc).
+- `pg_locks` lists relation locks: the ones queries (with the indexes the planner opens), DML,
+  `LOCK TABLE` and DDL take, at PostgreSQL's lock level for each statement and ALTER TABLE
+  subcommand. They are held to the end of the transaction (or released by `ROLLBACK TO`) and
+  conflict with `LOCK ... NOWAIT` in other sessions.
 
 ### Fixed
 
@@ -43,6 +47,8 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - UNION / INTERSECT / EXCEPT and `SELECT DISTINCT` without ORDER BY return rows in PostgreSQL's
   order (sorted, or hash-table order, as its planner picks) for inputs of constants and VALUES
   lists, instead of first-seen order. Table inputs keep first-seen order.
+- `LOCK TABLE` locks a partitioned table's partitions (not with `ONLY`) and a view's base
+  relations, and refuses sequences and indexes (`42809 cannot lock relation`).
 - `MERGE` into a partitioned table acts on the rows of its leaf partitions instead of none: inserts
   are routed to their partition (23514 when none accepts the row), updates move rows across
   partitions, and a target that is itself a partition enforces its partition constraint.

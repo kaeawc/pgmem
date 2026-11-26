@@ -41,6 +41,7 @@ pub struct MergePlan {
 
 pub fn bind_merge(b: &Binder, m: &ir::Merge, outer: &Ctx) -> SqlResult<MergePlan> {
     let table = lookup_table(b, &m.table)?;
+    b.lock_table_and_indexes(&table, crate::lock_levels::ROW_EXCLUSIVE);
     let qualifier = m.alias.clone().unwrap_or_else(|| table.name.clone());
     let rules = b.bind_row_rules(&table)?;
     let tscope = target_scope(&table, &qualifier);
