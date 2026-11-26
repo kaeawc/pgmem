@@ -186,6 +186,9 @@ pub fn deparse_index(catalog: &Catalog, table: &TableDef, index: &IndexDef) -> S
     if index.nulls_not_distinct {
         s.push_str(" NULLS NOT DISTINCT");
     }
+    if !index.reloptions.is_empty() {
+        s.push_str(&format!(" WITH ({})", crate::reloptions::flatten(&index.reloptions)));
+    }
     if let Some(p) = &index.predicate {
         s.push_str(&format!(" WHERE {}", deparse_predicate(catalog, table, p)?));
     }
