@@ -23,6 +23,7 @@ fn db_with_tables(names: &[&str], seed: &[(i32, &str)]) -> (Arc<Database>, Vec<O
                 indexes: vec![],
                 matview: None,
                 unlogged: false,
+                replident: 'd',
                 reloptions: Vec::new(),
             })
             .expect("create");
@@ -319,6 +320,8 @@ fn db_with_unique_id() -> (Arc<Database>, Oid) {
         exprs: vec![],
         include: vec![],
         reloptions: vec![],
+        clustered: false,
+        replica: false,
         unique: true,
         primary: false,
         nulls_not_distinct: false,
