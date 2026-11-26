@@ -367,6 +367,67 @@ pidx_a_idx
 statement ok
 DROP TABLE pidx
 
+# RETURNING of rows an UPDATE ... FROM moves to another partition sees the FROM tables.
+statement ok
+CREATE TABLE mv (id int, v text) PARTITION BY RANGE (id)
+
+statement ok
+CREATE TABLE mv1 PARTITION OF mv FOR VALUES FROM (0) TO (10)
+
+statement ok
+CREATE TABLE mv2 PARTITION OF mv FOR VALUES FROM (10) TO (20) PARTITION BY LIST (v)
+
+statement ok
+CREATE TABLE mv2_x PARTITION OF mv2 FOR VALUES IN ('x')
+
+statement ok
+CREATE TABLE mv2_y PARTITION OF mv2 FOR VALUES IN ('y', 'z')
+
+statement ok
+INSERT INTO mv VALUES (1, 'a'), (2, 'b'), (3, 'c')
+
+statement ok
+CREATE TABLE mv_src (id int, w text)
+
+statement ok
+INSERT INTO mv_src VALUES (1, 'x'), (2, 'y'), (3, 'z')
+
+query
+UPDATE mv SET id = 15, v = mv_src.w FROM mv_src WHERE mv.id = mv_src.id AND mv_src.id = 1 RETURNING mv.id, mv_src.w
+----
+id:int4 | w:text
+15 | x
+
+query rowsort
+UPDATE mv SET id = mv.id + 10, v = mv_src.w FROM mv_src WHERE mv.id = mv_src.id RETURNING mv.tableoid::regclass, mv.v || mv_src.w AS vw, old.id AS old_id, old.v AS old_v, new.*, mv_src.*
+----
+tableoid:regclass | vw:text | old_id:int4 | old_v:text | id:int4 | v:text | id:int4 | w:text
+mv2_y | yy | 2 | b | 12 | y | 2 | y
+mv2_y | zz | 3 | c | 13 | z | 3 | z
+
+query
+UPDATE mv m SET v = 'z' FROM mv_src s WHERE m.id = s.id + 9 RETURNING m.tableoid::regclass, *, old.v AS old_v
+----
+tableoid:regclass | id:int4 | v:text | id:int4 | w:text | old_v:text
+mv2_y | 12 | z | 3 | z | y
+
+query
+UPDATE mv m SET v = 'x' FROM mv_src s WHERE m.id = s.id + 10 AND s.id = 3 RETURNING m.tableoid::regclass, m.*, s.w, old.v AS old_v
+----
+tableoid:regclass | id:int4 | v:text | w:text | old_v:text
+mv2_x | 13 | x | z | z
+
+query
+SELECT tableoid::regclass, * FROM mv ORDER BY id
+----
+tableoid:regclass | id:int4 | v:text
+mv2_y | 12 | z
+mv2_x | 13 | x
+mv2_x | 15 | x
+
+statement ok
+DROP TABLE mv, mv_src
+
 # A partition created after a parent DROP COLUMN has only the live columns, so its attnums
 # differ from the parent's.
 statement ok
