@@ -233,7 +233,18 @@ fn policies_filter_and_check_rows_for_other_roles() {
     assert_eq!(rows(&mut c, "SELECT id FROM rt ORDER BY id"), [["2"], ["5"]]);
     c.batch_execute("RESET ROLE").expect("reset");
     assert_eq!(rows(&mut c, "SELECT id FROM rt ORDER BY id"), [["2"], ["5"]]);
-    c.batch_execute("DROP TABLE rt").expect("drop");
+    // Statements in function bodies are subject to the policies too, read-only or writing.
+    c.batch_execute(
+        "INSERT INTO rt VALUES (6, 'rls_enf_u1', 'a', 6);
+         CREATE FUNCTION rt_count() RETURNS bigint STABLE LANGUAGE sql AS 'SELECT count(*) FROM rt';
+         CREATE FUNCTION rt_bad() RETURNS int LANGUAGE sql AS $$ INSERT INTO rt VALUES (7, 'x', 'bad', 7) RETURNING id $$;
+         SET ROLE rls_enf_u2",
+    )
+    .expect("functions");
+    assert_eq!(rows(&mut c, "SELECT rt_count()"), [["3"]]);
+    let e = expect_code(c.batch_execute("SELECT rt_bad()"), "42501");
+    assert_eq!(message(&e), "new row violates row-level security policy for table \"rt\"");
+    c.batch_execute("RESET ROLE; DROP FUNCTION rt_count(); DROP FUNCTION rt_bad(); DROP TABLE rt").expect("drop");
     drop_roles(&mut c, &roles);
 }
 

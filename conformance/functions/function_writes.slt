@@ -1,0 +1,84 @@
+# Data-modifying statements in functions: BEFORE / AFTER triggers and volatile functions called
+# from queries may write; stable and immutable functions may not (#174).
+
+statement ok
+CREATE TABLE a (x int); CREATE TABLE log (m text)
+
+statement ok
+CREATE FUNCTION tf() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO log VALUES (TG_WHEN || ' ' || TG_OP || ' ' || coalesce(NEW.x, OLD.x)); IF TG_OP = 'DELETE' THEN RETURN OLD; END IF; RETURN NEW; END $$
+
+statement ok
+CREATE TRIGGER tb BEFORE INSERT OR UPDATE OR DELETE ON a FOR EACH ROW EXECUTE FUNCTION tf(); CREATE TRIGGER ta AFTER INSERT ON a FOR EACH ROW EXECUTE FUNCTION tf()
+
+statement ok
+INSERT INTO a VALUES (1), (2); UPDATE a SET x = 11 WHERE x = 1; DELETE FROM a WHERE x = 2
+
+query rowsort
+SELECT m FROM log
+----
+m:text
+BEFORE INSERT 1
+BEFORE INSERT 2
+AFTER INSERT 1
+AFTER INSERT 2
+BEFORE UPDATE 11
+BEFORE DELETE 2
+
+statement ok
+DROP TRIGGER tb ON a; DROP TRIGGER ta ON a; DELETE FROM log; DELETE FROM a; INSERT INTO a VALUES (1), (2)
+
+statement ok
+CREATE FUNCTION f() RETURNS int LANGUAGE plpgsql AS $$ BEGIN INSERT INTO log VALUES ('f'); RETURN (SELECT count(*) FROM log); END $$; CREATE FUNCTION g() RETURNS int LANGUAGE plpgsql AS $$ BEGIN INSERT INTO a VALUES (100); RETURN 1; END $$; CREATE FUNCTION sq() RETURNS int LANGUAGE sql AS $$ INSERT INTO log VALUES ('sq'); SELECT count(*)::int FROM log $$
+
+query
+SELECT f(), f()
+----
+f:int4 | f:int4
+1 | 2
+
+query
+SELECT sq()
+----
+sq:int4
+3
+
+# The calling statement keeps its snapshot.
+query
+SELECT g(), (SELECT count(*) FROM a) FROM a ORDER BY x
+----
+g:int4 | count:int8
+1 | 2
+1 | 2
+
+query
+SELECT count(*) FROM a
+----
+count:int8
+4
+
+statement ok
+INSERT INTO a VALUES (g()); CREATE TABLE d (x int DEFAULT f()); INSERT INTO d DEFAULT VALUES
+
+query
+SELECT (SELECT count(*) FROM a), (SELECT x FROM d), (SELECT count(*) FROM log)
+----
+count:int8 | x:int4 | count:int8
+6 | 4 | 4
+
+statement ok
+CREATE FUNCTION s() RETURNS int STABLE LANGUAGE plpgsql AS $$ BEGIN INSERT INTO log VALUES ('s'); RETURN 1; END $$; CREATE FUNCTION ss() RETURNS int STABLE LANGUAGE sql AS $$ INSERT INTO log VALUES ('s') RETURNING 1 $$; CREATE FUNCTION im() RETURNS int IMMUTABLE LANGUAGE plpgsql AS $$ BEGIN UPDATE log SET m = m; RETURN 1; END $$
+
+statement error 0A000 INSERT is not allowed in a non-volatile function
+SELECT s()
+
+statement error 0A000 INSERT is not allowed in a non-volatile function
+SELECT ss()
+
+statement error 0A000 UPDATE is not allowed in a non-volatile function
+SELECT im()
+
+statement ok
+CREATE FUNCTION stf() RETURNS trigger STABLE LANGUAGE plpgsql AS $$ BEGIN DELETE FROM log; RETURN NEW; END $$; CREATE TRIGGER t2 BEFORE INSERT ON d FOR EACH ROW EXECUTE FUNCTION stf()
+
+statement error 0A000 DELETE is not allowed in a non-volatile function
+INSERT INTO d VALUES (1)
