@@ -623,7 +623,7 @@ impl Session {
         };
         let top = Level::new(Scope::default());
         let ctx = Ctx::new(&top);
-        crate::roles::check_statement(stmt, &catalog, &env)?;
+        crate::roles::check_statement(stmt, &catalog, &env, param_types)?;
         for (oid, mode) in crate::lock_levels::ddl_locks(stmt, &catalog) {
             txn.lock_relation(oid, mode);
         }

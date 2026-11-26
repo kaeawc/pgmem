@@ -41,6 +41,10 @@ pub struct ScopeCol {
     /// A system column (`ctid`, `xmin`, ...): addressable by name, not part of `*` or the
     /// row type.
     pub system: bool,
+    /// The table or view column (relation OID, attnum) a reference reads, for column
+    /// privilege checks: set by table and view scans, kept by join aliases, not by
+    /// subqueries (whose own references were already noted).
+    pub perm: Option<(Oid, i16)>,
 }
 
 impl ScopeCol {
@@ -55,6 +59,7 @@ impl ScopeCol {
             hidden_unqualified: false,
             dropped: false,
             system: false,
+            perm: None,
         }
     }
 }
@@ -266,11 +271,31 @@ pub struct Binder<'a> {
     /// While a FROM clause under FOR UPDATE / SHARE binds: the tables it locks (empty: all),
     /// which take ROW SHARE instead of ACCESS SHARE.
     row_share: RefCell<Option<Vec<String>>>,
+    /// When recording: the columns the statement uses, as (relation, attnum, privilege
+    /// letter): `r` read, `a` inserted, `w` updated (Postgres' selectedCols / insertedCols /
+    /// updatedCols).
+    column_use: RefCell<Option<Vec<(Oid, i16, char)>>>,
+    /// Nonzero while binding what runs with other privileges (a view's query) or reads no
+    /// user data (defaults, CHECK constraints, generated columns).
+    quiet: Cell<u32>,
+    /// While binding DML through an automatically updatable view: (base table, view, the view
+    /// attnum of each base column, 0 when the view does not show it). Uses of the target's
+    /// columns are noted on the view, whose privileges Postgres checks for the target.
+    target_view: RefCell<Option<(Oid, Oid, Vec<i16>)>>,
 }
 
 impl<'a> Binder<'a> {
     pub fn new(catalog: &'a Catalog, declared: &[Type]) -> Binder<'a> {
-        Binder { catalog, params: RefCell::new(declared.to_vec()), next_id: Cell::new(1), locker: None, row_share: RefCell::new(None) }
+        Binder {
+            catalog,
+            params: RefCell::new(declared.to_vec()),
+            next_id: Cell::new(1),
+            column_use: RefCell::new(None),
+            quiet: Cell::new(0),
+            target_view: RefCell::new(None),
+            locker: None,
+            row_share: RefCell::new(None),
+        }
     }
 
     /// A binder that takes the statement's relation locks for a transaction.
@@ -312,6 +337,76 @@ impl<'a> Binder<'a> {
         let out = f();
         *self.row_share.borrow_mut() = saved;
         out
+    }
+
+    /// Runs `f` with the DML target's column uses noted on `view` instead of `base`.
+    pub(crate) fn with_target_view<T>(&self, map: (Oid, Oid, Vec<i16>), f: impl FnOnce() -> T) -> T {
+        let previous = self.target_view.replace(Some(map));
+        let r = f();
+        *self.target_view.borrow_mut() = previous;
+        r
+    }
+
+    /// The relation column a use of DML target column (`rel`, `attnum`) is checked on.
+    fn target_perm(&self, rel: Oid, attnum: i16) -> (Oid, i16) {
+        match &*self.target_view.borrow() {
+            Some((base, view, map)) if *base == rel => {
+                let mapped = usize::try_from(attnum - 1).ok().and_then(|i| map.get(i).copied());
+                // System columns and base columns the view does not show: no column grant.
+                (*view, if attnum < 0 { attnum } else { mapped.unwrap_or(0) })
+            }
+            _ => (rel, attnum),
+        }
+    }
+
+    /// Notes a use of DML target column `attnum` of `rel` for privilege `p`.
+    pub(crate) fn note_target_use(&self, rel: Oid, attnum: i16, p: char) {
+        let (rel, attnum) = self.target_perm(rel, attnum);
+        self.note_use(rel, attnum, p);
+    }
+
+    /// A scope over the DML target, its reads noted as [`Binder::note_target_use`] does.
+    pub(crate) fn target_cols(&self, mut scope: Scope) -> Scope {
+        for c in &mut scope.cols {
+            if let Some((rel, attnum)) = c.perm {
+                c.perm = Some(self.target_perm(rel, attnum));
+            }
+        }
+        scope
+    }
+
+    /// Starts recording the columns bound statements use.
+    pub fn record_column_use(&self) {
+        *self.column_use.borrow_mut() = Some(Vec::new());
+    }
+
+    /// The columns recorded since [`Binder::record_column_use`].
+    pub fn column_use(&self) -> Vec<(Oid, i16, char)> {
+        self.column_use.borrow().clone().unwrap_or_default()
+    }
+
+    /// Notes a use of table column `attnum` of `rel` for privilege `p`.
+    pub(crate) fn note_use(&self, rel: Oid, attnum: i16, p: char) {
+        if self.quiet.get() == 0
+            && let Some(used) = self.column_use.borrow_mut().as_mut()
+        {
+            used.push((rel, attnum, p));
+        }
+    }
+
+    /// Notes that a scope column is read.
+    pub(crate) fn note_read(&self, c: &ScopeCol) {
+        if let Some((rel, attnum)) = c.perm {
+            self.note_use(rel, attnum, 'r');
+        }
+    }
+
+    /// Runs `f` without noting column uses.
+    pub(crate) fn quietly<T>(&self, f: impl FnOnce() -> T) -> T {
+        self.quiet.set(self.quiet.get() + 1);
+        let r = f();
+        self.quiet.set(self.quiet.get() - 1);
+        r
     }
 
     pub fn fresh_id(&self) -> usize {

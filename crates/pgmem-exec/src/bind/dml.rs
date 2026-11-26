@@ -107,7 +107,10 @@ pub struct DeletePlan {
 /// RETURNING see.
 pub fn target_scope(table: &TableDef, qualifier: &str) -> Scope {
     let mut cols = physical_scope(table, qualifier).cols;
-    cols.extend(super::system_scope_cols(qualifier));
+    cols.extend(super::system_scope_cols(qualifier).into_iter().map(|mut c| {
+        c.perm = Some((table.oid, c.attnum));
+        c
+    }));
     Scope::from_cols(cols)
 }
 
@@ -123,6 +126,7 @@ pub fn physical_scope(table: &TableDef, qualifier: &str) -> Scope {
             sc.table_oid = table.oid;
             sc.attnum = i16::try_from(i + 1).unwrap_or(i16::MAX);
             sc.typmod = c.typmod;
+            sc.perm = Some((table.oid, sc.attnum));
             sc
         })
         .collect();
@@ -133,6 +137,7 @@ pub fn physical_scope(table: &TableDef, qualifier: &str) -> Scope {
 /// restrictions.
 struct ViewTarget {
     view: String,
+    oid: pgmem_catalog::Oid,
     u: crate::views::Updatable,
 }
 
@@ -142,7 +147,7 @@ fn view_target(b: &Binder, name: &ir::ObjectName, verb: &str) -> SqlResult<Optio
     let Some(pgmem_catalog::Relation::View(v)) = b.catalog.find_relation(name)? else { return Ok(None) };
     b.lock(v.oid, crate::lock_levels::ROW_EXCLUSIVE);
     match crate::views::resolve(b.catalog, &v)? {
-        Ok(u) => Ok(Some(ViewTarget { view: v.name.clone(), u })),
+        Ok(u) => Ok(Some(ViewTarget { view: v.name.clone(), oid: v.oid, u })),
         Err(reason) => {
             let (what, gerund, cmd) = match verb {
                 "insert" => ("insert into", "inserting into", "INSERT"),
@@ -159,6 +164,21 @@ fn view_target(b: &Binder, name: &ir::ObjectName, verb: &str) -> SqlResult<Optio
 }
 
 impl ViewTarget {
+    /// Binds `f` (the statement on the base table) with the target's column uses noted on the
+    /// view's columns.
+    fn bind_through<T>(&self, b: &Binder, f: impl FnOnce() -> SqlResult<T>) -> SqlResult<T> {
+        let base = lookup_table(b, &self.u.base)?;
+        let map = base
+            .columns
+            .iter()
+            .map(|c| {
+                let shown = self.u.columns.iter().position(|(_, bc)| bc.as_deref() == Some(c.name.as_str()));
+                shown.map_or(0, |j| i16::try_from(j + 1).unwrap_or(i16::MAX))
+            })
+            .collect();
+        b.with_target_view((base.oid, self.oid, map), f)
+    }
+
     /// The base column a view column writes (Postgres' error for a computed one).
     fn base_column(&self, column: &str, verb: &str) -> SqlResult<String> {
         match self.u.columns.iter().find(|(n, _)| n == column) {
@@ -172,6 +192,11 @@ impl ViewTarget {
     /// The view's WHERE clauses (`checks`: its CHECK OPTION predicates instead), bound over
     /// the base table's physical row.
     fn bind_predicates(&self, b: &Binder, table: &TableDef, checks: bool) -> SqlResult<Vec<(String, Expr)>> {
+        // The view's own conditions run with its owner's privileges.
+        b.quietly(|| self.bind_predicates_inner(b, table, checks))
+    }
+
+    fn bind_predicates_inner(&self, b: &Binder, table: &TableDef, checks: bool) -> SqlResult<Vec<(String, Expr)>> {
         let items: Vec<(String, ir::Expr, String)> = if checks {
             self.u.checks.clone()
         } else {
@@ -216,6 +241,11 @@ impl Binder<'_> {
     /// Binds the expression-valued rules of a table: defaults, generated columns, CHECKs and
     /// unique indexes.
     pub fn bind_row_rules(&self, table: &Arc<TableDef>) -> SqlResult<RowRules> {
+        // Defaults, generated columns and constraints read no privileges of the role.
+        self.quietly(|| self.bind_row_rules_inner(table))
+    }
+
+    fn bind_row_rules_inner(&self, table: &Arc<TableDef>) -> SqlResult<RowRules> {
         let empty = Level::new(Scope::default());
         let empty_ctx = Ctx::new(&empty).with_clause(Clause::Default);
         let row_level = Level::new(physical_scope(table, &table.name));
@@ -322,7 +352,7 @@ impl Binder<'_> {
         let current = &ctx.current().scope;
         let mut cols = current.cols.clone();
         for alias in [&aliases.0, &aliases.1] {
-            cols.extend(physical_scope(table, alias).cols.into_iter().map(|mut c| {
+            cols.extend(self.target_cols(physical_scope(table, alias)).cols.into_iter().map(|mut c| {
                 c.hidden_unqualified = true;
                 c
             }));
@@ -337,6 +367,7 @@ impl Binder<'_> {
                 ir::SelectItem::Wildcard => {
                     for &i in &scope.star {
                         let c = &scope.cols[i];
+                        self.note_read(c);
                         exprs.push(Expr::Col(i));
                         cols.push(OutCol {
                             name: c.name.clone(),
@@ -354,6 +385,7 @@ impl Binder<'_> {
                     }
                     for i in scope.qualified_star(qual) {
                         let c = &scope.cols[i];
+                        self.note_read(c);
                         exprs.push(Expr::Col(i));
                         cols.push(OutCol {
                             name: c.name.clone(),
@@ -399,12 +431,16 @@ fn arbiter_for(b: &Binder, rules: &RowRules, table: &Arc<TableDef>, target: &ir:
         ir::ConflictTarget::Columns { columns, exprs, selection } => {
             // A partial unique index is only inferred when the ON CONFLICT WHERE clause
             // matches its predicate (Postgres accepts any clause that implies it).
-            let row_level = Level::new(physical_scope(table, &table.name));
+            let row_level = Level::new(b.target_cols(physical_scope(table, &table.name)));
             let row_ctx = Ctx::new(&row_level).with_clause(Clause::Check);
             let selection = selection.as_ref().map(|s| b.bind_predicate(s, "WHERE", &row_ctx)).transpose()?;
             let mut wanted = Vec::new();
             for c in columns {
                 wanted.push(table.column_index(c).ok_or_else(|| SqlError::undefined_column(&format!("\"{c}\"")))?);
+            }
+            // The arbiter's columns are read.
+            for &i in &wanted {
+                b.note_target_use(table.oid, i16::try_from(i + 1).unwrap_or(i16::MAX), 'r');
             }
             wanted.sort_unstable();
             wanted.dedup();
@@ -460,7 +496,7 @@ pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<Inser
             _ => names.len(),
         };
         base.columns = names.iter().take(needed).map(|c| vt.base_column(c, "insert into")).collect::<SqlResult<Vec<_>>>()?;
-        let mut plan = bind_insert(b, &base, outer)?;
+        let mut plan = vt.bind_through(b, || bind_insert(b, &base, outer))?;
         plan.view_checks.extend(vt.bind_predicates(b, &plan.rules.table, true)?);
         return Ok(plan);
     }
@@ -494,6 +530,11 @@ pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<Inser
         return Err(super::feature("WITH on INSERT"));
     }
     vctx.ctes = outer.ctes.clone();
+    let note_inserted = |columns: &[usize]| {
+        for &slot in columns {
+            b.note_target_use(table.oid, i16::try_from(slot + 1).unwrap_or(i16::MAX), 'a');
+        }
+    };
     let rows = match &ins.source {
         ir::InsertSource::DefaultValues => InsertRows::DefaultValues,
         ir::InsertSource::Values(rows) => {
@@ -517,6 +558,7 @@ pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<Inser
                 }
                 out.push(bound);
             }
+            note_inserted(&columns);
             InsertRows::Values(out)
         }
         ir::InsertSource::Query(q) => {
@@ -529,6 +571,7 @@ pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<Inser
             if bound.columns.len() < columns.len() {
                 return Err(SqlError::syntax("INSERT has more target columns than expressions"));
             }
+            note_inserted(&columns);
             let mut exprs = Vec::new();
             for (i, (out, &slot)) in bound.columns.iter().zip(&columns).enumerate() {
                 let col = &table.columns[slot];
@@ -537,7 +580,7 @@ pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<Inser
             InsertRows::Query(Rel::Project { input: Box::new(bound.rel), exprs })
         }
     };
-    let row_scope = physical_scope(&table, &qualifier);
+    let row_scope = b.target_cols(physical_scope(&table, &qualifier));
     let on_conflict = match &ins.on_conflict {
         None => None,
         Some(oc) => {
@@ -561,6 +604,8 @@ pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<Inser
                     for c in &row_scope.cols {
                         let mut e = c.clone();
                         e.qualifier = Some("excluded".into());
+                        // The proposed row is no read of the table.
+                        e.perm = None;
                         cols.push(e);
                     }
                     let combined = Level::new(Scope { star: row_scope.star.clone(), cols });
@@ -573,7 +618,7 @@ pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<Inser
             Some(OnConflictPlan { arbiter, update })
         }
     };
-    let returning_level = Level::new(target_scope(&table, &qualifier));
+    let returning_level = Level::new(b.target_cols(target_scope(&table, &qualifier)));
     let (returning, returning_cols) = b.bind_returning(&ins.returning, &Ctx::new(&returning_level), &table)?;
     Ok(InsertPlan {
         rules,
@@ -631,6 +676,7 @@ pub(crate) fn bind_assignments(
         if !seen.insert(*slot) {
             return Err(SqlError::syntax(format!("multiple assignments to same column \"{}\"", table.columns[*slot].name)));
         }
+        b.note_target_use(table.oid, i16::try_from(*slot + 1).unwrap_or(i16::MAX), 'w');
     }
     Ok(out)
 }
@@ -712,7 +758,7 @@ pub fn bind_update(b: &Binder, upd: &ir::Update, outer: &Ctx) -> SqlResult<Updat
                 }
             }
         }
-        let mut plan = bind_update(b, &base, outer)?;
+        let mut plan = vt.bind_through(b, || bind_update(b, &base, outer))?;
         let filters = vt.bind_predicates(b, &plan.rules.table, false)?;
         plan.filter = and_filters(plan.filter.take(), filters);
         plan.view_checks.extend(vt.bind_predicates(b, &plan.rules.table, true)?);
@@ -722,7 +768,7 @@ pub fn bind_update(b: &Binder, upd: &ir::Update, outer: &Ctx) -> SqlResult<Updat
     b.lock_table_and_indexes(&table, crate::lock_levels::ROW_EXCLUSIVE);
     let qualifier = upd.alias.clone().unwrap_or_else(|| table.name.clone());
     let rules = b.bind_row_rules(&table)?;
-    let target_scope = target_scope(&table, &qualifier);
+    let target_scope = b.target_cols(target_scope(&table, &qualifier));
     let width = target_scope.width();
     let (from, scope) = if upd.from.is_empty() {
         (None, target_scope)
@@ -750,7 +796,7 @@ pub fn bind_delete(b: &Binder, del: &ir::Delete, outer: &Ctx) -> SqlResult<Delet
         let mut base = del.clone();
         base.table = vt.u.base.clone();
         base.alias = Some(del.alias.clone().unwrap_or_else(|| vt.view.clone()));
-        let mut plan = bind_delete(b, &base, outer)?;
+        let mut plan = vt.bind_through(b, || bind_delete(b, &base, outer))?;
         let filters = vt.bind_predicates(b, &plan.table, false)?;
         plan.filter = and_filters(plan.filter.take(), filters);
         return Ok(plan);
@@ -758,7 +804,7 @@ pub fn bind_delete(b: &Binder, del: &ir::Delete, outer: &Ctx) -> SqlResult<Delet
     let table = lookup_table(b, &del.table)?;
     b.lock_table_and_indexes(&table, crate::lock_levels::ROW_EXCLUSIVE);
     let qualifier = del.alias.clone().unwrap_or_else(|| table.name.clone());
-    let target_scope = target_scope(&table, &qualifier);
+    let target_scope = b.target_cols(target_scope(&table, &qualifier));
     let width = target_scope.width();
     let (using, scope) = if del.using.is_empty() {
         (None, target_scope)
