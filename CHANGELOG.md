@@ -39,6 +39,9 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - `CREATE FUNCTION / TYPE / VIEW / SEQUENCE / DOMAIN pg_temp.x` creates the session's temporary
   schema on demand; temporary views, sequences, composite types and indexes report
   `relpersistence` `t`.
+- UNION / INTERSECT / EXCEPT and `SELECT DISTINCT` without ORDER BY return rows in PostgreSQL's
+  order (sorted, or hash-table order, as its planner picks) for inputs of constants and VALUES
+  lists, instead of first-seen order. Table inputs keep first-seen order.
 - Storage parameters are stored and validated like PostgreSQL: `WITH (...)` on tables, indexes, views and materialized views, `ALTER TABLE / INDEX / VIEW / MATERIALIZED VIEW ... SET / RESET (...)`, `pg_class.reloptions`, `pg_get_indexdef` (`WITH (fillfactor='70')`) and `information_schema.views.check_option` (including `WITH CHECK OPTION` and `check_option`).
 - Storage-parameter gaps: `CREATE TABLE ... PARTITION BY ... WITH (...)` takes PostgreSQL's clause order (the reverse is a syntax error); `PRIMARY KEY`, `UNIQUE` and `EXCLUDE` constraints take `WITH (...)` (in `CREATE TABLE` and `ALTER TABLE ADD`), shown by `pg_get_indexdef` and, for `EXCLUDE`, `pg_get_constraintdef`; `ALTER TABLE ... SET / RESET (...)` combines with other actions; `RESET (x = 1)` and empty `SET ()` / `WITH ()` give PostgreSQL's errors; integer values in hex, octal, binary or with `_` are stored in decimal.
 - `WITH CHECK OPTION` (or `check_option`) on a view that is not automatically updatable fails with `0A000` and PostgreSQL's hint; `LOCAL` and `CASCADED` check options are told apart when a view over views is written, each violation naming the view whose condition failed; `ALTER VIEW ... SET / RESET` keeps the view's grants and owner.
