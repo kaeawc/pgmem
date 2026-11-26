@@ -18,6 +18,7 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - `ALTER FUNCTION / PROCEDURE / ROUTINE` supports `SET` / `RESET`, `[EXTERNAL] SECURITY`, volatility, `[NOT] LEAKPROOF`, `STRICT` / `CALLED ON NULL INPUT`, `PARALLEL`, `COST`, `ROWS`, `RENAME TO` and `SET SCHEMA`.
 - `ALTER TABLE ... ALTER COLUMN SET STATISTICS | STORAGE | COMPRESSION`, `REPLICA IDENTITY`, `CLUSTER ON`, `SET WITHOUT CLUSTER` and `SET LOGGED | UNLOGGED` are accepted with PostgreSQL's validation and errors, and show up in `pg_attribute` (`attstattarget`, `attstorage`, `attcompression`), `pg_class` (`relreplident`, `relpersistence`) and `pg_index` (`indisreplident`, `indisclustered`); `ALTER COLUMN TYPE` resets storage and compression. `SET LOGGED | UNLOGGED` were silently ignored before.
 - `pg_constraint.connamespace` is the namespace of the owning table or domain instead of always `public`.
+- `pg_get_indexdef` and `pg_indexes.indexdef` print `INCLUDE (...)` for covering indexes, and `pg_index.indnatts`, `indnkeyatts`, `indkey` and `pg_class.relnatts` count the INCLUDE columns like PostgreSQL.
 
 ### Changed
 

@@ -429,6 +429,7 @@ pub fn add_constraint(
                 name: name.clone(),
                 columns: idx_cols.clone(),
                 exprs: Vec::new(),
+                include: Vec::new(),
                 unique: true,
                 primary,
                 nulls_not_distinct,
@@ -606,6 +607,11 @@ pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(
             }
         }
     }
+    let include = ci
+        .include
+        .iter()
+        .map(|n| table.column_index(n).ok_or_else(|| SqlError::undefined_column(&format!("\"{n}\""))))
+        .collect::<SqlResult<Vec<_>>>()?;
     if !exprs.is_empty() {
         // Mixed column/expression keys: treat all keys as expressions.
         exprs = ci.columns.iter().map(|k| k.expr.clone()).collect();
@@ -644,6 +650,7 @@ pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(
             name,
             columns,
             exprs,
+            include,
             unique: ci.unique,
             primary: false,
             nulls_not_distinct: ci.nulls_not_distinct,
@@ -824,7 +831,7 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
             // only for objects in other tables, e.g. views; those are not tracked here).
             let _ = cascade;
             def.constraints.retain(|c| !constraint_uses(c, slot, name));
-            def.indexes.retain(|i| !i.columns.contains(&slot));
+            def.indexes.retain(|i| !i.columns.contains(&slot) && !i.include.contains(&slot));
             let col = &mut def.columns[slot];
             col.dropped = true;
             col.name = format!("........pg.dropped.{}........", slot + 1);
@@ -1134,6 +1141,7 @@ fn add_exclusion(
         name: name.clone(),
         columns: plain.clone().unwrap_or_default(),
         exprs: if plain.is_some() { Vec::new() } else { elements.iter().map(|(e, _)| e.clone()).collect() },
+        include: Vec::new(),
         unique: false,
         primary: false,
         nulls_not_distinct: false,
