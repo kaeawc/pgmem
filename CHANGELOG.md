@@ -17,6 +17,13 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - Publishing skips crates already on crates.io, so a failed release can be rerun.
 - Release notes come from this changelog.
 
+### Fixed
+
+- `CREATE TABLE ... PARTITION OF` builds the partition from the parent's live columns only, as
+  PostgreSQL does: a partition created after a parent `DROP COLUMN` no longer copies the dropped
+  slot, so its `pg_attribute.attnum`, `information_schema.columns.ordinal_position`,
+  `pg_index.indkey` and constraint `conkey` match PostgreSQL's.
+
 ## [0.1.1] - 2026-11-25
 
 ### Changed
