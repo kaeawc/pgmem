@@ -171,7 +171,10 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
         Statement::DropOwned { roles, .. } => crate::roles::drop_owned(roles, txn, env),
         Statement::ReassignOwned { roles, to } => crate::roles::reassign_owned(roles, to, txn, env),
         Statement::AlterOwner { object, name, owner } => crate::roles::alter_owner(*object, name, owner, txn, env),
-        Statement::CreateFunction(cf) => crate::functions::create_function(cf, txn),
+        Statement::CreateFunction(cf) => crate::functions::create_function(cf, txn, env),
+        Statement::AlterFunction { name, types, kind, actions } => {
+            crate::functions::alter_function(name, types.as_deref(), *kind, actions, txn, env)
+        }
         Statement::DropFunction { items, if_exists, cascade, kind } => {
             crate::functions::drop_function(items, *if_exists, *cascade, *kind, txn)
         }
