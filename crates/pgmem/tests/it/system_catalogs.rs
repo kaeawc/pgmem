@@ -253,3 +253,32 @@ fn covering_index_include_columns() {
     c.batch_execute("ALTER TABLE cov DROP COLUMN b").expect("drop");
     assert_eq!(rows(&mut c, "SELECT count(*)::text FROM pg_indexes WHERE tablename = 'cov'"), vec![vec!["1"]]);
 }
+
+#[test]
+fn pg_get_keywords() {
+    let (_db, mut c) = setup();
+    assert_eq!(rows(&mut c, "SELECT count(*) FROM pg_get_keywords()"), [["494"]]);
+    assert_eq!(
+        rows(&mut c, "SELECT * FROM pg_get_keywords() WHERE word IN ('abort', 'all', 'between', 'bit', 'authorization') ORDER BY word"),
+        [
+            ["abort", "U", "t", "unreserved", "can be bare label"],
+            ["all", "R", "t", "reserved", "can be bare label"],
+            ["authorization", "T", "t", "reserved (can be function or type name)", "can be bare label"],
+            ["between", "C", "t", "unreserved (cannot be function or type name)", "can be bare label"],
+            ["bit", "C", "t", "unreserved (cannot be function or type name)", "can be bare label"],
+        ]
+    );
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT pg_typeof(word)::text, pg_typeof(catcode)::text, pg_typeof(barelabel)::text, pg_typeof(catdesc)::text, pg_typeof(baredesc)::text FROM pg_get_keywords() LIMIT 1"
+        ),
+        [["text", "\"char\"", "boolean", "text", "text"]]
+    );
+    assert_eq!(rows(&mut c, "SELECT word FROM pg_get_keywords() LIMIT 2"), [["abort"], ["absent"]]);
+    // Neighbouring behaviour: quote_ident quotes exactly the non-unreserved keywords.
+    assert_eq!(
+        rows(&mut c, "SELECT count(*) FROM pg_get_keywords() WHERE quote_ident(word) <> word"),
+        rows(&mut c, "SELECT count(*) FROM pg_get_keywords() WHERE catcode <> 'U'")
+    );
+}
