@@ -29,6 +29,8 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - DROP EXTENSION checks what depends on the functions marked `DEPENDS ON EXTENSION` (column defaults, triggers): `2BP01 cannot drop extension x because other objects depend on it` with PostgreSQL's DETAIL and HINT, and CASCADE drops them; DROP FUNCTION ... CASCADE drops dependent triggers too.
 - `ALTER SEQUENCE ... OWNER TO` parses; `pg_tables.tableowner` shows the table's owner.
 - `pg_get_indexdef` and `pg_indexes.indexdef` print `INCLUDE (...)` for covering indexes, and `pg_index.indnatts`, `indnkeyatts`, `indkey` and `pg_class.relnatts` count the INCLUDE columns like PostgreSQL.
+- Storage parameters are stored and validated like PostgreSQL: `WITH (...)` on tables, indexes, views and materialized views, `ALTER TABLE / INDEX / VIEW / MATERIALIZED VIEW ... SET / RESET (...)`, `pg_class.reloptions`, `pg_get_indexdef` (`WITH (fillfactor='70')`) and `information_schema.views.check_option` (including `WITH CHECK OPTION` and `check_option`). `security_invoker` is stored but not yet enforced.
+- Row triggers on a partitioned table are cloned to its partitions (existing, created, attached and sub-partitions; `pg_trigger.tgparentid`) and fire on the leaf partition. The clones follow the parent trigger through `DROP TRIGGER`, `ALTER TRIGGER ... RENAME`, `ENABLE` / `DISABLE` and `CREATE OR REPLACE TRIGGER`, cannot be dropped or renamed on their own, and go with `DETACH PARTITION`. Statement triggers of a partitioned table fire for statements on it, and its partitions' statement triggers no longer do.
 
 ### Changed
 
