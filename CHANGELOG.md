@@ -10,6 +10,7 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 
 - Static Linux binaries (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) on each release.
 - `cargo binstall pgmem` installs the prebuilt binary from the GitHub release.
+- `pg_get_keywords()` returns PostgreSQL 18's keyword list (word, catcode, barelabel, catdesc, baredesc).
 
 ### Fixed
 
