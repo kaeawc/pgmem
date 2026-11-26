@@ -232,7 +232,7 @@ pub(crate) fn lookup_table(b: &Binder, name: &ir::ObjectName) -> SqlResult<Arc<T
         Some(pgmem_catalog::Relation::View(_)) => Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("cannot modify view \"{base}\""))
             .with_detail("Views that do not select from a single table or view are not automatically updatable.")),
         Some(other) => Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("cannot modify {} \"{base}\"", other.kind_name()))),
-        None => Err(SqlError::undefined_table(&name.to_string())),
+        None => Err(SqlError::undefined_table(&name.to_string()).about(pgmem_types::ErrorRef::Relation(name.0.join(".")))),
     }
 }
 
@@ -514,8 +514,10 @@ pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<Inser
     } else {
         let mut out = Vec::new();
         for c in &ins.columns {
-            let idx =
-                table.column_index(c).ok_or_else(|| SqlError::undefined_column(&format!("\"{c}\" of relation \"{}\"", table.name)))?;
+            let idx = table.column_index(c).ok_or_else(|| {
+                SqlError::undefined_column(&format!("\"{c}\" of relation \"{}\"", table.name))
+                    .about(pgmem_types::ErrorRef::Column(c.clone()))
+            })?;
             if out.contains(&idx) {
                 return Err(SqlError::new(code::DUPLICATE_COLUMN, format!("column \"{c}\" specified more than once")));
             }
@@ -690,8 +692,10 @@ fn bind_one_assignment(b: &Binder, table: &TableDef, target: &[String], value: &
         [first, rest @ ..] => (first, rest),
         [] => ("", &[]),
     };
-    let slot =
-        table.column_index(column).ok_or_else(|| SqlError::undefined_column(&format!("\"{column}\" of relation \"{}\"", table.name)))?;
+    let slot = table.column_index(column).ok_or_else(|| {
+        SqlError::undefined_column(&format!("\"{column}\" of relation \"{}\"", table.name))
+            .about(pgmem_types::ErrorRef::Column(column.to_owned()))
+    })?;
     let col = &table.columns[slot];
     if let [field] = fields {
         return bind_field_assignment(b, table, slot, field, value, ctx);
