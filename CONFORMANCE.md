@@ -7,7 +7,7 @@ PostgreSQL 18; CI re-verifies every record against PostgreSQL and runs it agains
 A record passes when pgmem returns the same column names, column types and text values, or
 the same SQLSTATE and error message.
 
-pgmem passes **3755 / 3756 records (100.0%)**.
+pgmem passes **3777 / 3777 records (100.0%)**.
 
 | Area | Records | Pass | Rate |
 |---|---:|---:|---:|
@@ -16,7 +16,7 @@ pgmem passes **3755 / 3756 records (100.0%)**.
 | ddl | 606 | 606 | 100.0% |
 | dml | 282 | 282 | 100.0% |
 | functions | 534 | 534 | 100.0% |
-| queries | 440 | 439 | 99.8% |
+| queries | 461 | 461 | 100.0% |
 | session | 482 | 482 | 100.0% |
 | smoke | 7 | 7 | 100.0% |
 | transactions | 569 | 569 | 100.0% |
@@ -80,7 +80,8 @@ pgmem passes **3755 / 3756 records (100.0%)**.
 | queries/joins.slt | 45 | 45 | 100.0% |
 | queries/ordering_limits.slt | 44 | 44 | 100.0% |
 | queries/select_basics.slt | 37 | 37 | 100.0% |
-| queries/set_operations.slt | 36 | 35 | 97.2% |
+| queries/set_operation_order.slt | 21 | 21 | 100.0% |
+| queries/set_operations.slt | 36 | 36 | 100.0% |
 | queries/subqueries.slt | 39 | 39 | 100.0% |
 | queries/where_operators.slt | 51 | 51 | 100.0% |
 | queries/windows.slt | 39 | 39 | 100.0% |
