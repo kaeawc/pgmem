@@ -27,6 +27,7 @@ pgmem passes **3610 / 3611 records (100.0%)**.
 | File | Records | Pass | Rate |
 |---|---:|---:|---:|
 | catalog/comments.slt | 32 | 32 | 100.0% |
+| catalog/dependencies.slt | 15 | 15 | 100.0% |
 | catalog/information_schema.slt | 38 | 38 | 100.0% |
 | catalog/int2vector.slt | 15 | 15 | 100.0% |
 | catalog/keywords.slt | 6 | 6 | 100.0% |
