@@ -458,6 +458,41 @@ pub struct TriggerDef {
     pub parent: Oid,
 }
 
+/// An extended statistics object (`pg_statistic_ext`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StatisticsDef {
+    pub oid: Oid,
+    pub name: String,
+    pub schema: String,
+    /// The table the statistics are on.
+    pub table: Oid,
+    /// Plain column keys (physical positions, in the order Postgres stores them: columns
+    /// first, ascending), `stxkeys`.
+    pub columns: Vec<usize>,
+    /// Expression keys, unbound, in key order after the columns (`stxexprs`).
+    pub exprs: Vec<Expr>,
+    /// `stxkind`: `d` (ndistinct), `f` (dependencies), `m` (mcv), `e` (expressions).
+    pub kinds: Vec<char>,
+    /// `stxstattarget`; None is the default (NULL).
+    pub target: Option<i16>,
+}
+
+/// A user-defined cast (`pg_cast` rows with a user OID).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CastDef {
+    pub oid: Oid,
+    pub source: Type,
+    pub target: Type,
+    /// The conversion function, None for binary-coercible and I/O-conversion casts.
+    pub function: Option<Oid>,
+    /// `castcontext`: `i`, `a` or `e`.
+    pub context: char,
+    /// `castmethod`: `f` (function), `b` (binary) or `i` (I/O conversion).
+    pub method: char,
+    /// The number of arguments of the conversion function (1 to 3).
+    pub function_args: usize,
+}
+
 /// A named CHECK constraint of a domain; `expr` refers to the value as `VALUE`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DomainCheck {
@@ -641,6 +676,10 @@ pub struct Catalog {
     functions: BTreeMap<Oid, Arc<FunctionDef>>,
     /// Triggers by OID.
     triggers: BTreeMap<Oid, Arc<TriggerDef>>,
+    /// Extended statistics objects by OID.
+    statistics: BTreeMap<Oid, Arc<StatisticsDef>>,
+    /// User-defined casts by OID.
+    casts: BTreeMap<Oid, Arc<CastDef>>,
     /// Roles created with CREATE ROLE (the session user and predefined roles are implicit).
     roles: BTreeMap<String, Arc<RoleDef>>,
     /// (role, member, admin option).
@@ -692,6 +731,8 @@ impl Catalog {
             types: BTreeMap::new(),
             functions: BTreeMap::new(),
             triggers: BTreeMap::new(),
+            statistics: BTreeMap::new(),
+            casts: BTreeMap::new(),
             roles: BTreeMap::new(),
             members: Vec::new(),
             grants: Vec::new(),
@@ -1191,6 +1232,7 @@ impl Catalog {
 
     pub fn drop_function(&mut self, oid: Oid) -> Option<Arc<FunctionDef>> {
         self.triggers.retain(|_, t| t.function != oid);
+        self.casts.retain(|_, c| c.function != Some(oid));
         self.grants.retain(|g| g.object != GrantObject::Function(oid));
         self.owners.remove(&oid);
         self.functions.remove(&oid)
@@ -1213,6 +1255,48 @@ impl Catalog {
 
     pub fn drop_trigger(&mut self, oid: Oid) -> Option<Arc<TriggerDef>> {
         self.triggers.remove(&oid)
+    }
+
+    /// Extended statistics objects, by OID.
+    pub fn statistics(&self) -> impl Iterator<Item = &Arc<StatisticsDef>> {
+        self.statistics.values()
+    }
+
+    pub fn statistics_by_oid(&self, oid: Oid) -> Option<&Arc<StatisticsDef>> {
+        self.statistics.get(&oid)
+    }
+
+    pub fn find_statistics(&self, schema: &str, name: &str) -> Option<&Arc<StatisticsDef>> {
+        self.statistics.values().find(|s| s.schema == schema && s.name == name)
+    }
+
+    /// Adds or replaces (same OID) a statistics object.
+    pub fn put_statistics(&mut self, def: StatisticsDef) {
+        self.statistics.insert(def.oid, Arc::new(def));
+    }
+
+    pub fn drop_statistics(&mut self, oid: Oid) -> Option<Arc<StatisticsDef>> {
+        self.comments.retain(|(_, o, _), _| *o != oid);
+        self.owners.remove(&oid);
+        self.statistics.remove(&oid)
+    }
+
+    /// User-defined casts, by OID.
+    pub fn casts(&self) -> impl Iterator<Item = &Arc<CastDef>> {
+        self.casts.values()
+    }
+
+    pub fn find_cast(&self, source: &Type, target: &Type) -> Option<&Arc<CastDef>> {
+        self.casts.values().find(|c| c.source == *source && c.target == *target)
+    }
+
+    pub fn put_cast(&mut self, def: CastDef) {
+        self.casts.insert(def.oid, Arc::new(def));
+    }
+
+    pub fn drop_cast(&mut self, oid: Oid) -> Option<Arc<CastDef>> {
+        self.comments.retain(|(_, o, _), _| *o != oid);
+        self.casts.remove(&oid)
     }
 
     /// Types share `pg_type`'s namespace with the row types of tables and views.
@@ -1241,7 +1325,9 @@ impl Catalog {
     }
 
     pub fn drop_type(&mut self, name: &QualName) -> Option<Arc<TypeDef>> {
-        self.types.remove(name)
+        let dropped = self.types.remove(name)?;
+        self.casts.retain(|_, c| !type_mentions(&c.source, dropped.oid) && !type_mentions(&c.target, dropped.oid));
+        Some(dropped)
     }
 
     /// Fails like Postgres when a new relation's row type would collide with a type.
@@ -1278,6 +1364,10 @@ impl Catalog {
             self.forget_index(idx.oid);
         }
         self.triggers.retain(|_, t| t.table != dropped.oid);
+        let gone: Vec<Oid> = self.statistics.values().filter(|s| s.table == dropped.oid).map(|s| s.oid).collect();
+        for oid in gone {
+            self.drop_statistics(oid);
+        }
         self.grants.retain(|g| g.object.relation_oid() != Some(dropped.oid));
         self.owners.remove(&dropped.oid);
         // Sequences owned by the table's columns go with it.

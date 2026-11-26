@@ -107,6 +107,18 @@ fn comment_target(
             })?;
             (crate::catalog_views::TRIGGER_CLASS_OID, t.oid, 0)
         }
+        T::Statistics => {
+            let st = crate::statistics::lookup(catalog, name)?.ok_or_else(|| crate::statistics::missing(name))?;
+            (crate::statistics::STATISTIC_EXT_CLASS_OID, st.oid, 0)
+        }
+        T::Cast(source, target) => {
+            let (s, _) = crate::bind::resolve_type_name(catalog, source)?;
+            let (t, _) = crate::bind::resolve_type_name(catalog, target)?;
+            let c = catalog.find_cast(&s, &t).ok_or_else(|| {
+                SqlError::new(code::UNDEFINED_OBJECT, format!("cast from type {} to type {} does not exist", s.name(), t.name()))
+            })?;
+            (crate::usercast::CAST_CLASS_OID, c.oid, 0)
+        }
         T::Other => return Ok(None),
     }))
 }
@@ -187,6 +199,11 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
         }
         Statement::Call { name, args } => crate::functions::call(name, args, txn, env, state),
         Statement::Do { language, body } => crate::functions::do_block(language, body, txn, env, state),
+        Statement::CreateStatistics(cs) => crate::statistics::create_statistics(cs, txn, binder, env),
+        Statement::AlterStatistics { name, if_exists, action } => crate::statistics::alter_statistics(name, *if_exists, action, txn, env),
+        Statement::DropStatistics { names, if_exists, .. } => crate::statistics::drop_statistics(names, *if_exists, txn),
+        Statement::CreateCast(cc) => crate::usercast::create_cast(cc, txn),
+        Statement::DropCast { source, target, if_exists, .. } => crate::usercast::drop_cast(source, target, *if_exists, txn),
         Statement::CreateTrigger(ct) => crate::triggers::create_trigger(ct, txn),
         Statement::RenameTrigger { name, table, new_name } => crate::triggers::rename_trigger(name, table, new_name, txn),
         Statement::DropTrigger { name, table, if_exists, .. } => crate::triggers::drop_trigger(name, table, *if_exists, txn),
@@ -290,6 +307,17 @@ pub(crate) fn alter_table_action(
     }
     let table = txn.catalog().table_q(current).cloned().ok_or_else(|| SqlError::undefined_table(&current.name))?;
     column_view_dependencies(txn, &table, action)?;
+    match action {
+        ir::AlterTableAction::DropColumn { name, .. } => {
+            if let Some(slot) = table.column_index(name) {
+                crate::statistics::drop_for_column(txn, &table, slot, name);
+            }
+        }
+        ir::AlterTableAction::RenameColumn { old, new } if table.column_index(old).is_some() => {
+            crate::statistics::rename_column(txn, &table, old, new);
+        }
+        _ => {}
+    }
     let has_rows = !txn.scan(table.oid).is_empty();
     let snapshot = txn.catalog().clone();
     let b = Binder::new(&snapshot, &[]);
@@ -586,7 +614,7 @@ fn apply_validation(
     }
 }
 
-fn rename_in_expr(e: &mut ir::Expr, table: &str, old: &str, new: &str) {
+pub(crate) fn rename_in_expr(e: &mut ir::Expr, table: &str, old: &str, new: &str) {
     if let ir::Expr::Column(parts) = e {
         let n = parts.len();
         if parts[n - 1] == old && (n == 1 || parts[n - 2] == table) {
@@ -1041,6 +1069,10 @@ pub(crate) fn drop_schema_contents(txn: &mut Txn, schema: &str) {
         }
     }
     let cat = txn.catalog_mut();
+    let stats: Vec<u32> = cat.statistics().filter(|s| s.schema == schema).map(|s| s.oid).collect();
+    for oid in stats {
+        cat.drop_statistics(oid);
+    }
     for t in &tables {
         cat.drop_comments(t.oid);
         cat.drop_table(&t.qualified());

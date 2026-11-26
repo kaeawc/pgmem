@@ -16,6 +16,8 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
   `LOCK TABLE` and DDL take, at PostgreSQL's lock level for each statement and ALTER TABLE
   subcommand. They are held to the end of the transaction (or released by `ROLLBACK TO`) and
   conflict with `LOCK ... NOWAIT` in other sessions.
+- `CREATE STATISTICS` (and `ALTER` / `DROP` / `COMMENT ON STATISTICS`): the object is stored, listed in `pg_statistic_ext`, printed by `pg_get_statisticsobjdef`, `pg_get_statisticsobjdef_columns` and `pg_get_statisticsobjdef_expressions`, shown in psql's `\d` footer, and dropped with its table or a referenced column. No statistics are gathered.
+- `CREATE CAST` (`WITH FUNCTION`, `WITHOUT FUNCTION`, `WITH INOUT`, `AS ASSIGNMENT | IMPLICIT`) and `DROP CAST`, with `pg_cast` listing PostgreSQL 18's builtin casts alongside user ones. Casts apply to `::` and `CAST` (and to assignments and implicit coercions of the expression itself, not to operator or function argument resolution).
 
 ### Fixed
 

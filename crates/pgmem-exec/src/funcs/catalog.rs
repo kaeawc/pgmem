@@ -599,10 +599,29 @@ fn partition_function(name: &str, n: usize) -> SqlResult<Option<Resolved>> {
             vec![Type::Reg(RegKind::Class)],
             Type::Bool,
         ),
-        // pgmem has no extended statistics objects.
-        "pg_get_statisticsobjdef_columns" | "pg_get_statisticsobjdef" if n == 1 => {
-            resolved(strict("pg_get_statisticsobjdef", |_, _| Ok(Value::Null)), vec![Type::Oid], Type::Text)
-        }
+        "pg_get_statisticsobjdef" if n == 1 => resolved(
+            strict("pg_get_statisticsobjdef", |a, c| {
+                Ok(oid_arg(&a[0]).and_then(|o| crate::statistics::definition(c.txn.catalog(), o)).map_or(Value::Null, Value::Text))
+            }),
+            vec![Type::Oid],
+            Type::Text,
+        ),
+        "pg_get_statisticsobjdef_columns" if n == 1 => resolved(
+            strict("pg_get_statisticsobjdef_columns", |a, c| {
+                Ok(oid_arg(&a[0]).and_then(|o| crate::statistics::columns_text(c.txn.catalog(), o)).map_or(Value::Null, Value::Text))
+            }),
+            vec![Type::Oid],
+            Type::Text,
+        ),
+        "pg_get_statisticsobjdef_expressions" if n == 1 => resolved(
+            strict("pg_get_statisticsobjdef_expressions", |a, c| {
+                Ok(oid_arg(&a[0])
+                    .and_then(|o| crate::statistics::expressions(c.txn.catalog(), o))
+                    .map_or(Value::Null, |v| Value::Array(v.into_iter().map(Value::Text).collect())))
+            }),
+            vec![Type::Oid],
+            Type::Array(Box::new(Type::Text)),
+        ),
         "pg_partition_root" if n == 1 => {
             resolved(strict("pg_partition_root", crate::partition::root_fn), vec![Type::Reg(RegKind::Class)], Type::Reg(RegKind::Class))
         }

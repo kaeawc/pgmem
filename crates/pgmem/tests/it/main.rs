@@ -104,6 +104,7 @@ mod named_stmt;
 mod notnull;
 mod nulls_order;
 mod numeric_fidelity;
+mod object_ddl;
 mod on_conflict;
 mod partitioning;
 mod pg_depend;
