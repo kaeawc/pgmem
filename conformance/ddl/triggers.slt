@@ -75,3 +75,86 @@ ALTER TRIGGER tr2 ON app.t RENAME TO tr3
 
 statement error 42704 trigger "nope" for table "t" does not exist
 ALTER TABLE app.t ENABLE TRIGGER nope
+
+# Row triggers on a partitioned table are cloned to its partitions (tgparentid) and fire on the
+# leaf; statement triggers fire on the partitioned table only.
+statement ok
+CREATE TABLE app.plog (n serial, name text, lvl text, tab text, op text); CREATE FUNCTION app.plg() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO app.plog (name, lvl, tab, op) VALUES (TG_NAME, TG_LEVEL, TG_TABLE_NAME, TG_OP); IF TG_OP = 'DELETE' THEN RETURN OLD; END IF; RETURN NEW; END $$
+
+statement ok
+CREATE TABLE app.pt (id int, v text) PARTITION BY RANGE (id); CREATE TABLE app.pt1 PARTITION OF app.pt FOR VALUES FROM (0) TO (10); CREATE TABLE app.pt2 PARTITION OF app.pt FOR VALUES FROM (10) TO (100) PARTITION BY RANGE (id); CREATE TABLE app.pt21 PARTITION OF app.pt2 FOR VALUES FROM (10) TO (50)
+
+statement ok
+CREATE TRIGGER r AFTER INSERT OR UPDATE OR DELETE ON app.pt FOR EACH ROW EXECUTE FUNCTION app.plg(); CREATE TRIGGER s AFTER INSERT OR UPDATE OR DELETE ON app.pt FOR EACH STATEMENT EXECUTE FUNCTION app.plg(); CREATE TRIGGER ls AFTER INSERT ON app.pt1 FOR EACH STATEMENT EXECUTE FUNCTION app.plg()
+
+query
+SELECT t.tgrelid::regclass::text AS rel, t.tgname, p.tgrelid::regclass::text AS parent, t.tgisinternal, pg_get_triggerdef(t.oid) FROM pg_trigger t LEFT JOIN pg_trigger p ON p.oid = t.tgparentid WHERE t.tgrelid::regclass::text LIKE 'pt%' ORDER BY 1, 2
+----
+rel:text | tgname:name | parent:text | tgisinternal:bool | pg_get_triggerdef:text
+pt | r | NULL | f | CREATE TRIGGER r AFTER INSERT OR DELETE OR UPDATE ON app.pt FOR EACH ROW EXECUTE FUNCTION plg()
+pt | s | NULL | f | CREATE TRIGGER s AFTER INSERT OR DELETE OR UPDATE ON app.pt FOR EACH STATEMENT EXECUTE FUNCTION plg()
+pt1 | ls | NULL | f | CREATE TRIGGER ls AFTER INSERT ON app.pt1 FOR EACH STATEMENT EXECUTE FUNCTION plg()
+pt1 | r | pt | f | CREATE TRIGGER r AFTER INSERT OR DELETE OR UPDATE ON app.pt1 FOR EACH ROW EXECUTE FUNCTION plg()
+pt2 | r | pt | f | CREATE TRIGGER r AFTER INSERT OR DELETE OR UPDATE ON app.pt2 FOR EACH ROW EXECUTE FUNCTION plg()
+pt21 | r | pt2 | f | CREATE TRIGGER r AFTER INSERT OR DELETE OR UPDATE ON app.pt21 FOR EACH ROW EXECUTE FUNCTION plg()
+
+statement ok
+INSERT INTO app.pt VALUES (1, 'a'), (11, 'b'); UPDATE app.pt SET v = 'c' WHERE id = 11; DELETE FROM app.pt WHERE id = 1; INSERT INTO app.pt1 VALUES (2, 'x')
+
+query
+SELECT name, lvl, tab, op FROM app.plog ORDER BY n
+----
+name:text | lvl:text | tab:text | op:text
+r | ROW | pt1 | INSERT
+r | ROW | pt21 | INSERT
+s | STATEMENT | pt | INSERT
+r | ROW | pt21 | UPDATE
+s | STATEMENT | pt | UPDATE
+r | ROW | pt1 | DELETE
+s | STATEMENT | pt | DELETE
+r | ROW | pt1 | INSERT
+ls | STATEMENT | pt1 | INSERT
+
+statement error 2BP01 cannot drop trigger r on table pt1 because trigger r on table pt requires it
+DROP TRIGGER r ON app.pt1
+
+statement error 0A000 cannot rename trigger "r" on table "pt21"
+ALTER TRIGGER r ON app.pt21 RENAME TO q
+
+statement error 42710 trigger "r" for relation "pt1" is an internal or a child trigger
+CREATE OR REPLACE TRIGGER r AFTER INSERT ON app.pt1 FOR EACH ROW EXECUTE FUNCTION app.plg()
+
+statement ok
+ALTER TRIGGER r ON app.pt RENAME TO r2; ALTER TABLE app.pt DISABLE TRIGGER r2; CREATE TABLE app.pt3 PARTITION OF app.pt FOR VALUES FROM (100) TO (200)
+
+query
+SELECT tgrelid::regclass::text AS rel, tgname, tgenabled FROM pg_trigger WHERE tgrelid::regclass::text LIKE 'pt%' AND tgparentid <> 0 ORDER BY 1, 2
+----
+rel:text | tgname:name | tgenabled:char
+pt1 | r2 | D
+pt2 | r2 | D
+pt21 | r2 | D
+pt3 | r2 | D
+
+statement ok
+ALTER TABLE app.pt DETACH PARTITION app.pt2
+
+query
+SELECT tgrelid::regclass::text AS rel, tgname FROM pg_trigger WHERE tgrelid::regclass::text LIKE 'pt%' ORDER BY 1, 2
+----
+rel:text | tgname:name
+pt | r2
+pt | s
+pt1 | ls
+pt1 | r2
+pt3 | r2
+
+statement ok
+DROP TRIGGER r2 ON app.pt
+
+query
+SELECT tgrelid::regclass::text AS rel, tgname FROM pg_trigger WHERE tgrelid::regclass::text LIKE 'pt%' ORDER BY 1, 2
+----
+rel:text | tgname:name
+pt | s
+pt1 | ls
