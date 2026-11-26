@@ -148,3 +148,117 @@ fn hash_partitions_foreign_keys_and_copy() {
     let e = expect_code(c.batch_execute("COPY acct TO STDOUT"), "42809");
     assert_eq!(message(&e), "cannot copy from partitioned table \"acct\"");
 }
+
+#[test]
+fn partition_of_after_dropped_column() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE dp_ref (id int PRIMARY KEY);
+         INSERT INTO dp_ref VALUES (1), (2);
+         CREATE TABLE dp (a int NOT NULL, b int, c text DEFAULT 'dflt', r int REFERENCES dp_ref, e int CHECK (e > 0),
+           PRIMARY KEY (a, c)) PARTITION BY LIST (a);
+         CREATE TABLE dp1 PARTITION OF dp FOR VALUES IN (1);
+         ALTER TABLE dp DROP COLUMN b;
+         CREATE TABLE dp2 PARTITION OF dp FOR VALUES IN (2, 3) PARTITION BY LIST (a);
+         CREATE TABLE dp2a PARTITION OF dp2 FOR VALUES IN (2);
+         CREATE TABLE dp2b PARTITION OF dp2 FOR VALUES IN (3);
+         CREATE INDEX dp_e_idx ON dp (e)",
+    )
+    .expect("schema");
+    // A partition created before the DROP keeps the dropped slot; one created after has only
+    // the live columns (sub-partitions too).
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT attrelid::regclass::text, attname::text, attnum::text, attisdropped::text FROM pg_attribute
+              WHERE attrelid IN ('dp1'::regclass, 'dp2'::regclass, 'dp2b'::regclass) AND attnum > 0 ORDER BY 1, 3::int"
+        ),
+        [
+            ["dp1", "a", "1", "false"],
+            ["dp1", "........pg.dropped.2........", "2", "true"],
+            ["dp1", "c", "3", "false"],
+            ["dp1", "r", "4", "false"],
+            ["dp1", "e", "5", "false"],
+            ["dp2", "a", "1", "false"],
+            ["dp2", "c", "2", "false"],
+            ["dp2", "r", "3", "false"],
+            ["dp2", "e", "4", "false"],
+            ["dp2b", "a", "1", "false"],
+            ["dp2b", "c", "2", "false"],
+            ["dp2b", "r", "3", "false"],
+            ["dp2b", "e", "4", "false"],
+        ]
+    );
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT column_name::text, ordinal_position::text, coalesce(column_default::text, '-') FROM information_schema.columns
+              WHERE table_name = 'dp2b' ORDER BY ordinal_position"
+        ),
+        [["a", "1", "-"], ["c", "2", "'dflt'::text"], ["r", "3", "-"], ["e", "4", "-"]]
+    );
+    // Cloned indexes and key / CHECK / foreign key constraints use the partition's attnums.
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT indexrelid::regclass::text, array_to_string(indkey::int2[], ' ') FROM pg_index
+              WHERE indrelid IN ('dp1'::regclass, 'dp2b'::regclass) ORDER BY 1"
+        ),
+        [["dp1_e_idx", "5"], ["dp1_pkey", "1 3"], ["dp2b_e_idx", "4"], ["dp2b_pkey", "1 2"]]
+    );
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT conrelid::regclass::text, conname::text, conkey::text FROM pg_constraint
+              WHERE conrelid IN ('dp1'::regclass, 'dp2b'::regclass) AND contype IN ('p', 'c', 'f') ORDER BY 1, 2"
+        ),
+        [
+            ["dp1", "dp1_pkey", "{1,3}"],
+            ["dp1", "dp_e_check", "{5}"],
+            ["dp1", "dp_r_fkey", "{4}"],
+            ["dp2b", "dp2b_pkey", "{1,2}"],
+            ["dp2b", "dp_e_check", "{4}"],
+            ["dp2b", "dp_r_fkey", "{3}"],
+        ]
+    );
+    // Routing, defaults, RETURNING and SELECT * through the parent.
+    assert_eq!(
+        rows(&mut c, "INSERT INTO dp (a, r, e) VALUES (1, 1, 5), (2, 2, 6), (3, 1, 7) RETURNING tableoid::regclass::text, *"),
+        [["dp1", "1", "dflt", "1", "5"], ["dp2a", "2", "dflt", "2", "6"], ["dp2b", "3", "dflt", "1", "7"]]
+    );
+    // Row movement both ways between layouts.
+    assert_eq!(
+        rows(&mut c, "UPDATE dp SET a = 3, c = 'm' WHERE a = 2 RETURNING tableoid::regclass::text, *"),
+        [["dp2b", "3", "m", "2", "6"]]
+    );
+    assert_eq!(
+        rows(&mut c, "UPDATE dp SET a = 1, e = 9 WHERE c = 'm' RETURNING tableoid::regclass::text, *"),
+        [["dp1", "1", "m", "2", "9"]]
+    );
+    assert_eq!(
+        rows(&mut c, "UPDATE dp SET a = 2, c = 'n' WHERE a = 1 AND c = 'dflt' RETURNING tableoid::regclass::text, *"),
+        [["dp2a", "2", "n", "1", "5"]]
+    );
+    // Constraints check the right columns on the new layout.
+    let e = expect_code(c.batch_execute("INSERT INTO dp (a, c, r, e) VALUES (3, 'fk', 9, 1)"), "23503");
+    assert_eq!(message(&e), "insert or update on table \"dp2b\" violates foreign key constraint \"dp_r_fkey\"");
+    expect_code(c.batch_execute("INSERT INTO dp (a, c, r, e) VALUES (3, 'ck', 1, 0)"), "23514");
+    let e = expect_code(c.batch_execute("INSERT INTO dp (a, r, e) VALUES (3, 1, 1)"), "23505");
+    assert_eq!(message(&e), "duplicate key value violates unique constraint \"dp2b_pkey\"");
+    expect_code(c.batch_execute("DELETE FROM dp_ref WHERE id = 2"), "23503");
+    let mut w = c.copy_in("COPY dp (a, c, r, e) FROM STDIN").expect("copy in");
+    std::io::Write::write_all(&mut w, b"2\tcp\t1\t3\n").expect("write");
+    assert_eq!(w.finish().expect("finish"), 1);
+    // DETACH and ATTACH the sub-partitioned partition back.
+    c.batch_execute("ALTER TABLE dp DETACH PARTITION dp2").expect("detach");
+    assert_eq!(
+        rows(&mut c, "SELECT tableoid::regclass::text, * FROM dp2 ORDER BY a, c"),
+        [["dp2a", "2", "cp", "1", "3"], ["dp2a", "2", "n", "1", "5"], ["dp2b", "3", "dflt", "1", "7"]]
+    );
+    c.batch_execute("ALTER TABLE dp ATTACH PARTITION dp2 FOR VALUES IN (2, 3)").expect("attach");
+    assert_eq!(
+        rows(&mut c, "SELECT tableoid::regclass::text, * FROM dp ORDER BY a, c"),
+        [["dp1", "1", "m", "2", "9"], ["dp2a", "2", "cp", "1", "3"], ["dp2a", "2", "n", "1", "5"], ["dp2b", "3", "dflt", "1", "7"],]
+    );
+    assert_eq!(rows(&mut c, "DELETE FROM dp WHERE a = 3 RETURNING tableoid::regclass::text, *"), [["dp2b", "3", "dflt", "1", "7"]]);
+}
