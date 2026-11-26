@@ -293,6 +293,9 @@ fn security_definer_procedure_and_writes() {
          SET ROLE itfa_sw_owner;
          CREATE PROCEDURE sw_note() LANGUAGE sql SECURITY DEFINER AS $$ INSERT INTO sw_log VALUES (current_user) $$;
          CREATE PROCEDURE sw_note_inv() LANGUAGE sql AS $$ INSERT INTO sw_log VALUES (current_user) $$;
+         CREATE FUNCTION sw_fn() RETURNS int LANGUAGE sql SECURITY DEFINER
+           AS $$ INSERT INTO sw_log VALUES (current_user || '/fn'); SELECT 1 $$;
+         CREATE FUNCTION sw_fn_inv() RETURNS int LANGUAGE sql AS $$ INSERT INTO sw_log VALUES (current_user); SELECT 1 $$;
          RESET ROLE;
          SET ROLE itfa_sw_caller;
          CALL sw_note()",
@@ -300,8 +303,13 @@ fn security_definer_procedure_and_writes() {
     .expect("setup");
     let e = expect_code(c.batch_execute("CALL sw_note_inv()"), "42501");
     assert_eq!(message(&e), "permission denied for table sw_log");
+    // A volatile function called from a query writes as its owner too; the caller's
+    // identity is back once it returns.
+    assert_eq!(rows(&mut c, "SELECT sw_fn(), current_user"), [["1", "itfa_sw_caller"]]);
+    let e = expect_code(c.batch_execute("SELECT sw_fn_inv()"), "42501");
+    assert_eq!(message(&e), "permission denied for table sw_log");
     c.batch_execute("RESET ROLE").expect("reset");
-    assert_eq!(rows(&mut c, "SELECT who FROM sw_log"), [["itfa_sw_owner"]]);
+    assert_eq!(rows(&mut c, "SELECT who FROM sw_log ORDER BY who"), [["itfa_sw_owner"], ["itfa_sw_owner/fn"]]);
     drop_roles(&mut c, &roles);
 }
 
