@@ -474,11 +474,11 @@ fn validate_unique(txn: &Txn, def: &TableDef, index: &str, env: &SessionEnv, sta
         if !seen.insert(key) {
             let cols: Vec<String> =
                 if u.exprs.is_empty() { u.columns.iter().map(|c| def.columns[*c].name.clone()).collect() } else { vec!["expr".into()] };
-            return Err(SqlError::new(code::UNIQUE_VIOLATION, format!("could not create unique index \"{index}\"")).with_detail(format!(
-                "Key ({})=({}) is duplicated.",
-                cols.join(", "),
-                vals.iter().map(display).collect::<Vec<_>>().join(", ")
-            )));
+            let keys: Vec<Option<usize>> = if u.exprs.is_empty() { u.columns.iter().map(|c| Some(*c)).collect() } else { vec![None] };
+            let detail = crate::detail_privileges::key_visible(def.oid, keys)
+                .then(|| format!("Key ({})=({}) is duplicated.", cols.join(", "), vals.iter().map(display).collect::<Vec<_>>().join(", ")));
+            let e = SqlError::new(code::UNIQUE_VIOLATION, format!("could not create unique index \"{index}\""));
+            return Err(crate::dml::with_detail(e, detail));
         }
     }
     Ok(())
@@ -1288,15 +1288,20 @@ pub(crate) fn validate_constraint(
                 });
                 if !found {
                     let names: Vec<&str> = columns.iter().map(|c| def.columns[*c].name.as_str()).collect();
+                    let detail = if crate::detail_privileges::key_visible(def.oid, columns.iter().map(|c| Some(*c))) {
+                        format!(
+                            "Key ({})=({}) is not present in table \"{ref_table}\".",
+                            names.join(", "),
+                            key.iter().map(display).collect::<Vec<_>>().join(", ")
+                        )
+                    } else {
+                        format!("Key is not present in table \"{ref_table}\".")
+                    };
                     return Err(SqlError::new(
                         code::FOREIGN_KEY_VIOLATION,
                         format!("insert or update on table \"{}\" violates foreign key constraint \"{name}\"", def.name),
                     )
-                    .with_detail(format!(
-                        "Key ({})=({}) is not present in table \"{ref_table}\".",
-                        names.join(", "),
-                        key.iter().map(display).collect::<Vec<_>>().join(", ")
-                    )));
+                    .with_detail(detail));
                 }
             }
             Ok(())

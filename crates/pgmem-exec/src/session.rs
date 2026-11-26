@@ -618,7 +618,9 @@ impl Session {
         let top = Level::new(Scope::default());
         let ctx = Ctx::new(&top);
         crate::roles::check_statement(stmt, &catalog, &env, param_types)?;
-        let result = crate::statement::exec_statement(stmt, &binder, &ctx, txn, params, &env, &state)?;
+        let result = crate::detail_privileges::as_viewer(&catalog, &env, stmt, || {
+            crate::statement::exec_statement(stmt, &binder, &ctx, txn, params, &env, &state)
+        })?;
         // New relations: their owner (when not the session user) and default privileges.
         let created = match stmt {
             Statement::CreateTable(ct) => Some((&ct.name, 'r')),

@@ -447,7 +447,16 @@ pub(crate) fn instead_of(
                             .ok_or_else(|| SqlError::undefined_column(&format!("\"{}\" of relation \"{}\"", c[0], view.name)))?;
                         targets.push(slot);
                     }
-                    exprs.push(a.value.clone());
+                    // `SET (a, b) = (x, y)` sets each column; DEFAULT is the view column's
+                    // default, which a view without one has as NULL.
+                    let values = match &a.value {
+                        ir::Expr::Row(items) if a.columns.len() > 1 && items.len() == a.columns.len() => items.clone(),
+                        v => vec![v.clone()],
+                    };
+                    exprs.extend(values.into_iter().map(|e| match e {
+                        ir::Expr::Default => ir::Expr::Literal(ir::Literal::Null),
+                        e => e,
+                    }));
                 }
                 let q = select_from(&u.table, u.alias.as_ref(), exprs, u.selection.clone());
                 let bound = binder.bind_query(&q, &ctx)?;

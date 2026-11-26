@@ -15,6 +15,25 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 ### Fixed
 
 - `pg_constraint.connamespace` is the namespace of the owning table or domain instead of always `public`.
+- Privilege checks cover every relation a statement reads, as in PostgreSQL: `UPDATE ... FROM`,
+  `DELETE ... USING`, subqueries in `WHERE` / `SET` / `RETURNING` / `VALUES`, `INSERT ... SELECT`,
+  `ON CONFLICT DO UPDATE`, and WITH queries (data-modifying ones always, SELECT ones when
+  referenced). `MERGE` needs each listed action's privilege on the target (column privileges for
+  `UPDATE SET` and `INSERT` columns), SELECT on the target columns it reads, and SELECT on the
+  source. `COPY table TO` / `FROM` need SELECT / INSERT on the copied columns, checked before the
+  copy starts. `UPDATE` / `DELETE` on a view with `INSTEAD OF` triggers need SELECT on the view
+  columns `WHERE`, `SET` and `RETURNING` read.
+- Constraint-violation DETAIL hides what the role cannot read: without SELECT on the table,
+  `Failing row contains (cols) = (values).` lists only the columns it may select or the statement
+  writes (no DETAIL when none), and unique, exclusion, foreign key and partition key details omit
+  the key unless every key column is readable, deferred checks at `COMMIT` / `SET CONSTRAINTS`
+  included. Writes through an automatically updatable view count the base columns they write.
+- A row routed into a partition is described in the partitioned table's column order in a
+  failing-row DETAIL, as PostgreSQL does.
+- `UPDATE` on a view with `INSTEAD OF` triggers accepts `SET c = DEFAULT` and
+  `SET (a, b) = (x, y)`.
+- `information_schema.table_privileges` and `role_table_grants` show only grants whose grantor or
+  grantee is a role the current user has the privileges of (`table_privileges` also PUBLIC's).
 
 ### Changed
 

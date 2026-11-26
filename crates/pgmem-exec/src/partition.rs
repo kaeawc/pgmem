@@ -486,9 +486,17 @@ fn routing_error(catalog: &Catalog, table: &TableDef, key: &PartitionKey, values
             }
         })
         .collect();
-    SqlError::new(code::CHECK_VIOLATION, format!("no partition of relation \"{}\" found for row", table.name))
-        .with_detail(format!("Partition key of the failing row contains ({}) = ({}).", names.join(", "), vals.join(", ")))
-        .with_table(table.name.clone())
+    let keys = key.parts.iter().map(|p| match p {
+        pgmem_catalog::PartitionKeyPart::Column(c) => Some(*c),
+        pgmem_catalog::PartitionKeyPart::Expr(_) => None,
+    });
+    let detail = crate::detail_privileges::key_visible(table.oid, keys)
+        .then(|| format!("Partition key of the failing row contains ({}) = ({}).", names.join(", "), vals.join(", ")));
+    crate::dml::with_detail(
+        SqlError::new(code::CHECK_VIOLATION, format!("no partition of relation \"{}\" found for row", table.name)),
+        detail,
+    )
+    .with_table(table.name.clone())
 }
 
 /// The direct partition of `parent` a row (in `parent`'s layout) belongs to.
@@ -546,9 +554,11 @@ pub(crate) fn satisfies_constraint(catalog: &Catalog, table: &TableDef, row: &Ro
 }
 
 pub(crate) fn constraint_error(table: &TableDef, row: &Row) -> SqlError {
-    SqlError::new(code::CHECK_VIOLATION, format!("new row for relation \"{}\" violates partition constraint", table.name))
-        .with_detail(crate::dml::failing_row(table, row))
-        .with_table(table.name.clone())
+    crate::dml::with_detail(
+        SqlError::new(code::CHECK_VIOLATION, format!("new row for relation \"{}\" violates partition constraint", table.name)),
+        crate::dml::failing_row(table, row),
+    )
+    .with_table(table.name.clone())
 }
 
 /// The rows of a partitioned table, read from its leaves in its layout: (leaf, row id, row).
