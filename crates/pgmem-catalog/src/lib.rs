@@ -52,6 +52,12 @@ pub struct ColumnDef {
     pub missing: Value,
     /// `COLLATE name` when not the type's default collation.
     pub collation: Option<String>,
+    /// `SET STATISTICS n` (`attstattarget`); None is the default (NULL in Postgres 17+).
+    pub stattarget: Option<i16>,
+    /// `SET STORAGE` (`attstorage`); None is the type's default.
+    pub storage: Option<char>,
+    /// `SET COMPRESSION` (`attcompression`: `p`glz or `l`z4); None is the default (empty).
+    pub compression: Option<char>,
 }
 
 impl ColumnDef {
@@ -68,6 +74,9 @@ impl ColumnDef {
             dropped: false,
             missing: Value::Null,
             collation: None,
+            stattarget: None,
+            storage: None,
+            compression: None,
         }
     }
 }
@@ -181,6 +190,10 @@ pub struct IndexDef {
     pub nulls_not_distinct: bool,
     /// Partial index predicate.
     pub predicate: Option<Expr>,
+    /// `CLUSTER ON` (`indisclustered`).
+    pub clustered: bool,
+    /// `REPLICA IDENTITY USING INDEX` (`indisreplident`).
+    pub replica: bool,
     /// `pg_class.reloptions` (`name=value`, in Postgres' order); empty means NULL.
     pub reloptions: Vec<String>,
 }
@@ -199,6 +212,9 @@ pub struct TableDef {
     pub matview: Option<Box<MatView>>,
     /// `CREATE UNLOGGED TABLE` (`relpersistence = 'u'`).
     pub unlogged: bool,
+    /// `REPLICA IDENTITY` (`relreplident`): `d`efault, `n`othing, `f`ull or `i` (an index,
+    /// the one flagged `IndexDef::replica`).
+    pub replident: char,
     /// `pg_class.reloptions` (`name=value`, in Postgres' order); empty means NULL.
     pub reloptions: Vec<String>,
 }
@@ -1326,6 +1342,7 @@ mod tests {
             indexes: vec![],
             matview: None,
             unlogged: false,
+            replident: 'd',
             reloptions: Vec::new(),
         }
     }
