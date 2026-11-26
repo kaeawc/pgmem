@@ -39,6 +39,9 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - `CREATE FUNCTION / TYPE / VIEW / SEQUENCE / DOMAIN pg_temp.x` creates the session's temporary
   schema on demand; temporary views, sequences, composite types and indexes report
   `relpersistence` `t`.
+- UNION / INTERSECT / EXCEPT and `SELECT DISTINCT` without ORDER BY return rows in PostgreSQL's
+  order (sorted, or hash-table order, as its planner picks) for inputs of constants and VALUES
+  lists, instead of first-seen order. Table inputs keep first-seen order.
 - `regrole` input and output (`'role'::regrole`, `to_regrole()`, casts to and from `oid`), `pg_class.relowner` for objects owned by other roles, and the `pg_policies` view (empty until row-level security exists).
 - `ALTER DEFAULT PRIVILEGES [FOR ROLE r] [IN SCHEMA s]` is stored in `pg_default_acl` (as in Postgres, global entries start from the hard-wired defaults and vanish when equal to them) and applied to tables, views and sequences created afterwards by that role.
 
