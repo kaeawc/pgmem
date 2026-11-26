@@ -1,3 +1,2 @@
 # Corpus records pgmem fails today, by key (file:hash of the SQL); the first line of the SQL
 # follows for reading. Regenerate with `cargo run -p pgmem-conformance -- --update`.
-queries/set_operations.slt:6680237cbd789fd6  # SELECT NULL UNION SELECT 1
