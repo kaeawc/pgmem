@@ -122,6 +122,7 @@ pub enum RegKind {
     Type,
     Proc,
     Namespace,
+    Role,
     /// `regprocedure`: a function with its argument types.
     Procedure,
 }
@@ -133,6 +134,7 @@ impl RegKind {
             RegKind::Type => "regtype",
             RegKind::Proc => "regproc",
             RegKind::Namespace => "regnamespace",
+            RegKind::Role => "regrole",
             RegKind::Procedure => "regprocedure",
         }
     }
@@ -178,6 +180,7 @@ impl Type {
             Type::Reg(RegKind::Type) => 2206,
             Type::Reg(RegKind::Proc) => 24,
             Type::Reg(RegKind::Namespace) => 4089,
+            Type::Reg(RegKind::Role) => 4096,
             Type::Reg(RegKind::Procedure) => 2202,
             Type::Void => 2278,
             Type::Int2Vector => 22,
@@ -227,6 +230,7 @@ impl Type {
                 Type::Reg(RegKind::Type) => 2211,
                 Type::Reg(RegKind::Proc) => 1008,
                 Type::Reg(RegKind::Namespace) => 4090,
+                Type::Reg(RegKind::Role) => 4097,
                 Type::Reg(RegKind::Procedure) => 2207,
                 Type::Enum(o) | Type::Domain(o) | Type::Composite(o) => usertype::array_oid(*o),
                 Type::Record => usertype::RECORD_ARRAY_OID,
@@ -268,6 +272,7 @@ impl Type {
             2206 => Some(Type::Reg(RegKind::Type)),
             24 => Some(Type::Reg(RegKind::Proc)),
             4089 => Some(Type::Reg(RegKind::Namespace)),
+            4096 => Some(Type::Reg(RegKind::Role)),
             2202 => Some(Type::Reg(RegKind::Procedure)),
             2278 => Some(Type::Void),
             22 => Some(Type::Int2Vector),
@@ -329,6 +334,7 @@ impl Type {
             2211 => Type::Reg(RegKind::Type),
             1008 => Type::Reg(RegKind::Proc),
             4090 => Type::Reg(RegKind::Namespace),
+            4097 => Type::Reg(RegKind::Role),
             2207 => Type::Reg(RegKind::Procedure),
             1016 => Type::Int8,
             1021 => Type::Float4,
@@ -548,6 +554,7 @@ impl Type {
             "regtype" => Type::Reg(RegKind::Type),
             "regproc" => Type::Reg(RegKind::Proc),
             "regnamespace" => Type::Reg(RegKind::Namespace),
+            "regrole" => Type::Reg(RegKind::Role),
             "regprocedure" => Type::Reg(RegKind::Procedure),
             "void" => Type::Void,
             "int2vector" => Type::Int2Vector,

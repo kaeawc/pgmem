@@ -8,7 +8,7 @@
 use pgmem_ir::Expr;
 use pgmem_types::usertype::{EnumLabel, Field, UserKind, UserType};
 use pgmem_types::{SqlError, SqlResult, Type, Value, code};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 mod extmembers;
@@ -16,7 +16,7 @@ mod partitions;
 mod roles;
 pub use extmembers::{ExtMember, ExtMemberClass};
 pub use partitions::{PartitionBound, PartitionKey, PartitionKeyPart, PartitionOf, PartitionStrategy, RangeDatum};
-pub use roles::{DefaultPrivilege, ExtensionDef, Grant, GrantObject, RoleDef};
+pub use roles::{DefaultItem, DefaultPrivilege, ExtensionDef, Grant, GrantObject, RoleDef};
 
 pub type Oid = u32;
 
@@ -636,6 +636,10 @@ pub struct Catalog {
     partition_keys: BTreeMap<Oid, PartitionKey>,
     /// Partitions' parents and bounds, by partition OID.
     partition_bounds: BTreeMap<Oid, PartitionOf>,
+    /// Partition indexes' parent indexes (`pg_inherits` of indexes), by child index OID.
+    index_parents: BTreeMap<Oid, Oid>,
+    /// Partitioned indexes not yet valid (`CREATE INDEX ... ON ONLY` before every partition has one).
+    invalid_indexes: BTreeSet<Oid>,
     next_oid: Oid,
 }
 
@@ -675,6 +679,8 @@ impl Catalog {
             comments: BTreeMap::new(),
             partition_keys: BTreeMap::new(),
             partition_bounds: BTreeMap::new(),
+            index_parents: BTreeMap::new(),
+            invalid_indexes: BTreeSet::new(),
             next_oid: FIRST_USER_OID,
         }
     }
@@ -1230,6 +1236,9 @@ impl Catalog {
         let dropped = self.tables.remove(name)?;
         self.partition_keys.remove(&dropped.oid);
         self.partition_bounds.remove(&dropped.oid);
+        for idx in &dropped.indexes {
+            self.forget_index(idx.oid);
+        }
         self.triggers.retain(|_, t| t.table != dropped.oid);
         self.grants.retain(|g| g.object.relation_oid() != Some(dropped.oid));
         self.owners.remove(&dropped.oid);

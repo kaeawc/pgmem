@@ -652,6 +652,16 @@ impl Session {
             }
             let schema = rel.schema().to_owned();
             crate::roles::apply_defaults(txn, &env, rel.oid(), &schema, kind);
+            // Serial / identity sequences are created with their table.
+            if let Relation::Table(t) = &rel {
+                let seqs: Vec<(Oid, String)> = txn.catalog().owned_sequences(t).map(|q| (q.oid, q.schema.clone())).collect();
+                for (oid, schema) in seqs {
+                    if role != env.user {
+                        txn.catalog_mut().set_owner(oid, Some(&role));
+                    }
+                    crate::roles::apply_defaults(txn, &env, oid, &schema, 'S');
+                }
+            }
         }
         if let Statement::CreateTable(ct) = stmt
             && ct.options.on_commit != ir::OnCommit::PreserveRows
@@ -1302,7 +1312,7 @@ fn write_command_name(stmt: &Statement) -> Option<&'static str> {
         Statement::CreateView(_) => "CREATE VIEW",
         Statement::RefreshMatview { .. } => "REFRESH MATERIALIZED VIEW",
         Statement::RenameView { .. } => "ALTER VIEW",
-        Statement::RenameIndex { .. } => "ALTER INDEX",
+        Statement::RenameIndex { .. } | Statement::AttachIndexPartition { .. } => "ALTER INDEX",
         Statement::AlterRelOptions { object, .. } => crate::reloptions::alter_tag(*object),
         Statement::AlterSequence { .. } => "ALTER SEQUENCE",
         Statement::CreateFunction(cf) if cf.procedure => "CREATE PROCEDURE",

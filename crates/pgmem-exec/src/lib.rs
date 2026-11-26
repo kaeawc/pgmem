@@ -22,6 +22,7 @@ pub mod functions;
 mod hashorder;
 pub mod lock_levels;
 pub mod partition;
+mod partition_index;
 pub mod plan;
 pub mod plpgsql;
 pub mod portal;
