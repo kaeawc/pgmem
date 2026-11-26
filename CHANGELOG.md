@@ -16,6 +16,9 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 
 - Function attributes are stored and shown: `SECURITY DEFINER`, `SET param = value` (`pg_proc.proconfig`), `PARALLEL`, `COST`, `ROWS` and `LEAKPROOF` appear in `pg_proc` and `pg_get_functiondef` as PostgreSQL prints them (procedures use `$procedure$`), and a function's `SET` options apply during its call.
 - `ALTER FUNCTION / PROCEDURE / ROUTINE` supports `SET` / `RESET`, `[EXTERNAL] SECURITY`, volatility, `[NOT] LEAKPROOF`, `STRICT` / `CALLED ON NULL INPUT`, `PARALLEL`, `COST`, `ROWS`, `RENAME TO` and `SET SCHEMA`.
+- `DROP SCHEMA` lists the schema's functions and procedures (and materialized views) in the "depends on schema" detail and the `CASCADE` notice, in creation order, fails with 2BP01 while they exist, and `CASCADE` drops them.
+- `ALTER TABLE ... ADD COLUMN ... DEFAULT` on a partitioned table sets `atthasmissing` on existing partitions only, not on the parent or on partitions created afterwards.
+- Under `session_replication_role = replica`, foreign keys are not enforced and `ON DELETE` / `ON UPDATE` actions do not fire, as in PostgreSQL (`ADD CONSTRAINT` still validates existing rows).
 - `pg_constraint.connamespace` is the namespace of the owning table or domain instead of always `public`.
 - `pg_get_indexdef` and `pg_indexes.indexdef` print `INCLUDE (...)` for covering indexes, and `pg_index.indnatts`, `indnkeyatts`, `indkey` and `pg_class.relnatts` count the INCLUDE columns like PostgreSQL.
 

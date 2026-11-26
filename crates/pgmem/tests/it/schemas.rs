@@ -115,3 +115,42 @@ fn temporary_tables_are_private_and_shadow_permanent_ones() {
     c.batch_execute("DROP TABLE src").expect("drop temp");
     assert_eq!(text_value(&mut c, "SELECT count(*) FROM src"), Some("3".into()));
 }
+
+#[test]
+fn drop_schema_lists_and_drops_functions_in_creation_order() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE SCHEMA fs; CREATE FUNCTION fs.f(a int, b text) RETURNS int LANGUAGE sql AS 'select 1';
+         CREATE TABLE fs.t (a int); CREATE PROCEDURE fs.p(x int) LANGUAGE sql AS 'select 1';
+         CREATE SEQUENCE fs.q; CREATE FUNCTION fs.g() RETURNS int LANGUAGE sql AS 'select 1';
+         CREATE VIEW fs.v AS SELECT 1 AS x; CREATE MATERIALIZED VIEW fs.mv AS SELECT 1 AS x; CREATE TYPE fs.ty AS ENUM ('a'); CREATE DOMAIN fs.d AS int;
+         CREATE FUNCTION fs.tf() RETURNS trigger LANGUAGE plpgsql AS 'begin return new; end';
+         CREATE TRIGGER tr BEFORE INSERT ON fs.t FOR EACH ROW EXECUTE FUNCTION fs.tf()",
+    )
+    .expect("setup");
+    let e = expect_code(c.simple_query("DROP SCHEMA fs"), "2BP01");
+    assert_eq!(message(&e), "cannot drop schema fs because other objects depend on it");
+    let detail = e.as_db_error().and_then(|d| d.detail()).unwrap_or_default().to_owned();
+    assert_eq!(
+        detail,
+        "function fs.f(integer,text) depends on schema fs\ntable fs.t depends on schema fs\nfunction fs.p(integer) depends on schema fs\n\
+         sequence fs.q depends on schema fs\nfunction fs.g() depends on schema fs\nview fs.v depends on schema fs\nmaterialized view fs.mv depends on schema fs\n\
+         type fs.ty depends on schema fs\ntype fs.d depends on schema fs\nfunction fs.tf() depends on schema fs"
+    );
+    c.batch_execute("DROP SCHEMA fs CASCADE").expect("cascade");
+    assert_eq!(
+        text_value(
+            &mut c,
+            "SELECT count(*) FROM pg_proc WHERE pronamespace NOT IN (SELECT oid FROM pg_namespace) OR proname IN ('f', 'g', 'p', 'tf')"
+        ),
+        Some("0".into())
+    );
+}
+
+#[test]
+fn drop_schema_without_functions_keeps_other_schemas_functions() {
+    let (_db, mut c) = setup();
+    c.batch_execute("CREATE SCHEMA gs; CREATE FUNCTION public.keepme() RETURNS int LANGUAGE sql AS 'select 1'; DROP SCHEMA gs")
+        .expect("setup");
+    assert_eq!(text_value(&mut c, "SELECT keepme()"), Some("1".into()));
+}

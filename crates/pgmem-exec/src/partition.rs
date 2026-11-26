@@ -705,7 +705,15 @@ pub(crate) fn create_partition(
         oid: 0,
         schema,
         name: name.clone(),
-        columns: parent.live_columns().map(|(_, c)| c.clone()).collect(),
+        // A new partition holds no rows, so it has no fast defaults (atthasmissing = f).
+        columns: parent
+            .live_columns()
+            .map(|(_, c)| {
+                let mut c = c.clone();
+                c.missing = Value::Null;
+                c
+            })
+            .collect(),
         constraints: parent
             .constraints
             .iter()

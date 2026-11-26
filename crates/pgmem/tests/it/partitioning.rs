@@ -1,7 +1,7 @@
 //! Declarative partitioning: routing, partition constraints, row movement, sub-partitions,
 //! ON CONFLICT, foreign keys to partitioned tables, COPY, ATTACH / DETACH and the catalogs.
 
-use crate::support::{expect_code, message, setup, texts};
+use crate::support::{expect_code, message, setup, text_value, texts};
 
 fn rows(c: &mut postgres::Client, sql: &str) -> Vec<Vec<String>> {
     texts(c, sql).into_iter().map(|r| r.into_iter().map(|v| v.unwrap_or_else(|| "NULL".into())).collect()).collect()
@@ -261,4 +261,21 @@ fn partition_of_after_dropped_column() {
         [["dp1", "1", "m", "2", "9"], ["dp2a", "2", "cp", "1", "3"], ["dp2a", "2", "n", "1", "5"], ["dp2b", "3", "dflt", "1", "7"],]
     );
     assert_eq!(rows(&mut c, "DELETE FROM dp WHERE a = 3 RETURNING tableoid::regclass::text, *"), [["dp2b", "3", "dflt", "1", "7"]]);
+}
+
+#[test]
+fn add_column_default_sets_atthasmissing_on_partitions_not_the_parent() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE hm (a int, b int) PARTITION BY RANGE (a); CREATE TABLE hm1 PARTITION OF hm FOR VALUES FROM (0) TO (10);
+         INSERT INTO hm VALUES (1, 1); ALTER TABLE hm ADD COLUMN c int DEFAULT 1;
+         CREATE TABLE hm2 PARTITION OF hm FOR VALUES FROM (10) TO (20)",
+    )
+    .expect("setup");
+    let q = "SELECT attrelid::regclass::text, atthasmissing FROM pg_attribute WHERE attrelid::regclass::text LIKE 'hm%' AND attname = 'c' ORDER BY 1";
+    assert_eq!(
+        texts(&mut c, q),
+        [[Some("hm".into()), Some("f".into())], [Some("hm1".into()), Some("t".into())], [Some("hm2".into()), Some("f".into())]]
+    );
+    assert_eq!(text_value(&mut c, "SELECT c FROM hm"), Some("1".into()));
 }

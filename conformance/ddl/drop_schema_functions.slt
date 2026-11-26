@@ -1,0 +1,89 @@
+statement ok
+CREATE SCHEMA fs
+
+statement ok
+CREATE FUNCTION fs.f(a int, b text) RETURNS int LANGUAGE sql AS 'select 1'
+
+statement ok
+CREATE TABLE fs.t (a int)
+
+statement ok
+CREATE PROCEDURE fs.p(x int) LANGUAGE sql AS 'select 1'
+
+statement ok
+CREATE FUNCTION fs.tf() RETURNS trigger LANGUAGE plpgsql AS 'begin return new; end'
+
+statement ok
+CREATE TRIGGER tr BEFORE INSERT ON fs.t FOR EACH ROW EXECUTE FUNCTION fs.tf()
+
+statement error 2BP01 cannot drop schema fs because other objects depend on it
+DROP SCHEMA fs
+
+statement ok
+DROP SCHEMA fs CASCADE
+
+query
+SELECT count(*) FROM pg_proc WHERE proname IN ('f', 'p', 'tf')
+----
+count:int8
+0
+
+statement ok
+CREATE TABLE hm (a int, b int) PARTITION BY RANGE (a)
+
+statement ok
+CREATE TABLE hm1 PARTITION OF hm FOR VALUES FROM (0) TO (10)
+
+statement ok
+ALTER TABLE hm ADD COLUMN c int DEFAULT 1
+
+statement ok
+CREATE TABLE hm2 PARTITION OF hm FOR VALUES FROM (10) TO (20)
+
+query
+SELECT attrelid::regclass::text, atthasmissing FROM pg_attribute WHERE attrelid::regclass::text LIKE 'hm%' AND attname = 'c' ORDER BY 1
+----
+attrelid:text | atthasmissing:bool
+hm | f
+hm1 | t
+hm2 | f
+
+statement ok
+DROP TABLE hm
+
+statement ok
+CREATE TABLE rp (id int PRIMARY KEY)
+
+statement ok
+CREATE TABLE rc (id int, pid int REFERENCES rp ON DELETE CASCADE)
+
+statement ok
+INSERT INTO rp VALUES (1)
+
+statement ok
+INSERT INTO rc VALUES (1, 1)
+
+statement ok
+SET session_replication_role = replica
+
+statement ok
+INSERT INTO rc VALUES (2, 99)
+
+statement ok
+DELETE FROM rp WHERE id = 1
+
+query rowsort
+SELECT id, pid FROM rc
+----
+id:int4 | pid:int4
+1 | 1
+2 | 99
+
+statement ok
+SET session_replication_role = origin
+
+statement error 23503 insert or update on table "rc" violates foreign key constraint "rc_pid_fkey"
+INSERT INTO rc VALUES (3, 99)
+
+statement ok
+DROP TABLE rc, rp

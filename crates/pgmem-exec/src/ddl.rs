@@ -974,22 +974,31 @@ pub(crate) fn create_schema(cs: &ir::CreateSchema, txn: &mut Txn, user: &str) ->
     Ok(tag("CREATE SCHEMA"))
 }
 
-/// The objects in a schema, as `DROP SCHEMA ... CASCADE` reports them ("table app.items").
+/// The objects in a schema, as `DROP SCHEMA ... CASCADE` reports them ("table app.items"), in
+/// creation (OID) order. Postgres names procedures "function" here too.
 fn schema_members(cat: &Catalog, schema: &str) -> Vec<String> {
-    let mut out = Vec::new();
+    let mut out: Vec<(u32, String)> = Vec::new();
     for t in cat.tables().filter(|t| t.schema == schema) {
-        out.push(format!("table {schema}.{}", t.name));
+        let kind = if t.matview.is_some() { "materialized view" } else { "table" };
+        out.push((t.oid, format!("{kind} {schema}.{}", t.name)));
     }
     for v in cat.views().filter(|v| v.schema == schema) {
-        out.push(format!("view {schema}.{}", v.name));
+        out.push((v.oid, format!("view {schema}.{}", v.name)));
     }
     for s in cat.sequences().filter(|s| s.schema == schema && s.owned_by.is_none()) {
-        out.push(format!("sequence {schema}.{}", s.name));
+        out.push((s.oid, format!("sequence {schema}.{}", s.name)));
     }
     for t in cat.types().filter(|t| t.schema == schema) {
-        out.push(format!("{} {schema}.{}", t.kind_name(), t.name));
+        out.push((t.oid, format!("type {schema}.{}", t.name)));
     }
-    out
+    for f in cat.functions().filter(|f| f.schema == schema) {
+        out.push((
+            f.oid,
+            format!("function {schema}.{}({})", f.name, f.input_types().iter().map(pgmem_types::Type::name).collect::<Vec<_>>().join(",")),
+        ));
+    }
+    out.sort_by_key(|(oid, _)| *oid);
+    out.into_iter().map(|(_, m)| m).collect()
 }
 
 fn drop_schemas(d: &ir::Drop, txn: &mut Txn) -> SqlResult<QueryResult> {
@@ -1064,6 +1073,11 @@ pub(crate) fn drop_schema_contents(txn: &mut Txn, schema: &str) {
     let types: Vec<QualName> = cat.types().filter(|t| t.schema == schema).map(|t| QualName::new(&t.schema, &t.name)).collect();
     for t in types {
         cat.drop_type(&t);
+    }
+    let funcs: Vec<pgmem_catalog::Oid> = cat.functions().filter(|f| f.schema == schema).map(|f| f.oid).collect();
+    for oid in funcs {
+        cat.drop_comments(oid);
+        cat.drop_function(oid);
     }
 }
 
