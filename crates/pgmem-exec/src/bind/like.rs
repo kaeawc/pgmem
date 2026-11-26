@@ -27,6 +27,7 @@ pub struct LikeIndex {
     pub unique: bool,
     pub nulls_not_distinct: bool,
     pub predicate: Option<ir::Expr>,
+    pub reloptions: Vec<String>,
 }
 
 /// Inserts the LIKE sources' columns into `table` (whose columns are the statement's own, in
@@ -75,6 +76,7 @@ fn source(b: &Binder, name: &ir::ObjectName) -> SqlResult<TableDef> {
                 indexes: Vec::new(),
                 matview: None,
                 unlogged: false,
+                reloptions: Vec::new(),
             };
             Ok(def)
         }
@@ -153,6 +155,7 @@ fn copy_columns(
                     unique: idx.unique,
                     nulls_not_distinct: idx.nulls_not_distinct,
                     predicate: idx.predicate.clone(),
+                    reloptions: idx.reloptions.clone(),
                 }),
             }
         }
@@ -229,5 +232,6 @@ pub fn build_index(b: &Binder, table: &TableDef, li: &LikeIndex, taken: &mut Vec
         primary: false,
         nulls_not_distinct: li.nulls_not_distinct,
         predicate: li.predicate.clone(),
+        reloptions: li.reloptions.clone(),
     })
 }

@@ -111,6 +111,7 @@ mod range_types;
 mod recursive_cte;
 mod regex;
 mod regexp_funcs;
+mod reloptions;
 mod returning_star;
 mod roles_privileges;
 mod savepoint;

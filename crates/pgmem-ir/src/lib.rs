@@ -258,6 +258,15 @@ pub enum Statement {
         options: Box<SequenceOptions>,
         rename_to: Option<String>,
     },
+    /// `ALTER {TABLE | INDEX | VIEW | MATERIALIZED VIEW} [IF EXISTS] name {SET | RESET} (options)`:
+    /// `object` is the keyword used.
+    AlterRelOptions {
+        object: ObjectType,
+        name: ObjectName,
+        if_exists: bool,
+        reset: bool,
+        options: Vec<RelOption>,
+    },
     /// `ALTER INDEX [IF EXISTS] name RENAME TO new_name`.
     RenameIndex {
         name: ObjectName,
@@ -1024,6 +1033,17 @@ pub struct CreateTableOptions {
     pub partition_by: Option<PartitionSpec>,
     /// `PARTITION OF parent FOR VALUES ... | DEFAULT`.
     pub partition_of: Option<(ObjectName, PartitionBoundSpec)>,
+    /// `WITH (storage_parameter [= value], ...)`.
+    pub reloptions: Vec<RelOption>,
+}
+
+/// One storage parameter of a `WITH (...)` / `SET (...)` / `RESET (...)` list: `[namespace.]name
+/// [= value]`, the name folded like an identifier and the value as written (text).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RelOption {
+    pub namespace: Option<String>,
+    pub name: String,
+    pub value: Option<String>,
 }
 
 /// `PARTITION BY RANGE | LIST | HASH (key, ...)`: each key a column or an expression.
@@ -1059,6 +1079,7 @@ impl Default for CreateTableOptions {
             column_names: Vec::new(),
             partition_by: None,
             partition_of: None,
+            reloptions: Vec::new(),
         }
     }
 }
@@ -1199,6 +1220,10 @@ pub struct CreateView {
     pub materialized: bool,
     /// `WITH [CASCADED | LOCAL] CHECK OPTION`.
     pub check_option: bool,
+    /// The check option was written `WITH LOCAL CHECK OPTION`.
+    pub check_local: bool,
+    /// `WITH (security_barrier, ...)`.
+    pub reloptions: Vec<RelOption>,
     /// A materialized view's `WITH [NO] DATA` (default WITH DATA).
     pub with_data: bool,
 }
@@ -1217,6 +1242,8 @@ pub struct CreateIndex {
     pub nulls_not_distinct: bool,
     /// `USING method` (lowercase), if given.
     pub method: Option<String>,
+    /// `WITH (fillfactor = 70, ...)`.
+    pub reloptions: Vec<RelOption>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
