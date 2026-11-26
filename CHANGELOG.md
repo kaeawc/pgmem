@@ -11,6 +11,8 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - Static Linux binaries (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) on each release.
 - `cargo binstall pgmem` installs the prebuilt binary from the GitHub release.
 - `pg_get_keywords()` returns PostgreSQL 18's keyword list (word, catcode, barelabel, catdesc, baredesc).
+- `CREATE STATISTICS` (and `ALTER` / `DROP` / `COMMENT ON STATISTICS`): the object is stored, listed in `pg_statistic_ext`, printed by `pg_get_statisticsobjdef`, `pg_get_statisticsobjdef_columns` and `pg_get_statisticsobjdef_expressions`, shown in psql's `\d` footer, and dropped with its table or a referenced column. No statistics are gathered.
+- `CREATE CAST` (`WITH FUNCTION`, `WITHOUT FUNCTION`, `WITH INOUT`, `AS ASSIGNMENT | IMPLICIT`) and `DROP CAST`, with `pg_cast` listing PostgreSQL 18's builtin casts alongside user ones. Casts apply to `::` and `CAST` (and to assignments and implicit coercions of the expression itself, not to operator or function argument resolution).
 
 ### Fixed
 

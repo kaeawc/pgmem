@@ -256,7 +256,8 @@ pub(crate) fn drop_function(
         let users = crate::deps::defaults_using_function(&catalog, &f);
         let triggers: Vec<_> = catalog.triggers().filter(|t| t.function == f.oid).cloned().collect();
         let sig = signature(&f.name, &f.input_types());
-        if (!users.is_empty() || !triggers.is_empty()) && !cascade {
+        let casts: Vec<String> = catalog.casts().filter(|c| c.function == Some(f.oid)).map(|c| crate::usercast::describe(c)).collect();
+        if (!users.is_empty() || !triggers.is_empty() || !casts.is_empty()) && !cascade {
             let mut lines: Vec<String> = users
                 .iter()
                 .map(|(t, slot)| {
@@ -268,6 +269,7 @@ pub(crate) fn drop_function(
                 let table = catalog.relation_by_oid(t.table).map(|r| r.name().to_owned()).unwrap_or_default();
                 lines.push(format!("trigger {} on table {table} depends on function {sig}", t.name));
             }
+            lines.extend(casts.iter().map(|c| format!("{c} depends on function {sig}")));
             return Err(SqlError::new(
                 code::DEPENDENT_OBJECTS_STILL_EXIST,
                 format!("cannot drop function {sig} because other objects depend on it"),
@@ -286,6 +288,9 @@ pub(crate) fn drop_function(
                 def.columns[slot].default = None;
                 txn.catalog_mut().replace_table(&t, def);
             }
+        }
+        for c in &casts {
+            notices.push(crate::session::Notice { severity: "NOTICE", code: "00000", message: format!("drop cascades to {c}") });
         }
         let cat = txn.catalog_mut();
         cat.drop_comments(f.oid);

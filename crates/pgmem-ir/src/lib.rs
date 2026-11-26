@@ -232,6 +232,29 @@ pub enum Statement {
         body: String,
     },
     CreateTrigger(Box<CreateTrigger>),
+    /// `CREATE STATISTICS [IF NOT EXISTS] [name] [(kinds)] ON items FROM table`.
+    CreateStatistics(Box<CreateStatistics>),
+    /// `ALTER STATISTICS name RENAME TO | SET SCHEMA | SET STATISTICS | OWNER TO`.
+    AlterStatistics {
+        name: ObjectName,
+        if_exists: bool,
+        action: AlterStatisticsAction,
+    },
+    /// `DROP STATISTICS [IF EXISTS] name, ... [CASCADE | RESTRICT]`.
+    DropStatistics {
+        names: Vec<ObjectName>,
+        if_exists: bool,
+        cascade: bool,
+    },
+    /// `CREATE CAST (source AS target) WITH FUNCTION | WITHOUT FUNCTION | WITH INOUT`.
+    CreateCast(Box<CreateCast>),
+    /// `DROP CAST [IF EXISTS] (source AS target) [CASCADE | RESTRICT]`.
+    DropCast {
+        source: TypeName,
+        target: TypeName,
+        if_exists: bool,
+        cascade: bool,
+    },
     DropTrigger {
         name: String,
         table: ObjectName,
@@ -359,6 +382,10 @@ pub enum CommentTarget {
     Constraint(ObjectName),
     /// `TRIGGER name ON table`.
     Trigger(ObjectName),
+    /// `STATISTICS name`.
+    Statistics,
+    /// `CAST (source AS target)`; the comment's name is empty.
+    Cast(TypeName, TypeName),
     /// Object kinds pgmem has no catalog entry for (extensions, roles, databases, ...):
     /// accepted without effect.
     Other,
@@ -1362,6 +1389,46 @@ pub struct CreateTrigger {
     pub when: Option<String>,
     pub function: ObjectName,
     pub args: Vec<String>,
+}
+
+/// One key of `CREATE STATISTICS`: a column or an expression.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StatisticsKey {
+    Column(String),
+    Expr(Expr),
+}
+
+/// `CREATE STATISTICS [IF NOT EXISTS] [name] [(kinds)] ON keys FROM tables`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateStatistics {
+    pub name: Option<ObjectName>,
+    pub if_not_exists: bool,
+    /// The statistics kinds as written (`ndistinct`, `dependencies`, `mcv`); empty = all.
+    pub kinds: Vec<String>,
+    pub keys: Vec<StatisticsKey>,
+    /// The FROM list (Postgres accepts exactly one relation).
+    pub tables: Vec<ObjectName>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum AlterStatisticsAction {
+    RenameTo(String),
+    SetSchema(String),
+    /// `SET STATISTICS n`.
+    SetStatistics(i64),
+    OwnerTo(String),
+}
+
+/// `CREATE CAST (source AS target) ...`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateCast {
+    pub source: TypeName,
+    pub target: TypeName,
+    /// `WITH FUNCTION name(args)`; None for `WITHOUT FUNCTION` / `WITH INOUT`.
+    pub function: Option<(ObjectName, Vec<TypeName>)>,
+    pub inout: bool,
+    /// `pg_cast.castcontext`: `e` (default), `a` (AS ASSIGNMENT) or `i` (AS IMPLICIT).
+    pub context: char,
 }
 
 /// CREATE / ALTER SEQUENCE and identity column options; None where not given.

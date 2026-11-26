@@ -86,6 +86,8 @@ const PG_PARTITIONED_TABLE: &str = "partrelid:oid, partstrat:\"char\", partnatts
     partclass:oidvector, partcollation:oidvector, partexprs:pg_node_tree";
 const PG_STATISTIC_EXT: &str = "oid:oid, stxrelid:oid, stxname:name, stxnamespace:oid, stxowner:oid, stxkeys:int2vector, \
     stxstattarget:int2, stxkind:\"char\"[], stxexprs:pg_node_tree";
+const PG_CAST: &str = "oid:oid, castsource:oid, casttarget:oid, castfunc:oid, castcontext:\"char\", castmethod:\"char\"";
+const PG_CAST_DATA: &str = include_str!("pg_cast.tsv");
 const PG_PUBLICATION: &str = "oid:oid, pubname:name, pubowner:oid, puballtables:bool, pubinsert:bool, pubupdate:bool, pubdelete:bool, \
     pubtruncate:bool, pubviaroot:bool, pubgencols:\"char\"";
 const PG_PUBLICATION_NAMESPACE: &str = "oid:oid, pnpubid:oid, pnnspid:oid";
@@ -136,7 +138,8 @@ pub static DEFS: &[Def] = &[
     def!("pg_depend", 2608, 'r', PG_DEPEND, pg_depend),
     def!("pg_inherits", 2611, 'r', PG_INHERITS, pg_inherits),
     def!("pg_policy", 3256, 'r', PG_POLICY, empty),
-    def!("pg_statistic_ext", 3381, 'r', PG_STATISTIC_EXT, empty),
+    def!("pg_statistic_ext", 3381, 'r', PG_STATISTIC_EXT, pg_statistic_ext),
+    def!("pg_cast", 2605, 'r', PG_CAST, pg_cast),
     def!("pg_publication", 6104, 'r', PG_PUBLICATION, empty),
     def!("pg_publication_namespace", 6237, 'r', PG_PUBLICATION_NAMESPACE, empty),
     def!("pg_publication_rel", 6106, 'r', PG_PUBLICATION_REL, empty),
@@ -897,6 +900,65 @@ fn pg_index(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         .collect())
 }
 
+/// `pg_statistic_ext`: the extended statistics objects.
+fn pg_statistic_ext(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let cat = ctx.txn.catalog();
+    let s = Spec::parse(PG_STATISTIC_EXT);
+    let all = roles(ctx);
+    Ok(cat
+        .statistics()
+        .map(|st| {
+            let owner = crate::roles::owner_of(cat, ctx.env, st.oid);
+            let owner_oid = all.iter().find(|(_, n, _, _)| *n == owner).map_or(SUPERUSER_OID, |(o, _, _, _)| *o);
+            let exprs = crate::statistics::expressions(cat, st.oid).map(|e| e.join(", "));
+            s.row(vec![
+                ("oid", oid(st.oid)),
+                ("stxrelid", oid(st.table)),
+                ("stxname", name(&st.name)),
+                ("stxnamespace", oid(cat.namespace_oid(&st.schema).unwrap_or(0))),
+                ("stxowner", oid(owner_oid)),
+                ("stxkeys", int2_array(&st.columns.iter().map(|c| c + 1).collect::<Vec<_>>())),
+                ("stxstattarget", st.target.map_or(Value::Null, Value::Int2)),
+                ("stxkind", Value::Array(st.kinds.iter().map(|k| Value::Text(k.to_string())).collect())),
+                ("stxexprs", exprs.map_or(Value::Null, txt)),
+            ])
+        })
+        .collect())
+}
+
+/// `pg_cast`: the builtin casts recorded from Postgres 18 and the ones `CREATE CAST` made.
+fn pg_cast(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let s = Spec::parse(PG_CAST);
+    let mut rows: Vec<Row> = PG_CAST_DATA
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            let n = |i: usize| f.get(i).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+            let c = |i: usize| f.get(i).and_then(|v| v.chars().next()).unwrap_or('e');
+            s.row(vec![
+                ("oid", oid(n(0))),
+                ("castsource", oid(n(1))),
+                ("casttarget", oid(n(2))),
+                ("castfunc", oid(n(3))),
+                ("castcontext", ch(c(4))),
+                ("castmethod", ch(c(5))),
+            ])
+        })
+        .collect();
+    for c in ctx.txn.catalog().casts() {
+        rows.push(s.row(vec![
+            ("oid", oid(c.oid)),
+            ("castsource", oid(c.source.oid())),
+            ("casttarget", oid(c.target.oid())),
+            ("castfunc", oid(c.function.unwrap_or(0))),
+            ("castcontext", ch(c.context)),
+            ("castmethod", ch(c.method)),
+        ]));
+    }
+    Ok(rows)
+}
+
 fn int2_array(attnums: &[usize]) -> Value {
     Value::Array(attnums.iter().map(|a| int2(*a)).collect())
 }
@@ -1559,4 +1621,12 @@ fn pg_stat_activity(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             ("backend_type", txt("client backend")),
         ])]
     }))
+}
+
+/// Whether Postgres has a builtin `pg_cast` row from type OID `source` to `target`.
+pub fn builtin_cast_exists(source: u32, target: u32) -> bool {
+    PG_CAST_DATA.lines().any(|l| {
+        let mut f = l.split('\t').skip(1);
+        f.next().and_then(|v| v.parse().ok()) == Some(source) && f.next().and_then(|v| v.parse().ok()) == Some(target)
+    })
 }

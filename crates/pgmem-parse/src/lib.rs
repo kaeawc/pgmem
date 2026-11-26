@@ -14,6 +14,7 @@ mod ddl;
 mod dml;
 mod expr;
 mod funcddl;
+mod objddl;
 mod query;
 mod roles;
 mod search_cycle;
@@ -277,6 +278,7 @@ fn lower_parsed(p: Parsed) -> SqlResult<Statement> {
         Parsed::TypeDdl(t) => typeddl::lower(*t),
         Parsed::FuncDdl(f) => funcddl::lower(*f),
         Parsed::Role(r) => roles::lower(*r),
+        Parsed::ObjDdl(o) => objddl::lower(*o),
         Parsed::Utility(u) => utility::lower(*u),
         Parsed::Schema(s, elements) => {
             let sq::Statement::CreateSchema { schema_name, if_not_exists, .. } = *s else {
@@ -326,6 +328,7 @@ enum Parsed {
     TypeDdl(Box<typeddl::TypeDdl>),
     FuncDdl(Box<funcddl::FuncDdl>),
     Role(Box<roles::RoleStmt>),
+    ObjDdl(Box<objddl::ObjDdl>),
     Utility(Box<utility::Utility>),
     /// `CREATE SCHEMA ...` followed by its schema elements.
     Schema(Box<sq::Statement>, Vec<Parsed>),
@@ -356,6 +359,11 @@ fn parse_statements(sql: &str) -> Result<Vec<Parsed>, ParserError> {
         }
         if let Some(f) = funcddl::try_parse(&mut p)? {
             out.push(Parsed::FuncDdl(Box::new(f)));
+            expecting_delimiter = true;
+            continue;
+        }
+        if let Some(o) = objddl::try_parse(&mut p)? {
+            out.push(Parsed::ObjDdl(Box::new(o)));
             expecting_delimiter = true;
             continue;
         }
