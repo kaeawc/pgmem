@@ -169,3 +169,29 @@ fn client_catalog_support() {
     let stmt = c.prepare_typed("SELECT $1::text", std::slice::from_ref(&mood)).expect("prepare with a user type OID");
     assert_eq!(stmt.params(), [mood]);
 }
+
+#[test]
+fn pg_constraint_connamespace_follows_owner() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE SCHEMA app; CREATE TABLE app.t (id int PRIMARY KEY, CHECK (id > 0)); \
+         CREATE DOMAIN app.pos AS int CHECK (VALUE > 0); CREATE TABLE pub_t (id int PRIMARY KEY, CHECK (id > 0))",
+    )
+    .expect("setup");
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT conname, connamespace::regnamespace::text FROM pg_constraint WHERE conrelid = 'app.t'::regclass ORDER BY conname"
+        ),
+        [["t_id_check", "app"], ["t_id_not_null", "app"], ["t_pkey", "app"]]
+    );
+    assert_eq!(
+        rows(&mut c, "SELECT conname, connamespace::regnamespace::text FROM pg_constraint WHERE contypid = 'app.pos'::regtype"),
+        [["pos_check", "app"]]
+    );
+    assert_eq!(rows(&mut c, "SELECT count(*) FROM pg_constraint WHERE connamespace = 'app'::regnamespace"), [["4"]]);
+    assert_eq!(
+        rows(&mut c, "SELECT DISTINCT connamespace::regnamespace::text FROM pg_constraint WHERE conrelid = 'pub_t'::regclass"),
+        [["public"]]
+    );
+}

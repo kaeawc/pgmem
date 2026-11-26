@@ -11,6 +11,10 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - Static Linux binaries (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) on each release.
 - `cargo binstall pgmem` installs the prebuilt binary from the GitHub release.
 
+### Fixed
+
+- `pg_constraint.connamespace` is the namespace of the owning table or domain instead of always `public`.
+
 ### Changed
 
 - Releases go through a PR: `scripts/release.sh X.Y.Z` opens it, and merging it publishes.

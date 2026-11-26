@@ -405,3 +405,40 @@ SELECT pg_get_partkeydef('events'::regclass)
 ----
 pg_get_partkeydef:text
 RANGE (at)
+
+# pg_constraint.connamespace is the namespace of the owning relation or domain
+
+statement ok
+CREATE SCHEMA cns
+
+statement ok
+CREATE TABLE cns.t (id int PRIMARY KEY, CHECK (id > 0))
+
+statement ok
+CREATE DOMAIN cns.pos AS int CHECK (VALUE > 0)
+
+query
+SELECT conname, connamespace::regnamespace::text FROM pg_constraint WHERE conrelid = 'cns.t'::regclass ORDER BY conname
+----
+conname:name | connamespace:text
+t_id_check | cns
+t_id_not_null | cns
+t_pkey | cns
+
+query
+SELECT conname, connamespace::regnamespace::text FROM pg_constraint WHERE contypid = 'cns.pos'::regtype
+----
+conname:name | connamespace:text
+pos_check | cns
+
+query
+SELECT count(*) FROM pg_constraint WHERE connamespace = 'cns'::regnamespace
+----
+count:int8
+4
+
+query
+SELECT DISTINCT connamespace::regnamespace::text FROM pg_constraint WHERE conrelid = 'accounts'::regclass
+----
+connamespace:text
+public
