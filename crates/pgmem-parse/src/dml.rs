@@ -43,18 +43,34 @@ fn lower_assignments(items: Vec<sq::Assignment>) -> SqlResult<Vec<Assignment>> {
 /// A SET target: the column name, then composite field names (`SET addr.zip = ...`). The
 /// binder decides whether a qualified target names a field.
 fn column_target(n: &sq::ObjectName) -> SqlResult<Vec<String>> {
-    Ok(object_name(n)?.0)
+    let name = object_name(n)?;
+    if let (Some(sq::ObjectNamePart::Identifier(first)), Some(column)) = (n.0.first(), name.0.first()) {
+        crate::note_ref(pgmem_types::ErrorRef::Column(column.clone()), first.span.start);
+    }
+    Ok(name.0)
 }
 
 pub(crate) fn lower_insert(i: sq::Insert) -> SqlResult<Insert> {
     let table = match &i.table {
-        sq::TableObject::TableName(n) => object_name(n)?,
+        sq::TableObject::TableName(n) => {
+            let name = object_name(n)?;
+            crate::note_name(pgmem_types::ErrorRef::Relation, n, &name);
+            name
+        }
         _ => return Err(unsupported("INSERT into a table function")),
     };
     if i.ignore || i.or.is_some() || i.replace_into || !i.assignments.is_empty() {
         return Err(unsupported("this INSERT syntax"));
     }
-    let columns = i.columns.iter().map(|c| object_name(c).map(|n| n.base().to_owned())).collect::<SqlResult<Vec<_>>>()?;
+    let columns = i
+        .columns
+        .iter()
+        .map(|c| {
+            let n = object_name(c)?;
+            crate::note_name(pgmem_types::ErrorRef::Column, c, &n);
+            Ok(n.base().to_owned())
+        })
+        .collect::<SqlResult<Vec<_>>>()?;
     let (with, source) = match i.source {
         None => (None, InsertSource::DefaultValues),
         Some(q) => {
