@@ -49,7 +49,8 @@ fn timing(c: Option<&sq::ConstraintCharacteristics>, what: &str) -> SqlResult<Co
     Ok(ConstraintTiming { deferrable, initially_deferred, not_valid: false })
 }
 
-fn lower_column_def(c: sq::ColumnDef) -> SqlResult<ColumnDef> {
+/// `untyped`: the column has no type (a column option of `PARTITION OF`), lowered to an empty type name.
+fn lower_column_def(c: sq::ColumnDef, untyped: bool) -> SqlResult<ColumnDef> {
     let mut constraints = Vec::new();
     for opt in c.options {
         let name = opt.name.as_ref().map(ident);
@@ -108,7 +109,12 @@ fn lower_column_def(c: sq::ColumnDef) -> SqlResult<ColumnDef> {
         };
         constraints.push(ColumnConstraint { name, kind, timing: ConstraintTiming::default() });
     }
-    Ok(ColumnDef { name: ident(&c.name), ty: lower_type(&c.data_type)?, constraints })
+    let ty = if untyped && matches!(c.data_type, sq::DataType::Unspecified) {
+        pgmem_ir::TypeName::simple("")
+    } else {
+        lower_type(&c.data_type)?
+    };
+    Ok(ColumnDef { name: ident(&c.name), ty, constraints })
 }
 
 fn lower_table_constraint(c: sq::TableConstraint) -> SqlResult<TableConstraint> {
@@ -219,7 +225,7 @@ pub(crate) fn lower_create_table(ct: sq::CreateTable) -> SqlResult<CreateTable> 
         if let Some(spec) = c.name.value.strip_prefix(crate::LIKE_MARKER) {
             options.likes.push(like_clause(spec, columns.len())?);
         } else {
-            columns.push(lower_column_def(c)?);
+            columns.push(lower_column_def(c, options.partition_of.is_some())?);
         }
     }
     if ct.on_commit.is_some() && !ct.temporary {
@@ -392,7 +398,7 @@ pub(crate) fn lower_alter_table(at: sq::AlterTable) -> SqlResult<AlterTable> {
                 actions.push(AlterTableAction::DetachPartition { partition: object_name(&partition)? });
             }
             O::AddColumn { if_not_exists, column_def, .. } => {
-                actions.push(AlterTableAction::AddColumn { if_not_exists, column: lower_column_def(column_def)? });
+                actions.push(AlterTableAction::AddColumn { if_not_exists, column: lower_column_def(column_def, false)? });
             }
             O::DropColumn { column_names, if_exists, drop_behavior, .. } => {
                 for name in column_names {

@@ -977,28 +977,31 @@ pub(crate) fn create_schema(cs: &ir::CreateSchema, txn: &mut Txn, user: &str) ->
 /// The objects in a schema, as `DROP SCHEMA ... CASCADE` reports them ("table app.items"), in
 /// creation (OID) order. Postgres names procedures "function" here too.
 fn schema_members(cat: &Catalog, schema: &str) -> Vec<String> {
-    let mut out: Vec<(u32, String)> = Vec::new();
-    for t in cat.tables().filter(|t| t.schema == schema) {
+    let mut found: Vec<(pgmem_catalog::Oid, String)> = Vec::new();
+    // Partitions are dropped with their parent, so they are not listed.
+    for t in cat.tables().filter(|t| t.schema == schema && cat.partition_of(t.oid).is_none()) {
         let kind = if t.matview.is_some() { "materialized view" } else { "table" };
-        out.push((t.oid, format!("{kind} {schema}.{}", t.name)));
+        found.push((t.oid, format!("{kind} {}", display_name(cat, &t.qualified()))));
     }
     for v in cat.views().filter(|v| v.schema == schema) {
-        out.push((v.oid, format!("view {schema}.{}", v.name)));
+        found.push((v.oid, format!("view {}", display_name(cat, &QualName::new(schema, &v.name)))));
     }
     for s in cat.sequences().filter(|s| s.schema == schema && s.owned_by.is_none()) {
-        out.push((s.oid, format!("sequence {schema}.{}", s.name)));
+        found.push((s.oid, format!("sequence {}", display_name(cat, &QualName::new(schema, &s.name)))));
     }
+    let on_path = cat.resolved_search_path().iter().any(|p| p == schema);
+    let qual = |name: &str| if on_path { name.to_owned() } else { format!("{schema}.{name}") };
+    // Postgres labels domains (and enums, composites) "type".
     for t in cat.types().filter(|t| t.schema == schema) {
-        out.push((t.oid, format!("type {schema}.{}", t.name)));
+        found.push((t.oid, format!("type {}", qual(&t.name))));
     }
     for f in cat.functions().filter(|f| f.schema == schema) {
-        out.push((
-            f.oid,
-            format!("function {schema}.{}({})", f.name, f.input_types().iter().map(pgmem_types::Type::name).collect::<Vec<_>>().join(",")),
-        ));
+        let args = f.input_types().iter().map(pgmem_types::Type::name).collect::<Vec<_>>().join(",");
+        found.push((f.oid, format!("function {}({args})", qual(&f.name))));
     }
-    out.sort_by_key(|(oid, _)| *oid);
-    out.into_iter().map(|(_, m)| m).collect()
+    // PostgreSQL reports dependents in creation (OID) order.
+    found.sort_by_key(|(oid, _)| *oid);
+    found.into_iter().map(|(_, m)| m).collect()
 }
 
 fn drop_schemas(d: &ir::Drop, txn: &mut Txn) -> SqlResult<QueryResult> {

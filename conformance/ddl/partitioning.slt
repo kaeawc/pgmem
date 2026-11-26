@@ -354,3 +354,88 @@ dropped_p2a | 3 | dflt | 10
 
 statement ok
 DROP TABLE dropped_p
+
+# Column options on PARTITION OF, inherited NOT NULL names, leaf names in errors, atthasmissing.
+statement ok
+CREATE TABLE d183 (a int NOT NULL, b int, e int DEFAULT 7, CONSTRAINT d183_b_ck CHECK (b < 100)) PARTITION BY RANGE (a)
+
+statement ok
+CREATE TABLE d183_1 PARTITION OF d183 (e DEFAULT 42) FOR VALUES FROM (0) TO (10)
+
+statement ok
+INSERT INTO d183_1 (a, b) VALUES (1, 1)
+
+statement ok
+INSERT INTO d183 (a, b) VALUES (2, 2)
+
+query
+SELECT a, e FROM d183 ORDER BY a
+----
+a:int4 | e:int4
+1 | 42
+2 | 7
+
+query
+SELECT conrelid::regclass, conname FROM pg_constraint WHERE contype = 'n' AND conrelid IN ('d183'::regclass, 'd183_1'::regclass) ORDER BY 1
+----
+conrelid:regclass | conname:name
+d183 | d183_a_not_null
+d183_1 | d183_a_not_null
+
+statement error 23514 new row for relation "d183_1" violates check constraint "d183_b_ck"
+INSERT INTO d183 VALUES (3, 200, 1)
+
+statement error 23514 no partition of relation "d183" found for row
+INSERT INTO d183 VALUES (30, 200, 1)
+
+statement ok
+CREATE TABLE r183 (a int PRIMARY KEY) PARTITION BY RANGE (a)
+
+statement ok
+CREATE TABLE r183_1 PARTITION OF r183 FOR VALUES FROM (0) TO (10)
+
+statement ok
+CREATE TABLE r183_2 PARTITION OF r183 FOR VALUES FROM (10) TO (20) PARTITION BY RANGE (a)
+
+statement ok
+CREATE TABLE r183_2a PARTITION OF r183_2 FOR VALUES FROM (10) TO (15)
+
+statement ok
+CREATE TABLE r183c (x int CONSTRAINT r183c_fk REFERENCES r183 (a))
+
+statement ok
+INSERT INTO r183 VALUES (1), (12)
+
+statement ok
+INSERT INTO r183c VALUES (1), (12)
+
+statement error 23503 update or delete on table "r183_1" violates foreign key constraint "r183c_fk_1" on table "r183c"
+DELETE FROM r183 WHERE a = 1
+
+statement error 23503 update or delete on table "r183_2a" violates foreign key constraint "r183c_fk_3" on table "r183c"
+DELETE FROM r183 WHERE a = 12
+
+statement error 23503 update or delete on table "r183_2a" violates foreign key constraint "r183c_fk_3" on table "r183c"
+DELETE FROM r183_2a WHERE a = 12
+
+statement ok
+CREATE TABLE m183 (a int) PARTITION BY RANGE (a)
+
+statement ok
+CREATE TABLE m183_1 PARTITION OF m183 FOR VALUES FROM (0) TO (10)
+
+statement ok
+ALTER TABLE m183 ADD COLUMN z int DEFAULT 5
+
+statement ok
+CREATE TABLE m183_2 PARTITION OF m183 FOR VALUES FROM (10) TO (20)
+
+query
+SELECT attrelid::regclass, atthasmissing FROM pg_attribute WHERE attname = 'z' AND attrelid IN ('m183_1'::regclass, 'm183_2'::regclass) ORDER BY 1
+----
+attrelid:regclass | atthasmissing:bool
+m183_1 | t
+m183_2 | f
+
+statement ok
+DROP TABLE m183, r183c, r183, d183

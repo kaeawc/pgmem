@@ -279,3 +279,108 @@ fn add_column_default_sets_atthasmissing_on_partitions_not_the_parent() {
     );
     assert_eq!(text_value(&mut c, "SELECT c FROM hm"), Some("1".into()));
 }
+
+fn detail(e: &postgres::Error) -> String {
+    e.as_db_error().and_then(|d| d.detail()).unwrap_or_default().to_owned()
+}
+
+#[test]
+fn partition_column_options_and_inherited_names() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE pn (a int NOT NULL, b int, e int DEFAULT 7, CONSTRAINT pn_b_ck CHECK (b < 100)) PARTITION BY RANGE (a);
+         CREATE TABLE pn1 PARTITION OF pn (e DEFAULT 42) FOR VALUES FROM (0) TO (10)",
+    )
+    .expect("partition with column options");
+    // The partition's own default applies when inserting into it, the parent's through the parent.
+    c.batch_execute("INSERT INTO pn1 (a, b) VALUES (1, 1); INSERT INTO pn (a, b) VALUES (2, 2)").expect("insert");
+    assert_eq!(rows(&mut c, "SELECT a::text, e::text FROM pn ORDER BY a"), [["1", "42"], ["2", "7"]]);
+    // A partition keeps the parent's NOT NULL constraint name.
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT conrelid::regclass::text, conname FROM pg_constraint WHERE contype = 'n' AND conrelid IN ('pn'::regclass, 'pn1'::regclass) ORDER BY 1"
+        ),
+        [["pn", "pn_a_not_null"], ["pn1", "pn_a_not_null"]]
+    );
+    // A CHECK violated through the parent names the partition the row routed to.
+    let e = expect_code(c.batch_execute("INSERT INTO pn VALUES (3, 200, 1)"), "23514");
+    assert_eq!(message(&e), "new row for relation \"pn1\" violates check constraint \"pn_b_ck\"");
+    assert_eq!(detail(&e), "Failing row contains (3, 200, 1).");
+    // Neighbouring behaviour: no partition for the row is reported before CHECKs.
+    let e = expect_code(c.batch_execute("INSERT INTO pn VALUES (30, 200, 1)"), "23514");
+    assert_eq!(message(&e), "no partition of relation \"pn\" found for row");
+}
+
+#[test]
+fn referenced_partitioned_table_error_names_the_partition() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE rp (a int PRIMARY KEY) PARTITION BY RANGE (a);
+         CREATE TABLE rp1 PARTITION OF rp FOR VALUES FROM (0) TO (10);
+         CREATE TABLE rp2 PARTITION OF rp FOR VALUES FROM (10) TO (20) PARTITION BY RANGE (a);
+         CREATE TABLE rp2a PARTITION OF rp2 FOR VALUES FROM (10) TO (15);
+         CREATE TABLE rc (x int CONSTRAINT rc_fk REFERENCES rp (a));
+         INSERT INTO rp VALUES (1), (12);
+         INSERT INTO rc VALUES (1), (12)",
+    )
+    .expect("schema");
+    let e = expect_code(c.batch_execute("DELETE FROM rp WHERE a = 1"), "23503");
+    assert_eq!(message(&e), "update or delete on table \"rp1\" violates foreign key constraint \"rc_fk_1\" on table \"rc\"");
+    assert_eq!(detail(&e), "Key (a)=(1) is still referenced from table \"rc\".");
+    let e = expect_code(c.batch_execute("DELETE FROM rp WHERE a = 12"), "23503");
+    assert_eq!(message(&e), "update or delete on table \"rp2a\" violates foreign key constraint \"rc_fk_3\" on table \"rc\"");
+    let e = expect_code(c.batch_execute("DELETE FROM rp2a WHERE a = 12"), "23503");
+    assert_eq!(message(&e), "update or delete on table \"rp2a\" violates foreign key constraint \"rc_fk_3\" on table \"rc\"");
+    // A plain referenced table still names itself and the constraint as declared.
+    c.batch_execute("CREATE TABLE pk (id int PRIMARY KEY); CREATE TABLE pkc (x int CONSTRAINT pkc_fk REFERENCES pk); INSERT INTO pk VALUES (1); INSERT INTO pkc VALUES (1)")
+        .expect("plain");
+    let e = expect_code(c.batch_execute("DELETE FROM pk"), "23503");
+    assert_eq!(message(&e), "update or delete on table \"pk\" violates foreign key constraint \"pkc_fk\" on table \"pkc\"");
+}
+
+#[test]
+fn new_partitions_reset_missing_defaults() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE mp (a int) PARTITION BY RANGE (a);
+         CREATE TABLE mp1 PARTITION OF mp FOR VALUES FROM (0) TO (10);
+         ALTER TABLE mp ADD COLUMN z int DEFAULT 5;
+         CREATE TABLE mp2 PARTITION OF mp FOR VALUES FROM (10) TO (20)",
+    )
+    .expect("schema");
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT attrelid::regclass::text, atthasmissing::text FROM pg_attribute WHERE attname = 'z' AND attrelid IN ('mp1'::regclass, 'mp2'::regclass) ORDER BY 1"
+        ),
+        [["mp1", "true"], ["mp2", "false"]]
+    );
+}
+
+#[test]
+fn drop_schema_cascade_notice() {
+    let (db, mut c) = setup();
+    c.batch_execute(
+        "CREATE SCHEMA ds;
+         CREATE TABLE ds.pt (a serial) PARTITION BY RANGE (a);
+         CREATE TABLE ds.pt1 PARTITION OF ds.pt FOR VALUES FROM (0) TO (5);
+         CREATE SEQUENCE ds.sq;
+         CREATE TABLE ds.t2 (a int)",
+    )
+    .expect("schema");
+    let mut raw = crate::support::RawConn::connect(&db, &mut c);
+    // Dependents are listed in creation order, partitions are not listed (the table
+    // drops them), and the list is the DETAIL.
+    let r = raw.query("DROP SCHEMA ds");
+    assert_eq!(r.errors, ["2BP01"]);
+    let r = raw.query("DROP SCHEMA ds CASCADE");
+    assert_eq!(
+        r.notices,
+        ["drop cascades to 3 other objects\ndrop cascades to table ds.pt\ndrop cascades to sequence ds.sq\ndrop cascades to table ds.t2"]
+    );
+    // One dependent: just the message.
+    c.batch_execute("CREATE SCHEMA ds1; CREATE TABLE ds1.solo (a int)").expect("schema");
+    let r = raw.query("DROP SCHEMA ds1 CASCADE");
+    assert_eq!(r.notices, ["drop cascades to table ds1.solo"]);
+}
