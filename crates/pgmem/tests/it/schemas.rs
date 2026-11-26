@@ -154,3 +154,21 @@ fn drop_schema_without_functions_keeps_other_schemas_functions() {
         .expect("setup");
     assert_eq!(text_value(&mut c, "SELECT keepme()"), Some("1".into()));
 }
+
+#[test]
+fn pg_temp_schema_is_created_on_demand() {
+    // #213: objects created in pg_temp before any temporary table.
+    let (_db, mut c) = setup();
+    c.batch_execute("CREATE FUNCTION pg_temp.f() RETURNS int LANGUAGE sql AS 'SELECT 1'").expect("function");
+    assert_eq!(text_value(&mut c, "SELECT pg_temp.f()"), Some("1".into()));
+    assert_eq!(text_value(&mut c, "SELECT pronamespace = pg_my_temp_schema() FROM pg_proc WHERE proname = 'f'"), Some("t".into()));
+    let (_db, mut c) = setup();
+    c.batch_execute("CREATE VIEW pg_temp.v AS SELECT 1 AS x").expect("view");
+    let (_db, mut c2) = setup();
+    c2.batch_execute("CREATE SEQUENCE pg_temp.sq").expect("sequence");
+    assert_eq!(text_value(&mut c2, "SELECT relpersistence FROM pg_class WHERE relname = 'sq'"), Some("t".into()));
+    let (_db, mut c3) = setup();
+    c3.batch_execute("CREATE TYPE pg_temp.ty AS (a int)").expect("type");
+    assert_eq!(text_value(&mut c3, "SELECT typnamespace = pg_my_temp_schema() FROM pg_type WHERE typname = 'ty'"), Some("t".into()));
+    assert_eq!(text_value(&mut c, "SELECT relpersistence FROM pg_class WHERE relname = 'v'"), Some("t".into()));
+}

@@ -32,6 +32,16 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
   the view's SQL text, not Postgres' node tree), `pg_class.relhasrules`, row-type array types in
   `pg_type`, and `pg_describe_object`, `pg_identify_object`, `pg_identify_object_as_address`.
   Toast tables and the internal triggers of foreign keys are not modelled.
+- Volatile functions may modify data wherever they are called, as in PostgreSQL: BEFORE row
+  triggers, and functions called from SELECT lists, WHERE clauses, VALUES and column defaults
+  (the calling statement keeps its snapshot). Stable and immutable functions get PostgreSQL's
+  `0A000` "INSERT is not allowed in a non-volatile function" (also UPDATE, DELETE, DROP TABLE,
+  ...). Writes made by functions, triggers, CALL and DO in a READ ONLY transaction raise `25006`,
+  and a PL/pgSQL exception block undoes the writes of the functions it called.
+- `CREATE TEMP TABLE` in a READ ONLY transaction raises `25006`, as in PostgreSQL.
+- `CREATE FUNCTION / TYPE / VIEW / SEQUENCE / DOMAIN pg_temp.x` creates the session's temporary
+  schema on demand; temporary views, sequences, composite types and indexes report
+  `relpersistence` `t`.
 - Partitioning matches PostgreSQL in six details: `CREATE TABLE ... PARTITION OF parent (col DEFAULT ...)` column options parse; a partition's NOT NULL constraints keep the parent's names; a CHECK violated through the parent names the partition; a foreign key violation when deleting a referenced row names the partition (and its copy of the constraint, `<name>_<n>`); new partitions do not copy `atthasmissing`.
 - `DROP SCHEMA ... CASCADE` reports its dependents as the notice's `DETAIL` in creation order, leaves out partitions, and qualifies names only when they are not on the `search_path`; `DROP SCHEMA` without `CASCADE` lists them the same way.
 
