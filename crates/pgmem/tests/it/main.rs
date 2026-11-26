@@ -104,6 +104,7 @@ mod numeric_fidelity;
 mod object_ddl;
 mod on_conflict;
 mod partitioning;
+mod pg_depend;
 mod position;
 mod qualified_star;
 mod query_fidelity;
