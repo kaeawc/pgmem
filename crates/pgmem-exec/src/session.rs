@@ -690,6 +690,7 @@ impl Session {
             Statement::AlterSequence { .. } => "ALTER SEQUENCE",
             Statement::CreateFunction(cf) if cf.procedure => "CREATE PROCEDURE",
             Statement::CreateFunction(_) => "CREATE FUNCTION",
+            Statement::AlterFunction { .. } => "ALTER FUNCTION",
             Statement::DropFunction { .. } => "DROP FUNCTION",
             Statement::CreateTrigger(_) => "CREATE TRIGGER",
             Statement::DropTrigger { .. } => "DROP TRIGGER",

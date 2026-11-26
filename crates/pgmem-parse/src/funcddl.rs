@@ -5,8 +5,11 @@
 
 use crate::expr::{lower_expr, lower_type};
 use crate::{ident, object_name};
-use pgmem_ir::{CreateFunction, CreateTrigger, FunctionArg, FunctionArgMode, FunctionReturns, RoutineKind, Statement, TriggerTiming};
-use pgmem_types::SqlResult;
+use pgmem_ir::{
+    AlterFunctionAction, CreateFunction, CreateTrigger, FunctionArg, FunctionArgMode, FunctionConfig, FunctionReturns, RoutineKind,
+    Statement, TriggerTiming,
+};
+use pgmem_types::{SqlError, SqlResult, code};
 use sqlparser::ast as sq;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::Token;
@@ -14,6 +17,12 @@ use sqlparser::tokenizer::Token;
 /// A statement parsed here (pieces still sqlparser values).
 pub(crate) enum FuncDdl {
     CreateFunction(Box<RawFunction>),
+    AlterFunction {
+        name: sq::ObjectName,
+        types: Option<Vec<sq::DataType>>,
+        kind: RoutineKind,
+        action: RawAlter,
+    },
     DropFunction {
         items: Vec<(sq::ObjectName, Option<Vec<sq::DataType>>)>,
         if_exists: bool,
@@ -43,6 +52,177 @@ pub(crate) enum FuncDdl {
     },
 }
 
+pub(crate) enum RawAlter {
+    Attrs(Attrs),
+    Rename(String),
+    SetSchema(String),
+}
+
+/// The function attributes `CREATE` and `ALTER FUNCTION` share (gram.y `common_func_opt_item`);
+/// a repeated one is `conflicting or redundant options`, reported when lowered.
+#[derive(Default)]
+pub(crate) struct Attrs {
+    volatility: Option<char>,
+    strict: Option<bool>,
+    security_definer: Option<bool>,
+    leakproof: Option<bool>,
+    parallel: Option<String>,
+    cost: Option<f64>,
+    rows: Option<f64>,
+    config: Vec<FunctionConfig>,
+    conflict: bool,
+}
+
+fn set_once<T>(slot: &mut Option<T>, v: T, conflict: &mut bool) {
+    *conflict |= slot.is_some();
+    *slot = Some(v);
+}
+
+fn number(p: &mut Parser) -> Result<f64, ParserError> {
+    let neg = p.consume_token(&Token::Minus);
+    let _ = !neg && p.consume_token(&Token::Plus);
+    match p.next_token().token {
+        Token::Number(n, _) => {
+            n.parse::<f64>().map(|v| if neg { -v } else { v }).map_err(|_| ParserError::ParserError(format!("invalid number {n}")))
+        }
+        other => p.expected("a numeric constant", sqlparser::tokenizer::TokenWithSpan::wrap(other)),
+    }
+}
+
+/// A `SET` value: a string, identifier, keyword or number (`FunctionSetResetClause`).
+fn set_value(p: &mut Parser) -> Result<String, ParserError> {
+    if matches!(p.peek_token().token, Token::Minus | Token::Plus) {
+        let neg = p.consume_token(&Token::Minus);
+        let _ = p.consume_token(&Token::Plus);
+        let n = match p.next_token().token {
+            Token::Number(n, _) => n,
+            other => return p.expected("a numeric constant", sqlparser::tokenizer::TokenWithSpan::wrap(other)),
+        };
+        return Ok(if neg { format!("-{n}") } else { n });
+    }
+    match p.next_token().token {
+        Token::Word(w) => Ok(if w.quote_style.is_some() { w.value } else { w.value.to_lowercase() }),
+        Token::SingleQuotedString(s) | Token::EscapedStringLiteral(s) => Ok(s),
+        Token::DollarQuotedString(d) => Ok(d.value),
+        Token::Number(n, _) => Ok(n),
+        other => p.expected("a value", sqlparser::tokenizer::TokenWithSpan::wrap(other)),
+    }
+}
+
+impl Attrs {
+    /// Parses one attribute when the next tokens start one.
+    fn parse_one(&mut self, p: &mut Parser) -> Result<bool, ParserError> {
+        let c = &mut self.conflict;
+        if eat(p, "IMMUTABLE") {
+            set_once(&mut self.volatility, 'i', c);
+        } else if eat(p, "STABLE") {
+            set_once(&mut self.volatility, 's', c);
+        } else if eat(p, "VOLATILE") {
+            set_once(&mut self.volatility, 'v', c);
+        } else if eat(p, "STRICT") {
+            set_once(&mut self.strict, true, c);
+        } else if word_at(p, 0, "RETURNS") && word_at(p, 1, "NULL") {
+            for _ in 0..5 {
+                p.next_token();
+            }
+            set_once(&mut self.strict, true, c);
+        } else if word_at(p, 0, "CALLED") && word_at(p, 1, "ON") {
+            for _ in 0..4 {
+                p.next_token();
+            }
+            set_once(&mut self.strict, false, c);
+        } else if word_at(p, 0, "EXTERNAL") || word_at(p, 0, "SECURITY") {
+            let _ = eat(p, "EXTERNAL");
+            expect(p, "SECURITY")?;
+            let definer = if eat(p, "DEFINER") {
+                true
+            } else {
+                expect(p, "INVOKER")?;
+                false
+            };
+            set_once(&mut self.security_definer, definer, c);
+        } else if word_at(p, 0, "NOT") && word_at(p, 1, "LEAKPROOF") {
+            p.next_token();
+            p.next_token();
+            set_once(&mut self.leakproof, false, c);
+        } else if eat(p, "LEAKPROOF") {
+            set_once(&mut self.leakproof, true, c);
+        } else if eat(p, "PARALLEL") {
+            let v = p.parse_identifier()?.value;
+            set_once(&mut self.parallel, v, c);
+        } else if eat(p, "COST") {
+            let v = number(p)?;
+            set_once(&mut self.cost, v, c);
+        } else if eat(p, "ROWS") {
+            let v = number(p)?;
+            set_once(&mut self.rows, v, c);
+        } else if word_at(p, 0, "SET") && !word_at(p, 1, "SCHEMA") {
+            p.next_token();
+            let n = p.parse_object_name(false)?;
+            let name = object_name(&n).map_err(|e| ParserError::ParserError(e.message))?.0.join(".");
+            if eat(p, "FROM") {
+                expect(p, "CURRENT")?;
+                self.config.push(FunctionConfig::FromCurrent(name));
+            } else {
+                if !eat(p, "TO") {
+                    p.expect_token(&Token::Eq)?;
+                }
+                if eat(p, "DEFAULT") {
+                    self.config.push(FunctionConfig::Reset(name));
+                } else {
+                    let mut vals = vec![set_value(p)?];
+                    while p.consume_token(&Token::Comma) {
+                        vals.push(set_value(p)?);
+                    }
+                    self.config.push(FunctionConfig::Set(name, vals));
+                }
+            }
+        } else if eat(p, "RESET") {
+            if eat(p, "ALL") {
+                self.config.push(FunctionConfig::ResetAll);
+            } else {
+                let n = p.parse_object_name(false)?;
+                let name = object_name(&n).map_err(|e| ParserError::ParserError(e.message))?.0.join(".");
+                self.config.push(FunctionConfig::Reset(name));
+            }
+        } else {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// The first error among the attributes (`conflicting or redundant options`, a bad
+    /// `PARALLEL`, `COST` or `ROWS` value).
+    fn check(&self) -> SqlResult<()> {
+        if self.conflict {
+            return Err(SqlError::syntax("conflicting or redundant options"));
+        }
+        if let Some(v) = &self.parallel {
+            parallel_code(v)?;
+        }
+        if self.cost.is_some_and(|c| c <= 0.0) {
+            return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, "COST must be positive"));
+        }
+        if self.rows.is_some_and(|r| r <= 0.0) {
+            return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, "ROWS must be positive"));
+        }
+        Ok(())
+    }
+
+    fn parallel(&self) -> SqlResult<Option<char>> {
+        self.parallel.as_deref().map(parallel_code).transpose()
+    }
+}
+
+fn parallel_code(v: &str) -> SqlResult<char> {
+    match v.to_ascii_lowercase().as_str() {
+        "safe" => Ok('s'),
+        "restricted" => Ok('r'),
+        "unsafe" => Ok('u'),
+        _ => Err(SqlError::syntax("parameter \"parallel\" must be SAFE, RESTRICTED, or UNSAFE")),
+    }
+}
+
 pub(crate) enum CommentOn {
     Function(Option<Vec<sq::DataType>>),
     Constraint(sq::ObjectName),
@@ -61,9 +241,7 @@ pub(crate) struct RawFunction {
     return_expr: Option<sq::Expr>,
     /// `BEGIN ATOMIC ... END`.
     atomic: bool,
-    volatility: Option<char>,
-    strict: bool,
-    security_definer: bool,
+    attrs: Attrs,
 }
 
 enum RawReturns {
@@ -138,6 +316,9 @@ pub(crate) fn try_parse(p: &mut Parser) -> Result<Option<FuncDdl>, ParserError> 
             return create_trigger(p, or_replace).map(|t| Some(FuncDdl::CreateTrigger(Box::new(t))));
         }
         return Ok(None);
+    }
+    if word_at(p, 0, "ALTER") && (word_at(p, 1, "FUNCTION") || word_at(p, 1, "PROCEDURE") || word_at(p, 1, "ROUTINE")) {
+        return alter_function(p);
     }
     if word_at(p, 0, "DROP") && (word_at(p, 1, "FUNCTION") || word_at(p, 1, "PROCEDURE") || word_at(p, 1, "ROUTINE")) {
         p.next_token();
@@ -290,9 +471,7 @@ fn create_function(p: &mut Parser, or_replace: bool, procedure: bool) -> Result<
         body: None,
         return_expr: None,
         atomic: false,
-        volatility: None,
-        strict: false,
-        security_definer: false,
+        attrs: Attrs::default(),
     };
     if eat(p, "RETURNS") {
         f.returns = Some(if eat(p, "SETOF") {
@@ -326,41 +505,9 @@ fn function_options(p: &mut Parser, f: &mut RawFunction) -> Result<(), ParserErr
                 Token::SingleQuotedString(s) => s.to_lowercase(),
                 other => return p.expected("a language name", sqlparser::tokenizer::TokenWithSpan::wrap(other)),
             });
-        } else if eat(p, "IMMUTABLE") {
-            f.volatility = Some('i');
-        } else if eat(p, "STABLE") {
-            f.volatility = Some('s');
-        } else if eat(p, "VOLATILE") {
-            f.volatility = Some('v');
-        } else if eat(p, "STRICT") {
-            f.strict = true;
-        } else if word_at(p, 0, "RETURNS") && word_at(p, 1, "NULL") {
-            for _ in 0..5 {
-                p.next_token();
-            }
-            f.strict = true;
-        } else if eat(p, "CALLED") {
-            for _ in 0..3 {
-                p.next_token();
-            }
-            f.strict = false;
-        } else if eat(p, "EXTERNAL") || eat(p, "SECURITY") {
-            let _ = eat(p, "SECURITY");
-            f.security_definer = eat(p, "DEFINER");
-            let _ = eat(p, "INVOKER");
-        } else if eat(p, "NOT") || eat(p, "LEAKPROOF") || eat(p, "WINDOW") {
-            let _ = eat(p, "LEAKPROOF");
-        } else if eat(p, "PARALLEL") || eat(p, "COST") || eat(p, "ROWS") || eat(p, "SUPPORT") {
-            p.next_token();
-        } else if eat(p, "SET") {
-            // SET param {TO | =} value | FROM CURRENT
-            p.next_token();
-            if eat(p, "FROM") {
-                p.next_token();
-            } else {
-                p.next_token();
-                p.next_token();
-            }
+        } else if f.attrs.parse_one(p)? || eat(p, "WINDOW") {
+        } else if eat(p, "SUPPORT") {
+            p.parse_object_name(false)?;
         } else if eat(p, "AS") {
             f.body = Some(string(p)?);
             if p.consume_token(&Token::Comma) {
@@ -393,6 +540,71 @@ fn function_options(p: &mut Parser, f: &mut RawFunction) -> Result<(), ParserErr
         }
     }
     Ok(())
+}
+
+/// `ALTER {FUNCTION | PROCEDURE | ROUTINE} name [(args)] {action ... | RENAME TO n | SET SCHEMA n}`;
+/// `OWNER TO` is left to the role statements.
+fn alter_function(p: &mut Parser) -> Result<Option<FuncDdl>, ParserError> {
+    let mut i = 2;
+    let mut depth = 0i32;
+    loop {
+        match &p.peek_nth_token(i).token {
+            Token::EOF | Token::SemiColon => break,
+            Token::LParen => depth += 1,
+            Token::RParen => depth -= 1,
+            Token::Word(w) if depth == 0 && w.quote_style.is_none() && w.value.eq_ignore_ascii_case("owner") => return Ok(None),
+            _ => {}
+        }
+        i += 1;
+    }
+    p.next_token();
+    let kind = if eat(p, "FUNCTION") {
+        RoutineKind::Function
+    } else if eat(p, "PROCEDURE") {
+        RoutineKind::Procedure
+    } else {
+        p.next_token();
+        RoutineKind::Routine
+    };
+    let name = p.parse_object_name(false)?;
+    let types = if p.consume_token(&Token::LParen) {
+        let mut ts = Vec::new();
+        if !p.consume_token(&Token::RParen) {
+            loop {
+                let (mode, _, ty, _) = function_arg(p)?;
+                if mode != FunctionArgMode::Out {
+                    ts.push(ty);
+                }
+                if p.consume_token(&Token::RParen) {
+                    break;
+                }
+                p.expect_token(&Token::Comma)?;
+            }
+        }
+        Some(ts)
+    } else {
+        None
+    };
+    let action = if eat(p, "RENAME") {
+        expect(p, "TO")?;
+        RawAlter::Rename(ident(&p.parse_identifier()?))
+    } else if word_at(p, 0, "SET") && word_at(p, 1, "SCHEMA") {
+        p.next_token();
+        p.next_token();
+        RawAlter::SetSchema(ident(&p.parse_identifier()?))
+    } else {
+        let mut a = Attrs::default();
+        let mut any = false;
+        while a.parse_one(p)? {
+            any = true;
+        }
+        if !any {
+            return p.expected("an ALTER FUNCTION action", p.peek_token());
+        }
+        let _ = eat(p, "RESTRICT");
+        RawAlter::Attrs(a)
+    };
+    Ok(Some(FuncDdl::AlterFunction { name, types, kind, action }))
 }
 
 fn drop_function(p: &mut Parser, kind: RoutineKind) -> Result<FuncDdl, ParserError> {
@@ -547,6 +759,8 @@ pub(crate) fn lower(d: FuncDdl) -> SqlResult<Statement> {
     Ok(match d {
         FuncDdl::CreateFunction(f) => {
             let f = *f;
+            f.attrs.check()?;
+            let parallel = f.attrs.parallel()?;
             let args = f
                 .args
                 .into_iter()
@@ -574,10 +788,40 @@ pub(crate) fn lower(d: FuncDdl) -> SqlResult<Statement> {
                 returns: f.returns.map(lower_returns).transpose()?,
                 language,
                 body,
-                volatility: f.volatility,
-                strict: f.strict,
-                security_definer: f.security_definer,
+                volatility: f.attrs.volatility,
+                strict: f.attrs.strict.unwrap_or(false),
+                security_definer: f.attrs.security_definer.unwrap_or(false),
+                leakproof: f.attrs.leakproof.unwrap_or(false),
+                parallel,
+                cost: f.attrs.cost,
+                rows: f.attrs.rows,
+                config: f.attrs.config,
             }))
+        }
+        FuncDdl::AlterFunction { name, types, kind, action } => {
+            let actions = match action {
+                RawAlter::Rename(n) => vec![AlterFunctionAction::RenameTo(n)],
+                RawAlter::SetSchema(n) => vec![AlterFunctionAction::SetSchema(n)],
+                RawAlter::Attrs(a) => {
+                    a.check()?;
+                    let mut out = Vec::new();
+                    out.extend(a.volatility.map(AlterFunctionAction::Volatility));
+                    out.extend(a.strict.map(AlterFunctionAction::Strict));
+                    out.extend(a.security_definer.map(AlterFunctionAction::SecurityDefiner));
+                    out.extend(a.leakproof.map(AlterFunctionAction::Leakproof));
+                    out.extend(a.config.iter().cloned().map(AlterFunctionAction::Config));
+                    out.extend(a.cost.map(AlterFunctionAction::Cost));
+                    out.extend(a.rows.map(AlterFunctionAction::Rows));
+                    out.extend(a.parallel()?.map(AlterFunctionAction::Parallel));
+                    out
+                }
+            };
+            Statement::AlterFunction {
+                name: object_name(&name)?,
+                types: types.map(|ts| ts.iter().map(lower_type).collect::<SqlResult<Vec<_>>>()).transpose()?,
+                kind,
+                actions,
+            }
         }
         FuncDdl::DropFunction { items, if_exists, cascade, kind } => Statement::DropFunction {
             items: items
