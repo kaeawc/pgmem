@@ -464,7 +464,9 @@ pub(crate) fn lower_alter_table(at: sq::AlterTable) -> SqlResult<AlterTable> {
                 sq::Owner::CurrentUser => "current_user".to_owned(),
                 sq::Owner::SessionUser => "session_user".to_owned(),
             })),
-            O::EnableRowLevelSecurity | O::DisableRowLevelSecurity | O::SetLogged | O::SetUnlogged => {}
+            O::EnableRowLevelSecurity | O::DisableRowLevelSecurity => {}
+            O::SetLogged => actions.push(AlterTableAction::SetUnlogged(false)),
+            O::SetUnlogged => actions.push(AlterTableAction::SetUnlogged(true)),
             other => return Err(unsupported(&format!("ALTER TABLE {other}"))),
         }
     }
