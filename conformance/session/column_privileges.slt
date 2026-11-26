@@ -1,0 +1,252 @@
+# Column-level privileges: GRANT / REVOKE with a column list set pg_attribute.attacl (not
+# relacl) and are enforced per column. Roles are cluster-wide on PostgreSQL, so names are
+# unique and dropped at the end. Grantor names are replaced by U (the session user differs).
+
+statement ok
+DROP ROLE IF EXISTS conf_colp_reader
+
+statement ok
+CREATE ROLE conf_colp_reader
+
+statement ok
+CREATE TABLE colp (id int PRIMARY KEY, email text, secret text)
+
+statement ok
+INSERT INTO colp VALUES (1, 'a', 's')
+
+statement ok
+GRANT SELECT (id, email), INSERT (id, email), UPDATE (email) ON colp TO conf_colp_reader
+
+statement ok
+GRANT REFERENCES (id) ON colp TO conf_colp_reader WITH GRANT OPTION
+
+query
+SELECT relacl IS NULL FROM pg_class WHERE relname = 'colp'
+----
+?column?:bool
+t
+
+query
+SELECT attname, replace(attacl::text, session_user, 'U') FROM pg_attribute
+WHERE attrelid = 'colp'::regclass AND attnum > 0 ORDER BY attnum
+----
+attname:name | replace:text
+id | {conf_colp_reader=arx*/U}
+email | {conf_colp_reader=arw/U}
+secret | NULL
+
+query
+SELECT grantee, column_name, privilege_type, is_grantable FROM information_schema.column_privileges
+WHERE table_name = 'colp' AND grantee = 'conf_colp_reader' ORDER BY column_name, privilege_type
+----
+grantee:name | column_name:name | privilege_type:varchar | is_grantable:varchar
+conf_colp_reader | email | INSERT | NO
+conf_colp_reader | email | SELECT | NO
+conf_colp_reader | email | UPDATE | NO
+conf_colp_reader | id | INSERT | NO
+conf_colp_reader | id | REFERENCES | YES
+conf_colp_reader | id | SELECT | NO
+
+query
+SELECT has_column_privilege('conf_colp_reader', 'colp', 'email', 'SELECT'),
+       has_column_privilege('conf_colp_reader', 'colp', 'secret', 'SELECT'),
+       has_any_column_privilege('conf_colp_reader', 'colp', 'UPDATE'),
+       has_table_privilege('conf_colp_reader', 'colp', 'SELECT')
+----
+has_column_privilege:bool | has_column_privilege:bool | has_any_column_privilege:bool | has_table_privilege:bool
+t | f | t | f
+
+statement error 0LP01 invalid privilege type DELETE for column
+GRANT DELETE (id) ON colp TO conf_colp_reader
+
+statement error 42703 column "nope" of relation "colp" does not exist
+GRANT SELECT (nope) ON colp TO conf_colp_reader
+
+statement ok
+SET ROLE conf_colp_reader
+
+query
+SELECT id, email FROM colp
+----
+id:int4 | email:text
+1 | a
+
+query
+SELECT count(*) FROM colp
+----
+count:int8
+1
+
+statement error 42501 permission denied for table colp
+SELECT * FROM colp
+
+statement error 42501 permission denied for table colp
+SELECT id FROM colp WHERE secret = 's'
+
+statement ok
+INSERT INTO colp (id, email) VALUES (2, 'b')
+
+statement error 42501 permission denied for table colp
+INSERT INTO colp (id, secret) VALUES (3, 'x')
+
+statement ok
+UPDATE colp SET email = 'z' WHERE id = 1
+
+statement error 42501 permission denied for table colp
+UPDATE colp SET secret = 'z'
+
+statement error 42501 permission denied for table colp
+UPDATE colp SET email = 'y' RETURNING secret
+
+statement ok
+RESET ROLE
+
+statement ok
+REVOKE SELECT (email) ON colp FROM conf_colp_reader
+
+statement ok
+REVOKE GRANT OPTION FOR REFERENCES (id) ON colp FROM conf_colp_reader
+
+query
+SELECT attname, replace(attacl::text, session_user, 'U') FROM pg_attribute
+WHERE attrelid = 'colp'::regclass AND attnum > 0 ORDER BY attnum
+----
+attname:name | replace:text
+id | {conf_colp_reader=arx/U}
+email | {conf_colp_reader=aw/U}
+secret | NULL
+
+statement ok
+GRANT SELECT ON colp TO conf_colp_reader
+
+query
+SELECT replace(relacl::text, session_user, 'U') FROM pg_class WHERE relname = 'colp'
+----
+replace:text
+{U=arwdDxtm/U,conf_colp_reader=r/U}
+
+statement ok
+REVOKE SELECT, INSERT ON colp FROM conf_colp_reader
+
+query
+SELECT attname, replace(attacl::text, session_user, 'U') FROM pg_attribute
+WHERE attrelid = 'colp'::regclass AND attnum > 0 ORDER BY attnum
+----
+attname:name | replace:text
+id | {conf_colp_reader=x/U}
+email | {conf_colp_reader=w/U}
+secret | NULL
+
+# Column privileges on a view used as the INSERT / UPDATE target are checked on the view's
+# columns (also with an INSTEAD OF trigger); default privileges cannot have column lists; the
+# grant option of column privileges; DROP COLUMN drops the column's grants.
+statement ok
+CREATE VIEW colpv AS SELECT id, email FROM colp
+
+statement ok
+GRANT UPDATE (email), INSERT (id, email) ON colpv TO conf_colp_reader
+
+statement ok
+CREATE VIEW colpw AS SELECT id, email || '!' AS e2 FROM colp
+
+statement ok
+CREATE FUNCTION colpw_f() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$
+
+statement ok
+CREATE TRIGGER colpw_t INSTEAD OF INSERT OR UPDATE ON colpw FOR EACH ROW EXECUTE FUNCTION colpw_f()
+
+statement ok
+GRANT INSERT (id), UPDATE (e2) ON colpw TO conf_colp_reader
+
+statement ok
+SET ROLE conf_colp_reader
+
+statement ok
+UPDATE colpv SET email = 'v'
+
+statement ok
+INSERT INTO colpv (id, email) VALUES (10, 'v')
+
+statement ok
+INSERT INTO colpv VALUES (11, 'v')
+
+statement error 42501 permission denied for view colpv
+UPDATE colpv SET id = 2
+
+statement error 42501 permission denied for view colpv
+UPDATE colpv SET email = 'w' WHERE id = 1
+
+statement error 42501 permission denied for view colpv
+UPDATE colpv SET email = 'w' RETURNING email
+
+statement error 42501 permission denied for view colpv
+DELETE FROM colpv
+
+statement ok
+INSERT INTO colpw (id) VALUES (12)
+
+statement ok
+UPDATE colpw SET e2 = 'a'
+
+statement error 42501 permission denied for view colpw
+INSERT INTO colpw (id, e2) VALUES (12, 'a')
+
+statement error 42501 permission denied for view colpw
+UPDATE colpw SET id = 1
+
+statement ok
+RESET ROLE
+
+statement error 0LP01 default privileges cannot be set for columns
+ALTER DEFAULT PRIVILEGES GRANT SELECT (id) ON TABLES TO conf_colp_reader
+
+statement error 0LP01 default privileges cannot be set for columns
+ALTER DEFAULT PRIVILEGES REVOKE SELECT (id) ON TABLES FROM conf_colp_reader
+
+statement ok
+GRANT UPDATE (email) ON colp TO conf_colp_reader WITH GRANT OPTION
+
+query
+SELECT has_column_privilege('conf_colp_reader', 'colp', 'id', 'INSERT WITH GRANT OPTION'),
+       has_column_privilege('conf_colp_reader', 'colp', 'id', 'INSERT'),
+       has_column_privilege('conf_colp_reader', 'colp', 'email', 'UPDATE WITH GRANT OPTION'),
+       has_any_column_privilege('conf_colp_reader', 'colp', 'UPDATE WITH GRANT OPTION'),
+       has_any_column_privilege('conf_colp_reader', 'colp', 'INSERT WITH GRANT OPTION')
+----
+has_column_privilege:bool | has_column_privilege:bool | has_column_privilege:bool | has_any_column_privilege:bool | has_any_column_privilege:bool
+f | f | t | t | f
+
+statement ok
+REVOKE GRANT OPTION FOR UPDATE (email) ON colp FROM conf_colp_reader
+
+statement ok
+ALTER TABLE colp ADD COLUMN extra text
+
+statement ok
+GRANT SELECT (extra) ON colp TO conf_colp_reader
+
+statement ok
+ALTER TABLE colp DROP COLUMN extra
+
+query
+SELECT count(*) FROM information_schema.column_privileges
+WHERE table_name = 'colp' AND grantee = 'conf_colp_reader' AND column_name NOT IN ('id', 'email', 'secret')
+----
+count:int8
+0
+
+statement ok
+DROP VIEW colpw
+
+statement ok
+DROP FUNCTION colpw_f()
+
+statement ok
+DROP VIEW colpv
+
+# cleanup
+statement ok
+DROP OWNED BY conf_colp_reader
+
+statement ok
+DROP ROLE conf_colp_reader

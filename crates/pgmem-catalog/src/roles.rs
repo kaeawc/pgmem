@@ -52,6 +52,18 @@ pub enum GrantObject {
     Function(Oid),
     Database,
     Type(Oid),
+    /// A column of a table or view (`pg_attribute.attacl`): relation OID and attnum.
+    Column(Oid, i16),
+}
+
+impl GrantObject {
+    /// The relation a relation or column privilege is on.
+    pub fn relation_oid(&self) -> Option<Oid> {
+        match self {
+            GrantObject::Relation(o) | GrantObject::Column(o, _) => Some(*o),
+            _ => None,
+        }
+    }
 }
 
 /// One grantee's privileges on one object. `grantee` "" is PUBLIC.
