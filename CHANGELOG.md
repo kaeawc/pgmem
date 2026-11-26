@@ -14,6 +14,8 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 
 ### Fixed
 
+- `int2vector` / `oidvector` print space-separated (`3 1 4`) when cast to text, cast to `int2[]` / `oid[]` with lower bound 0, and parse from text literals.
+- An index with mixed column and expression keys reports the plain column's attnum in `pg_index.indkey` (`1 0`) and lists only the real expressions in `indexprs`.
 - `pg_constraint.connamespace` is the namespace of the owning table or domain instead of always `public`.
 
 ### Changed
