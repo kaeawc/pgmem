@@ -42,6 +42,9 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - `CREATE FUNCTION / TYPE / VIEW / SEQUENCE / DOMAIN pg_temp.x` creates the session's temporary
   schema on demand; temporary views, sequences, composite types and indexes report
   `relpersistence` `t`.
+- UNION / INTERSECT / EXCEPT and `SELECT DISTINCT` without ORDER BY return rows in PostgreSQL's
+  order (sorted, or hash-table order, as its planner picks) for inputs of constants and VALUES
+  lists, instead of first-seen order. Table inputs keep first-seen order.
 - Partitioning matches PostgreSQL in six details: `CREATE TABLE ... PARTITION OF parent (col DEFAULT ...)` column options parse; a partition's NOT NULL constraints keep the parent's names; a CHECK violated through the parent names the partition; a foreign key violation when deleting a referenced row names the partition (and its copy of the constraint, `<name>_<n>`); new partitions do not copy `atthasmissing`.
 - `DROP SCHEMA ... CASCADE` reports its dependents as the notice's `DETAIL` in creation order, leaves out partitions, and qualifies names only when they are not on the `search_path`; `DROP SCHEMA` without `CASCADE` lists them the same way.
 
