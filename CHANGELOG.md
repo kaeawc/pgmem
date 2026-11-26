@@ -18,6 +18,8 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - `ALTER FUNCTION / PROCEDURE / ROUTINE` supports `SET` / `RESET`, `[EXTERNAL] SECURITY`, volatility, `[NOT] LEAKPROOF`, `STRICT` / `CALLED ON NULL INPUT`, `PARALLEL`, `COST`, `ROWS`, `RENAME TO` and `SET SCHEMA`.
 - `pg_constraint.connamespace` is the namespace of the owning table or domain instead of always `public`.
 - `pg_get_indexdef` and `pg_indexes.indexdef` print `INCLUDE (...)` for covering indexes, and `pg_index.indnatts`, `indnkeyatts`, `indkey` and `pg_class.relnatts` count the INCLUDE columns like PostgreSQL.
+- Partitioning matches PostgreSQL in six details: `CREATE TABLE ... PARTITION OF parent (col DEFAULT ...)` column options parse; a partition's NOT NULL constraints keep the parent's names; a CHECK violated through the parent names the partition; a foreign key violation when deleting a referenced row names the partition (and its copy of the constraint, `<name>_<n>`); new partitions do not copy `atthasmissing`.
+- `DROP SCHEMA ... CASCADE` reports its dependents as the notice's `DETAIL` in creation order, leaves out partitions, and qualifies names only when they are not on the `search_path`; `DROP SCHEMA` without `CASCADE` lists them the same way.
 
 ### Changed
 
