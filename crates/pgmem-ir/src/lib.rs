@@ -1275,6 +1275,9 @@ pub enum GrantTarget {
 pub struct GrantStmt {
     /// Privilege keywords (lowercase); None for ALL [PRIVILEGES].
     pub privileges: Option<Vec<String>>,
+    /// Column lists, one per entry of `privileges` (one for ALL [PRIVILEGES]); an empty list
+    /// is a privilege on the whole object. Empty when no privilege has a column list.
+    pub columns: Vec<Vec<String>>,
     pub target: GrantTarget,
     /// Role names; "public" for PUBLIC.
     pub grantees: Vec<String>,
