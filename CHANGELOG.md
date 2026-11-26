@@ -11,6 +11,10 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - Static Linux binaries (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) on each release.
 - `cargo binstall pgmem` installs the prebuilt binary from the GitHub release.
 - `pg_get_keywords()` returns PostgreSQL 18's keyword list (word, catcode, barelabel, catdesc, baredesc).
+- `pg_locks` lists relation locks: the ones queries (with the indexes the planner opens), DML,
+  `LOCK TABLE` and DDL take, at PostgreSQL's lock level for each statement and ALTER TABLE
+  subcommand. They are held to the end of the transaction (or released by `ROLLBACK TO`) and
+  conflict with `LOCK ... NOWAIT` in other sessions.
 - Database forks: `Embedded::fork()` and `Server::fork()` copy the committed state (catalog, rows, roles and grants, sequence values, pinned `now()`) cheaply, by sharing it copy-on-write; the copies are independent afterwards.
 - In-process embedding API: `pgmem::Embedded` → `session()` with `execute_batch(sql)` (simple-query semantics: implicit transaction block, rollback on error), `query(sql)` (column names and type OIDs, rows as Postgres text) and `DbError` (SQLSTATE, message, detail, hint, object fields). `pgmem::to_pg_text` renders a value in Postgres text form. `Server::embedded()` and `Builder::start_on(&Embedded)` connect the two.
 - The wire server is behind the default-on `server` feature: `pgmem = { default-features = false }` builds the embedding API without tokio.
@@ -46,6 +50,8 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - UNION / INTERSECT / EXCEPT and `SELECT DISTINCT` without ORDER BY return rows in PostgreSQL's
   order (sorted, or hash-table order, as its planner picks) for inputs of constants and VALUES
   lists, instead of first-seen order. Table inputs keep first-seen order.
+- `LOCK TABLE` locks a partitioned table's partitions (not with `ONLY`) and a view's base
+  relations, and refuses sequences and indexes (`42809 cannot lock relation`).
 
 ### Changed
 
