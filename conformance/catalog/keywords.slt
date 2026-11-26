@@ -1,0 +1,46 @@
+# pg_get_keywords() and quote_ident agreement with the keyword categories.
+
+query
+SELECT count(*) FROM pg_get_keywords()
+----
+count:int8
+494
+
+query
+SELECT * FROM pg_get_keywords() WHERE word IN ('abort', 'all', 'authorization', 'between', 'bit') ORDER BY word
+----
+word:text | catcode:char | barelabel:bool | catdesc:text | baredesc:text
+abort | U | t | unreserved | can be bare label
+all | R | t | reserved | can be bare label
+authorization | T | t | reserved (can be function or type name) | can be bare label
+between | C | t | unreserved (cannot be function or type name) | can be bare label
+bit | C | t | unreserved (cannot be function or type name) | can be bare label
+
+query
+SELECT word FROM pg_get_keywords() LIMIT 3
+----
+word:text
+abort
+absent
+absolute
+
+query
+SELECT count(*) FROM pg_get_keywords() WHERE quote_ident(word) <> word
+----
+count:int8
+164
+
+query
+SELECT count(*) FROM pg_get_keywords() WHERE catcode <> 'U'
+----
+count:int8
+164
+
+query
+SELECT catcode, count(*), bool_and(barelabel) FROM pg_get_keywords() GROUP BY catcode ORDER BY catcode
+----
+catcode:char | count:int8 | bool_and:bool
+C | 63 | f
+R | 78 | f
+T | 23 | f
+U | 330 | f
