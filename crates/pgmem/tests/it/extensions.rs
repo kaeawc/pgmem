@@ -138,3 +138,28 @@ fn drop_extension_checks_dependents_of_member_functions() {
     );
     c.batch_execute("INSERT INTO xdu VALUES (1); INSERT INTO xdt DEFAULT VALUES").expect("tables still work");
 }
+
+/// DROP EXTENSION ... CASCADE reports every dependent in one notice: "drop cascades to N
+/// other objects" with the list as DETAIL (#236).
+#[test]
+fn drop_extension_cascade_notice_lists_dependents() {
+    use std::sync::{Arc, Mutex};
+    let (db, mut c) = setup();
+    type Seen = Vec<(String, Option<String>)>;
+    let seen: Arc<Mutex<Seen>> = Arc::default();
+    let sink = Arc::clone(&seen);
+    let mut cfg: postgres::Config = db.conninfo().parse().expect("conninfo");
+    cfg.notice_callback(move |n| sink.lock().expect("lock").push((n.message().to_owned(), n.detail().map(str::to_owned))));
+    let mut c2 = cfg.connect(postgres::NoTls).expect("connect");
+    c.batch_execute("CREATE EXTENSION hstore; CREATE TABLE xcn1 (a int, h hstore); CREATE TABLE xcn2 (h hstore, b int)").expect("setup");
+    c2.batch_execute("DROP EXTENSION hstore CASCADE").expect("cascade");
+    let got = seen.lock().expect("lock").clone();
+    assert_eq!(
+        got,
+        [(
+            "drop cascades to 2 other objects".to_owned(),
+            Some("drop cascades to column h of table xcn1\ndrop cascades to column h of table xcn2".to_owned())
+        )]
+    );
+    c.batch_execute("DROP TABLE xcn1, xcn2").expect("cleanup");
+}

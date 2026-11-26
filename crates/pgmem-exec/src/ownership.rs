@@ -72,6 +72,36 @@ impl Checker<'_> {
         Ok(())
     }
 
+    /// CREATE on `schema` (`pg_namespace_aclcheck(ACL_CREATE)`); temporary schemas need none.
+    fn schema_create(&self, schema: &str) -> SqlResult<()> {
+        if self.catalog.schema(schema).is_some()
+            && !schema.starts_with("pg_temp")
+            && !has_privilege(self.catalog, self.env, &self.role, &GrantObject::Schema(schema.to_owned()), 'C')
+        {
+            return Err(denied("schema", schema));
+        }
+        Ok(())
+    }
+
+    /// Creating an object named `name`: USAGE on a qualified schema, then CREATE on the
+    /// schema it lands in (`RangeVarGetAndCheckCreationNamespace`). A name that resolves to
+    /// no schema passes: the statement reports it.
+    fn create_in(&self, name: &ir::ObjectName) -> SqlResult<()> {
+        self.usage(name)?;
+        match self.catalog.creation_schema(name) {
+            Ok(schema) => self.schema_create(&schema),
+            Err(_) => Ok(()),
+        }
+    }
+
+    /// CREATE on the database (creating or renaming a schema).
+    fn database_create(&self) -> SqlResult<()> {
+        if has_privilege(self.catalog, self.env, &self.role, &GrantObject::Database, 'C') {
+            return Ok(());
+        }
+        Err(denied("database", &self.env.database))
+    }
+
     /// The relation `name` names, if it exists (a missing one is reported by the statement).
     fn relation(&self, name: &ir::ObjectName) -> SqlResult<Option<Relation>> {
         self.usage(name)?;
@@ -193,36 +223,45 @@ pub(crate) fn check_ddl(stmt: &Statement, catalog: &Catalog, env: &SessionEnv) -
             Ok(())
         }
         Statement::AlterFunction { name, types, kind, actions } => check_alter_function(&ck, name, types.as_deref(), *kind, actions),
-        Statement::CreateFunction(cf) if cf.or_replace => {
-            ck.usage(&cf.name)?;
-            Ok(())
-        }
-        Statement::CreateView(cv) if cv.or_replace => {
-            ck.relation_named(&cv.name, Label::Kind, |r| matches!(r, Relation::View(_)))?;
+        Statement::CreateFunction(cf) => ck.create_in(&cf.name),
+        Statement::CreateSequence(cs) => ck.create_in(&cs.name),
+        Statement::CreateType(ct) => ck.create_in(&ct.name),
+        Statement::CreateDomain(cd) => ck.create_in(&cd.name),
+        Statement::CreateSchema(_) => ck.database_create(),
+        Statement::CreateView(cv) => {
+            ck.create_in(&cv.name)?;
+            if cv.or_replace {
+                ck.relation_named(&cv.name, Label::Kind, |r| matches!(r, Relation::View(_)))?;
+            }
             Ok(())
         }
         Statement::CreateIndex(ci) => {
-            ck.relation_named(&ci.table, Label::Kind, |_| true)?;
+            if let Some(rel) = ck.relation_named(&ci.table, Label::Kind, |_| true)? {
+                ck.schema_create(rel.schema())?;
+            }
             Ok(())
         }
         Statement::CreateTable(ct) => {
+            if !ct.temporary {
+                ck.create_in(&ct.name)?;
+            }
             if let Some((parent, _)) = &ct.options.partition_of {
                 ck.relation_named(parent, Label::Kind, |_| true)?;
             }
             Ok(())
         }
         Statement::AlterTable(at) => check_alter_table(&ck, at),
-        Statement::AlterSequence { name, .. } => {
-            ck.relation_named(name, Label::Kind, |r| matches!(r, Relation::Sequence(_)))?;
-            Ok(())
+        Statement::AlterSequence { name, rename_to, .. } => {
+            let rel = ck.relation_named(name, Label::Kind, |r| matches!(r, Relation::Sequence(_)))?;
+            rename_create(&ck, rel.as_ref(), rename_to.is_some())
         }
         Statement::RenameView { name, .. } => {
-            ck.relation_named(name, Label::Kind, |r| !matches!(r, Relation::Index { .. }))?;
-            Ok(())
+            let rel = ck.relation_named(name, Label::Kind, |r| !matches!(r, Relation::Index { .. }))?;
+            rename_create(&ck, rel.as_ref(), true)
         }
         Statement::RenameIndex { name, .. } => {
-            ck.relation_named(name, Label::Kind, |r| matches!(r, Relation::Index { .. }))?;
-            Ok(())
+            let rel = ck.relation_named(name, Label::Kind, |r| matches!(r, Relation::Index { .. }))?;
+            rename_create(&ck, rel.as_ref(), true)
         }
         Statement::RefreshMatview { name, .. } => {
             if let Some(rel) = ck.relation(name)?
@@ -234,8 +273,14 @@ pub(crate) fn check_ddl(stmt: &Statement, catalog: &Catalog, env: &SessionEnv) -
         }
         Statement::AlterType(at) => ck.require_type(&at.name).map(drop),
         Statement::AlterDomain(ad) => ck.require_type(&ad.name).map(drop),
-        Statement::AlterSchema { name, .. } => ck.require_schema(name),
-        Statement::SetSchema { object_type, name, .. } => check_set_schema(&ck, *object_type, name),
+        Statement::AlterSchema { name, rename_to, .. } => {
+            ck.require_schema(name)?;
+            if rename_to.is_some() && catalog.schema(name).is_some() {
+                ck.database_create()?;
+            }
+            Ok(())
+        }
+        Statement::SetSchema { object_type, name, schema, .. } => check_set_schema(&ck, *object_type, name, schema),
         Statement::Comment { target, name, .. } => check_comment(&ck, target, name),
         Statement::AlterOwner { object, name, owner } => check_alter_owner(&ck, *object, name, owner),
         Statement::DropTrigger { table, .. } => {
@@ -257,6 +302,14 @@ pub(crate) fn check_ddl(stmt: &Statement, catalog: &Catalog, env: &SessionEnv) -
             }
             Ok(())
         }
+        _ => Ok(()),
+    }
+}
+
+/// RENAME of a relation needs CREATE on its schema, after ownership.
+fn rename_create(ck: &Checker, rel: Option<&Relation>, renames: bool) -> SqlResult<()> {
+    match rel {
+        Some(rel) if renames => ck.schema_create(rel.schema()),
         _ => Ok(()),
     }
 }
@@ -344,7 +397,15 @@ fn check_alter_function(
             return ck.owner_to(&ck.owner(f.oid), new, Some(&f.schema), not_owner(word, &f.name));
         }
     }
-    ck.require_function(&f, word)
+    ck.require_function(&f, word)?;
+    for a in actions {
+        match a {
+            A::RenameTo(_) => ck.schema_create(&f.schema)?,
+            A::SetSchema(target) => ck.schema_create(target)?,
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// CREATE OR REPLACE of an existing function (called by CREATE FUNCTION once it has found
@@ -364,20 +425,26 @@ fn check_alter_table(ck: &Checker, at: &ir::AlterTable) -> SqlResult<()> {
             return ck.owner_to(&ck.relation_owner(&rel), new, Some(rel.schema()), not_owner(relation_kind(&rel), rel.name()));
         }
     }
-    ck.require_relation(&rel, Label::Kind)
+    ck.require_relation(&rel, Label::Kind)?;
+    if at.actions.iter().any(|a| matches!(a, ir::AlterTableAction::RenameTable { .. })) {
+        ck.schema_create(rel.schema())?;
+    }
+    Ok(())
 }
 
-fn check_set_schema(ck: &Checker, object_type: ir::ObjectType, name: &ir::ObjectName) -> SqlResult<()> {
+/// ALTER ... SET SCHEMA: ownership, then CREATE on the target schema.
+fn check_set_schema(ck: &Checker, object_type: ir::ObjectType, name: &ir::ObjectName, target: &str) -> SqlResult<()> {
     use ir::ObjectType as O;
-    match object_type {
-        O::Type | O::Domain => ck.require_type(name).map(drop),
+    let found = match object_type {
+        O::Type | O::Domain => ck.require_type(name)?.is_some(),
         O::Function => match ck.routine(name, None)? {
-            Some(f) => ck.require_function(&f, "function"),
-            None => Ok(()),
+            Some(f) => ck.require_function(&f, "function").map(|()| true)?,
+            None => false,
         },
-        O::Schema | O::Extension => Ok(()),
-        O::Table | O::View | O::MaterializedView | O::Index | O::Sequence => ck.relation_named(name, Label::Kind, |_| true).map(drop),
-    }
+        O::Schema | O::Extension => false,
+        O::Table | O::View | O::MaterializedView | O::Index | O::Sequence => ck.relation_named(name, Label::Kind, |_| true)?.is_some(),
+    };
+    if found { ck.schema_create(target) } else { Ok(()) }
 }
 
 fn check_comment(ck: &Checker, target: &ir::CommentTarget, name: &ir::ObjectName) -> SqlResult<()> {

@@ -309,6 +309,10 @@ impl Writer {
         self.fields(b'N', severity, code, message, None, None);
     }
 
+    pub fn notice_detail(&mut self, severity: &str, code: &str, message: &str, detail: &str) {
+        self.fields(b'N', severity, code, message, Some(detail), None);
+    }
+
     pub fn parse_complete(&mut self) {
         let at = self.begin(b'1');
         self.finish(at);

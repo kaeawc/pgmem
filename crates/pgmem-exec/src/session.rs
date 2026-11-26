@@ -446,6 +446,7 @@ impl Session {
             Some(r) if !r.is_empty() && r != "none" => r.clone(),
             _ => self.user.clone(),
         };
+        let mut no_usage = Vec::new();
         if role != self.user {
             let current;
             let catalog = match &self.txn {
@@ -456,15 +457,13 @@ impl Session {
                 }
             };
             let env = SessionEnv { user: self.user.clone(), ..SessionEnv::detached() };
-            if !crate::roles::is_superuser(catalog, &env, &role) {
-                entries.retain(|e| {
-                    let schema = if e == "$user" { role.as_str() } else { e.as_str() };
-                    catalog.schema(schema).is_none()
-                        || crate::roles::has_privilege(catalog, &env, &role, &pgmem_catalog::GrantObject::Schema(schema.to_owned()), 'U')
-                });
-            }
+            no_usage = crate::roles::schemas_without_usage(catalog, &env, &role);
+            entries.retain(|e| {
+                let schema = if e == "$user" { role.as_str() } else { e.as_str() };
+                !no_usage.iter().any(|s| s == schema)
+            });
         }
-        pgmem_types::context::SearchPath { entries, user: role, temp_schema: self.temp_schema.clone() }
+        pgmem_types::context::SearchPath { entries, user: role, temp_schema: self.temp_schema.clone(), no_usage }
     }
 
     /// Analyzes a statement without running it: parameter types and result columns.
@@ -637,6 +636,7 @@ impl Session {
             (Statement::CreateSchema(cs), _) => {
                 // A new schema is owned by the current role (SET ROLE's), not the session user.
                 let owner = crate::roles::current_role(&env);
+                crate::ownership::check_ddl(stmt, txn.catalog(), &env)?;
                 return create_schema_with_elements(cs, txn, &owner, &env, &state);
             }
             (Statement::AlterSchema { name, rename_to }, _) => {

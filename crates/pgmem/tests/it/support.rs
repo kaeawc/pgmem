@@ -30,6 +30,11 @@ impl TestDb {
         }
     }
 
+    /// The connection string of the test database.
+    pub fn conninfo(&self) -> &str {
+        &self.conninfo
+    }
+
     pub fn connect(&self) -> Client {
         Client::connect(&self.conninfo, NoTls).expect("connect")
     }

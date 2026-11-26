@@ -511,6 +511,11 @@ pub fn resolve_type_name(catalog: &Catalog, t: &pgmem_ir::TypeName) -> SqlResult
     let base = match builtin {
         Some(b) => b,
         None => {
+            if let Some(s) = &t.schema
+                && pgmem_types::context::search_path().no_usage.contains(s)
+            {
+                return Err(SqlError::new(code::INSUFFICIENT_PRIVILEGE, format!("permission denied for schema {s}")));
+            }
             let mut parts: Vec<String> = t.schema.iter().cloned().collect();
             parts.push(t.name.clone());
             let qualified = parts.join(".");

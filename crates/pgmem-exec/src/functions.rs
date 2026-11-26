@@ -754,6 +754,7 @@ pub fn in_function_env<R>(def: &FunctionDef, exec: &mut Exec, f: impl FnOnce(&mu
     let mut path = pgmem_types::context::search_path();
     if def.security_definer {
         let owner = crate::roles::owner_of(exec.txn().catalog(), &env, def.oid);
+        path.no_usage = crate::roles::schemas_without_usage(exec.txn().catalog(), &env, &owner);
         path.user.clone_from(&owner);
         env.security_definer = Some(owner);
     }

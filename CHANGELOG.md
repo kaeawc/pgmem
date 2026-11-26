@@ -27,6 +27,9 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - CREATE TRIGGER needs TRIGGER on the table and EXECUTE on the trigger function; REFRESH MATERIALIZED VIEW needs MAINTAIN.
 - After `SET ROLE`, `$user` in `search_path` is the current role, schemas the role has no USAGE on drop out of the search path, and a qualified name in one fails with `42501 permission denied for schema s`.
 - DROP EXTENSION checks what depends on the functions marked `DEPENDS ON EXTENSION` (column defaults, triggers): `2BP01 cannot drop extension x because other objects depend on it` with PostgreSQL's DETAIL and HINT, and CASCADE drops them; DROP FUNCTION ... CASCADE drops dependent triggers too.
+- CREATE on the schema is required to create tables, views, materialized views, sequences, indexes, functions, procedures, types and domains in it, to rename tables, views, sequences, indexes and functions, and for `ALTER ... SET SCHEMA` on the target schema (`42501 permission denied for schema s`); `public` gives PUBLIC only USAGE, as PostgreSQL 15+. `CREATE SCHEMA` and `ALTER SCHEMA ... RENAME` need CREATE on the database (`GRANT CREATE ON DATABASE`).
+- A qualified type name in a schema the role has no USAGE on is refused, and a `SECURITY DEFINER` function's `$user` is its owner.
+- `DROP EXTENSION ... CASCADE` reports its dependents in one notice, `drop cascades to N other objects` with a DETAIL list (as does `DROP SCHEMA ... CASCADE`); `pg_proc.proacl` shows a function's ACL once EXECUTE was granted or revoked.
 - `ALTER SEQUENCE ... OWNER TO` parses; `pg_tables.tableowner` shows the table's owner.
 - `pg_get_indexdef` and `pg_indexes.indexdef` print `INCLUDE (...)` for covering indexes, and `pg_index.indnatts`, `indnkeyatts`, `indkey` and `pg_class.relnatts` count the INCLUDE columns like PostgreSQL.
 
