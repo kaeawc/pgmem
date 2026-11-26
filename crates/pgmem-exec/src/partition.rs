@@ -655,6 +655,7 @@ fn clone_indexes(
             continue;
         }
         let Some(columns) = idx.columns.iter().map(|c| slot_of(*c)).collect::<Option<Vec<usize>>>() else { continue };
+        let Some(include) = idx.include.iter().map(|c| slot_of(*c)).collect::<Option<Vec<usize>>>() else { continue };
         let name = partition_index_name(catalog, part, &IndexDef { columns: columns.clone(), ..idx.clone() }, &taken);
         taken.push(name.clone());
         links.push((name.clone(), idx.oid));
@@ -671,7 +672,7 @@ fn clone_indexes(
             };
             part.constraints.push(c);
         }
-        part.indexes.push(IndexDef { oid: 0, name, columns, ..idx.clone() });
+        part.indexes.push(IndexDef { oid: 0, name, columns, include, ..idx.clone() });
     }
     links
 }

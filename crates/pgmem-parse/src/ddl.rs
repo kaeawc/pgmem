@@ -287,6 +287,7 @@ pub(crate) fn lower_create_index(ci: sq::CreateIndex) -> SqlResult<CreateIndex> 
         name: ci.name.as_ref().map(|n| object_name(n).map(|o| o.base().to_owned())).transpose()?,
         table: object_name(&ci.table_name)?,
         columns: ci.columns.into_iter().map(|c| lower_order_by_expr(c.column)).collect::<SqlResult<Vec<_>>>()?,
+        include: ci.include.iter().map(ident).collect(),
         unique: ci.unique,
         if_not_exists: ci.if_not_exists,
         concurrently: ci.concurrently,

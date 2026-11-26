@@ -1213,6 +1213,8 @@ pub struct CreateIndex {
     pub name: Option<String>,
     pub table: ObjectName,
     pub columns: Vec<OrderByExpr>,
+    /// `INCLUDE (...)` column names.
+    pub include: Vec<String>,
     pub unique: bool,
     pub if_not_exists: bool,
     pub concurrently: bool,
