@@ -316,6 +316,7 @@ fn db_with_unique_id() -> (Arc<Database>, Oid) {
         name: "items_id_key".into(),
         columns: vec![0],
         exprs: vec![],
+        include: vec![],
         unique: true,
         primary: false,
         nulls_not_distinct: false,

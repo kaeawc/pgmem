@@ -216,6 +216,45 @@ fn pg_type_and_namespaces() {
 }
 
 #[test]
+fn covering_index_include_columns() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE cov (id int, e text, a int, b text);
+         CREATE UNIQUE INDEX cov_expr ON cov (lower(e)) INCLUDE (id) WHERE id > 0;
+         CREATE INDEX cov_two ON cov (a) INCLUDE (id, b);
+         CREATE INDEX cov_plain ON cov (a, b);",
+    )
+    .expect("schema");
+    let got = rows(
+        &mut c,
+        "SELECT i.relname, x.indnatts::text, x.indnkeyatts::text, array_to_string(x.indkey::int2[], ' '), pg_get_indexdef(x.indexrelid), i.relnatts::text
+         FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid WHERE x.indrelid = 'cov'::regclass ORDER BY i.relname",
+    );
+    assert_eq!(
+        got,
+        vec![
+            vec![
+                "cov_expr",
+                "2",
+                "1",
+                "0 1",
+                "CREATE UNIQUE INDEX cov_expr ON public.cov USING btree (lower(e)) INCLUDE (id) WHERE (id > 0)",
+                "2"
+            ],
+            vec!["cov_plain", "2", "2", "3 4", "CREATE INDEX cov_plain ON public.cov USING btree (a, b)", "2"],
+            vec!["cov_two", "3", "1", "3 1 4", "CREATE INDEX cov_two ON public.cov USING btree (a) INCLUDE (id, b)", "3"],
+        ]
+    );
+    assert_eq!(
+        rows(&mut c, "SELECT indexdef FROM pg_indexes WHERE indexname = 'cov_two'"),
+        vec![vec!["CREATE INDEX cov_two ON public.cov USING btree (a) INCLUDE (id, b)"]]
+    );
+    // Dropping an INCLUDE column drops the index.
+    c.batch_execute("ALTER TABLE cov DROP COLUMN b").expect("drop");
+    assert_eq!(rows(&mut c, "SELECT count(*)::text FROM pg_indexes WHERE tablename = 'cov'"), vec![vec!["1"]]);
+}
+
+#[test]
 fn pg_get_keywords() {
     let (_db, mut c) = setup();
     assert_eq!(rows(&mut c, "SELECT count(*) FROM pg_get_keywords()"), [["494"]]);
