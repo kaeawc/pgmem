@@ -1110,7 +1110,7 @@ pub(crate) fn recurses(action: &ir::AlterTableAction) -> Option<ir::AlterTableAc
 // Functions
 
 fn reg_class(catalog: &Catalog, oid: pgmem_catalog::Oid) -> Value {
-    Value::Reg(pgmem_types::RegKind::Class, oid, crate::reg::reg_name(pgmem_types::RegKind::Class, oid, catalog))
+    Value::Reg(pgmem_types::RegKind::Class, oid, crate::reg::reg_name(pgmem_types::RegKind::Class, oid, catalog, ""))
 }
 
 fn arg_oid(v: &Value) -> Option<pgmem_catalog::Oid> {

@@ -393,11 +393,24 @@ fn userbyid_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
 
 fn to_reg_fn(kind: RegKind) -> crate::plan::ScalarFn {
     match kind {
-        RegKind::Class => |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Class, ctx.txn.catalog()).unwrap_or(Value::Null)),
-        RegKind::Type => |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Type, ctx.txn.catalog()).unwrap_or(Value::Null)),
-        RegKind::Namespace => |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Namespace, ctx.txn.catalog()).unwrap_or(Value::Null)),
-        RegKind::Proc => |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Proc, ctx.txn.catalog()).unwrap_or(Value::Null)),
-        RegKind::Procedure => |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Procedure, ctx.txn.catalog()).unwrap_or(Value::Null)),
+        RegKind::Class => {
+            |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Class, ctx.txn.catalog(), &ctx.env.user).unwrap_or(Value::Null))
+        }
+        RegKind::Type => {
+            |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Type, ctx.txn.catalog(), &ctx.env.user).unwrap_or(Value::Null))
+        }
+        RegKind::Namespace => {
+            |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Namespace, ctx.txn.catalog(), &ctx.env.user).unwrap_or(Value::Null))
+        }
+        RegKind::Role => {
+            |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Role, ctx.txn.catalog(), &ctx.env.user).unwrap_or(Value::Null))
+        }
+        RegKind::Proc => {
+            |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Proc, ctx.txn.catalog(), &ctx.env.user).unwrap_or(Value::Null))
+        }
+        RegKind::Procedure => {
+            |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Procedure, ctx.txn.catalog(), &ctx.env.user).unwrap_or(Value::Null))
+        }
     }
 }
 
@@ -520,6 +533,7 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
         "to_regnamespace" if n == 1 => {
             resolved(strict("to_regnamespace", to_reg_fn(RegKind::Namespace)), vec![Text], Type::Reg(RegKind::Namespace))
         }
+        "to_regrole" if n == 1 => resolved(strict("to_regrole", to_reg_fn(RegKind::Role)), vec![Text], Type::Reg(RegKind::Role)),
         "to_regproc" if n == 1 => resolved(strict("to_regproc", to_reg_fn(RegKind::Proc)), vec![Text], Type::Reg(RegKind::Proc)),
         "to_regprocedure" if n == 1 => {
             resolved(strict("to_regprocedure", to_reg_fn(RegKind::Procedure)), vec![Text], Type::Reg(RegKind::Procedure))

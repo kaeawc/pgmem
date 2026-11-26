@@ -131,6 +131,22 @@ fn letters(privs: Option<&[String]>, object: &GrantObject, sequence: bool) -> Sq
 /// Privilege letters in `aclitem` output order (Postgres' ACL bit order).
 const ACL_ORDER: &str = "arwdDxtXUCcTsAm";
 
+/// A role name as `aclitem` output writes it (`putid`): quoted unless alphanumeric/underscore.
+pub fn acl_name(name: &str) -> String {
+    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return name.to_owned();
+    }
+    let mut out = String::from("\"");
+    for c in name.chars() {
+        if c == '"' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
 /// An object's ACL (`relacl`, ...) as `aclitem` texts: None until something was granted on
 /// it (the default privileges), else the owner's entry then each grantee's (`role=rw*/grantor`).
 pub fn acl_items(catalog: &Catalog, env: &SessionEnv, object: &GrantObject, oid: Oid, sequence: bool) -> Option<Vec<String>> {
@@ -146,10 +162,15 @@ pub fn acl_items(catalog: &Catalog, env: &SessionEnv, object: &GrantObject, oid:
             .map(|c| if grantable.contains(&c) { format!("{c}*") } else { c.to_string() })
             .collect()
     };
-    let mut items = vec![format!("{owner}={}/{owner}", object_privileges(object, sequence))];
-    for g in grants.iter().filter(|g| g.grantee != owner) {
-        items.push(format!("{}={}/{}", g.grantee, letters(&g.privileges, &g.grantable), g.grantor));
+    let fmt =
+        |g: &pgmem_catalog::Grant| format!("{}={}/{}", acl_name(&g.grantee), letters(&g.privileges, &g.grantable), acl_name(&g.grantor));
+    let mut items = Vec::new();
+    // An explicit owner entry (from default privileges) keeps its position; otherwise the
+    // owner's implicit entry leads.
+    if !grants.iter().any(|g| g.grantee == owner) {
+        items.push(format!("{}={}/{}", acl_name(&owner), object_privileges(object, sequence), acl_name(&owner)));
     }
+    items.extend(grants.iter().map(|g| fmt(g)));
     Some(items)
 }
 
@@ -317,7 +338,7 @@ pub(crate) fn alter_role(name: &str, action: &ir::AlterRoleAction, txn: &mut Txn
 }
 
 /// What depends on a role (DROP ROLE's DETAIL lines).
-fn role_dependencies(catalog: &Catalog, role: &str, owner: &str) -> Vec<String> {
+fn role_dependencies(catalog: &Catalog, role: &str) -> Vec<String> {
     let mut out = Vec::new();
     for oid in catalog.owned_by(role) {
         if let Some(r) = catalog.relation_by_oid(oid) {
@@ -328,6 +349,8 @@ fn role_dependencies(catalog: &Catalog, role: &str, owner: &str) -> Vec<String> 
     }
     for g in catalog.grants().iter().filter(|g| g.grantee == role) {
         match &g.object {
+            // The owner's own ACL entry (from default privileges) is not a dependency.
+            GrantObject::Relation(o) if catalog.owner(*o) == Some(role) => {}
             GrantObject::Relation(o) => {
                 if let Some(r) = catalog.relation_by_oid(*o) {
                     out.push(format!("privileges for {} {}", r.kind_name(), r.name()));
@@ -343,7 +366,7 @@ fn role_dependencies(catalog: &Catalog, role: &str, owner: &str) -> Vec<String> 
             GrantObject::Type(_) => out.push("privileges for type".to_owned()),
         }
     }
-    for d in catalog.default_privileges().iter().filter(|d| d.grantee == role) {
+    for d in catalog.default_privileges() {
         let what = match d.kind {
             'S' => "sequences",
             'f' => "functions",
@@ -351,10 +374,13 @@ fn role_dependencies(catalog: &Catalog, role: &str, owner: &str) -> Vec<String> 
             'n' => "schemas",
             _ => "relations",
         };
-        out.push(match &d.schema {
-            Some(s) => format!("privileges for default privileges on new {what} belonging to role {owner} in schema {s}"),
-            None => format!("privileges for default privileges on new {what} belonging to role {owner}"),
-        });
+        let in_schema = d.schema.as_ref().map_or(String::new(), |s| format!(" in schema {s}"));
+        let on = format!("default privileges on new {what} belonging to role {}{in_schema}", d.role);
+        if d.role == role {
+            out.push(format!("owner of {on}"));
+        } else if d.items.iter().any(|x| x.grantee == role) {
+            out.push(format!("privileges for {on}"));
+        }
     }
     out
 }
@@ -380,7 +406,7 @@ pub(crate) fn drop_role(names: &[String], if_exists: bool, txn: &mut Txn, env: &
             }
             return Err(missing_role(name));
         }
-        let deps = role_dependencies(txn.catalog(), name, &env.user);
+        let deps = role_dependencies(txn.catalog(), name);
         if !deps.is_empty() {
             return Err(SqlError::new(
                 code::DEPENDENT_OBJECTS_STILL_EXIST,
@@ -531,6 +557,7 @@ pub(crate) fn grant_role(
 }
 
 pub(crate) fn alter_default_privileges(
+    roles: &[String],
     schemas: &[String],
     kind: char,
     g: &ir::GrantStmt,
@@ -547,36 +574,68 @@ pub(crate) fn alter_default_privileges(
     };
     let privs = letters(g.privileges.as_deref(), &probe.0, probe.1)?;
     let schema_list: Vec<Option<String>> = if schemas.is_empty() { vec![None] } else { schemas.iter().cloned().map(Some).collect() };
+    let me = current_role(env);
+    let owners: Vec<String> =
+        if roles.is_empty() { vec![me.clone()] } else { roles.iter().map(|r| resolve_role(&catalog, env, r)).collect::<SqlResult<_>>()? };
+    for owner in &owners {
+        if !is_superuser(&catalog, env, &me) && !catalog.roles_of(&me).contains(owner) {
+            return Err(SqlError::new(code::INSUFFICIENT_PRIVILEGE, "permission denied to change default privileges"));
+        }
+    }
     for grantee in &g.grantees {
         let grantee = if grantee == "public" { String::new() } else { resolve_role(&catalog, env, grantee)? };
-        for s in &schema_list {
-            if g.revoke {
-                txn.catalog_mut().remove_default_privilege(s.as_deref(), kind, &grantee, &privs);
-            } else {
-                txn.catalog_mut().add_default_privilege(DefaultPrivilege {
-                    schema: s.clone(),
-                    kind,
-                    grantee: grantee.clone(),
-                    privileges: privs.clone(),
-                });
+        for owner in &owners {
+            for s in &schema_list {
+                let mut entry = txn
+                    .catalog()
+                    .default_privilege(owner, s.as_deref(), kind)
+                    .cloned()
+                    .unwrap_or_else(|| DefaultPrivilege::new(owner, s.as_deref(), kind));
+                if g.revoke {
+                    entry.revoke(&grantee, &privs, g.grant_option);
+                } else {
+                    entry.grant(&grantee, &privs, g.grant_option);
+                }
+                txn.catalog_mut().put_default_privilege(entry);
             }
         }
     }
     Ok(tag("ALTER DEFAULT PRIVILEGES"))
 }
 
-/// Default privileges for a new relation (`r` table or `S` sequence) in `schema`.
+/// Default privileges for a new relation (`r` table or `S` sequence) in `schema`, created by
+/// the current role: the role's global entry and its entry for the schema, merged.
 pub(crate) fn apply_defaults(txn: &mut Txn, env: &SessionEnv, oid: Oid, schema: &str, kind: char) {
-    let defaults: Vec<DefaultPrivilege> = txn
-        .catalog()
-        .default_privileges()
-        .iter()
-        .filter(|d| d.kind == kind && d.schema.as_deref().is_none_or(|s| s == schema))
-        .cloned()
-        .collect();
     let me = current_role(env);
-    for d in defaults {
-        txn.catalog_mut().grant(GrantObject::Relation(oid), &d.grantee, &me, &d.privileges, false);
+    let cat = txn.catalog();
+    let mut merged = DefaultPrivilege::new(&me, None, kind);
+    if let Some(global) = cat.default_privilege(&me, None, kind) {
+        merged = global.clone();
+    }
+    if let Some(local) = cat.default_privilege(&me, Some(schema), kind) {
+        for x in &local.items {
+            let plain: Vec<char> = x.privileges.iter().filter(|p| !x.grantable.contains(p)).copied().collect();
+            merged.grant(&x.grantee, &plain, false);
+            merged.grant(&x.grantee, &x.grantable, true);
+        }
+    }
+    if merged.items.iter().all(|x| x.grantee == me) {
+        return;
+    }
+    // Postgres sorts a merged default ACL by grantee OID (PUBLIC first).
+    let catalog = txn.catalog().clone();
+    merged
+        .items
+        .sort_by_key(|x| if x.grantee.is_empty() { 0 } else { crate::reg::role_oid(&catalog, &env.user, &x.grantee).unwrap_or(u32::MAX) });
+    for x in &merged.items {
+        let object = GrantObject::Relation(oid);
+        let plain: Vec<char> = x.privileges.iter().filter(|p| !x.grantable.contains(p)).copied().collect();
+        if !plain.is_empty() {
+            txn.catalog_mut().grant(object.clone(), &x.grantee, &me, &plain, false);
+        }
+        if !x.grantable.is_empty() {
+            txn.catalog_mut().grant(object, &x.grantee, &me, &x.grantable, true);
+        }
     }
 }
 
@@ -586,11 +645,7 @@ pub(crate) fn drop_owned(roles: &[String], txn: &mut Txn, env: &SessionEnv) -> S
     for r in &roles {
         let cat = txn.catalog_mut();
         cat.drop_grants(|g| &g.grantee == r);
-        let defaults: Vec<(Option<String>, char, Vec<char>)> =
-            cat.default_privileges().iter().filter(|d| &d.grantee == r).map(|d| (d.schema.clone(), d.kind, d.privileges.clone())).collect();
-        for (s, k, p) in defaults {
-            cat.remove_default_privilege(s.as_deref(), k, r, &p);
-        }
+        cat.drop_default_privileges_of(r);
         // Owned objects are dropped.
         for oid in catalog.owned_by(r) {
             match catalog.relation_by_oid(oid) {

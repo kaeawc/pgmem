@@ -14,6 +14,8 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 ### Fixed
 
 - `pg_constraint.connamespace` is the namespace of the owning table or domain instead of always `public`.
+- `regrole` input and output (`'role'::regrole`, `to_regrole()`, casts to and from `oid`), `pg_class.relowner` for objects owned by other roles, and the `pg_policies` view (empty until row-level security exists).
+- `ALTER DEFAULT PRIVILEGES [FOR ROLE r] [IN SCHEMA s]` is stored in `pg_default_acl` (as in Postgres, global entries start from the hard-wired defaults and vanish when equal to them) and applied to tables, views and sequences created afterwards by that role.
 
 ### Changed
 

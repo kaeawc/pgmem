@@ -101,7 +101,7 @@ pub fn eval(expr: &Expr, row: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
         Expr::Cast { expr, to, typmod, explicit } => {
             let v = eval(expr, row, ctx)?;
             match to {
-                pgmem_types::Type::Reg(kind) => crate::reg::to_reg(v, *kind, ctx.txn.catalog())?,
+                pgmem_types::Type::Reg(kind) => crate::reg::to_reg(v, *kind, ctx.txn.catalog(), &ctx.env.user)?,
                 _ => crate::cast::cast_value_ctx(v, to, *typmod, *explicit)?,
             }
         }

@@ -412,10 +412,11 @@ pub(crate) fn try_parse(p: &mut Parser) -> Result<Option<RoleStmt>, ParserError>
             p.next_token();
         }
         let mut schemas = Vec::new();
+        let mut roles = Vec::new();
         loop {
             if eat(p, "FOR") {
                 let _ = eat(p, "ROLE") || eat(p, "USER");
-                role_list(p)?;
+                roles.extend(role_list(p)?);
             } else if eat(p, "IN") {
                 expect(p, "SCHEMA")?;
                 schemas.extend(ident_list(p)?);
@@ -464,7 +465,7 @@ pub(crate) fn try_parse(p: &mut Parser) -> Result<Option<RoleStmt>, ParserError>
                 break;
             }
         }
-        return Ok(Some(RoleStmt::Lowered(Statement::AlterDefaultPrivileges { schemas, kind, grant: Box::new(stmt) })));
+        return Ok(Some(RoleStmt::Lowered(Statement::AlterDefaultPrivileges { roles, schemas, kind, grant: Box::new(stmt) })));
     }
     if word_at(p, 0, "DROP") && word_at(p, 1, "OWNED") {
         p.next_token();

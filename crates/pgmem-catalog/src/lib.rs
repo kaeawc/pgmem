@@ -14,7 +14,7 @@ use std::sync::Arc;
 mod partitions;
 mod roles;
 pub use partitions::{PartitionBound, PartitionKey, PartitionKeyPart, PartitionOf, PartitionStrategy, RangeDatum};
-pub use roles::{DefaultPrivilege, ExtensionDef, Grant, GrantObject, RoleDef};
+pub use roles::{DefaultItem, DefaultPrivilege, ExtensionDef, Grant, GrantObject, RoleDef};
 
 pub type Oid = u32;
 
