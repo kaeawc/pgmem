@@ -395,8 +395,9 @@ pub struct TriggerDef {
     pub when: Option<String>,
     pub function: Oid,
     pub args: Vec<String>,
-    /// False after `ALTER TABLE ... DISABLE TRIGGER`.
-    pub enabled: bool,
+    /// `pg_trigger.tgenabled`: 'O' fires in origin / local role, 'D' disabled, 'R' fires in
+    /// replica role, 'A' always.
+    pub enabled: char,
 }
 
 /// A named CHECK constraint of a domain; `expr` refers to the value as `VALUE`.
@@ -924,6 +925,20 @@ impl Catalog {
                         return s == schema;
                     }
                 }
+            }
+        }
+        false
+    }
+
+    /// ruleutils' `FunctionIsVisible` for a function `f`: the first schema on the search path
+    /// with a function of that name and argument types holds `f`.
+    pub fn function_visible(&self, f: &FunctionDef) -> bool {
+        let types = f.input_types();
+        for e in self.search_path() {
+            if let PathEntry::Schema(s) = e
+                && self.functions.values().any(|g| g.schema == s && g.name == f.name && g.input_types() == types)
+            {
+                return s == f.schema;
             }
         }
         false

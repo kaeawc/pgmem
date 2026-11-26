@@ -93,7 +93,7 @@ pub(crate) fn create_trigger(ct: &ir::CreateTrigger, txn: &mut Txn) -> SqlResult
         when: ct.when.clone(),
         function: func.oid,
         args: ct.args.clone(),
-        enabled: true,
+        enabled: 'O',
     });
     Ok(QueryResult { tag: "CREATE TRIGGER".into(), ..Default::default() })
 }
@@ -136,8 +136,25 @@ pub(crate) fn drop_trigger(name: &str, table: &ir::ObjectName, if_exists: bool, 
     }
 }
 
-/// `ALTER TABLE ... {ENABLE | DISABLE} TRIGGER {name | ALL}`.
-pub(crate) fn set_enabled(table: &TableDef, name: Option<&str>, enabled: bool, txn: &mut Txn) -> SqlResult<()> {
+/// `ALTER TRIGGER name ON table RENAME TO new_name`.
+pub(crate) fn rename_trigger(name: &str, table: &ir::ObjectName, new_name: &str, txn: &mut Txn) -> SqlResult<QueryResult> {
+    let rel = txn.catalog().lookup_relation(table)?.ok_or_else(|| SqlError::undefined_table(&table.to_string()))?;
+    let base = rel.name().to_owned();
+    let t = txn
+        .catalog()
+        .triggers()
+        .find(|t| t.table == rel.oid() && t.name == name)
+        .cloned()
+        .ok_or_else(|| SqlError::new(code::UNDEFINED_OBJECT, format!("trigger \"{name}\" for table \"{base}\" does not exist")))?;
+    if name != new_name && txn.catalog().triggers().any(|o| o.table == rel.oid() && o.name == new_name) {
+        return Err(SqlError::new(code::DUPLICATE_OBJECT, format!("trigger \"{new_name}\" for relation \"{base}\" already exists")));
+    }
+    txn.catalog_mut().put_trigger(TriggerDef { name: new_name.to_owned(), ..(*t).clone() });
+    Ok(QueryResult { tag: "ALTER TRIGGER".into(), ..Default::default() })
+}
+
+/// `ALTER TABLE ... {ENABLE [REPLICA | ALWAYS] | DISABLE} TRIGGER {name | ALL | USER}`.
+pub(crate) fn set_enabled(table: &TableDef, name: Option<&str>, enabled: char, txn: &mut Txn) -> SqlResult<()> {
     let triggers = txn.catalog().table_triggers(table.oid);
     let mut any = false;
     for t in triggers {
@@ -162,11 +179,16 @@ pub(crate) fn load(
     when: TriggerTiming,
     row: bool,
     updated: Option<&[String]>,
+    env: &crate::session::SessionEnv,
 ) -> Vec<(Arc<TriggerDef>, Arc<FunctionDef>)> {
     let cat = txn.catalog();
+    // `session_replication_role = replica` fires 'R' and 'A' triggers; origin and local fire
+    // 'O' and 'A'; 'D' never fires (`TriggerEnabled`).
+    let replica = env.setting("session_replication_role").is_some_and(|r| r.eq_ignore_ascii_case("replica"));
+    let fires = |mode: char| mode == 'A' || mode == if replica { 'R' } else { 'O' };
     cat.table_triggers(table.oid)
         .into_iter()
-        .filter(|t| t.enabled && t.timing == when && t.for_each_row == row)
+        .filter(|t| fires(t.enabled) && t.timing == when && t.for_each_row == row)
         .filter(|t| match event {
             Event::Insert => t.insert,
             Event::Delete => t.delete,
@@ -282,9 +304,14 @@ pub(crate) fn fire_statement(
 }
 
 /// The INSTEAD OF row triggers of view `view` for `event`.
-fn instead_of_triggers(txn: &Txn, view: &pgmem_catalog::ViewDef, event: Event) -> Vec<(Arc<TriggerDef>, Arc<FunctionDef>)> {
+fn instead_of_triggers(
+    txn: &Txn,
+    view: &pgmem_catalog::ViewDef,
+    event: Event,
+    env: &crate::session::SessionEnv,
+) -> Vec<(Arc<TriggerDef>, Arc<FunctionDef>)> {
     let pseudo = view_table(txn, view);
-    load(txn, &pseudo, event, TriggerTiming::InsteadOf, true, None)
+    load(txn, &pseudo, event, TriggerTiming::InsteadOf, true, None, env)
 }
 
 /// A view as a table definition (its columns typed by its query), for trigger calls.
@@ -342,7 +369,7 @@ pub(crate) fn instead_of(
         _ => return Ok(None),
     };
     let Ok(Some(Relation::View(view))) = txn.catalog().find_relation(name) else { return Ok(None) };
-    let trigs = instead_of_triggers(txn, &view, event);
+    let trigs = instead_of_triggers(txn, &view, event, env);
     if trigs.is_empty() {
         return Ok(None);
     }
