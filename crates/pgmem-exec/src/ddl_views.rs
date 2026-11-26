@@ -202,6 +202,10 @@ pub(crate) fn refresh_matview(
     let rows = if with_data {
         let catalog = txn.catalog().clone();
         let binder = Binder::new(&catalog, &[]);
+        // The query runs as the materialized view's owner, under the owner's policies.
+        let user = crate::rls::RlsUser::from_env(env);
+        let owner = catalog.owner(def.oid).unwrap_or(&user.bootstrap).to_owned();
+        binder.set_rls(crate::rls::RlsUser { role: owner, ..user });
         let top = Level::new(Scope::default());
         let bound = pgmem_types::context::with_search_path(&mv.search_path, || binder.bind_query(&mv.query, &Ctx::new(&top)))?;
         run(&bound.rel, &EvalCtx::new(txn, &[], env, state))?

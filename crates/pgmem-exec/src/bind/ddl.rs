@@ -861,7 +861,11 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
         | ir::AlterTableAction::SetIdentity { .. }
         | ir::AlterTableAction::DropIdentity { .. }
         | ir::AlterTableAction::EnableTrigger { .. }
-        | ir::AlterTableAction::OwnerTo(_) => Err(SqlError::internal("identity, trigger and owner actions run in ddl::alter_table_action")),
+        | ir::AlterTableAction::OwnerTo(_)
+        | ir::AlterTableAction::RowSecurity(_)
+        | ir::AlterTableAction::ForceRowSecurity(_) => {
+            Err(SqlError::internal("identity, trigger and owner actions run in ddl::alter_table_action"))
+        }
         ir::AlterTableAction::SetExpression { column, expr } => {
             let slot = def.column_index(column).ok_or_else(|| not_found(column))?;
             if def.columns[slot].generated.is_none() {

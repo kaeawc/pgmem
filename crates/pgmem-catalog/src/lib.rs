@@ -12,8 +12,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 mod partitions;
+mod policies;
 mod roles;
 pub use partitions::{PartitionBound, PartitionKey, PartitionKeyPart, PartitionOf, PartitionStrategy, RangeDatum};
+pub use policies::PolicyDef;
 pub use roles::{DefaultPrivilege, ExtensionDef, Grant, GrantObject, RoleDef};
 
 pub type Oid = u32;
@@ -616,6 +618,10 @@ pub struct Catalog {
     partition_keys: BTreeMap<Oid, PartitionKey>,
     /// Partitions' parents and bounds, by partition OID.
     partition_bounds: BTreeMap<Oid, PartitionOf>,
+    /// Row-level security policies by OID.
+    policies: BTreeMap<Oid, Arc<PolicyDef>>,
+    /// (`relrowsecurity`, `relforcerowsecurity`) of tables with either set, by OID.
+    row_security: BTreeMap<Oid, (bool, bool)>,
     next_oid: Oid,
 }
 
@@ -654,6 +660,8 @@ impl Catalog {
             comments: BTreeMap::new(),
             partition_keys: BTreeMap::new(),
             partition_bounds: BTreeMap::new(),
+            policies: BTreeMap::new(),
+            row_security: BTreeMap::new(),
             next_oid: FIRST_USER_OID,
         }
     }
@@ -1210,6 +1218,7 @@ impl Catalog {
         self.partition_keys.remove(&dropped.oid);
         self.partition_bounds.remove(&dropped.oid);
         self.triggers.retain(|_, t| t.table != dropped.oid);
+        self.drop_table_policies(dropped.oid);
         self.grants.retain(|g| g.object.relation_oid() != Some(dropped.oid));
         self.owners.remove(&dropped.oid);
         // Sequences owned by the table's columns go with it.

@@ -612,6 +612,7 @@ impl Exec<'_, '_> {
     pub fn statement(&mut self, stmt: &ir::Statement, types: &[Type], params: &[Value]) -> SqlResult<QueryResult> {
         let catalog = self.txn().catalog().clone();
         let binder = Binder::new(&catalog, types);
+        binder.set_rls(crate::rls::RlsUser::from_env(self.env()));
         let top = Level::new(Scope::default());
         let ctx = Ctx::new(&top);
         match self {
@@ -762,9 +763,11 @@ pub(crate) fn call(
 ) -> SqlResult<QueryResult> {
     let catalog = txn.catalog().clone();
     let binder = Binder::new(&catalog, &[]);
+    binder.set_rls(crate::rls::RlsUser::from_env(env));
     let top = Level::new(Scope::default());
     let ctx = Ctx::new(&top);
-    let bound = args.iter().map(|a| binder.bind_expr(a, &ctx)).collect::<SqlResult<Vec<_>>>()?;
+    let arg_ctx = ctx.with_clause(crate::bind::Clause::CallArg);
+    let bound = args.iter().map(|a| binder.bind_expr(a, &arg_ctx)).collect::<SqlResult<Vec<_>>>()?;
     let types: Vec<Type> = bound.iter().map(|(_, t)| t.clone()).collect();
     let cands = catalog.find_functions(name);
     let Some(call) = resolve(name.base(), &cands, &types, true)? else {

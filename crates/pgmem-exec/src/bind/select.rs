@@ -17,6 +17,7 @@ pub struct BoundQuery {
 
 impl Binder<'_> {
     pub fn bind_query(&self, q: &ir::Query, ctx: &Ctx) -> SqlResult<BoundQuery> {
+        let inherited_lock = self.take_lock_next();
         let mut ctx = Ctx { levels: ctx.levels.clone(), ctes: ctx.ctes.clone(), clause: Clause::Other, windows: Vec::new() };
         let mut cte_plans = Vec::new();
         if let Some(with) = &q.with {
@@ -37,7 +38,7 @@ impl Binder<'_> {
         let mut lock_targets = 0;
         let mut bound = match &q.body {
             ir::SetExpr::Select(s) => {
-                let (b, n) = self.bind_select_locking(s, &q.order_by, &q.locking, &ctx)?;
+                let (b, n) = self.bind_select_locking(s, &q.order_by, &q.locking, inherited_lock, &ctx)?;
                 lock_targets = n;
                 b
             }
@@ -235,7 +236,7 @@ impl Binder<'_> {
     }
 
     fn bind_select(&self, s: &ir::Select, order_by: &[ir::OrderByExpr], ctx: &Ctx) -> SqlResult<BoundQuery> {
-        Ok(self.bind_select_locking(s, order_by, &[], ctx)?.0)
+        Ok(self.bind_select_locking(s, order_by, &[], None, ctx)?.0)
     }
 
     /// A SELECT, with its FOR UPDATE / SHARE clauses: the rows of each locked table's
@@ -245,10 +246,17 @@ impl Binder<'_> {
         s: &ir::Select,
         order_by: &[ir::OrderByExpr],
         locking: &[ir::LockClause],
+        inherited_lock: Option<Vec<String>>,
         ctx: &Ctx,
     ) -> SqlResult<(BoundQuery, usize)> {
-        // FROM
-        let (mut rel, scope) = self.bind_from(&s.from, ctx)?;
+        // FROM (the locking clause, or one reaching this query from an enclosing one, adds
+        // the UPDATE policies of the relations it locks).
+        let lock_mode = if locking.is_empty() {
+            inherited_lock
+        } else {
+            Some(locking.iter().flat_map(|l| l.of.iter().map(|n| n.base().to_owned())).collect())
+        };
+        let (mut rel, scope) = self.with_lock_mode(lock_mode, || self.bind_from(&s.from, ctx))?;
         let lock_junk = lock_targets(&scope, locking)?;
         if let Some(l) = locking.first() {
             let what = if !matches!(s.distinct, ir::Distinct::All) {
@@ -675,10 +683,12 @@ impl Binder<'_> {
                 let left_level = Level::new(left.clone());
                 let level = Level::new(Scope::default());
                 let lateral = *lateral && !left.cols.is_empty();
+                let qualifier = alias.as_ref().map_or("", |a| a.name.as_str());
                 let bound = if lateral {
-                    self.bind_query(query, &ctx.from_item(&[&left_level, &level]))?
+                    self.locking_into(qualifier, || self.bind_query(query, &ctx.from_item(&[&left_level, &level])))?
                 } else {
-                    self.bind_query(query, &ctx.from_item(&[&level])).map_err(|e| sibling_reference(e, left))?
+                    self.locking_into(qualifier, || self.bind_query(query, &ctx.from_item(&[&level])))
+                        .map_err(|e| sibling_reference(e, left))?
                 };
                 let alias_name = alias.as_ref().map(|a| a.name.clone());
                 let mut cols: Vec<ScopeCol> =
@@ -1028,16 +1038,20 @@ impl Binder<'_> {
             System,
             User(Relation),
         }
-        let found = self
-            .catalog
-            .resolve(name, |schema, n| {
-                if schema == pgmem_catalog::PG_CATALOG {
-                    crate::catalog_views::lookup("pg_catalog", n).map(|_| Found::System)
-                } else {
-                    self.catalog.relation(schema, n).map(Found::User)
-                }
-            })
-            .or_else(|e| if e.code == code::INVALID_SCHEMA_NAME { Ok(None) } else { Err(e) })?;
+        // A policy's subqueries read the relations resolved when it was created.
+        let found = if let Some(r) = self.pinned(name) {
+            Some(Found::User(r))
+        } else {
+            self.catalog
+                .resolve(name, |schema, n| {
+                    if schema == pgmem_catalog::PG_CATALOG {
+                        crate::catalog_views::lookup("pg_catalog", n).map(|_| Found::System)
+                    } else {
+                        self.catalog.relation(schema, n).map(Found::User)
+                    }
+                })
+                .or_else(|e| if e.code == code::INVALID_SCHEMA_NAME { Ok(None) } else { Err(e) })?
+        };
         let rel = match found {
             Some(Found::System) => return self.bind_virtual("pg_catalog", base, &qualifier, alias),
             Some(Found::User(r)) => Some(r),
@@ -1070,17 +1084,24 @@ impl Binder<'_> {
                     c.perm = Some((def.oid, c.attnum));
                     c
                 }));
+                let locked = self.locked(&qualifier);
+                let scan = self.rls_scan(&def, Rel::Scan { table: def.oid, slots, missing, system: true }, &cols, locked)?;
                 if let Some(a) = alias {
                     apply_column_aliases(&mut cols, &a.columns, &a.name)?;
                 }
-                Ok((Rel::Scan { table: def.oid, slots, missing, system: true }, Scope::from_cols(cols)))
+                Ok((scan, Scope::from_cols(cols)))
             }
             Some(Relation::View(view)) => {
                 let top = Level::new(Scope::default());
                 let vctx = Ctx::new(&top);
                 // The view's query runs with its owner's privileges.
-                let bound =
-                    self.quietly(|| pgmem_types::context::with_search_path(&view.search_path, || self.bind_query(&view.query, &vctx)))?;
+                let bound = self.quietly(|| {
+                    self.as_view_owner(&view, || {
+                        pgmem_types::context::with_search_path(&view.search_path, || {
+                            self.with_pins(Vec::new(), || self.locking_into(&qualifier, || self.bind_query(&view.query, &vctx)))
+                        })
+                    })
+                })?;
                 let mut cols: Vec<ScopeCol> = bound
                     .columns
                     .iter()

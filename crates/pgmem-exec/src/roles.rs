@@ -434,6 +434,7 @@ fn role_dependencies(catalog: &Catalog, role: &str, owner: &str) -> Vec<String> 
             None => format!("privileges for default privileges on new {what} belonging to role {owner}"),
         });
     }
+    out.extend(crate::rls::role_dependencies(catalog, role));
     out
 }
 
@@ -745,6 +746,7 @@ pub(crate) fn drop_owned(roles: &[String], txn: &mut Txn, env: &SessionEnv) -> S
         for (s, k, p) in defaults {
             cat.remove_default_privilege(s.as_deref(), k, r, &p);
         }
+        crate::rls::drop_owned(cat, r);
         // Owned objects are dropped.
         for oid in catalog.owned_by(r) {
             match catalog.relation_by_oid(oid) {

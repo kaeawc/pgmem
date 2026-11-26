@@ -642,6 +642,14 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
             vec![Oid],
             Bool,
         ),
+        "row_security_active" if n == 1 => resolved(
+            strict("row_security_active", |a, c| {
+                let Some(o) = oid_arg(&a[0]) else { return Ok(Value::Null) };
+                crate::rls::row_security_active(c, o).map(Value::Bool)
+            }),
+            vec![Type::Reg(RegKind::Class)],
+            Bool,
+        ),
         "pg_type_is_visible" | "pg_function_is_visible" if n == 1 => resolved(strict("pg_type_is_visible", always_true), vec![Oid], Bool),
         _ if privilege_arity(name, n) => privilege_function(name, args),
         "has_table_privilege"

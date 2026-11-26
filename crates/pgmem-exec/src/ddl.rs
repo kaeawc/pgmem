@@ -107,6 +107,14 @@ fn comment_target(
             })?;
             (crate::catalog_views::TRIGGER_CLASS_OID, t.oid, 0)
         }
+        T::Policy(table) => {
+            let t = catalog.lookup_table(table)?;
+            let base = name.base();
+            let p = catalog.table_policies(t.oid).into_iter().find(|p| p.name == base).ok_or_else(|| {
+                SqlError::new(code::UNDEFINED_OBJECT, format!("policy \"{base}\" for table \"{}\" does not exist", t.name))
+            })?;
+            (crate::rls::POLICY_CLASS_OID, p.oid, 0)
+        }
         T::Other => return Ok(None),
     }))
 }
@@ -186,6 +194,9 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
         Statement::CreateTrigger(ct) => crate::triggers::create_trigger(ct, txn),
         Statement::RenameTrigger { name, table, new_name } => crate::triggers::rename_trigger(name, table, new_name, txn),
         Statement::DropTrigger { name, table, if_exists, .. } => crate::triggers::drop_trigger(name, table, *if_exists, txn),
+        Statement::CreatePolicy(p) => crate::rls::create_policy(p, txn, env),
+        Statement::AlterPolicy(p) => crate::rls::alter_policy(p, txn, env),
+        Statement::DropPolicy { name, table, if_exists } => crate::rls::drop_policy(name, table, *if_exists, txn, env),
         Statement::AlterSequence { name, if_exists, options, rename_to } => {
             crate::ddl_sequences::alter_sequence(name, *if_exists, options, rename_to.as_deref(), txn)
         }
@@ -292,6 +303,9 @@ pub(crate) fn alter_table_action(
         crate::roles::set_owner(txn, env, table.oid, owner)?;
         return Ok(current.clone());
     }
+    if crate::rls::alter_row_security(txn, env, &table, action)? {
+        return Ok(current.clone());
+    }
     if let ir::AlterTableAction::EnableTrigger { name, mode } = action {
         crate::triggers::set_enabled(&table, name.as_deref(), *mode, txn)?;
         return Ok(current.clone());
@@ -310,6 +324,16 @@ pub(crate) fn alter_table_action(
         for u in users {
             let drop = ir::AlterTableAction::DropColumn { name: u, if_exists: true, cascade: true };
             alter_table_action(txn, current, &drop, env, state)?;
+        }
+        let policies = crate::rls::column_dependents(txn.catalog(), &table, name);
+        if !policies.is_empty() && !cascade {
+            let t = &table.name;
+            let lines: Vec<String> =
+                policies.iter().map(|p| format!("policy {} on table {t} depends on column {name} of table {t}", p.name)).collect();
+            return Err(dependents_error("column", &format!("{name} of table {t}"), lines.join("\n")));
+        }
+        for p in policies {
+            txn.catalog_mut().drop_policy(p.oid);
         }
     }
     let table = txn.catalog().table_q(current).cloned().ok_or_else(|| SqlError::undefined_table(&current.name))?;
@@ -332,10 +356,12 @@ pub(crate) fn alter_table_action(
             }
             if let ir::AlterTableAction::RenameColumn { old, new } = action {
                 rename_column_refs(&mut def, old, new);
+                crate::rls::rename_column(txn.catalog_mut(), &table, old, new);
             }
             apply_validation(txn, &table, &def, validate, &snapshot, env, state)?;
             if let Some(old) = &rename_from {
                 rename_table_refs(txn.catalog_mut(), old, &def.name);
+                crate::rls::rename_table(txn.catalog_mut(), def.oid, &old.name, &def.name);
             }
             let new_name = def.qualified();
             if let Some(key) = txn.catalog().partition_key(def.oid).cloned() {
@@ -599,7 +625,7 @@ fn apply_validation(
     }
 }
 
-fn rename_in_expr(e: &mut ir::Expr, table: &str, old: &str, new: &str) {
+pub(crate) fn rename_in_expr(e: &mut ir::Expr, table: &str, old: &str, new: &str) {
     if let ir::Expr::Column(parts) = e {
         let n = parts.len();
         if parts[n - 1] == old && (n == 1 || parts[n - 2] == table) {
@@ -772,6 +798,7 @@ fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> 
                     }
                     return Err(dependents_error("table", &base, lines.join("\n")));
                 }
+                crate::rls::drop_dependents(txn, t.oid, "table", &base, d.cascade, &mut notices)?;
                 drop_views_cascade(txn, &views, &mut notices);
                 if !referencing.is_empty() {
                     for (child, con) in &referencing {
@@ -803,6 +830,7 @@ fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> 
                     let lines: Vec<String> = views.iter().map(|x| format!("view {} depends on view {base}", x.name)).collect();
                     return Err(dependents_error("view", &base, lines.join("\n")));
                 }
+                crate::rls::drop_dependents(txn, v.oid, "view", &base, d.cascade, &mut notices)?;
                 drop_views_cascade(txn, &views, &mut notices);
                 txn.catalog_mut().drop_view(&QualName::new(&v.schema, &v.name));
             }

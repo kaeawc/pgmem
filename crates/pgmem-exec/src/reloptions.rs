@@ -127,6 +127,11 @@ fn parse_int(text: &str) -> Option<i64> {
     (i64::from(i32::MIN)..=I32_MAX).contains(&v).then_some(v)
 }
 
+/// Whether boolean option `name` is set to true in `reloptions` (`name=value` entries).
+pub(crate) fn bool_option(reloptions: &[String], name: &str) -> bool {
+    reloptions.iter().any(|o| o.split_once('=').is_some_and(|(n, v)| n == name && parse_bool(v) == Some(true)))
+}
+
 /// `parse_bool`: `true`/`false`/`yes`/`no`/`on`/`off`/`1`/`0`, the words by unique prefix.
 fn parse_bool(text: &str) -> Option<bool> {
     let t = text.trim().to_ascii_lowercase();

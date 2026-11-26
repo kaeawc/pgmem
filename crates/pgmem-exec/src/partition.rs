@@ -970,9 +970,21 @@ pub(crate) fn exec_insert(
     stripped.returning.clear();
     stripped.on_conflict = None;
     let plan = crate::bind::bind_insert(binder, &stripped, ctx)?;
-    let columns = if i.returning.is_empty() { Vec::new() } else { crate::bind::bind_insert(binder, i, ctx)?.returning_cols };
+    let full = if i.returning.is_empty() { None } else { Some(crate::bind::bind_insert(binder, i, ctx)?) };
+    if matches!(&i.on_conflict, Some(ir::OnConflict { action: ir::ConflictAction::Update { .. }, .. })) {
+        binder.rls_unsupported(root, "INSERT ... ON CONFLICT DO UPDATE")?;
+    }
+    let columns = full.as_ref().map_or_else(Vec::new, |p| p.returning_cols.clone());
     crate::triggers::root_statement(txn, root, Event::Insert, TriggerTiming::Before, None, env, state)?;
     let rows = crate::dml::insert_preview(&plan, txn, params, env, state)?;
+    {
+        // The partitioned table's policies check the rows (the partitions' own do not apply).
+        let checks = full.as_ref().map_or(&plan.rls_checks, |p| &p.rls_checks);
+        let ectx = EvalCtx::new(txn, params, env, state);
+        for row in &rows {
+            crate::rls::check_new_row(checks, row, &ectx)?;
+        }
+    }
     let catalog = Arc::new(txn.catalog().clone());
     let b = Binder::new(&catalog, &[]);
     let mut groups: Vec<(Arc<TableDef>, Vec<Row>)> = Vec::new();
@@ -1032,7 +1044,9 @@ pub(crate) fn exec_update(
         lu.table = leaf_name(leaf);
         lu.alias = Some(alias.clone());
         let stmt = Statement::Update(Box::new(lu));
-        let r = routed(state, leaf.oid, || crate::statement::exec_statement(&stmt, binder, ctx, txn, params, env, state));
+        let r = binder.with_policy_root(root, || {
+            routed(state, leaf.oid, || crate::statement::exec_statement(&stmt, binder, ctx, txn, params, env, state))
+        });
         match r {
             Ok(r) => results.push(r),
             Err(e) => {
@@ -1114,7 +1128,9 @@ pub(crate) fn exec_delete(
         ld.table = leaf_name(&leaf);
         ld.alias = Some(alias.clone());
         let stmt = Statement::Delete(Box::new(ld));
-        results.push(routed(state, leaf.oid, || crate::statement::exec_statement(&stmt, binder, ctx, txn, params, env, state))?);
+        results.push(binder.with_policy_root(root, || {
+            routed(state, leaf.oid, || crate::statement::exec_statement(&stmt, binder, ctx, txn, params, env, state))
+        })?);
     }
     crate::triggers::root_statement(txn, root, Event::Delete, TriggerTiming::After, None, env, state)?;
     Ok(combine(results, "DELETE", columns))

@@ -615,6 +615,7 @@ impl Session {
         };
         let catalog = Arc::new(txn.catalog().clone());
         let binder = Binder::new(&catalog, param_types);
+        binder.set_rls(crate::rls::RlsUser::from_env(&env));
         let top = Level::new(Scope::default());
         let ctx = Ctx::new(&top);
         crate::roles::check_statement(stmt, &catalog, &env, param_types)?;
@@ -695,6 +696,9 @@ impl Session {
             Statement::DropFunction { .. } => "DROP FUNCTION",
             Statement::CreateTrigger(_) => "CREATE TRIGGER",
             Statement::DropTrigger { .. } => "DROP TRIGGER",
+            Statement::CreatePolicy(_) => "CREATE POLICY",
+            Statement::AlterPolicy(_) => "ALTER POLICY",
+            Statement::DropPolicy { .. } => "DROP POLICY",
             Statement::RenameTrigger { .. } => "ALTER TRIGGER",
             Statement::CreateIndex(_) => "CREATE INDEX",
             Statement::CreateSequence(_) => "CREATE SEQUENCE",

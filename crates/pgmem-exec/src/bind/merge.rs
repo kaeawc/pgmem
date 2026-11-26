@@ -40,6 +40,7 @@ pub struct MergePlan {
 
 pub fn bind_merge(b: &Binder, m: &ir::Merge, outer: &Ctx) -> SqlResult<MergePlan> {
     let table = lookup_table(b, &m.table)?;
+    b.rls_unsupported(&table, "MERGE")?;
     let qualifier = m.alias.clone().unwrap_or_else(|| table.name.clone());
     let rules = b.bind_row_rules(&table)?;
     let target_scope = physical_scope(&table, &qualifier);
