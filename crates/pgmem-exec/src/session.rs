@@ -1294,6 +1294,7 @@ fn write_command_name(stmt: &Statement) -> Option<&'static str> {
         Statement::AlterSequence { .. } => "ALTER SEQUENCE",
         Statement::CreateFunction(cf) if cf.procedure => "CREATE PROCEDURE",
         Statement::CreateFunction(_) => "CREATE FUNCTION",
+        Statement::AlterFunction { .. } => "ALTER FUNCTION",
         Statement::DropFunction { .. } => "DROP FUNCTION",
         Statement::CreateTrigger(_) => "CREATE TRIGGER",
         Statement::DropTrigger { .. } => "DROP TRIGGER",
