@@ -200,6 +200,29 @@ pub struct IndexDef {
     pub reloptions: Vec<String>,
 }
 
+impl IndexDef {
+    /// `pg_index.indkey`: per key, the attnum of a plain column and 0 for an expression.
+    /// A mixed index stores every key in `exprs`; its bare-column keys are plain columns.
+    pub fn key_attnums(&self, table: &TableDef) -> Vec<usize> {
+        if self.exprs.is_empty() {
+            return self.columns.iter().map(|c| c + 1).collect();
+        }
+        self.exprs.iter().map(|e| Self::plain_column(table, e).map_or(0, |c| c + 1)).collect()
+    }
+
+    /// The keys that are real expressions (`pg_index.indexprs`), leaving out bare columns.
+    pub fn true_exprs<'a>(&'a self, table: &'a TableDef) -> impl Iterator<Item = &'a Expr> {
+        self.exprs.iter().filter(move |e| Self::plain_column(table, e).is_none())
+    }
+
+    fn plain_column(table: &TableDef, e: &Expr) -> Option<usize> {
+        match e {
+            Expr::Column(parts) if parts.len() == 1 => table.column_index(&parts[0]),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TableDef {
     pub oid: Oid,

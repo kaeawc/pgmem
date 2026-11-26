@@ -980,19 +980,22 @@ fn pg_index(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     Ok(m.indexes()
         .into_iter()
         .map(|(t, idx)| {
-            let mut keys: Vec<Value> = idx.columns.iter().map(|c| int2(c + 1)).collect();
-            keys.extend(idx.exprs.iter().map(|_| Value::Int2(0)));
-            let collations: Vec<Value> = idx
-                .columns
+            let attnums = idx.key_attnums(t);
+            let mut keys: Vec<Value> = attnums.iter().map(|a| int2(*a)).collect();
+            let collations: Vec<Value> = attnums
                 .iter()
-                .map(|c| oid(t.columns.get(*c).map_or(0, |col| if col.ty.is_string() { DEFAULT_COLLATION_OID } else { 0 })))
-                .chain(idx.exprs.iter().map(|_| oid(0)))
+                .map(|a| {
+                    oid(a
+                        .checked_sub(1)
+                        .and_then(|c| t.columns.get(c))
+                        .map_or(0, |col| if col.ty.is_string() { DEFAULT_COLLATION_OID } else { 0 }))
+                })
                 .collect();
             let nkey = keys.len();
             keys.extend(idx.include.iter().map(|c| int2(c + 1)));
             let n = keys.len();
             let exprs = (!idx.exprs.is_empty()).then(|| {
-                idx.exprs.iter().map(|e| crate::deparse::deparse_expr(m.catalog, t, e).unwrap_or_default()).collect::<Vec<_>>().join(", ")
+                idx.true_exprs(t).map(|e| crate::deparse::deparse_expr(m.catalog, t, e).unwrap_or_default()).collect::<Vec<_>>().join(", ")
             });
             let pred = idx.predicate.as_ref().map(|p| crate::deparse::deparse_predicate(m.catalog, t, p).unwrap_or_default());
             s.row(vec![

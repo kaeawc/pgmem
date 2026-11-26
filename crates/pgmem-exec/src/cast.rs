@@ -106,6 +106,10 @@ pub fn cast_value_ctx(v: Value, to: &Type, typmod: i32, explicit: bool) -> SqlRe
             other => other,
         });
     }
+    // A bounded array prints with its bounds (`[0:1]={1,2}`).
+    if matches!(v, Value::BoundedArray(..)) && to.is_string() {
+        return convert(Value::Text(text::encode(&v, &v.natural_type())?), to);
+    }
     // An integer becomes its low n bits (`bitfromint4(int, n)`).
     if *to == Type::Bit
         && let Some(n) = v.as_i64()
@@ -157,6 +161,20 @@ pub fn bpchar_trim(v: Value) -> Value {
 
 pub fn bpchar_trim_fn(a: &[Value], _: &crate::eval::EvalCtx) -> SqlResult<Value> {
     Ok(bpchar_trim(a[0].clone()))
+}
+
+/// `int2vector` / `oidvector` → text: space-separated, no braces.
+pub fn vector_text_fn(a: &[Value], _: &crate::eval::EvalCtx) -> SqlResult<Value> {
+    let Value::Array(items) = a[0].clone().unbounded() else { return Ok(a[0].clone()) };
+    Ok(Value::Text(items.iter().map(|i| text::encode(i, &i.natural_type())).collect::<SqlResult<Vec<_>>>()?.join(" ")))
+}
+
+/// `int2vector` / `oidvector` → array: the same elements with lower bound 0.
+pub fn vector_array_fn(a: &[Value], _: &crate::eval::EvalCtx) -> SqlResult<Value> {
+    Ok(match a[0].clone().unbounded() {
+        Value::Array(items) => Value::array_with_bounds(vec![0], items),
+        other => other,
+    })
 }
 
 /// `int8` → `oid`: the value must fit in 32 bits (negative values wrap, as in Postgres).
@@ -297,6 +315,11 @@ fn convert(v: Value, to: &Type) -> SqlResult<Value> {
                 return Err(SqlError::cannot_coerce("record", &to.name()).with_detail(detail));
             }
             V::Record(*oid, items.into_iter().zip(&fields).map(|(i, f)| cast_value(i, &f.ty, f.typmod)).collect::<SqlResult<Vec<_>>>()?)
+        }
+        // `int2vector` / `oidvector` hold their elements as an array.
+        (V::Array(items), Type::Int2Vector | Type::OidVector) => {
+            let elem = to.element().cloned().unwrap_or(Type::Int2);
+            V::Array(items.into_iter().map(|i| cast_value(i, &elem, -1)).collect::<SqlResult<Vec<_>>>()?)
         }
         (V::Record(_, items), Type::Record) => V::Record(pgmem_types::usertype::RECORD_OID, items),
         (v, t) => return Err(SqlError::cannot_coerce(&v.natural_type().name(), &t.name())),
