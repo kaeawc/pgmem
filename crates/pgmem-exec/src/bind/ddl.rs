@@ -101,6 +101,7 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
         matview: None,
         unlogged: ct.options.unlogged,
         replident: 'd',
+        reloptions: crate::reloptions::table(&ct.options.reloptions, ct.options.partition_by.is_some())?,
     };
     let mut sequences = Vec::new();
     let mut taken: Vec<String> = vec![name.clone()];
@@ -436,6 +437,7 @@ pub fn add_constraint(
                 predicate: None,
                 clustered: false,
                 replica: false,
+                reloptions: Vec::new(),
             });
             let ckind = if primary {
                 ConstraintKind::PrimaryKey { columns: idx_cols }
@@ -583,7 +585,15 @@ pub fn bind_create_view(b: &Binder, cv: &ir::CreateView) -> SqlResult<ViewDef> {
         return Err(SqlError::new(code::UNDEFINED_PARAMETER, "there is no parameter $1"));
     }
     let search_path = b.catalog.resolved_search_path();
-    Ok(ViewDef { oid: 0, schema, name, columns, query: (*cv.query).clone(), search_path, check_option: cv.check_option })
+    // `WITH [LOCAL | CASCADED] CHECK OPTION` is the `check_option` option appended last.
+    let mut opts = cv.reloptions.clone();
+    if cv.check_option {
+        let value = if cv.check_local { "local" } else { "cascaded" };
+        opts.push(ir::RelOption { namespace: None, name: "check_option".into(), value: Some(value.into()) });
+    }
+    let reloptions = crate::reloptions::create(crate::reloptions::Target::View, &opts)?;
+    let check_option = reloptions.iter().any(|o| o.starts_with("check_option="));
+    Ok(ViewDef { oid: 0, schema, name, columns, query: (*cv.query).clone(), search_path, check_option, reloptions })
 }
 
 pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(QualName, IndexDef)>> {
@@ -628,6 +638,8 @@ pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(
             return Err(SqlError::feature_not_supported(format!("access method \"{m}\" does not support unique indexes")));
         }
     }
+    let reloptions =
+        crate::reloptions::create(crate::reloptions::Target::Index(Some(ci.method.as_deref().unwrap_or("btree"))), &ci.reloptions)?;
     let name = match &ci.name {
         Some(n) => {
             if catalog.relation(&table.schema, n).is_some() {
@@ -657,6 +669,7 @@ pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(
             predicate: ci.predicate.clone(),
             clustered: false,
             replica: false,
+            reloptions,
         },
     )))
 }
@@ -1148,6 +1161,7 @@ fn add_exclusion(
         predicate: predicate.clone(),
         clustered: false,
         replica: false,
+        reloptions: Vec::new(),
     });
     table.constraints.push(Constraint {
         oid: 0,

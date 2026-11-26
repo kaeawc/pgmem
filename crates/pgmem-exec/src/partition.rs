@@ -724,6 +724,7 @@ pub(crate) fn create_partition(
         matview: None,
         unlogged: ct.options.unlogged,
         replident: 'd',
+        reloptions: crate::reloptions::table(&ct.options.reloptions, false)?,
     };
     for c in &ct.columns {
         apply_column_options(&mut table, c)?;

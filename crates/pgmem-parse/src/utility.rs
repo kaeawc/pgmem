@@ -54,6 +54,13 @@ pub(crate) enum Utility {
         if_exists: bool,
         actions: Vec<pgmem_ir::AlterTableAction>,
     },
+    RelOptions {
+        object: pgmem_ir::ObjectType,
+        name: sqlparser::ast::ObjectName,
+        if_exists: bool,
+        reset: bool,
+        options: Vec<sqlparser::ast::SqlOption>,
+    },
 }
 
 /// Sequence options as parsed (the type still a sqlparser type).
@@ -112,6 +119,13 @@ pub(crate) fn lower(u: Utility) -> SqlResult<Statement> {
         Utility::AlterAttrs { table, if_exists, actions } => {
             Statement::AlterTable(Box::new(pgmem_ir::AlterTable { name: object_name(&table)?, if_exists, actions }))
         }
+        Utility::RelOptions { object, name, if_exists, reset, options } => Statement::AlterRelOptions {
+            object,
+            name: object_name(&name)?,
+            if_exists,
+            reset,
+            options: options.iter().map(crate::ddl::rel_option).collect::<SqlResult<Vec<_>>>()?,
+        },
         Utility::RenameIndex { name, new_name, if_exists } => {
             Statement::RenameIndex { name: object_name(&name)?, new_name: crate::ident(&new_name), if_exists }
         }
@@ -166,6 +180,9 @@ pub(crate) fn try_parse(p: &mut Parser) -> Result<Option<Utility>, ParserError> 
         p.next_token();
         return alter_column(p).map(Some);
     }
+    if let Some(u) = alter_rel_options(p)? {
+        return Ok(Some(u));
+    }
     if word_at(p, 0, "ALTER") && word_at(p, 1, "INDEX") {
         let n = if word_at(p, 2, "IF") { 4 } else { 2 };
         // ALTER INDEX [IF EXISTS] name [. name] RENAME TO new
@@ -210,6 +227,44 @@ pub(crate) fn try_parse(p: &mut Parser) -> Result<Option<Utility>, ParserError> 
         return cluster(p).map(Some);
     }
     Ok(None)
+}
+
+/// `ALTER {INDEX | VIEW | MATERIALIZED VIEW} [IF EXISTS] name {SET | RESET} (option, ...)`.
+fn alter_rel_options(p: &mut Parser) -> Result<Option<Utility>, ParserError> {
+    use pgmem_ir::ObjectType as O;
+    if !word_at(p, 0, "ALTER") {
+        return Ok(None);
+    }
+    let (object, mut n) = if word_at(p, 1, "INDEX") {
+        (O::Index, 2)
+    } else if word_at(p, 1, "VIEW") {
+        (O::View, 2)
+    } else if word_at(p, 1, "MATERIALIZED") && word_at(p, 2, "VIEW") {
+        (O::MaterializedView, 3)
+    } else {
+        return Ok(None);
+    };
+    if word_at(p, n, "IF") && word_at(p, n + 1, "EXISTS") {
+        n += 2;
+    }
+    n += 1;
+    while p.peek_nth_token(n).token == Token::Period {
+        n += 2;
+    }
+    if !((word_at(p, n, "SET") || word_at(p, n, "RESET")) && p.peek_nth_token(n + 1).token == Token::LParen) {
+        return Ok(None);
+    }
+    for _ in 0..(if object == O::MaterializedView { 3 } else { 2 }) {
+        p.next_token();
+    }
+    let if_exists = eat_word(p, "IF") && eat_word(p, "EXISTS");
+    let name = p.parse_object_name(false)?;
+    let reset = word_at(p, 0, "RESET");
+    p.next_token();
+    p.expect_token(&Token::LParen)?;
+    let options = p.parse_comma_separated(|p| p.parse_sql_option())?;
+    p.expect_token(&Token::RParen)?;
+    Ok(Some(Utility::RelOptions { object, name, if_exists, reset, options }))
 }
 
 /// `SignedIconst`, if one comes next.
