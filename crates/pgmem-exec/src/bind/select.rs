@@ -673,7 +673,9 @@ impl Binder<'_> {
     fn bind_table_ref(&self, item: &ir::TableRef, ctx: &Ctx, left: &Scope) -> SqlResult<(Rel, Scope, bool)> {
         match item {
             ir::TableRef::Table { name, alias } => {
-                let (rel, scope) = self.bind_relation(name, alias.as_ref(), ctx)?;
+                let (rel, scope) = self
+                    .bind_relation(name, alias.as_ref(), ctx)
+                    .map_err(|e| super::about(e, &[code::UNDEFINED_TABLE], || pgmem_types::ErrorRef::Relation(name.0.join("."))))?;
                 Ok((rel, scope, false))
             }
             ir::TableRef::Subquery { query, alias, lateral } => {

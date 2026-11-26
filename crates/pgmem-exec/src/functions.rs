@@ -182,10 +182,11 @@ pub(crate) fn create_function(cf: &ir::CreateFunction, txn: &mut Txn, env: &Sess
         None => def.oid = txn.catalog_mut().alloc_oid(),
     }
     // SQL bodies are checked when created (check_function_bodies): they must parse.
+    // Positions inside the body are not positions in the CREATE FUNCTION text.
     if def.language == "sql" {
-        pgmem_parse::parse(&def.body)?;
+        pgmem_parse::parse(&def.body).map_err(SqlError::without_position)?;
     } else {
-        crate::plpgsql::parse(&def.body)?;
+        crate::plpgsql::parse(&def.body).map_err(SqlError::without_position)?;
     }
     txn.catalog_mut().put_function(def);
     Ok(tag(if cf.procedure { "CREATE PROCEDURE" } else { "CREATE FUNCTION" }))
@@ -753,10 +754,13 @@ fn run_function_in(def: &FunctionDef, args: &[Value], exec: &mut Exec) -> SqlRes
     if def.strict && args.iter().any(Value::is_null) {
         return Ok(if def.returns_set() { Vec::new() } else { vec![vec![Value::Null]] });
     }
-    let rows = exec.for_function(def, |exec| match def.language.as_str() {
-        "plpgsql" => crate::plpgsql::run_function(def, args, exec),
-        _ => run_sql(def, args, exec),
-    })?;
+    // Errors inside the body point into the body, not into the calling query.
+    let rows = exec
+        .for_function(def, |exec| match def.language.as_str() {
+            "plpgsql" => crate::plpgsql::run_function(def, args, exec),
+            _ => run_sql(def, args, exec),
+        })
+        .map_err(SqlError::without_position)?;
     let coerce_row = |row: Row, types: &[Type]| -> SqlResult<Row> {
         row.into_iter().zip(types).map(|(v, t)| crate::cast::cast_value(v, t, -1)).collect()
     };
@@ -853,6 +857,6 @@ pub(crate) fn do_block(language: &str, body: &str, txn: &mut Txn, env: &SessionE
     }
     let mut exec = Exec::Write { txn, env, state };
     let _guard = enter_call()?;
-    crate::plpgsql::run_block(body, &mut exec)?;
+    crate::plpgsql::run_block(body, &mut exec).map_err(SqlError::without_position)?;
     Ok(tag("DO"))
 }
