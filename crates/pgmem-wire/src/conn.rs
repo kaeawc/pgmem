@@ -6,7 +6,7 @@ use pgmem_exec::portal::PreparedStatement;
 use pgmem_exec::session::{is_reported, setting_display_name};
 use pgmem_exec::{CopyIn, CopyOut, OutCol, QueryResult, Session};
 use pgmem_ir::Statement;
-use pgmem_types::{Format, SqlError, SqlResult, Type, Value, code};
+use pgmem_types::{Format, SourceRefs, SqlError, SqlResult, Type, Value, code};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::Arc;
@@ -36,7 +36,7 @@ struct CopyState {
     pending: Box<CopyIn>,
     data: Vec<u8>,
     /// From a simple Query: the statements after the COPY, run once it completes.
-    rest: Option<VecDeque<Statement>>,
+    rest: Option<VecDeque<(Statement, SourceRefs)>>,
 }
 
 fn format_for(codes: &[i16], i: usize) -> Format {
@@ -313,7 +313,7 @@ impl Conn {
                 return;
             }
         };
-        let stmts = match pgmem_parse::parse(&sql) {
+        let stmts = match pgmem_parse::parse_located(&sql) {
             Ok(s) => s,
             Err(e) => {
                 self.out.error(&e);
@@ -327,9 +327,9 @@ impl Conn {
 
     /// Runs a simple Query's statements. A COPY FROM STDIN suspends the batch until the
     /// client's CopyDone (`finish_copy` resumes it).
-    fn run_statements(&mut self, mut stmts: VecDeque<Statement>) {
+    fn run_statements(&mut self, mut stmts: VecDeque<(Statement, SourceRefs)>) {
         let mut failed = false;
-        while let Some(stmt) = stmts.pop_front() {
+        while let Some((stmt, refs)) = stmts.pop_front() {
             match self.session.execute(&stmt, &[], &[]) {
                 Ok(mut r) => {
                     self.send_result_preamble(&r);
@@ -345,7 +345,7 @@ impl Conn {
                     }
                 }
                 Err(e) => {
-                    self.out.error(&e);
+                    self.out.error(&refs.resolve(e));
                     failed = true;
                     break;
                 }
@@ -462,8 +462,8 @@ impl Conn {
         if !name.is_empty() && self.session.prepared(&name).is_some() {
             return Err(SqlError::new(code::DUPLICATE_PREPARED_STATEMENT, format!("prepared statement \"{name}\" already exists")));
         }
-        let stmt = pgmem_parse::parse_one(&sql)?;
-        self.session.prepare_protocol(&name, &sql, stmt, &declared)?;
+        let (stmt, refs) = pgmem_parse::parse_one_located(&sql)?;
+        self.session.prepare_protocol(&name, &sql, stmt, &declared).map_err(|e| refs.resolve(e))?;
         self.out.parse_complete();
         Ok(())
     }
