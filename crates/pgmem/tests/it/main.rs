@@ -137,6 +137,7 @@ mod subquery;
 mod system_catalogs;
 mod table_alias;
 mod table_fk;
+mod table_locks;
 mod text_numeric_funcs;
 mod time_zones;
 mod timestamptz;

@@ -19,6 +19,7 @@ mod extensions;
 pub mod funcs;
 pub mod functions;
 pub mod opclass;
+pub mod lock_levels;
 mod hashorder;
 pub mod partition;
 pub mod plan;
