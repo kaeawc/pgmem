@@ -12,6 +12,10 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - `cargo binstall pgmem` installs the prebuilt binary from the GitHub release.
 - `pg_get_keywords()` returns PostgreSQL 18's keyword list (word, catcode, barelabel, catdesc, baredesc).
 
+### Fixed
+
+- `pg_constraint.connamespace` is the namespace of the owning table or domain instead of always `public`.
+
 ### Changed
 
 - Releases go through a PR: `scripts/release.sh X.Y.Z` opens it, and merging it publishes.
