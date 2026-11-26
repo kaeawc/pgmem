@@ -3,11 +3,10 @@
 
 use crate::agg::{Accumulator, run_aggregate};
 use crate::eval::{EvalCtx, eval, eval_pred};
-use crate::plan::{JoinKind, Rel, Row, SetOpKind, SortKey};
+use crate::plan::{JoinKind, Rel, Row, SortKey};
 use crate::window::run_window;
 use pgmem_types::{GroupKey, SqlError, SqlResult, Value, code, compare_values};
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 pub fn run(rel: &Rel, ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
@@ -144,26 +143,20 @@ pub fn run(rel: &Rel, ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             }
             Ok(rows)
         }
-        Rel::Distinct { input, on } => {
+        Rel::Distinct { input, on: None } => Ok(crate::hashorder::distinct(input, run(input, ctx)?)),
+        Rel::Distinct { input, on: Some(exprs) } => {
             let rows = run(input, ctx)?;
             let mut seen = std::collections::HashSet::new();
             let mut out = Vec::new();
             for r in rows {
-                let key: Vec<GroupKey> = match on {
-                    None => r.iter().map(Value::group_key).collect(),
-                    Some(exprs) => exprs.iter().map(|e| eval(e, &r, ctx).map(|v| v.group_key())).collect::<SqlResult<Vec<_>>>()?,
-                };
+                let key: Vec<GroupKey> = exprs.iter().map(|e| eval(e, &r, ctx).map(|v| v.group_key())).collect::<SqlResult<Vec<_>>>()?;
                 if seen.insert(key) {
                     out.push(r);
                 }
             }
             Ok(out)
         }
-        Rel::SetOp { op, all, left, right } => {
-            let l = run(left, ctx)?;
-            let r = run(right, ctx)?;
-            Ok(set_op(*op, *all, l, r))
-        }
+        Rel::SetOp { .. } => crate::hashorder::set_op(rel, ctx),
         Rel::CteScan { id } => {
             let rows = ctx.state.ctes.borrow().get(id).cloned().ok_or_else(|| SqlError::internal(format!("CTE {id} not materialized")))?;
             Ok(rows.as_ref().clone())
@@ -306,61 +299,6 @@ fn run_recursive(id: usize, base: &Rel, step: &Rel, union_all: bool, ctx: &EvalC
         }
     }
     Ok(all_rows)
-}
-
-fn set_op(op: SetOpKind, all: bool, left: Vec<Row>, right: Vec<Row>) -> Vec<Row> {
-    let key = |r: &Row| r.iter().map(Value::group_key).collect::<Vec<_>>();
-    match op {
-        SetOpKind::Union => {
-            let mut out = left;
-            out.extend(right);
-            if all {
-                out
-            } else {
-                let mut seen = std::collections::HashSet::new();
-                out.into_iter().filter(|r| seen.insert(key(r))).collect()
-            }
-        }
-        SetOpKind::Intersect | SetOpKind::Except => {
-            let mut counts: HashMap<Vec<GroupKey>, usize> = HashMap::new();
-            for r in &right {
-                *counts.entry(key(r)).or_default() += 1;
-            }
-            let mut emitted = std::collections::HashSet::new();
-            let mut out = Vec::new();
-            for r in left {
-                let k = key(&r);
-                let c = counts.get(&k).copied().unwrap_or(0);
-                match (op, all) {
-                    (SetOpKind::Intersect, true) => {
-                        if c > 0 {
-                            counts.insert(k, c - 1);
-                            out.push(r);
-                        }
-                    }
-                    (SetOpKind::Intersect, false) => {
-                        if c > 0 && emitted.insert(k) {
-                            out.push(r);
-                        }
-                    }
-                    (SetOpKind::Except, true) => {
-                        if c > 0 {
-                            counts.insert(k, c - 1);
-                        } else {
-                            out.push(r);
-                        }
-                    }
-                    (SetOpKind::Except, false) => {
-                        if c == 0 && emitted.insert(k) {
-                            out.push(r);
-                        }
-                    }
-                    (SetOpKind::Union, _) => {}
-                }
-            }
-            out
-        }
-    }
 }
 
 /// Compares two values for ORDER BY: NULL placement per key, then the type's order.
