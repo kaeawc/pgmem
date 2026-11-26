@@ -462,7 +462,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pgmem"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "jiff",
  "pgmem-exec",
@@ -477,7 +477,7 @@ dependencies = [
 
 [[package]]
 name = "pgmem-catalog"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pgmem-ir",
  "pgmem-types",
@@ -485,7 +485,7 @@ dependencies = [
 
 [[package]]
 name = "pgmem-conformance"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pgmem",
  "postgres",
@@ -493,7 +493,7 @@ dependencies = [
 
 [[package]]
 name = "pgmem-exec"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blowfish",
  "getrandom",
@@ -512,11 +512,11 @@ dependencies = [
 
 [[package]]
 name = "pgmem-ir"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "pgmem-parse"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pgmem-ir",
  "pgmem-types",
@@ -525,7 +525,7 @@ dependencies = [
 
 [[package]]
 name = "pgmem-storage"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pgmem-catalog",
  "pgmem-types",
@@ -533,7 +533,7 @@ dependencies = [
 
 [[package]]
 name = "pgmem-types"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "jiff",
  "num-bigint",
@@ -545,7 +545,7 @@ dependencies = [
 
 [[package]]
 name = "pgmem-wire"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pgmem-exec",
  "pgmem-ir",
