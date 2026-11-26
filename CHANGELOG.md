@@ -49,6 +49,8 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
   lists, instead of first-seen order. Table inputs keep first-seen order.
 - `LOCK TABLE` locks a partitioned table's partitions (not with `ONLY`) and a view's base
   relations, and refuses sequences and indexes (`42809 cannot lock relation`).
+- `regrole` input and output (`'role'::regrole`, `to_regrole()`, casts to and from `oid`), `pg_class.relowner` for objects owned by other roles, and the `pg_policies` view (empty until row-level security exists).
+- `ALTER DEFAULT PRIVILEGES [FOR ROLE r] [IN SCHEMA s]` is stored in `pg_default_acl` (as in Postgres, global entries start from the hard-wired defaults and vanish when equal to them) and applied to tables, views and sequences created afterwards by that role.
 
 ### Changed
 

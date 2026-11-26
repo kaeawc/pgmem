@@ -184,6 +184,8 @@ pub enum Statement {
     },
     /// `ALTER DEFAULT PRIVILEGES [IN SCHEMA s] {GRANT | REVOKE} ... ON {TABLES | ...}`.
     AlterDefaultPrivileges {
+        /// `FOR ROLE` (empty: the current role).
+        roles: Vec<String>,
         schemas: Vec<String>,
         kind: char,
         grant: Box<GrantStmt>,

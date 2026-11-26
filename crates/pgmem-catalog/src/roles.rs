@@ -78,14 +78,100 @@ pub struct Grant {
     pub grantable: Vec<char>,
 }
 
-/// `ALTER DEFAULT PRIVILEGES [IN SCHEMA s] GRANT ... ON {TABLES | SEQUENCES | ...}`.
+/// One grantee's entry in a default ACL. `grantee` "" is PUBLIC.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DefaultPrivilege {
-    pub schema: Option<String>,
-    /// `r` tables, `S` sequences, `f` functions, `T` types, `n` schemas.
-    pub kind: char,
+pub struct DefaultItem {
     pub grantee: String,
     pub privileges: Vec<char>,
+    pub grantable: Vec<char>,
+}
+
+/// One `pg_default_acl` entry: what `ALTER DEFAULT PRIVILEGES FOR ROLE role [IN SCHEMA s]`
+/// grants on new objects of `kind` (`r` tables, `S` sequences, `f` functions, `T` types,
+/// `n` schemas). A global entry (no schema) starts from the hard-wired defaults.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DefaultPrivilege {
+    pub role: String,
+    pub schema: Option<String>,
+    pub kind: char,
+    pub items: Vec<DefaultItem>,
+}
+
+impl DefaultPrivilege {
+    /// The hard-wired default ACL of a new object of `kind` owned by `owner` (`acldefault`).
+    pub fn hardwired(owner: &str, kind: char) -> Vec<DefaultItem> {
+        let (own, public) = match kind {
+            'S' => ("rwU", ""),
+            'f' => ("X", "X"),
+            'T' => ("U", "U"),
+            'n' => ("UC", ""),
+            _ => ("arwdDxtm", ""),
+        };
+        let item =
+            |grantee: &str, p: &str| DefaultItem { grantee: grantee.to_owned(), privileges: p.chars().collect(), grantable: Vec::new() };
+        let mut items = vec![item(owner, own)];
+        if !public.is_empty() {
+            items.push(item("", public));
+        }
+        items
+    }
+
+    /// A new entry: global ones start from the hard-wired defaults, schema ones empty.
+    pub fn new(role: &str, schema: Option<&str>, kind: char) -> DefaultPrivilege {
+        let items = if schema.is_none() { Self::hardwired(role, kind) } else { Vec::new() };
+        DefaultPrivilege { role: role.to_owned(), schema: schema.map(str::to_owned), kind, items }
+    }
+
+    pub fn grant(&mut self, grantee: &str, privileges: &[char], grantable: bool) {
+        let i = match self.items.iter().position(|x| x.grantee == grantee) {
+            Some(i) => i,
+            None => {
+                self.items.push(DefaultItem { grantee: grantee.to_owned(), privileges: Vec::new(), grantable: Vec::new() });
+                self.items.len() - 1
+            }
+        };
+        let item = &mut self.items[i];
+        for p in privileges {
+            if !item.privileges.contains(p) {
+                item.privileges.push(*p);
+            }
+            if grantable && !item.grantable.contains(p) {
+                item.grantable.push(*p);
+            }
+        }
+    }
+
+    pub fn revoke(&mut self, grantee: &str, privileges: &[char], grant_option_only: bool) {
+        for x in self.items.iter_mut().filter(|x| x.grantee == grantee) {
+            x.grantable.retain(|p| !privileges.contains(p));
+            if !grant_option_only {
+                x.privileges.retain(|p| !privileges.contains(p));
+            }
+        }
+        self.items.retain(|x| !x.privileges.is_empty());
+    }
+
+    /// Whether the entry adds nothing (so Postgres deletes it): a global one equal to the
+    /// hard-wired defaults, a schema one with no items.
+    pub fn is_default(&self) -> bool {
+        if self.schema.is_some() {
+            return self.items.is_empty();
+        }
+        let sorted = |items: &[DefaultItem]| {
+            let mut v: Vec<(String, Vec<char>, Vec<char>)> = items
+                .iter()
+                .map(|x| {
+                    let (mut p, mut g) = (x.privileges.clone(), x.grantable.clone());
+                    p.sort_unstable();
+                    g.sort_unstable();
+                    (x.grantee.clone(), p, g)
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        sorted(&self.items) == sorted(&Self::hardwired(&self.role, self.kind))
+    }
 }
 
 /// An installed extension (`pg_extension`).
@@ -128,7 +214,7 @@ impl Catalog {
 
     pub fn drop_role(&mut self, name: &str) -> Option<Arc<RoleDef>> {
         self.members.retain(|(r, m, _)| r != name && m != name);
-        self.default_privileges.retain(|d| d.grantee != name);
+        self.drop_default_privileges_of(name);
         self.roles.remove(name)
     }
 
@@ -145,6 +231,16 @@ impl Catalog {
             }
             if m.1 == old {
                 new.clone_into(&mut m.1);
+            }
+        }
+        for d in &mut self.default_privileges {
+            if d.role == old {
+                new.clone_into(&mut d.role);
+            }
+            for x in &mut d.items {
+                if x.grantee == old {
+                    new.clone_into(&mut x.grantee);
+                }
             }
         }
         for g in &mut self.grants {
@@ -242,24 +338,26 @@ impl Catalog {
         &self.default_privileges
     }
 
-    pub fn add_default_privilege(&mut self, d: DefaultPrivilege) {
-        match self.default_privileges.iter_mut().find(|x| x.schema == d.schema && x.kind == d.kind && x.grantee == d.grantee) {
-            Some(x) => {
-                for p in d.privileges {
-                    if !x.privileges.contains(&p) {
-                        x.privileges.push(p);
-                    }
-                }
-            }
-            None => self.default_privileges.push(d),
+    pub fn default_privilege(&self, role: &str, schema: Option<&str>, kind: char) -> Option<&DefaultPrivilege> {
+        self.default_privileges.iter().find(|d| d.role == role && d.schema.as_deref() == schema && d.kind == kind)
+    }
+
+    /// Stores an entry (replacing its predecessor); an entry that adds nothing is removed.
+    pub fn put_default_privilege(&mut self, d: DefaultPrivilege) {
+        self.default_privileges.retain(|x| !(x.role == d.role && x.schema == d.schema && x.kind == d.kind));
+        if !d.is_default() {
+            self.default_privileges.push(d);
         }
     }
 
-    pub fn remove_default_privilege(&mut self, schema: Option<&str>, kind: char, grantee: &str, privileges: &[char]) {
-        for x in self.default_privileges.iter_mut().filter(|x| x.schema.as_deref() == schema && x.kind == kind && x.grantee == grantee) {
-            x.privileges.retain(|p| !privileges.contains(p));
+    /// Removes a role's default-ACL entries and its grantee items (`DROP OWNED`).
+    pub fn drop_default_privileges_of(&mut self, role: &str) {
+        self.default_privileges.retain(|d| d.role != role);
+        let entries = std::mem::take(&mut self.default_privileges);
+        for mut d in entries {
+            d.items.retain(|x| x.grantee != role);
+            self.put_default_privilege(d);
         }
-        self.default_privileges.retain(|x| !x.privileges.is_empty());
     }
 
     /// The recorded owner of an object (None: the bootstrap superuser).

@@ -168,8 +168,8 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
         Statement::DropRole { names, if_exists } => crate::roles::drop_role(names, *if_exists, txn, env),
         Statement::Grant(g) => crate::roles::grant(g, txn, env),
         Statement::GrantRole { roles, members, admin, revoke } => crate::roles::grant_role(roles, members, *admin, *revoke, txn, env),
-        Statement::AlterDefaultPrivileges { schemas, kind, grant } => {
-            crate::roles::alter_default_privileges(schemas, *kind, grant, txn, env)
+        Statement::AlterDefaultPrivileges { roles, schemas, kind, grant } => {
+            crate::roles::alter_default_privileges(roles, schemas, *kind, grant, txn, env)
         }
         Statement::DropOwned { roles, .. } => crate::roles::drop_owned(roles, txn, env),
         Statement::ReassignOwned { roles, to } => crate::roles::reassign_owned(roles, to, txn, env),

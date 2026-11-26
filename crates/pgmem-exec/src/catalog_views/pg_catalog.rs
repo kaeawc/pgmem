@@ -83,6 +83,9 @@ pub(super) const PG_DEPEND: &str =
     "classid:oid, objid:oid, objsubid:int4, refclassid:oid, refobjid:oid, refobjsubid:int4, deptype:\"char\"";
 const PG_POLICY: &str = "oid:oid, polname:name, polrelid:oid, polcmd:\"char\", polpermissive:bool, polroles:oid[], \
     polqual:pg_node_tree, polwithcheck:pg_node_tree";
+const PG_DEFAULT_ACL: &str = "oid:oid, defaclrole:oid, defaclnamespace:oid, defaclobjtype:\"char\", defaclacl:aclitem[]";
+const PG_POLICIES: &str = "schemaname:name, tablename:name, policyname:name, permissive:text, roles:name[], cmd:text, qual:text, \
+    with_check:text";
 const PG_PARTITIONED_TABLE: &str = "partrelid:oid, partstrat:\"char\", partnatts:int2, partdefid:oid, partattrs:int2vector, \
     partclass:oidvector, partcollation:oidvector, partexprs:pg_node_tree";
 const PG_STATISTIC_EXT: &str = "oid:oid, stxrelid:oid, stxname:name, stxnamespace:oid, stxowner:oid, stxkeys:int2vector, \
@@ -137,6 +140,7 @@ pub static DEFS: &[Def] = &[
     def!("pg_depend", 2608, 'r', PG_DEPEND, super::depend::pg_depend),
     def!("pg_rewrite", 2618, 'r', super::depend::PG_REWRITE, super::depend::pg_rewrite),
     def!("pg_inherits", 2611, 'r', PG_INHERITS, pg_inherits),
+    def!("pg_default_acl", 826, 'r', PG_DEFAULT_ACL, pg_default_acl),
     def!("pg_policy", 3256, 'r', PG_POLICY, empty),
     def!("pg_statistic_ext", 3381, 'r', PG_STATISTIC_EXT, empty),
     def!("pg_publication", 6104, 'r', PG_PUBLICATION, empty),
@@ -159,6 +163,7 @@ pub static DEFS: &[Def] = &[
     def!("pg_cursors", 12_011, 'v', PG_CURSORS, pg_cursors),
     def!("pg_locks", 12_012, 'v', PG_LOCKS, pg_locks),
     def!("pg_stat_activity", 12_013, 'v', PG_STAT_ACTIVITY, pg_stat_activity),
+    def!("pg_policies", 12_014, 'v', PG_POLICIES, empty),
 ];
 
 fn pg_inherits(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
@@ -282,6 +287,43 @@ fn pg_partitioned_table(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             ]));
         }
         rows
+    }))
+}
+
+/// `ALTER DEFAULT PRIVILEGES` entries; each ACL lists PUBLIC first, then grantees by role OID.
+fn pg_default_acl(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let m = snapshot(ctx);
+    let role_oid = |name: &str| if name.is_empty() { 0 } else { crate::reg::role_oid(m.catalog, &ctx.env.user, name).unwrap_or(0) };
+    let mut entries: Vec<_> = m.catalog.default_privileges().iter().collect();
+    entries.sort_by(|a, b| (role_oid(&a.role), &a.schema, a.kind).cmp(&(role_oid(&b.role), &b.schema, b.kind)));
+    Ok(rows_of(PG_DEFAULT_ACL, |s| {
+        entries
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                let mut items: Vec<_> = d.items.iter().collect();
+                items.sort_by_key(|x| role_oid(&x.grantee));
+                let acl = items
+                    .iter()
+                    .map(|x| {
+                        let privs: String = "arwdDxtXUCcTsAm"
+                            .chars()
+                            .filter(|c| x.privileges.contains(c))
+                            .map(|c| if x.grantable.contains(&c) { format!("{c}*") } else { c.to_string() })
+                            .collect();
+                        let who = if x.grantee.is_empty() { String::new() } else { crate::roles::acl_name(&x.grantee) };
+                        Value::Text(format!("{who}={privs}/{}", crate::roles::acl_name(&d.role)))
+                    })
+                    .collect();
+                s.row(vec![
+                    ("oid", oid(u32::try_from(70_000 + i).unwrap_or(70_000))),
+                    ("defaclrole", oid(role_oid(&d.role))),
+                    ("defaclnamespace", oid(d.schema.as_deref().map_or(0, |sc| m.namespace(sc)))),
+                    ("defaclobjtype", ch(d.kind)),
+                    ("defaclacl", Value::Array(acl)),
+                ])
+            })
+            .collect()
     }))
 }
 
@@ -486,6 +528,19 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         let natts = Spec::parse(d.spec).columns().len();
         let extra = if d.kind == 'r' { vec![("relam", oid(2)), ("relfilenode", oid(d.oid))] } else { vec![] };
         rows.push(class_row(&s, d.oid, d.name, ns, d.kind, natts, extra));
+    }
+    // Owners other than the session user.
+    let cols = s.columns();
+    if let (Some(oid_col), Some(owner_col)) = (cols.iter().position(|(n, _)| n == "oid"), cols.iter().position(|(n, _)| n == "relowner")) {
+        for row in &mut rows {
+            let owner = match &row[oid_col] {
+                Value::Oid(o) => m.catalog.owner(*o).and_then(|n| crate::reg::role_oid(m.catalog, &ctx.env.user, n)),
+                _ => None,
+            };
+            if let Some(o) = owner {
+                row[owner_col] = oid(o);
+            }
+        }
     }
     Ok(rows)
 }
@@ -1188,6 +1243,15 @@ pub fn predefined_role(name: &str) -> Option<u32> {
     PG_ROLES_DATA.lines().filter(|l| !l.is_empty()).find_map(|l| {
         let f: Vec<&str> = l.split('\t').collect();
         (f.get(1) == Some(&name)).then(|| f[0].parse().unwrap_or(0))
+    })
+}
+
+/// A predefined role's name by OID.
+pub fn predefined_role_name(oid: u32) -> Option<&'static str> {
+    PG_ROLES_DATA.lines().filter(|l| !l.is_empty()).find_map(|l| {
+        let mut f = l.split('\t');
+        let o = f.next()?;
+        (o.parse() == Ok(oid)).then(|| f.next()).flatten()
     })
 }
 

@@ -652,6 +652,16 @@ impl Session {
             }
             let schema = rel.schema().to_owned();
             crate::roles::apply_defaults(txn, &env, rel.oid(), &schema, kind);
+            // Serial / identity sequences are created with their table.
+            if let Relation::Table(t) = &rel {
+                let seqs: Vec<(Oid, String)> = txn.catalog().owned_sequences(t).map(|q| (q.oid, q.schema.clone())).collect();
+                for (oid, schema) in seqs {
+                    if role != env.user {
+                        txn.catalog_mut().set_owner(oid, Some(&role));
+                    }
+                    crate::roles::apply_defaults(txn, &env, oid, &schema, 'S');
+                }
+            }
         }
         if let Statement::CreateTable(ct) = stmt
             && ct.options.on_commit != ir::OnCommit::PreserveRows
