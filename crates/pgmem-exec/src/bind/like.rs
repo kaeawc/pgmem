@@ -76,6 +76,7 @@ fn source(b: &Binder, name: &ir::ObjectName) -> SqlResult<TableDef> {
                 indexes: Vec::new(),
                 matview: None,
                 unlogged: false,
+                replident: 'd',
                 reloptions: Vec::new(),
             };
             Ok(def)
@@ -232,6 +233,8 @@ pub fn build_index(b: &Binder, table: &TableDef, li: &LikeIndex, taken: &mut Vec
         primary: false,
         nulls_not_distinct: li.nulls_not_distinct,
         predicate: li.predicate.clone(),
+        clustered: false,
+        replica: false,
         reloptions: li.reloptions.clone(),
     })
 }
