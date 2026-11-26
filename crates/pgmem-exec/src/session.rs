@@ -694,6 +694,7 @@ impl Session {
             Statement::DropFunction { .. } => "DROP FUNCTION",
             Statement::CreateTrigger(_) => "CREATE TRIGGER",
             Statement::DropTrigger { .. } => "DROP TRIGGER",
+            Statement::RenameTrigger { .. } => "ALTER TRIGGER",
             Statement::CreateIndex(_) => "CREATE INDEX",
             Statement::CreateSequence(_) => "CREATE SEQUENCE",
             Statement::AlterTable(_) => "ALTER TABLE",

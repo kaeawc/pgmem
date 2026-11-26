@@ -238,6 +238,12 @@ pub enum Statement {
         if_exists: bool,
         cascade: bool,
     },
+    /// `ALTER TRIGGER name ON table RENAME TO new_name`.
+    RenameTrigger {
+        name: String,
+        table: ObjectName,
+        new_name: String,
+    },
     /// `ALTER SEQUENCE [IF EXISTS] name options | RENAME TO new_name`.
     AlterSequence {
         name: ObjectName,
@@ -1467,10 +1473,12 @@ pub enum AlterTableAction {
     },
     /// `OWNER TO role`.
     OwnerTo(String),
-    /// `ENABLE / DISABLE TRIGGER {name | ALL | USER}` (None: all).
+    /// `{ENABLE [REPLICA | ALWAYS] | DISABLE} TRIGGER {name | ALL | USER}` (None: all);
+    /// `mode` is the `pg_trigger.tgenabled` letter: 'O' origin, 'D' disabled, 'R' replica,
+    /// 'A' always.
     EnableTrigger {
         name: Option<String>,
-        enabled: bool,
+        mode: char,
     },
     SetNotNull {
         column: String,

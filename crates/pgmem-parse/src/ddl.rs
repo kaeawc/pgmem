@@ -336,10 +336,10 @@ pub(crate) fn lower_sequence_options(opts: &[sq::SequenceOptions]) -> SqlResult<
 }
 
 /// `ENABLE / DISABLE TRIGGER {name | ALL | USER}`.
-fn trigger_toggle(name: &sq::Ident, enabled: bool) -> AlterTableAction {
+fn trigger_toggle(name: &sq::Ident, mode: char) -> AlterTableAction {
     let n = ident(name);
     let all = name.quote_style.is_none() && (n == "all" || n == "user");
-    AlterTableAction::EnableTrigger { name: (!all).then_some(n), enabled }
+    AlterTableAction::EnableTrigger { name: (!all).then_some(n), mode }
 }
 
 /// `PARTITION BY RANGE (a, (expr))` arrives as the function call `RANGE(a, (expr))`.
@@ -447,8 +447,10 @@ pub(crate) fn lower_alter_table(at: sq::AlterTable) -> SqlResult<AlterTable> {
                 if_exists,
                 cascade: matches!(drop_behavior, Some(sq::DropBehavior::Cascade)),
             }),
-            O::EnableTrigger { name } => actions.push(trigger_toggle(&name, true)),
-            O::DisableTrigger { name } => actions.push(trigger_toggle(&name, false)),
+            O::EnableTrigger { name } => actions.push(trigger_toggle(&name, 'O')),
+            O::EnableReplicaTrigger { name } => actions.push(trigger_toggle(&name, 'R')),
+            O::EnableAlwaysTrigger { name } => actions.push(trigger_toggle(&name, 'A')),
+            O::DisableTrigger { name } => actions.push(trigger_toggle(&name, 'D')),
             O::OwnerTo { new_owner } => actions.push(AlterTableAction::OwnerTo(match new_owner {
                 sq::Owner::Ident(i) => ident(&i),
                 sq::Owner::CurrentRole => "current_role".to_owned(),

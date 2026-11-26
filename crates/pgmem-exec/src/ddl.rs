@@ -181,6 +181,7 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
         Statement::Call { name, args } => crate::functions::call(name, args, txn, env, state),
         Statement::Do { language, body } => crate::functions::do_block(language, body, txn, env, state),
         Statement::CreateTrigger(ct) => crate::triggers::create_trigger(ct, txn),
+        Statement::RenameTrigger { name, table, new_name } => crate::triggers::rename_trigger(name, table, new_name, txn),
         Statement::DropTrigger { name, table, if_exists, .. } => crate::triggers::drop_trigger(name, table, *if_exists, txn),
         Statement::AlterSequence { name, if_exists, options, rename_to } => {
             crate::ddl_sequences::alter_sequence(name, *if_exists, options, rename_to.as_deref(), txn)
@@ -288,8 +289,8 @@ pub(crate) fn alter_table_action(
         crate::roles::set_owner(txn, env, table.oid, owner)?;
         return Ok(current.clone());
     }
-    if let ir::AlterTableAction::EnableTrigger { name, enabled } = action {
-        crate::triggers::set_enabled(&table, name.as_deref(), *enabled, txn)?;
+    if let ir::AlterTableAction::EnableTrigger { name, mode } = action {
+        crate::triggers::set_enabled(&table, name.as_deref(), *mode, txn)?;
         return Ok(current.clone());
     }
     // Generated columns reading a dropped column: an error, or dropped too with CASCADE.
