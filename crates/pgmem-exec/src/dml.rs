@@ -571,7 +571,7 @@ fn referential_actions(
 
 /// The row RETURNING is evaluated over: the statement's row, then the old and the new
 /// version of the target row (all NULL when there is none).
-fn returning_row(current: &[Value], old: Option<&Row>, new: Option<&Row>, width: usize) -> Row {
+pub(crate) fn returning_row(current: &[Value], old: Option<&Row>, new: Option<&Row>, width: usize) -> Row {
     let mut out = current.to_vec();
     for version in [old, new] {
         match version {
@@ -936,7 +936,8 @@ pub fn exec_update(plan: &UpdatePlan, txn: &mut Txn, params: &[Value], env: &Ses
             if is_partition && !crate::partition::satisfies_constraint(ctx.txn.catalog(), &table, &new_row, &ctx)? {
                 match state.moved_rows.borrow_mut().as_mut() {
                     Some(moved) => {
-                        moved.push((table.oid, id, new_row));
+                        let from = combined.iter().skip(width + system_values(table.oid, None, 0).len()).cloned().collect();
+                        moved.push(crate::eval::MovedRow { leaf: table.oid, id, old, new: new_row, from });
                         continue;
                     }
                     None => return Err(crate::partition::constraint_error(&table, &new_row)),
