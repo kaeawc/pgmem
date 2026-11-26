@@ -227,6 +227,11 @@ impl Database {
         &self.advisory
     }
 
+    /// Every granted relation lock (`pg_locks` rows of locktype `relation`).
+    pub fn relation_locks(&self) -> Vec<locks::RelationLock> {
+        self.locks.relation_locks()
+    }
+
     /// The LISTEN / NOTIFY queue shared by every session.
     pub fn notifications(&self) -> &notify::NotifyHub {
         &self.notify
@@ -246,6 +251,7 @@ impl Database {
         let base = self.current();
         Txn {
             id: self.next_txn_id.fetch_add(1, Ordering::Relaxed),
+            pid: 0,
             held_rows: std::cell::RefCell::new(Vec::new()),
             snapshot_seq: 0,
             reads: std::cell::RefCell::new(BTreeSet::new()),
@@ -394,6 +400,8 @@ struct Savepoint {
     name: String,
     /// `held_rows` length when the savepoint was set.
     row_locks: usize,
+    /// How many relation locks the transaction held when the savepoint was set.
+    table_locks: usize,
     catalog: Option<Catalog>,
     changes: HashMap<Oid, TableChanges>,
     /// `seq_undo` length when the savepoint was set.
@@ -430,6 +438,8 @@ impl Drop for SeqUndo {
 pub struct Txn {
     /// Owner of the transaction's row and table locks.
     id: u64,
+    /// The backend that runs the transaction (`pg_locks.pid`).
+    pid: i32,
     /// Row locks taken, in order (ROLLBACK TO releases the later ones).
     held_rows: std::cell::RefCell<Vec<(Oid, RowId, locks::RowLockMode)>>,
     /// The commit sequence the snapshot saw (SERIALIZABLE write-skew detection).
@@ -470,6 +480,9 @@ impl Txn {
         let fork = side.get_or_insert_with(|| {
             Box::new(Txn {
                 id: self.id,
+                // Locks taken in the fork belong to the parent (same id and pid); only the
+                // parent's Drop releases them.
+                pid: self.pid,
                 held_rows: std::cell::RefCell::new(Vec::new()),
                 snapshot_seq: self.snapshot_seq,
                 reads: std::cell::RefCell::new(BTreeSet::new()),
@@ -737,6 +750,7 @@ impl Txn {
         self.savepoints.push(Savepoint {
             name: name.to_owned(),
             row_locks: self.held_rows.borrow().len(),
+            table_locks: self.db.locks.table_lock_count(self.id),
             catalog: self.catalog.clone(),
             changes: self.changes.clone(),
             seq_undo: self.seq_undo.entries.len(),
@@ -761,6 +775,7 @@ impl Txn {
         self.savepoints.truncate(idx + 1);
         let released: Vec<_> = self.held_rows.borrow_mut().drain(sp.row_locks..).collect();
         self.db.locks.release_rows(self.id, &released);
+        self.db.locks.release_tables_from(self.id, sp.table_locks);
         Ok(())
     }
 
@@ -900,8 +915,25 @@ impl Txn {
         if nowait && self.db.locks.table_conflict(self.id, table, mode) {
             return Err(SqlError::new(code::LOCK_NOT_AVAILABLE, format!("could not obtain lock on relation \"{table_name}\"")));
         }
-        self.db.locks.grant_table(self.id, table, mode);
+        self.lock_relation(table, mode);
         Ok(())
+    }
+
+    /// Takes the relation lock a statement implicitly takes (a query's ACCESS SHARE, DML's
+    /// ROW EXCLUSIVE, a DDL statement's lock level), held to the end of the transaction.
+    /// pgmem does not wait for a conflicting lock (see [`locks`]).
+    pub fn lock_relation(&self, table: Oid, mode: locks::TableLockMode) {
+        self.db.locks.grant_table(self.id, self.pid, table, mode);
+    }
+
+    /// A handle that takes this transaction's relation locks while a statement is analyzed.
+    pub fn locker(&self) -> Locker {
+        Locker { db: Arc::clone(&self.db), owner: self.id, pid: self.pid }
+    }
+
+    /// Sets the backend that runs this transaction (`pg_locks.pid` of its locks).
+    pub fn set_backend_pid(&mut self, pid: i32) {
+        self.pid = pid;
     }
 
     /// Whether the row version this transaction sees is still the latest committed one (or
@@ -911,6 +943,20 @@ impl Txn {
             return true;
         }
         self.db.current().tables.get(&table).is_some_and(|d| d.rows.contains_key(&id))
+    }
+}
+
+/// Takes relation locks on behalf of a transaction ([`Txn::locker`]).
+#[derive(Clone, Debug)]
+pub struct Locker {
+    db: Arc<Database>,
+    owner: u64,
+    pid: i32,
+}
+
+impl Locker {
+    pub fn lock(&self, table: Oid, mode: locks::TableLockMode) {
+        self.db.locks.grant_table(self.owner, self.pid, table, mode);
     }
 }
 

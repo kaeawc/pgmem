@@ -544,6 +544,7 @@ pub fn parse_qualified(raw: &str) -> String {
 
 fn nextval(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
     let seq = sequence(ctx, &a[0])?;
+    ctx.txn.lock_relation(seq.oid, crate::lock_levels::ROW_EXCLUSIVE);
     let v = ctx.txn.database().nextval(&seq)?;
     ctx.state.currval.borrow_mut().insert(seq.oid, v);
     Ok(Value::Int8(v))
@@ -594,6 +595,7 @@ pub fn sequence_is_called(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
 
 fn setval(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
     let seq = sequence(ctx, &a[0])?;
+    ctx.txn.lock_relation(seq.oid, crate::lock_levels::ROW_EXCLUSIVE);
     let v = a[1].as_i64().unwrap_or(0);
     let called = a.get(2).and_then(Value::as_bool).unwrap_or(true);
     ctx.txn.database().setval(&seq, v, called)?;
