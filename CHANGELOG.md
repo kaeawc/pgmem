@@ -26,6 +26,10 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 
 - `pg_get_triggerdef` schema-qualifies the trigger function when its schema is not on `search_path`, and quotes its name.
 - `ALTER TRIGGER ... RENAME TO`, and `ALTER TABLE ... ENABLE REPLICA | ALWAYS TRIGGER` (`pg_trigger.tgenabled` `O`/`D`/`R`/`A`); triggers fire according to `session_replication_role`.
+- `CREATE TABLE ... PARTITION OF` builds the partition from the parent's live columns only, as
+  PostgreSQL does: a partition created after a parent `DROP COLUMN` no longer copies the dropped
+  slot, so its `pg_attribute.attnum`, `information_schema.columns.ordinal_position`,
+  `pg_index.indkey` and constraint `conkey` match PostgreSQL's.
 - `RETURNING` of a row that `UPDATE ... FROM` moves to another partition can reference the FROM
   tables, and its `old` values are the row before the update (it failed with `42P01`).
 
