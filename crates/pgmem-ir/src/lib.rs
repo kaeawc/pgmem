@@ -184,6 +184,8 @@ pub enum Statement {
     },
     /// `ALTER DEFAULT PRIVILEGES [IN SCHEMA s] {GRANT | REVOKE} ... ON {TABLES | ...}`.
     AlterDefaultPrivileges {
+        /// `FOR ROLE` (empty: the current role).
+        roles: Vec<String>,
         schemas: Vec<String>,
         kind: char,
         grant: Box<GrantStmt>,
@@ -212,6 +214,11 @@ pub enum Statement {
         names: Vec<String>,
         if_exists: bool,
         cascade: bool,
+    },
+    /// `ALTER EXTENSION name {UPDATE [TO version] | SET SCHEMA s | ADD member | DROP member}`.
+    AlterExtension {
+        name: String,
+        action: AlterExtensionAction,
     },
     CreateFunction(Box<CreateFunction>),
     /// `ALTER {FUNCTION | PROCEDURE | ROUTINE} name [(types)] action ...` (not `OWNER TO`).
@@ -280,6 +287,11 @@ pub enum Statement {
         if_exists: bool,
         options: Box<SequenceOptions>,
         rename_to: Option<String>,
+    },
+    /// `ALTER INDEX name ATTACH PARTITION partition_index`.
+    AttachIndexPartition {
+        index: ObjectName,
+        partition: ObjectName,
     },
     /// `ALTER {TABLE | INDEX | VIEW | MATERIALIZED VIEW} [IF EXISTS] name {SET | RESET} (options)`:
     /// `object` is the keyword used.
@@ -1269,6 +1281,8 @@ pub struct CreateIndex {
     pub nulls_not_distinct: bool,
     /// `USING method` (lowercase), if given.
     pub method: Option<String>,
+    /// `ON ONLY table`: a partitioned table's index without its partitions' indexes.
+    pub only: bool,
     /// `WITH (fillfactor = 70, ...)`.
     pub reloptions: Vec<RelOption>,
 }
@@ -1746,6 +1760,33 @@ pub enum ObjectType {
     Type,
     Domain,
     Function,
+}
+
+/// What `ALTER EXTENSION` does.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AlterExtensionAction {
+    Update {
+        version: Option<String>,
+    },
+    SetSchema(String),
+    /// `ADD member` (`add`) or `DROP member`.
+    Member {
+        add: bool,
+        member: ExtensionMember,
+    },
+}
+
+/// An object `ALTER EXTENSION ADD / DROP` names.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExtensionMember {
+    Table(ObjectName),
+    View(ObjectName),
+    MaterializedView(ObjectName),
+    Sequence(ObjectName),
+    Function { name: ObjectName, args: Option<Vec<TypeName>>, kind: RoutineKind },
+    Type(ObjectName),
+    Domain(ObjectName),
+    Schema(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]

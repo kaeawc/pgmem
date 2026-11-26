@@ -682,7 +682,7 @@ fn table_privileges(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         for p in ["INSERT", "SELECT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"] {
             rows.push(row(&owner, &owner, &schema, &rel, p, true));
         }
-        for g in m.catalog.grants().iter().filter(|g| g.object == pgmem_catalog::GrantObject::Relation(oid)) {
+        for g in m.catalog.grants().iter().filter(|g| g.object == pgmem_catalog::GrantObject::Relation(oid) && g.grantee != owner) {
             for c in "arwdDxt".chars().filter(|c| g.privileges.contains(c)) {
                 rows.push(row(&g.grantor, &g.grantee, &schema, &rel, crate::roles::privilege_name(c), g.grantable.contains(&c)));
             }

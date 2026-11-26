@@ -124,6 +124,7 @@ fn comment_target(
 }
 
 pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &SessionEnv, state: &StatementState) -> SqlResult<QueryResult> {
+    crate::ext_alter::check_member_drop(stmt, txn.catalog())?;
     match stmt {
         Statement::Comment { target, name, text } => {
             if let Some((classoid, objoid, subid)) = comment_target(txn.catalog(), target, name)? {
@@ -174,14 +175,17 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
         Statement::CreateExtension { name, if_not_exists, schema, version } => {
             crate::extensions::create_extension(name, *if_not_exists, schema.as_deref(), version.as_deref(), txn)
         }
-        Statement::DropExtension { names, if_exists, cascade } => crate::extensions::drop_extension(names, *if_exists, *cascade, txn),
+        Statement::DropExtension { names, if_exists, cascade } => {
+            crate::extensions::drop_extension(names, *if_exists, *cascade, txn, env, state)
+        }
+        Statement::AlterExtension { name, action } => crate::ext_alter::alter_extension(name, action, txn),
         Statement::CreateRole { name, options, if_not_exists } => crate::roles::create_role(name, options, *if_not_exists, txn, env),
         Statement::AlterRole { name, action } => crate::roles::alter_role(name, action, txn, env),
         Statement::DropRole { names, if_exists } => crate::roles::drop_role(names, *if_exists, txn, env),
         Statement::Grant(g) => crate::roles::grant(g, txn, env),
         Statement::GrantRole { roles, members, admin, revoke } => crate::roles::grant_role(roles, members, *admin, *revoke, txn, env),
-        Statement::AlterDefaultPrivileges { schemas, kind, grant } => {
-            crate::roles::alter_default_privileges(schemas, *kind, grant, txn, env)
+        Statement::AlterDefaultPrivileges { roles, schemas, kind, grant } => {
+            crate::roles::alter_default_privileges(roles, schemas, *kind, grant, txn, env)
         }
         Statement::DropOwned { roles, .. } => crate::roles::drop_owned(roles, txn, env),
         Statement::ReassignOwned { roles, to } => crate::roles::reassign_owned(roles, to, txn, env),
@@ -219,39 +223,8 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
             cat.create_sequence(seq)?;
             Ok(tag("CREATE SEQUENCE"))
         }
-        Statement::CreateIndex(ci) => {
-            let Some((tname, mut idx)) = bind::bind_create_index(binder, ci)? else {
-                return Ok(notice(
-                    "CREATE INDEX",
-                    format!("relation \"{}\" already exists, skipping", ci.name.clone().unwrap_or_default()),
-                ));
-            };
-            let table = txn.catalog().table_q(&tname).cloned().ok_or_else(|| SqlError::undefined_table(&tname.name))?;
-            let mut def = (*table).clone();
-            idx.oid = txn.catalog_mut().alloc_oid();
-            let unique = idx.unique;
-            let name = idx.name.clone();
-            def.indexes.push(idx);
-            if unique {
-                validate_unique(txn, &def, &name, env, state)?;
-            }
-            if let Some(key) = txn.catalog().partition_key(def.oid).cloned() {
-                crate::partition::check_unique_keys(&def, &key)?;
-            }
-            let partitions = txn.catalog().partitions(def.oid).into_iter().map(|(t, _)| t).collect::<Vec<_>>();
-            txn.catalog_mut().replace_table(&tname, def);
-            // An index on a partitioned table is created on each partition too.
-            for p in partitions {
-                let mut child = (**ci).clone();
-                child.name = None;
-                child.if_not_exists = false;
-                child.table = ir::ObjectName(vec![p.schema.clone(), p.name.clone()]);
-                let snapshot = txn.catalog().clone();
-                let b = Binder::new(&snapshot, &[]);
-                execute_ddl(&Statement::CreateIndex(Box::new(child)), txn, &b, env, state)?;
-            }
-            Ok(tag("CREATE INDEX"))
-        }
+        Statement::CreateIndex(ci) => crate::partition_index::create_index(ci, txn, binder, env, state),
+        Statement::AttachIndexPartition { index, partition } => crate::partition_index::attach_index(index, partition, txn),
         Statement::AlterTable(at) => {
             let name = at.name.base().to_owned();
             let current = match txn.catalog().lookup_relation(&at.name)? {
@@ -376,9 +349,20 @@ pub(crate) fn alter_table_action(
             txn.catalog_mut().replace_table(rename_from.as_ref().unwrap_or(current), def);
             // Most actions on a partitioned table apply to its partitions too.
             if let Some(child_action) = crate::partition::recurses(action) {
-                let partitions: Vec<QualName> = txn.catalog().partitions(oid).into_iter().map(|(t, _)| t.qualified()).collect();
-                for p in partitions {
+                let partitions: Vec<(pgmem_catalog::Oid, QualName, Vec<pgmem_catalog::Oid>)> = txn
+                    .catalog()
+                    .partitions(oid)
+                    .into_iter()
+                    .map(|(t, _)| (t.oid, t.qualified(), t.indexes.iter().map(|i| i.oid).collect()))
+                    .collect();
+                let new_indexes: Vec<pgmem_catalog::Oid> = txn
+                    .catalog()
+                    .table_by_oid(oid)
+                    .map(|t| t.indexes.iter().filter(|i| table.indexes.iter().all(|o| o.oid != i.oid)).map(|i| i.oid).collect())
+                    .unwrap_or_default();
+                for (part, p, before) in partitions {
                     alter_table_action(txn, &p, &child_action, env, state)?;
+                    crate::partition_index::link_new_indexes(txn.catalog_mut(), oid, &new_indexes, part, &before);
                 }
             }
             Ok(new_name)
@@ -485,7 +469,7 @@ pub(crate) fn padded_rows(txn: &Txn, def: &TableDef) -> Vec<(u64, Vec<Value>)> {
 }
 
 /// `CREATE UNIQUE INDEX` / `ADD PRIMARY KEY` over existing rows.
-fn validate_unique(txn: &Txn, def: &TableDef, index: &str, env: &SessionEnv, state: &StatementState) -> SqlResult<()> {
+pub(crate) fn validate_unique(txn: &Txn, def: &TableDef, index: &str, env: &SessionEnv, state: &StatementState) -> SqlResult<()> {
     let mut catalog = txn.catalog().clone();
     catalog.replace_table(&def.qualified(), def.clone());
     let b = Binder::new(&catalog, &[]);
@@ -868,6 +852,7 @@ fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> 
             (ObjectType::Sequence, Some(_)) => return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{base}\" is not a sequence"))),
             (ObjectType::Index, Some(Relation::Index { table, index })) => {
                 let t = txn.catalog().table_q(&table).cloned().ok_or_else(|| SqlError::undefined_table(&table.name))?;
+                crate::partition_index::check_drop(txn.catalog(), &index)?;
                 if t.has_constraint(&index.name) {
                     let tname = display_name(txn.catalog(), &table);
                     return Err(SqlError::new(
@@ -879,6 +864,7 @@ fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> 
                 let mut def = (*t).clone();
                 def.indexes.retain(|i| i.name != index.name);
                 txn.catalog_mut().replace_table(&table, def);
+                crate::partition_index::drop_children(txn.catalog_mut(), index.oid);
             }
             (ObjectType::Index, Some(_)) => return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{base}\" is not an index"))),
             (_, None) => {
@@ -1136,7 +1122,7 @@ pub(crate) fn alter_schema(name: &str, rename_to: &str, txn: &mut Txn) -> SqlRes
 
 /// `ALTER ... SET SCHEMA`: moves a relation or type (a table takes its indexes, row type and
 /// owned sequences along, as `AlterTableNamespace` does).
-fn set_schema(kind: ObjectType, name: &ir::ObjectName, if_exists: bool, schema: &str, txn: &mut Txn) -> SqlResult<QueryResult> {
+pub(crate) fn set_schema(kind: ObjectType, name: &ir::ObjectName, if_exists: bool, schema: &str, txn: &mut Txn) -> SqlResult<QueryResult> {
     let tag_name = match kind {
         ObjectType::Table => "ALTER TABLE",
         ObjectType::View => "ALTER VIEW",

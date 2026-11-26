@@ -39,6 +39,19 @@ fn coerce_inner(b: &Binder, mut e: Expr, from: &Type, to: &Type, typmod: i32, co
     if from == to && typmod < 0 {
         return Ok(e);
     }
+    // Out of int2vector / oidvector: text is space-separated, arrays start at subscript 0.
+    if matches!(from, Type::Int2Vector | Type::OidVector) && (to.is_string() || matches!(to, Type::Array(_))) {
+        let (func, mid) = if to.is_string() {
+            (crate::funcs::strict("vector_text", crate::cast::vector_text_fn), Type::Text)
+        } else {
+            (
+                crate::funcs::strict("vector_array", crate::cast::vector_array_fn),
+                Type::Array(Box::new(from.element().cloned().unwrap_or(Type::Int2))),
+            )
+        };
+        let call = Expr::Call { func, args: vec![e] };
+        return coerce_inner(b, call, &mid, to, typmod, context, explicit);
+    }
     // Into a domain: convert to its base type, then check its constraints.
     if let Type::Domain(oid) = to {
         return b.coerce_to_domain(e, from, *oid, typmod, context, explicit);

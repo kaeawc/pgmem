@@ -20,19 +20,113 @@ pub mod notify;
 pub use notify::{Notification, NotifyHub};
 
 use pgmem_catalog::{Catalog, Oid, SequenceDef, TableDef};
-use pgmem_types::{SqlError, SqlResult, Value, code, compare_values};
+use pgmem_types::{GroupKey, SqlError, SqlResult, Value, code};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
 
 pub type RowId = u64;
 /// A stored tuple: one value per physical column slot (dropped columns included). Rows written
 /// before an ADD COLUMN are shorter; readers pad them with the column's missing value.
 pub type Row = Vec<Value>;
 
-#[derive(Clone, Debug, Default)]
+/// A table's committed rows, with the hash indexes built over them so far.
+#[derive(Debug, Default)]
 pub struct TableData {
-    pub rows: BTreeMap<RowId, Row>,
+    rows: BTreeMap<RowId, Row>,
+    /// Built on first lookup and kept current by every change, so one lookup per statement
+    /// costs O(1) however many rows the table holds.
+    indexes: Mutex<KeyIndexes>,
+}
+
+impl Clone for TableData {
+    fn clone(&self) -> TableData {
+        // Indexes are derived data: rebuilt lazily on first lookup instead of deep-copied.
+        TableData { rows: self.rows.clone(), indexes: Mutex::default() }
+    }
+}
+
+impl TableData {
+    fn insert_row(&mut self, id: RowId, row: Row) {
+        self.indexes.get_mut().unwrap_or_else(PoisonError::into_inner).add(id, &row);
+        self.rows.insert(id, row);
+    }
+
+    fn remove_row(&mut self, id: RowId) -> Option<Row> {
+        let row = self.rows.remove(&id)?;
+        self.indexes.get_mut().unwrap_or_else(PoisonError::into_inner).remove(id, &row);
+        Some(row)
+    }
+
+    fn clear(&mut self) {
+        self.rows.clear();
+        self.indexes.get_mut().unwrap_or_else(PoisonError::into_inner).0.clear();
+    }
+
+    /// Ids of the rows whose `spec` columns hold `key`.
+    fn lookup(&self, spec: &IndexSpec, key: &[GroupKey]) -> Vec<RowId> {
+        lock(&self.indexes).lookup(spec, key, &self.rows)
+    }
+}
+
+/// The key of an index lookup: values compared by [`Value::group_key`].
+type IndexKey = Vec<GroupKey>;
+
+/// What a hash index covers: column slots, and the values rows written before a column was
+/// added read back as (part of the identity, so an index is never shared between catalogs
+/// that disagree about them).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct IndexSpec {
+    cols: Vec<usize>,
+    missing: Vec<GroupKey>,
+}
+
+impl IndexSpec {
+    fn new(def: &TableDef, cols: &[usize]) -> IndexSpec {
+        let missing = cols.iter().map(|c| def.columns.get(*c).map_or(GroupKey::Null, |col| col.missing.group_key())).collect();
+        IndexSpec { cols: cols.to_vec(), missing }
+    }
+
+    fn key(&self, row: &Row) -> IndexKey {
+        self.cols.iter().zip(&self.missing).map(|(c, m)| row.get(*c).map_or_else(|| m.clone(), Value::group_key)).collect()
+    }
+}
+
+/// Hash indexes over one row set: spec → key → row ids.
+#[derive(Clone, Debug, Default)]
+struct KeyIndexes(HashMap<IndexSpec, HashMap<IndexKey, BTreeSet<RowId>>>);
+
+impl KeyIndexes {
+    fn add(&mut self, id: RowId, row: &Row) {
+        for (spec, map) in &mut self.0 {
+            map.entry(spec.key(row)).or_default().insert(id);
+        }
+    }
+
+    fn remove(&mut self, id: RowId, row: &Row) {
+        for (spec, map) in &mut self.0 {
+            let key = spec.key(row);
+            if let Some(ids) = map.get_mut(&key) {
+                ids.remove(&id);
+                if ids.is_empty() {
+                    map.remove(&key);
+                }
+            }
+        }
+    }
+
+    /// Ids of the rows of `rows` whose `spec` columns hold `key`, building the index first.
+    fn lookup(&mut self, spec: &IndexSpec, key: &[GroupKey], rows: &BTreeMap<RowId, Row>) -> Vec<RowId> {
+        let map = self.0.entry(spec.clone()).or_insert_with(|| {
+            let mut map: HashMap<IndexKey, BTreeSet<RowId>> = HashMap::new();
+            for (id, row) in rows {
+                map.entry(spec.key(row)).or_default().insert(*id);
+            }
+            map
+        });
+        map.get(key).map(|ids| ids.iter().copied().collect()).unwrap_or_default()
+    }
 }
 
 /// A committed database version.
@@ -252,7 +346,7 @@ impl Database {
         let mut next = (*cur).clone();
         let data = Arc::make_mut(next.tables.entry(def.oid).or_default());
         for row in rows {
-            data.rows.insert(self.alloc_row_id(), row);
+            data.insert_row(self.alloc_row_id(), row);
         }
         *self.state.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(next);
         Ok(())
@@ -275,6 +369,30 @@ struct TableChanges {
     deleted: BTreeSet<RowId>,
     /// TRUNCATE (or creation in this transaction): committed rows are invisible.
     truncated: bool,
+    /// Hash indexes over `inserted`, kept current by every change to it.
+    index: RefCell<KeyIndexes>,
+}
+
+impl TableChanges {
+    fn insert(&mut self, id: RowId, row: Row) {
+        self.index.get_mut().add(id, &row);
+        self.inserted.insert(id, row);
+    }
+
+    fn remove_inserted(&mut self, id: RowId) -> bool {
+        match self.inserted.remove(&id) {
+            Some(row) => {
+                self.index.get_mut().remove(id, &row);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn clear_inserted(&mut self) {
+        self.inserted.clear();
+        self.index.get_mut().0.clear();
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -458,9 +576,26 @@ impl Txn {
         self.frozen.as_ref().unwrap_or(&self.changes)
     }
 
+    /// True between [`Txn::freeze_reads`] and [`Txn::thaw_reads`].
+    pub fn reads_frozen(&self) -> bool {
+        self.frozen.is_some()
+    }
+
     /// [`Txn::scan`] ignoring [`Txn::freeze_reads`]: every change made so far.
     pub fn scan_latest(&self, table: Oid) -> Vec<(RowId, Row)> {
         scan_with(&self.base, &self.changes, table)
+    }
+
+    /// The visible rows of `def` whose columns `cols` hold `key` (compared by
+    /// [`Value::group_key`]; rows shorter than a column read its missing value), in row-id
+    /// order, through hash indexes: O(1) in the table's size once an index is built.
+    pub fn lookup(&self, def: &TableDef, cols: &[usize], key: &[Value]) -> Vec<(RowId, Row)> {
+        lookup_with(&self.base, self.read_changes(), def, cols, key)
+    }
+
+    /// [`Txn::lookup`] ignoring [`Txn::freeze_reads`]: every change made so far.
+    pub fn lookup_latest(&self, def: &TableDef, cols: &[usize], key: &[Value]) -> Vec<(RowId, Row)> {
+        lookup_with(&self.base, &self.changes, def, cols, key)
     }
 
     /// Resets a sequence to its start, undone if the transaction (or the enclosing savepoint)
@@ -562,7 +697,7 @@ impl Txn {
         self.settle();
         self.writes.insert(table);
         let id = self.db.alloc_row_id();
-        self.changes.entry(table).or_default().inserted.insert(id, row);
+        self.changes.entry(table).or_default().insert(id, row);
         id
     }
 
@@ -570,7 +705,7 @@ impl Txn {
         self.settle();
         self.writes.insert(table);
         let ch = self.changes.entry(table).or_default();
-        if ch.inserted.remove(&id).is_none() {
+        if !ch.remove_inserted(id) {
             ch.deleted.insert(id);
         }
     }
@@ -589,10 +724,10 @@ impl Txn {
         let ch = self.changes.entry(table).or_default();
         ch.truncated = true;
         ch.deleted.clear();
-        ch.inserted.clear();
+        ch.clear_inserted();
         for (id, mut row) in rows {
             f(&mut row);
-            ch.inserted.insert(id, row);
+            ch.insert(id, row);
         }
     }
 
@@ -600,7 +735,7 @@ impl Txn {
         self.settle();
         let ch = self.changes.entry(table).or_default();
         ch.truncated = true;
-        ch.inserted.clear();
+        ch.clear_inserted();
         ch.deleted.clear();
     }
 
@@ -672,37 +807,53 @@ impl Txn {
         if self.isolation == Isolation::Serializable {
             self.check_write_skew()?;
         }
-        let cur = db.current();
-        let mut next = (*cur).clone();
-        if let Some(catalog) = self.catalog.take() {
-            if cur.catalog_version != self.catalog_base_version {
+        // Validate against the latest committed state before changing anything: only
+        // committers (holding the commit lock) replace it.
+        {
+            let cur = db.current();
+            if self.catalog.is_some() && cur.catalog_version != self.catalog_base_version {
                 return Err(SqlError::new(code::SERIALIZATION_FAILURE, "could not serialize access due to concurrent schema change"));
             }
+            let catalog = self.catalog.as_ref().unwrap_or(&cur.catalog);
+            for (oid, ch) in &self.changes {
+                let Some(def) = catalog.table_by_oid(*oid) else {
+                    continue; // dropped in this transaction
+                };
+                let data = cur.tables.get(oid).filter(|_| !ch.truncated);
+                if ch.deleted.iter().any(|id| !data.is_some_and(|d| d.rows.contains_key(id))) {
+                    return Err(SqlError::new(code::SERIALIZATION_FAILURE, "could not serialize access due to concurrent update"));
+                }
+                if !ch.inserted.is_empty() {
+                    recheck_unique(def, data.map(Arc::as_ref), ch)?;
+                }
+            }
+        }
+        // Apply in place when no snapshot shares the committed state (the usual case), so a
+        // commit costs O(its changes), not O(the database).
+        self.base = empty_state();
+        let mut state = db.state.write().unwrap_or_else(PoisonError::into_inner);
+        let next = Arc::make_mut(&mut state);
+        if let Some(catalog) = self.catalog.take() {
             next.tables.retain(|oid, _| catalog.table_by_oid(*oid).is_some());
             next.catalog = Arc::new(catalog);
             next.catalog_version += 1;
         }
         for (oid, ch) in std::mem::take(&mut self.changes) {
-            let Some(def) = next.catalog.table_by_oid(oid).cloned() else {
-                continue; // dropped in this transaction
-            };
+            if next.catalog.table_by_oid(oid).is_none() {
+                continue;
+            }
             let data = Arc::make_mut(next.tables.entry(oid).or_default());
             if ch.truncated {
-                data.rows.clear();
+                data.clear();
             }
             for id in &ch.deleted {
-                if data.rows.remove(id).is_none() {
-                    return Err(SqlError::new(code::SERIALIZATION_FAILURE, "could not serialize access due to concurrent update"));
-                }
+                data.remove_row(*id);
             }
-            for (id, row) in &ch.inserted {
-                data.rows.insert(*id, row.clone());
-            }
-            if !ch.inserted.is_empty() {
-                recheck_unique(&def, data, &ch.inserted)?;
+            for (id, row) in ch.inserted {
+                data.insert_row(id, row);
             }
         }
-        *db.state.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(next);
+        drop(state);
         let seq = db.commit_seq.fetch_add(1, Ordering::SeqCst) + 1;
         if self.isolation == Isolation::Serializable {
             let reads = self.reads.borrow().clone();
@@ -859,27 +1010,51 @@ fn scan_with(base: &DbState, changes: &HashMap<Oid, TableChanges>, table: Oid) -
     out
 }
 
+fn lookup_with(base: &DbState, changes: &HashMap<Oid, TableChanges>, def: &TableDef, cols: &[usize], key: &[Value]) -> Vec<(RowId, Row)> {
+    let spec = IndexSpec::new(def, cols);
+    let key: IndexKey = key.iter().map(Value::group_key).collect();
+    let changes = changes.get(&def.oid);
+    let mut out = Vec::new();
+    if !changes.is_some_and(|c| c.truncated)
+        && let Some(data) = base.tables.get(&def.oid)
+    {
+        for id in data.lookup(&spec, &key) {
+            if !changes.is_some_and(|c| c.deleted.contains(&id))
+                && let Some(row) = data.rows.get(&id)
+            {
+                out.push((id, row.clone()));
+            }
+        }
+    }
+    if let Some(c) = changes {
+        let ids = c.index.borrow_mut().lookup(&spec, &key, &c.inserted);
+        out.extend(ids.into_iter().filter_map(|id| c.inserted.get(&id).map(|r| (id, r.clone()))));
+    }
+    out.sort_by_key(|(id, _)| *id);
+    out
+}
+
+/// A state holding nothing, for a committing transaction to drop its snapshot.
+fn empty_state() -> Arc<DbState> {
+    static EMPTY: OnceLock<Arc<DbState>> = OnceLock::new();
+    Arc::clone(EMPTY.get_or_init(|| Arc::new(DbState { catalog: Arc::new(Catalog::new()), ..Default::default() })))
+}
+
 /// Re-validates plain-column unique indexes for rows inserted by a committing transaction
 /// against everything committed concurrently (Postgres would have blocked on the conflicting
-/// insert and then raised the same error).
-fn recheck_unique(def: &TableDef, data: &TableData, inserted: &BTreeMap<RowId, Row>) -> SqlResult<()> {
+/// insert and then raised the same error). `committed` is the latest committed data the
+/// transaction's changes apply to (None when it truncated or created the table).
+fn recheck_unique(def: &TableDef, committed: Option<&TableData>, ch: &TableChanges) -> SqlResult<()> {
     for idx in def.indexes.iter().filter(|i| i.unique && i.exprs.is_empty() && i.predicate.is_none()) {
-        for (id, row) in inserted {
-            let key: Vec<&Value> = idx.columns.iter().map(|c| row.get(*c).unwrap_or(&Value::Null)).collect();
-            if !idx.nulls_not_distinct && key.iter().any(|v| v.is_null()) {
+        let spec = IndexSpec::new(def, &idx.columns);
+        let mut inserted: HashMap<IndexKey, RowId> = HashMap::new();
+        for (id, row) in &ch.inserted {
+            let key = spec.key(row);
+            if !idx.nulls_not_distinct && key.contains(&GroupKey::Null) {
                 continue;
             }
-            let dup = data.rows.iter().any(|(other_id, other)| {
-                other_id != id
-                    && idx.columns.iter().zip(&key).all(|(c, v)| {
-                        let o = other.get(*c).unwrap_or(&Value::Null);
-                        if o.is_null() || v.is_null() {
-                            o.is_null() && v.is_null()
-                        } else {
-                            compare_values(o, v).is_ok_and(std::cmp::Ordering::is_eq)
-                        }
-                    })
-            });
+            let dup = committed.is_some_and(|d| d.lookup(&spec, &key).iter().any(|other| other != id && !ch.deleted.contains(other)))
+                || inserted.insert(key, *id).is_some();
             if dup {
                 return Err(SqlError::new(
                     code::UNIQUE_VIOLATION,
