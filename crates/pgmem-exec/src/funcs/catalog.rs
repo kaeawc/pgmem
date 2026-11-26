@@ -5,7 +5,7 @@
 use super::{Resolved, lenient, resolved, strict};
 use crate::catalog_views::{CLASS_CLASS_OID, CONSTRAINT_CLASS_OID, Model, NAMESPACE_CLASS_OID, constraint_def, index_def};
 use crate::eval::EvalCtx;
-use crate::funcs::string::quote_ident;
+use crate::funcs::string::{quote_ident, quote_literal};
 use pgmem_types::{RegKind, SqlError, SqlResult, Type, Value, code};
 
 fn oid_arg(v: &Value) -> Option<u32> {
@@ -342,21 +342,71 @@ fn function_text(a: &[Value], ctx: &EvalCtx, what: FnText) -> SqlResult<Value> {
                 s.push_str(&format!(" RETURNS {r}\n"));
             }
             s.push_str(&format!(" LANGUAGE {}\n", f.language));
+            let mut attrs = String::new();
             match f.volatility {
-                'i' => s.push_str(" IMMUTABLE"),
-                's' => s.push_str(" STABLE"),
+                'i' => attrs.push_str(" IMMUTABLE"),
+                's' => attrs.push_str(" STABLE"),
+                _ => {}
+            }
+            match f.parallel {
+                's' => attrs.push_str(" PARALLEL SAFE"),
+                'r' => attrs.push_str(" PARALLEL RESTRICTED"),
                 _ => {}
             }
             if f.strict {
-                s.push_str(" STRICT");
+                attrs.push_str(" STRICT");
             }
-            if f.volatility != 'v' || f.strict {
+            if f.security_definer {
+                attrs.push_str(" SECURITY DEFINER");
+            }
+            if f.leakproof {
+                attrs.push_str(" LEAKPROOF");
+            }
+            if f.cost != 100.0 {
+                attrs.push_str(&format!(" COST {}", format_g(f.cost)));
+            }
+            if f.rows > 0.0 && f.rows != 1000.0 {
+                attrs.push_str(&format!(" ROWS {}", format_g(f.rows)));
+            }
+            if !attrs.is_empty() {
+                s.push_str(&attrs);
                 s.push('\n');
             }
-            s.push_str(&format!("AS $function${}$function$\n", f.body));
+            for entry in &f.config {
+                let (name, value) = entry.split_once('=').unwrap_or((entry, ""));
+                let shown = if matches!(
+                    name.to_ascii_lowercase().as_str(),
+                    "search_path"
+                        | "temp_tablespaces"
+                        | "session_preload_libraries"
+                        | "shared_preload_libraries"
+                        | "local_preload_libraries"
+                ) {
+                    crate::functions::split_guc_list(value).iter().map(|v| quote_literal(v)).collect::<Vec<_>>().join(", ")
+                } else {
+                    quote_literal(value)
+                };
+                s.push_str(&format!(" SET {} TO {shown}\n", quote_ident(name)));
+            }
+            let dq = if f.procedure { "$procedure$" } else { "$function$" };
+            s.push_str(&format!("AS {dq}{}{dq}\n", f.body));
             Value::Text(s)
         }
     })
+}
+
+/// C's `%g`: six significant digits, no trailing zeros, exponent form past 1e6.
+fn format_g(v: f64) -> String {
+    if v != 0.0 && !(1e-4..1e6).contains(&v.abs()) {
+        let e = format!("{v:.5e}");
+        let (m, exp) = e.split_once('e').unwrap_or((&e, "0"));
+        let m = if m.contains('.') { m.trim_end_matches('0').trim_end_matches('.') } else { m };
+        let exp: i32 = exp.parse().unwrap_or(0);
+        return format!("{m}e{}{:02}", if exp < 0 { '-' } else { '+' }, exp.abs());
+    }
+    let digits = 5 - v.abs().log10().floor().max(-4.0) as i32;
+    let t = format!("{v:.*}", digits.max(0) as usize);
+    if t.contains('.') { t.trim_end_matches('0').trim_end_matches('.').to_owned() } else { t }
 }
 
 fn constraintdef_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
