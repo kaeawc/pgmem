@@ -38,6 +38,11 @@ pub(crate) enum FuncDdl {
         body: String,
     },
     CreateTrigger(Box<RawTrigger>),
+    RenameTrigger {
+        name: sq::Ident,
+        table: sq::ObjectName,
+        new_name: sq::Ident,
+    },
     DropTrigger {
         name: sq::Ident,
         table: sq::ObjectName,
@@ -331,6 +336,17 @@ pub(crate) fn try_parse(p: &mut Parser) -> Result<Option<FuncDdl>, ParserError> 
             RoutineKind::Routine
         };
         return drop_function(p, kind).map(Some);
+    }
+    if word_at(p, 0, "ALTER") && word_at(p, 1, "TRIGGER") {
+        p.next_token();
+        p.next_token();
+        let name = p.parse_identifier()?;
+        expect(p, "ON")?;
+        let table = p.parse_object_name(false)?;
+        expect(p, "RENAME")?;
+        expect(p, "TO")?;
+        let new_name = p.parse_identifier()?;
+        return Ok(Some(FuncDdl::RenameTrigger { name, table, new_name }));
     }
     if word_at(p, 0, "DROP") && word_at(p, 1, "TRIGGER") {
         p.next_token();
@@ -862,6 +878,9 @@ pub(crate) fn lower(d: FuncDdl) -> SqlResult<Statement> {
                 CommentOn::Trigger(t) => pgmem_ir::CommentTarget::Trigger(object_name(&t)?),
             };
             Statement::Comment { target, name: object_name(&name)?, text }
+        }
+        FuncDdl::RenameTrigger { name, table, new_name } => {
+            Statement::RenameTrigger { name: ident(&name), table: object_name(&table)?, new_name: ident(&new_name) }
         }
         FuncDdl::DropTrigger { name, table, if_exists, cascade } => {
             Statement::DropTrigger { name: ident(&name), table: object_name(&table)?, if_exists, cascade }
