@@ -966,6 +966,7 @@ fn pg_constraint(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             let mut vals = vec![
                 ("oid", oid(c.oid)),
                 ("conname", name(&c.name)),
+                ("connamespace", oid(m.namespace(&t.schema))),
                 ("contype", ch(c.contype)),
                 ("conrelid", oid(0)),
                 ("contypid", oid(t.oid)),
@@ -984,6 +985,7 @@ fn pg_constraint(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             let mut vals = vec![
                 ("oid", oid(c.oid)),
                 ("conname", name(&c.name)),
+                ("connamespace", oid(m.namespace(&c.table.schema))),
                 ("contype", ch(c.contype)),
                 ("conrelid", oid(c.table.oid)),
                 ("conindid", oid(c.conindid)),
