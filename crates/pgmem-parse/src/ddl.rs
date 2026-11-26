@@ -283,7 +283,12 @@ pub(crate) fn lower_create_view(cv: sq::CreateView) -> SqlResult<CreateView> {
 }
 
 pub(crate) fn lower_create_index(ci: sq::CreateIndex) -> SqlResult<CreateIndex> {
+    let opclasses =
+        ci.columns.iter().map(|c| c.operator_class.as_ref().and_then(|o| o.0.last()).and_then(|p| p.as_ident()).map(ident)).collect();
+    let include = ci.include.iter().map(ident).collect();
     Ok(CreateIndex {
+        opclasses,
+        include,
         name: ci.name.as_ref().map(|n| object_name(n).map(|o| o.base().to_owned())).transpose()?,
         table: object_name(&ci.table_name)?,
         columns: ci.columns.into_iter().map(|c| lower_order_by_expr(c.column)).collect::<SqlResult<Vec<_>>>()?,

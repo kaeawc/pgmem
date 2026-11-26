@@ -1215,6 +1215,10 @@ pub struct CreateIndex {
     pub nulls_not_distinct: bool,
     /// `USING method` (lowercase), if given.
     pub method: Option<String>,
+    /// The explicit operator class of each key (parallel to `columns`; the last name part).
+    pub opclasses: Vec<Option<String>>,
+    /// `INCLUDE (...)` column names.
+    pub include: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

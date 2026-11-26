@@ -27,6 +27,8 @@ pub struct LikeIndex {
     pub unique: bool,
     pub nulls_not_distinct: bool,
     pub predicate: Option<ir::Expr>,
+    pub method: String,
+    pub opclasses: Vec<pgmem_catalog::IndexOpclass>,
 }
 
 /// Inserts the LIKE sources' columns into `table` (whose columns are the statement's own, in
@@ -153,6 +155,8 @@ fn copy_columns(
                     unique: idx.unique,
                     nulls_not_distinct: idx.nulls_not_distinct,
                     predicate: idx.predicate.clone(),
+                    method: idx.method.clone(),
+                    opclasses: idx.opclasses.clone(),
                 }),
             }
         }
@@ -220,6 +224,8 @@ pub fn build_index(b: &Binder, table: &TableDef, li: &LikeIndex, taken: &mut Vec
     );
     taken.push(name.clone());
     Ok(IndexDef {
+        method: li.method.clone(),
+        opclasses: li.opclasses.clone(),
         oid: 0,
         name,
         columns,

@@ -71,6 +71,7 @@ mod functions_fidelity;
 mod generate_series;
 mod generated_columns;
 mod group_by;
+mod index_access_method;
 mod index_noop;
 mod insert_default_marker;
 mod insert_default_values;
