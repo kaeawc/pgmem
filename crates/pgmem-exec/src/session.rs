@@ -689,6 +689,7 @@ impl Session {
             Statement::RefreshMatview { .. } => "REFRESH MATERIALIZED VIEW",
             Statement::RenameView { .. } => "ALTER VIEW",
             Statement::RenameIndex { .. } => "ALTER INDEX",
+            Statement::AlterRelOptions { object, .. } => crate::reloptions::alter_tag(*object),
             Statement::AlterSequence { .. } => "ALTER SEQUENCE",
             Statement::CreateFunction(cf) if cf.procedure => "CREATE PROCEDURE",
             Statement::CreateFunction(_) => "CREATE FUNCTION",

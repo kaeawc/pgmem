@@ -24,6 +24,7 @@ pub mod plpgsql;
 pub mod portal;
 mod privilege_uses;
 pub mod reg;
+mod reloptions;
 pub mod roles;
 pub mod run;
 pub mod sequences;
