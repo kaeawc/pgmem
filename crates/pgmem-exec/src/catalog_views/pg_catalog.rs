@@ -546,12 +546,22 @@ fn pg_attribute(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let m = snapshot(ctx);
     let s = Spec::parse(PG_ATTRIBUTE);
     let mut rows = Vec::new();
+    // Column privileges (`attacl`) of table and view columns.
+    let attacl = s.columns().iter().position(|(n, _)| n == "attacl");
+    let with_acl = |relid: u32, a: &Att| {
+        let mut row = att_row(&s, relid, a);
+        let items = i16::try_from(a.attnum).ok().filter(|_| !a.dropped).and_then(|n| crate::roles::column_acl_items(m.catalog, relid, n));
+        if let (Some(i), Some(items)) = (attacl, items) {
+            row[i] = Value::Array(items.into_iter().map(Value::Text).collect());
+        }
+        row
+    };
     for t in m.tables() {
         rows.extend(system_att_rows(&s, t.oid));
-        rows.extend(Model::table_atts(t).iter().map(|a| att_row(&s, t.oid, a)));
+        rows.extend(Model::table_atts(t).iter().map(|a| with_acl(t.oid, a)));
     }
     for v in m.views() {
-        rows.extend(m.view_atts(v).iter().map(|a| att_row(&s, v.oid, a)));
+        rows.extend(m.view_atts(v).iter().map(|a| with_acl(v.oid, a)));
     }
     for seq in m.sequences() {
         rows.extend(Model::sequence_atts(seq).iter().map(|a| att_row(&s, seq.oid, a)));
