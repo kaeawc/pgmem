@@ -23,7 +23,7 @@ mod typeddl;
 mod utility;
 
 use pgmem_ir::{IsolationLevel, ObjectName, ObjectType, Statement, TransactionStmt};
-use pgmem_types::{SqlError, SqlResult, code};
+use pgmem_types::{ErrorRef, SourceRefs, SqlError, SqlResult, code};
 use sqlparser::ast as sq;
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::{Parser, ParserError};
@@ -31,6 +31,14 @@ use sqlparser::parser::{Parser, ParserError};
 /// Parses a query string that may contain several `;`-separated statements (the simple-query
 /// protocol). An empty string yields `[Statement::Empty]`.
 pub fn parse(sql: &str) -> SqlResult<Vec<Statement>> {
+    Ok(parse_located(sql)?.into_iter().map(|(s, _)| s).collect())
+}
+
+/// [`parse`], with each statement's [`SourceRefs`]: where its column, relation, function,
+/// operator and literal references start in `sql`, for [`SourceRefs::resolve`] to give binder
+/// errors Postgres' `position`. Statements parsed from rewritten text get no references
+/// (their offsets would not point into `sql`).
+pub fn parse_located(sql: &str) -> SqlResult<Vec<(Statement, SourceRefs)>> {
     let original = sql;
     search_cycle::clear();
     FK_SET_COLUMNS.with(|c| c.borrow_mut().clear());
@@ -40,7 +48,7 @@ pub fn parse(sql: &str) -> SqlResult<Vec<Statement>> {
     relopts::clear();
     CONFLICT_EXPRS.with(|c| c.borrow_mut().clear());
     if sql.trim().trim_matches(';').trim().is_empty() {
-        return Ok(vec![Statement::Empty]);
+        return Ok(vec![(Statement::Empty, SourceRefs::default())]);
     }
     relopts::precheck(sql)?;
     // SQL/JSON query functions are rewritten up front (sqlparser can't parse their clauses).
@@ -56,15 +64,26 @@ pub fn parse(sql: &str) -> SqlResult<Vec<Statement>> {
     });
     match parsed {
         Ok((stmts, text)) => {
+            let locate = text == original;
             PARSED_TEXT.with(|t| *t.borrow_mut() = text);
-            let mut lowered = stmts.into_iter().map(lower_parsed).collect::<SqlResult<Vec<_>>>()?;
-            // PREPARE and DECLARE remember the query string they came from, as Postgres does.
-            for s in &mut lowered {
-                match s {
+            PARSED_TOKENS.with(|t| *t.borrow_mut() = None);
+            let lines = if locate { line_starts(original) } else { Vec::new() };
+            let mut lowered = Vec::with_capacity(stmts.len());
+            for p in stmts {
+                REFS.with(|r| *r.borrow_mut() = locate.then(Vec::new));
+                let stmt = lower_parsed(p);
+                let refs = REFS.with(|r| r.borrow_mut().take()).unwrap_or_default();
+                let mut stmt = stmt.map_err(|e| if locate { e } else { e.without_position() })?;
+                // PREPARE and DECLARE remember the query string they came from, as Postgres does.
+                match &mut stmt {
                     Statement::Prepare(p) => original.clone_into(&mut p.text),
                     Statement::DeclareCursor(d) => original.clone_into(&mut d.text),
                     _ => {}
                 }
+                let mut refs: Vec<(ErrorRef, u32)> = refs.into_iter().filter_map(|(r, at)| Some((r, char_position(&lines, at)?))).collect();
+                refs.sort_by_key(|(_, p)| *p);
+                refs.dedup();
+                lowered.push((stmt, SourceRefs(refs)));
             }
             Ok(lowered)
         }
@@ -73,9 +92,88 @@ pub fn parse(sql: &str) -> SqlResult<Vec<Statement>> {
             // sqlparser doesn't model; only when every piece is recognized do we accept it.
             let pieces: Vec<&str> = split_statements(sql);
             let fallback: Option<Vec<Statement>> = pieces.iter().map(|p| fallback_statement(p)).collect();
-            fallback.ok_or_else(|| map_parser_error(&err, sql))
+            match fallback {
+                Some(stmts) => Ok(stmts.into_iter().map(|s| (s, SourceRefs::default())).collect()),
+                None => {
+                    let e = map_parser_error(&err, sql);
+                    Err(if sql == original { e } else { e.without_position() })
+                }
+            }
         }
     }
+}
+
+/// The character offset at which each line of `sql` starts (line 1 at index 0).
+fn line_starts(sql: &str) -> Vec<u32> {
+    let mut starts = vec![0u32];
+    for (n, c) in sql.chars().enumerate() {
+        if c == '\n' {
+            starts.push(u32::try_from(n + 1).unwrap_or(u32::MAX));
+        }
+    }
+    starts
+}
+
+/// The 1-based character offset of a sqlparser location (1-based line and character column).
+fn char_position(lines: &[u32], at: sqlparser::tokenizer::Location) -> Option<u32> {
+    let line = usize::try_from(at.line).ok()?.checked_sub(1)?;
+    let col = u32::try_from(at.column).ok().filter(|c| *c > 0)?;
+    Some(lines.get(line)?.saturating_add(col))
+}
+
+/// Records where a reference an error may be about starts in the text being lowered (a no-op
+/// when that text is not the query string as sent).
+pub(crate) fn note_ref(r: ErrorRef, at: sqlparser::tokenizer::Location) {
+    if at.line == 0 {
+        return;
+    }
+    REFS.with(|refs| {
+        if let Some(refs) = refs.borrow_mut().as_mut() {
+            refs.push((r, at));
+        }
+    });
+}
+
+/// Notes `name` (lowered to `lowered`) as a reference of kind `kind` at its first part.
+pub(crate) fn note_name(kind: fn(String) -> ErrorRef, name: &sq::ObjectName, lowered: &ObjectName) {
+    if let Some(sq::ObjectNamePart::Identifier(first)) = name.0.first() {
+        note_ref(kind(lowered.0.join(".")), first.span.start);
+    }
+}
+
+/// Whether the statement being lowered records its references (see [`note_ref`]).
+fn locating() -> bool {
+    REFS.with(|r| r.borrow().is_some())
+}
+
+/// The position of `at` in the text being lowered, when it is the query string as sent.
+fn position_in_parsed(at: sqlparser::tokenizer::Location) -> Option<u32> {
+    if !locating() {
+        return None;
+    }
+    PARSED_TEXT.with(|t| char_position(&line_starts(&t.borrow()), at))
+}
+
+/// The location of the first token at or after `after` in the text being lowered, when it is
+/// spelled `text` (an operator between two operands).
+pub(crate) fn token_location(after: sqlparser::tokenizer::Location, text: &str) -> Option<sqlparser::tokenizer::Location> {
+    use sqlparser::tokenizer::{Token, Tokenizer};
+    if !locating() || after.line == 0 {
+        return None;
+    }
+    PARSED_TOKENS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.is_none() {
+            *cache = Some(PARSED_TEXT.with(|t| Tokenizer::new(&PostgreSqlDialect {}, &t.borrow()).tokenize_with_location()).ok()?);
+        }
+        cache
+            .as_ref()?
+            .iter()
+            .filter(|t| !matches!(t.token, Token::Whitespace(_) | Token::EOF))
+            .find(|t| (t.span.start.line, t.span.start.column) >= (after.line, after.column))
+            .filter(|t| t.token.to_string() == text)
+            .map(|t| t.span.start)
+    })
 }
 
 thread_local! {
@@ -93,6 +191,10 @@ thread_local! {
     static CONFLICT_EXPRS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
     /// The text the statements being lowered were parsed from (spans point into it).
     static PARSED_TEXT: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    /// The references noted while lowering one statement (`None`: not recording).
+    static REFS: std::cell::RefCell<Option<Vec<(ErrorRef, sqlparser::tokenizer::Location)>>> = const { std::cell::RefCell::new(None) };
+    /// `PARSED_TEXT`'s tokens, for locating operators.
+    static PARSED_TOKENS: std::cell::RefCell<Option<Vec<sqlparser::tokenizer::TokenWithSpan>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Postgres' `syntax error at or near "X"` for the first token at or after `at` in the text
@@ -266,11 +368,23 @@ pub(crate) fn syntax_error_at(at: sqlparser::tokenizer::Location) -> SqlError {
             .into_iter()
             .filter(|t| !matches!(t.token, Token::Whitespace(_) | Token::EOF))
             .find(|t| (t.span.start.line, t.span.start.column) >= (at.line, at.column))
-            .map(|t| t.token.to_string())
+            .map(|t| (t.token.to_string(), t.span.start))
     });
     match next {
-        Some(tok) => SqlError::syntax(format!("syntax error at or near \"{tok}\"")),
-        None => SqlError::syntax("syntax error at end of input"),
+        Some((tok, loc)) => {
+            let e = SqlError::syntax(format!("syntax error at or near \"{tok}\""));
+            match position_in_parsed(loc) {
+                Some(p) => e.with_position(p),
+                None => e,
+            }
+        }
+        None => {
+            let e = SqlError::syntax("syntax error at end of input");
+            match locating().then(|| PARSED_TEXT.with(|t| u32::try_from(t.borrow().chars().count() + 1).ok())).flatten() {
+                Some(p) => e.with_position(p),
+                None => e,
+            }
+        }
     }
 }
 
@@ -396,11 +510,16 @@ fn parse_statements(sql: &str) -> Result<Vec<Parsed>, ParserError> {
 /// Parses exactly one statement (the extended-query `Parse` message). Postgres rejects
 /// multiple commands in a prepared statement with 42601.
 pub fn parse_one(sql: &str) -> SqlResult<Statement> {
-    let mut stmts = parse(sql)?;
+    Ok(parse_one_located(sql)?.0)
+}
+
+/// [`parse_one`], with the statement's [`SourceRefs`] (see [`parse_located`]).
+pub fn parse_one_located(sql: &str) -> SqlResult<(Statement, SourceRefs)> {
+    let mut stmts = parse_located(sql)?;
     if stmts.len() > 1 {
         return Err(SqlError::syntax("cannot insert multiple commands into a prepared statement"));
     }
-    Ok(stmts.pop().unwrap_or(Statement::Empty))
+    Ok(stmts.pop().unwrap_or((Statement::Empty, SourceRefs::default())))
 }
 
 /// Rewrites Postgres syntax that sqlparser does not accept into equivalent syntax it does,
@@ -1096,20 +1215,29 @@ fn map_parser_error(err: &ParserError, sql: &str) -> SqlError {
         return SqlError::syntax(format!("misplaced {what} clause")).with_detail(text);
     }
     let found = text.split("found: ").nth(1).map(|rest| rest.split(" at Line:").next().unwrap_or(rest).trim().to_owned());
-    let message = match found.as_deref() {
-        Some("EOF") | None if text.contains("EOF") => "syntax error at end of input".to_owned(),
+    let lines = line_starts(sql);
+    let at = error_location(&text).and_then(|at| char_position(&lines, at));
+    let end = u32::try_from(sql.chars().count() + 1).ok();
+    let (message, position) = match found.as_deref() {
+        Some("EOF") | None if text.contains("EOF") => ("syntax error at end of input".to_owned(), end),
         // `... ORDER` / `... GROUP` without BY: Postgres fails at the token after the keyword.
         Some(tok) if (tok.eq_ignore_ascii_case("ORDER") || tok.eq_ignore_ascii_case("GROUP")) && text.contains("end of statement") => {
             match error_location(&text).and_then(|at| token_after(sql, at)) {
-                Some(next) if !next.eq_ignore_ascii_case("BY") => format!("syntax error at or near \"{next}\""),
-                Some(_) => format!("syntax error at or near \"{tok}\""),
-                None => "syntax error at end of input".to_owned(),
+                Some((next, loc)) if !next.eq_ignore_ascii_case("BY") => {
+                    (format!("syntax error at or near \"{next}\""), char_position(&lines, loc))
+                }
+                Some(_) => (format!("syntax error at or near \"{tok}\""), at),
+                None => ("syntax error at end of input".to_owned(), end),
             }
         }
-        Some(tok) => format!("syntax error at or near \"{}\"", tok.trim_matches('\'')),
-        None => format!("syntax error: {text}"),
+        Some(tok) => (format!("syntax error at or near \"{}\"", tok.trim_matches('\'')), at),
+        None => (format!("syntax error: {text}"), None),
     };
-    SqlError::syntax(message).with_detail(text)
+    let e = SqlError::syntax(message).with_detail(text);
+    match position {
+        Some(p) => e.with_position(p),
+        None => e,
+    }
 }
 
 /// The `Line: L, Column: C` location in a sqlparser error message.
@@ -1138,15 +1266,15 @@ fn offset_of(sql: &str, at: sqlparser::tokenizer::Location) -> Option<usize> {
     None
 }
 
-/// The first token after the one starting at `at`.
-fn token_after(sql: &str, at: sqlparser::tokenizer::Location) -> Option<String> {
+/// The first token after the one starting at `at`, and where it starts.
+fn token_after(sql: &str, at: sqlparser::tokenizer::Location) -> Option<(String, sqlparser::tokenizer::Location)> {
     use sqlparser::tokenizer::{Token, Tokenizer};
     let tokens = Tokenizer::new(&PostgreSqlDialect {}, sql).tokenize_with_location().ok()?;
     tokens
         .into_iter()
         .filter(|t| !matches!(t.token, Token::Whitespace(_) | Token::EOF))
         .find(|t| (t.span.start.line, t.span.start.column) > (at.line, at.column))
-        .map(|t| t.token.to_string())
+        .map(|t| (t.token.to_string(), t.span.start))
 }
 
 /// Tokenizer failures, worded like Postgres' scanner (`unterminated quoted string at or near
@@ -1161,10 +1289,15 @@ fn lexer_error(text: &str, sql: &str) -> Option<SqlError> {
     } else {
         return None;
     };
-    let start = offset_of(sql, error_location(text)?)?;
+    let at = error_location(text)?;
+    let start = offset_of(sql, at)?;
     // sqlparser points at the opening quote; Postgres quotes the rest of the input.
     let rest = &sql[start..];
-    Some(SqlError::syntax(format!("{what} at or near \"{}\"", rest.trim_end())).with_detail(text.to_owned()))
+    let e = SqlError::syntax(format!("{what} at or near \"{}\"", rest.trim_end())).with_detail(text.to_owned());
+    Some(match char_position(&line_starts(sql), at) {
+        Some(p) => e.with_position(p),
+        None => e,
+    })
 }
 
 /// Postgres identifier folding: unquoted identifiers are lower-cased.
