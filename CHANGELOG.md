@@ -23,6 +23,8 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 
 ### Fixed
 
+- `pg_get_triggerdef` schema-qualifies the trigger function when its schema is not on `search_path`, and quotes its name.
+- `ALTER TRIGGER ... RENAME TO`, and `ALTER TABLE ... ENABLE REPLICA | ALWAYS TRIGGER` (`pg_trigger.tgenabled` `O`/`D`/`R`/`A`); triggers fire according to `session_replication_role`.
 - `RETURNING` of a row that `UPDATE ... FROM` moves to another partition can reference the FROM
   tables, and its `old` values are the row before the update (it failed with `42P01`).
 
