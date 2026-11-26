@@ -14,6 +14,8 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 
 ### Fixed
 
+- Function attributes are stored and shown: `SECURITY DEFINER`, `SET param = value` (`pg_proc.proconfig`), `PARALLEL`, `COST`, `ROWS` and `LEAKPROOF` appear in `pg_proc` and `pg_get_functiondef` as PostgreSQL prints them (procedures use `$procedure$`), and a function's `SET` options apply during its call.
+- `ALTER FUNCTION / PROCEDURE / ROUTINE` supports `SET` / `RESET`, `[EXTERNAL] SECURITY`, volatility, `[NOT] LEAKPROOF`, `STRICT` / `CALLED ON NULL INPUT`, `PARALLEL`, `COST`, `ROWS`, `RENAME TO` and `SET SCHEMA`.
 - `pg_constraint.connamespace` is the namespace of the owning table or domain instead of always `public`.
 - Row triggers on a partitioned table are cloned to its partitions (existing, created, attached and sub-partitions; `pg_trigger.tgparentid`) and fire on the leaf partition. The clones follow the parent trigger through `DROP TRIGGER`, `ALTER TRIGGER ... RENAME`, `ENABLE` / `DISABLE` and `CREATE OR REPLACE TRIGGER`, cannot be dropped or renamed on their own, and go with `DETACH PARTITION`. Statement triggers of a partitioned table fire for statements on it, and its partitions' statement triggers no longer do.
 
