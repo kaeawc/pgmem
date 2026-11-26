@@ -403,6 +403,7 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("relam", oid(if partitioned { 0 } else { 2 })),
                 ("relfilenode", oid(if partitioned { 0 } else { t.oid })),
                 ("relacl", acl(ctx, &m, t.oid, false)),
+                ("reloptions", crate::reloptions::as_value(&t.reloptions)),
                 ("relispartition", boolean(bound.is_some())),
                 ("relpartbound", bound.map_or(Value::Null, txt)),
                 ("relhasindex", boolean(!t.indexes.is_empty())),
@@ -430,7 +431,12 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             m.namespace(&v.schema),
             'v',
             v.columns.len(),
-            vec![("reltype", oid(rowtype_oid(v.oid))), ("relacl", acl(ctx, &m, v.oid, false)), temp_persistence(&v.schema)],
+            vec![
+                ("reltype", oid(rowtype_oid(v.oid))),
+                ("relacl", acl(ctx, &m, v.oid, false)),
+                temp_persistence(&v.schema),
+                ("reloptions", crate::reloptions::as_value(&v.reloptions)),
+            ],
         ));
     }
     for seq in m.sequences() {
@@ -460,7 +466,12 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             m.namespace(&t.schema),
             if partitioned { 'I' } else { 'i' },
             natts,
-            vec![("relam", oid(403)), ("relfilenode", oid(if partitioned { 0 } else { idx.oid })), temp_persistence(&t.schema)],
+            vec![
+                ("relam", oid(403)),
+                ("relfilenode", oid(if partitioned { 0 } else { idx.oid })),
+                temp_persistence(&t.schema),
+                ("reloptions", crate::reloptions::as_value(&idx.reloptions)),
+            ],
         ));
     }
     for d in super::defs() {
@@ -807,6 +818,7 @@ fn user_type_rows(s: &Spec, catalog: &pgmem_catalog::Catalog, t: &pgmem_catalog:
                     indexes: vec![],
                     matview: None,
                     unlogged: false,
+                    reloptions: Vec::new(),
                 };
                 let mut col = pgmem_catalog::ColumnDef::new("value", base.clone());
                 col.typmod = *typmod;
@@ -1401,6 +1413,7 @@ fn pg_matviews(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 query: mv.query.clone(),
                 search_path: mv.search_path.clone(),
                 check_option: false,
+                reloptions: Vec::new(),
             };
             s.row(vec![
                 ("schemaname", name(&t.schema)),

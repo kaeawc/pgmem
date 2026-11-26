@@ -1,0 +1,229 @@
+# Storage parameters: WITH (...), ALTER ... SET / RESET (...), pg_class.reloptions.
+
+statement ok
+CREATE TABLE plain (id int); CREATE TABLE t (id int PRIMARY KEY, n int) WITH (fillfactor = 70, Autovacuum_enabled = false, toast.autovacuum_enabled = off)
+
+query
+SELECT relname, reloptions FROM pg_class WHERE relname IN ('plain', 't', 't_pkey') ORDER BY relname
+----
+relname:name | reloptions:_text
+plain | NULL
+t | {fillfactor=70,autovacuum_enabled=false}
+t_pkey | NULL
+
+# Values stay as written; bare words fold to lower case
+statement ok
+CREATE TABLE v (id int) WITH (fillfactor = ' 70', vacuum_index_cleanup = Auto, autovacuum_enabled, autovacuum_vacuum_scale_factor = 0.50)
+
+query
+SELECT reloptions FROM pg_class WHERE relname = 'v'
+----
+reloptions:_text
+{"fillfactor= 70",vacuum_index_cleanup=auto,autovacuum_enabled=true,autovacuum_vacuum_scale_factor=0.50}
+
+statement ok
+CREATE TABLE ctas WITH (fillfactor = 50) AS SELECT 1 AS x
+
+query
+SELECT reloptions FROM pg_class WHERE relname = 'ctas'
+----
+reloptions:_text
+{fillfactor=50}
+
+statement error 22023 unrecognized parameter "foo"
+CREATE TABLE e (id int) WITH (foo = 1)
+
+statement error 22023 unrecognized parameter namespace "ns"
+CREATE TABLE e (id int) WITH (ns.fillfactor = 70)
+
+statement error 22023 unrecognized parameter "fillfactor"
+CREATE TABLE e (id int) WITH (toast.fillfactor = 70)
+
+statement error 22023 value 5 out of bounds for option "fillfactor"
+CREATE TABLE e (id int) WITH (fillfactor = 5)
+
+statement error 22023 invalid value for integer option "fillfactor": true
+CREATE TABLE e (id int) WITH (fillfactor)
+
+statement error 22023 invalid value for boolean option "autovacuum_enabled": maybe
+CREATE TABLE e (id int) WITH (autovacuum_enabled = maybe)
+
+statement error 22023 invalid value for enum option "vacuum_index_cleanup": bad
+CREATE TABLE e (id int) WITH (vacuum_index_cleanup = bad)
+
+statement error 22023 parameter "fillfactor" specified more than once
+CREATE TABLE e (id int) WITH (fillfactor = 70, fillfactor = 80)
+
+statement error 0A000 tables declared WITH OIDS are not supported
+CREATE TABLE e (id int) WITH (oids = true)
+
+# SET drops the old entry and appends; RESET ignores unknown names
+statement ok
+ALTER TABLE t SET (fillfactor = 80, parallel_workers = 2)
+
+query
+SELECT reloptions FROM pg_class WHERE relname = 't'
+----
+reloptions:_text
+{autovacuum_enabled=false,fillfactor=80,parallel_workers=2}
+
+statement ok
+ALTER TABLE t RESET (fillfactor, nonsense, toast.whatever)
+
+query
+SELECT reloptions FROM pg_class WHERE relname = 't'
+----
+reloptions:_text
+{autovacuum_enabled=false,parallel_workers=2}
+
+statement ok
+ALTER TABLE t RESET (autovacuum_enabled, parallel_workers)
+
+query
+SELECT reloptions FROM pg_class WHERE relname = 't'
+----
+reloptions:_text
+NULL
+
+statement error 22023 unrecognized parameter "security_barrier"
+ALTER TABLE t SET (security_barrier = true)
+
+statement error 22023 unrecognized parameter namespace "foo"
+ALTER TABLE t SET (foo.bar = 1)
+
+# Indexes
+statement ok
+CREATE INDEX i1 ON t (n) WITH (fillfactor = 60, deduplicate_items = on); CREATE INDEX i2 ON t (n) WITH (FILLFACTOR = 60, Deduplicate_items = 'off') WHERE n > 3; CREATE UNIQUE INDEX i3 ON t (id, n) WITH (fillfactor = 80); CREATE INDEX plain_idx ON t (id)
+
+query
+SELECT relname, reloptions FROM pg_class WHERE relname IN ('i1', 'i2', 'i3', 'plain_idx') ORDER BY relname
+----
+relname:name | reloptions:_text
+i1 | {fillfactor=60,deduplicate_items=on}
+i2 | {fillfactor=60,deduplicate_items=off}
+i3 | {fillfactor=80}
+plain_idx | NULL
+
+query
+SELECT pg_get_indexdef('i1'::regclass), pg_get_indexdef('i2'::regclass), pg_get_indexdef('i3'::regclass)
+----
+pg_get_indexdef:text | pg_get_indexdef:text | pg_get_indexdef:text
+CREATE INDEX i1 ON public.t USING btree (n) WITH (fillfactor='60', deduplicate_items='on') | CREATE INDEX i2 ON public.t USING btree (n) WITH (fillfactor='60', deduplicate_items=off) WHERE (n > 3) | CREATE UNIQUE INDEX i3 ON public.t USING btree (id, n) WITH (fillfactor='80')
+
+query
+SELECT indexdef FROM pg_indexes WHERE indexname = 'i2'
+----
+indexdef:text
+CREATE INDEX i2 ON public.t USING btree (n) WITH (fillfactor='60', deduplicate_items=off) WHERE (n > 3)
+
+statement ok
+ALTER INDEX i1 SET (fillfactor = 70, deduplicate_items = off)
+
+query
+SELECT reloptions FROM pg_class WHERE relname = 'i1'
+----
+reloptions:_text
+{fillfactor=70,deduplicate_items=off}
+
+statement ok
+ALTER INDEX i1 RESET (fillfactor, deduplicate_items)
+
+query
+SELECT reloptions FROM pg_class WHERE relname = 'i1'
+----
+reloptions:_text
+NULL
+
+statement error 22023 unrecognized parameter "foo"
+CREATE INDEX e ON t (n) WITH (foo = 1)
+
+statement error 22023 unrecognized parameter namespace "toast"
+CREATE INDEX e ON t (n) WITH (toast.fillfactor = 20)
+
+statement error 22023 value 5 out of bounds for option "fillfactor"
+CREATE INDEX e ON t (n) WITH (fillfactor = 5)
+
+statement error 22023 unrecognized parameter "autovacuum_enabled"
+ALTER INDEX i1 SET (autovacuum_enabled = true)
+
+statement error 42809 "t" is not an index
+ALTER INDEX t SET (fillfactor = 40)
+
+# Views
+statement ok
+CREATE VIEW v1 WITH (security_barrier, security_invoker = true) AS SELECT * FROM t; CREATE VIEW v2 WITH (check_option = CASCADED, security_barrier = 1) AS SELECT * FROM t WHERE n > 0; CREATE VIEW v3 AS SELECT * FROM t WHERE n > 0 WITH LOCAL CHECK OPTION; CREATE VIEW v4 AS SELECT * FROM t WHERE n > 0 WITH CHECK OPTION; CREATE VIEW v5 AS SELECT * FROM t
+
+query
+SELECT relname, reloptions FROM pg_class WHERE relname IN ('v1', 'v2', 'v3', 'v4', 'v5') ORDER BY relname
+----
+relname:name | reloptions:_text
+v1 | {security_barrier=true,security_invoker=true}
+v2 | {check_option=cascaded,security_barrier=1}
+v3 | {check_option=local}
+v4 | {check_option=cascaded}
+v5 | NULL
+
+query
+SELECT table_name, check_option FROM information_schema.views WHERE table_name IN ('v1', 'v2', 'v3', 'v4', 'v5') ORDER BY 1
+----
+table_name:name | check_option:varchar
+v1 | NONE
+v2 | CASCADED
+v3 | LOCAL
+v4 | CASCADED
+v5 | NONE
+
+statement ok
+ALTER VIEW v1 SET (security_barrier = false, check_option = local)
+
+query
+SELECT reloptions FROM pg_class WHERE relname = 'v1'
+----
+reloptions:_text
+{security_invoker=true,security_barrier=false,check_option=local}
+
+statement ok
+ALTER TABLE v1 SET (security_invoker = off); ALTER VIEW v1 RESET (check_option, security_barrier)
+
+query
+SELECT reloptions FROM pg_class WHERE relname = 'v1'
+----
+reloptions:_text
+{security_invoker=off}
+
+statement ok
+CREATE OR REPLACE VIEW v2 AS SELECT * FROM t WHERE n > 0
+
+query
+SELECT reloptions FROM pg_class WHERE relname = 'v2'
+----
+reloptions:_text
+NULL
+
+statement error 22023 unrecognized parameter "fillfactor"
+CREATE VIEW e WITH (fillfactor = 50) AS SELECT * FROM t
+
+statement error 22023 invalid value for enum option "check_option": bad
+CREATE VIEW e WITH (check_option = bad) AS SELECT * FROM t
+
+statement error 22023 parameter "check_option" specified more than once
+CREATE VIEW e WITH (check_option = local) AS SELECT * FROM t WITH CHECK OPTION
+
+statement error 42809 "t" is not a view
+ALTER VIEW t SET (security_barrier = true)
+
+# Materialized views take table options
+statement ok
+CREATE MATERIALIZED VIEW m WITH (fillfactor = 50) AS SELECT 1 AS x; ALTER MATERIALIZED VIEW m SET (fillfactor = 60, autovacuum_enabled = false); ALTER TABLE m SET (parallel_workers = 3)
+
+query
+SELECT reloptions FROM pg_class WHERE relname = 'm'
+----
+reloptions:_text
+{fillfactor=60,autovacuum_enabled=false,parallel_workers=3}
+
+statement error 22023 unrecognized parameter "check_option"
+CREATE MATERIALIZED VIEW m2 WITH (check_option = local) AS SELECT 1
+
+statement error 42809 "t" is not a materialized view
+ALTER MATERIALIZED VIEW t SET (fillfactor = 60)
