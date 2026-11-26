@@ -302,7 +302,7 @@ impl Binder<'_> {
     }
 
     /// Binds RETURNING over the statement's row followed by the old and the new version of
-    /// the target row (Postgres 18's `old.col` / `new.col`, renamed by
+    /// the target row, each with its system columns (Postgres 18's `old.col` / `new.col`, renamed by
     /// `RETURNING WITH (OLD AS o, NEW AS n)`), as the executor evaluates it.
     pub(crate) fn bind_returning(&self, items: &[ir::SelectItem], ctx: &Ctx, table: &TableDef) -> SqlResult<(Vec<Expr>, Vec<OutCol>)> {
         let (aliases, items) = match items.first() {
@@ -321,7 +321,7 @@ impl Binder<'_> {
         let current = &ctx.current().scope;
         let mut cols = current.cols.clone();
         for alias in [&aliases.0, &aliases.1] {
-            cols.extend(physical_scope(table, alias).cols.into_iter().map(|mut c| {
+            cols.extend(physical_scope(table, alias).cols.into_iter().chain(super::system_scope_cols(alias)).map(|mut c| {
                 c.hidden_unqualified = true;
                 c
             }));

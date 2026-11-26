@@ -12,7 +12,7 @@ use pgmem_storage::Txn;
 use pgmem_types::{SqlError, SqlResult, Type, Value, code};
 use std::sync::Arc;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Event {
     Insert,
     Update,

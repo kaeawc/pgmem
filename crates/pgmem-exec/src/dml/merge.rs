@@ -5,6 +5,11 @@
 //! A partitioned target's rows are its leaf partitions': rows are handled in the target's
 //! layout, inserted rows are routed to their leaf, and an UPDATE whose new row belongs to
 //! another partition moves it there.
+//!
+//! Triggers fire as in Postgres: the target's statement triggers for every action type the
+//! WHEN clauses list (BEFORE: INSERT, UPDATE, DELETE; AFTER: DELETE, UPDATE, INSERT), and the
+//! row triggers of the leaf each row is stored in (a move is a DELETE from one leaf and an
+//! INSERT into the other). BEFORE row triggers may change the new row or skip it.
 
 use super::{
     Checks, DmlResult, apply_generated, check_checks, check_foreign_keys, check_not_null, check_uniques, identity_always_error, pad,
@@ -13,16 +18,112 @@ use super::{
 use crate::bind::merge::{MergeActionPlan, MergeClausePlan, MergePlan};
 use crate::bind::{Binder, SYSTEM_COLUMNS};
 use crate::eval::{EvalCtx, StatementState, eval, eval_pred};
+use crate::functions::Exec;
 use crate::partition::{constraint_error, remap, route};
 use crate::plan::Row;
 use crate::run::run;
 use crate::session::SessionEnv;
-use pgmem_catalog::{Identity, Oid, TableDef};
+use crate::triggers::{self, Event};
+use pgmem_catalog::{FunctionDef, Identity, Oid, TableDef, TriggerDef, TriggerTiming};
 use pgmem_ir::MergeMatch;
 use pgmem_storage::{RowId, Txn};
 use pgmem_types::{SqlError, SqlResult, Value, code};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::Arc;
+
+type TriggerList = Vec<(Arc<TriggerDef>, Arc<FunctionDef>)>;
+
+/// The triggers a MERGE fires: the target's statement triggers for each action type listed,
+/// and the row triggers of each leaf, loaded on first use.
+struct MergeTriggers {
+    /// The action types the WHEN clauses list, in BEFORE STATEMENT order.
+    events: Vec<Event>,
+    /// The columns of every UPDATE action: what `UPDATE OF` matches.
+    updated: Vec<String>,
+    rows: RefCell<HashMap<(Oid, Event, bool), Rc<TriggerList>>>,
+}
+
+impl MergeTriggers {
+    fn new(plan: &MergePlan) -> MergeTriggers {
+        let table = &plan.rules.table;
+        let mut updated: Vec<String> = Vec::new();
+        let mut listed = [false; 3];
+        for c in &plan.clauses {
+            match &c.action {
+                MergeActionPlan::Insert { .. } => listed[0] = true,
+                MergeActionPlan::Update(assignments) => {
+                    listed[1] = true;
+                    for (slot, _) in assignments {
+                        let name = &table.columns[*slot].name;
+                        if !updated.contains(name) {
+                            updated.push(name.clone());
+                        }
+                    }
+                }
+                MergeActionPlan::Delete => listed[2] = true,
+                MergeActionPlan::DoNothing => {}
+            }
+        }
+        let events = [Event::Insert, Event::Update, Event::Delete].into_iter().zip(listed).filter(|(_, l)| *l).map(|(e, _)| e).collect();
+        MergeTriggers { events, updated, rows: RefCell::default() }
+    }
+
+    fn load(&self, txn: &Txn, table: &TableDef, event: Event, when: TriggerTiming, row: bool, env: &SessionEnv) -> TriggerList {
+        triggers::load(txn, table, event, when, row, (event == Event::Update).then_some(self.updated.as_slice()), env)
+    }
+
+    /// `leaf`'s BEFORE (or AFTER) row triggers for `event`.
+    fn row(&self, txn: &Txn, target: &Arc<TableDef>, leaf: Oid, event: Event, before: bool, env: &SessionEnv) -> Rc<TriggerList> {
+        let key = (leaf, event, before);
+        if let Some(list) = self.rows.borrow().get(&key) {
+            return Rc::clone(list);
+        }
+        let when = if before { TriggerTiming::Before } else { TriggerTiming::After };
+        let list = Rc::new(self.load(txn, &leaf_def(txn, target, leaf), event, when, true, env));
+        self.rows.borrow_mut().insert(key, Rc::clone(&list));
+        list
+    }
+
+    /// The target's statement triggers: BEFORE in INSERT, UPDATE, DELETE order, AFTER in reverse.
+    fn statement(&self, when: TriggerTiming, table: &TableDef, txn: &mut Txn, env: &SessionEnv, state: &StatementState) -> SqlResult<()> {
+        let mut events = self.events.clone();
+        if when == TriggerTiming::After {
+            events.reverse();
+        }
+        for event in events {
+            let list = self.load(txn, table, event, when, false, env);
+            if !list.is_empty() {
+                triggers::fire_statement(&list, table, event, &mut Exec::Write { txn, env, state })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Fires the AFTER row triggers of each applied change (rows in their leaf's layout).
+    fn after_rows(
+        &self,
+        changes: Vec<AfterRow>,
+        target: &Arc<TableDef>,
+        txn: &mut Txn,
+        env: &SessionEnv,
+        state: &StatementState,
+    ) -> SqlResult<()> {
+        for (leaf, event, new, old) in changes {
+            let list = self.row(txn, target, leaf, event, false, env);
+            if list.is_empty() {
+                continue;
+            }
+            let def = leaf_def(txn, target, leaf);
+            triggers::fire_row(&list, &def, event, new, old.as_ref(), &mut Exec::Write { txn, env, state })?;
+        }
+        Ok(())
+    }
+}
+
+/// An applied change for the AFTER row triggers: (leaf, event, new row, old row).
+type AfterRow = (Oid, Event, Option<Row>, Option<Row>);
 
 /// A change, with rows in the target's layout and the leaf partition (the target itself when
 /// it is not partitioned) that stores them.
@@ -70,6 +171,7 @@ fn leaf_def(txn: &Txn, target: &Arc<TableDef>, leaf: Oid) -> Arc<TableDef> {
 struct Merger<'a, 'c> {
     plan: &'a MergePlan,
     ctx: &'a EvalCtx<'c>,
+    triggers: &'a MergeTriggers,
     /// The target's physical width; its system columns follow in the combined row.
     width: usize,
     effects: Vec<Effect>,
@@ -96,7 +198,12 @@ impl<'a> Merger<'a, '_> {
         Ok(None)
     }
 
-    fn emit(&mut self, action: &'static str, current: &Row, old: Option<&Row>, new: Option<&Row>) -> SqlResult<()> {
+    /// The system columns of the target row in `combined` (target ++ system ++ source).
+    fn system<'r>(&self, combined: &'r Row) -> &'r [Value] {
+        &combined[self.width..self.source_start()]
+    }
+
+    fn emit(&mut self, action: &'static str, current: &Row, old: Option<(&Row, &[Value])>, new: Option<(&Row, &[Value])>) -> SqlResult<()> {
         if self.plan.returning.is_empty() {
             return Ok(());
         }
@@ -128,6 +235,61 @@ impl<'a> Merger<'a, '_> {
         Ok(table.oid)
     }
 
+    /// The leaf a new row of a partitioned target routes to (the target itself otherwise).
+    fn route(&self, row: &Row) -> SqlResult<Oid> {
+        let table = &self.plan.rules.table;
+        let catalog = self.ctx.txn.catalog();
+        if catalog.is_partitioned(table.oid) {
+            return Ok(route(catalog, &Binder::new(catalog, &[]), table, row, self.ctx)?.0.oid);
+        }
+        Ok(table.oid)
+    }
+
+    /// [`Self::place`], which must be `leaf` (a BEFORE INSERT trigger of `leaf` may have
+    /// changed the partition key).
+    fn place_in(&self, leaf: Oid, row: &Row) -> SqlResult<()> {
+        if self.place(row)? == leaf {
+            return Ok(());
+        }
+        let (txn, table) = (self.ctx.txn, &self.plan.rules.table);
+        let def = leaf_def(txn, table, leaf);
+        Err(constraint_error(&def, &leaf_row(txn, table, leaf, row)))
+    }
+
+    /// Fires `leaf`'s BEFORE row triggers for `event` on rows of the target's layout: the row
+    /// to use (the old one for DELETE), or `None` when a trigger skipped it.
+    fn before_row(&self, leaf: Oid, event: Event, new: Option<Row>, old: Option<&Row>) -> SqlResult<Option<Row>> {
+        let (txn, table) = (self.ctx.txn, &self.plan.rules.table);
+        let list = self.triggers.row(txn, table, leaf, event, true, self.ctx.env);
+        if list.is_empty() {
+            return Ok(new.or_else(|| old.cloned()));
+        }
+        let def = leaf_def(txn, table, leaf);
+        let to_leaf = |r: &Row| leaf_row(txn, table, leaf, r);
+        let old_leaf = old.map(to_leaf);
+        let out = triggers::fire_row(&list, &def, event, new.as_ref().map(to_leaf), old_leaf.as_ref(), &mut Exec::Read(self.ctx))?;
+        Ok(out.map(|r| if def.oid == table.oid { r } else { remap(&r, &def, table) }))
+    }
+
+    /// The new row of an UPDATE of `leaf`'s row `old` after the BEFORE triggers, with the leaf
+    /// it goes to; `None` when a trigger skipped it. A row moving to another leaf is deleted
+    /// from its own (BEFORE DELETE triggers) and inserted into the other (BEFORE INSERT).
+    fn updated_row(&self, leaf: Oid, old: &Row, new_row: Row) -> SqlResult<Option<(Oid, Row)>> {
+        let Some(mut new_row) = self.before_row(leaf, Event::Update, Some(new_row), Some(old))? else { return Ok(None) };
+        apply_generated(&self.plan.rules, &mut new_row, self.ctx)?;
+        let to = self.place(&new_row)?;
+        if to == leaf {
+            return Ok(Some((to, new_row)));
+        }
+        if self.before_row(leaf, Event::Delete, None, Some(old))?.is_none() {
+            return Ok(None);
+        }
+        let Some(mut new_row) = self.before_row(to, Event::Insert, Some(new_row), None)? else { return Ok(None) };
+        apply_generated(&self.plan.rules, &mut new_row, self.ctx)?;
+        self.place_in(to, &new_row)?;
+        Ok(Some((to, new_row)))
+    }
+
     /// WHEN MATCHED / NOT MATCHED BY SOURCE for target row `t` (`combined` = target ++ system
     /// columns ++ source).
     fn target_action(&mut self, kind: MergeMatch, t: &Target, combined: &Row) -> SqlResult<()> {
@@ -135,12 +297,16 @@ impl<'a> Merger<'a, '_> {
         let (leaf, id, target) = (t.0, t.1, &t.2);
         match &clause.action {
             MergeActionPlan::DoNothing | MergeActionPlan::Insert { .. } => return Ok(()),
-            MergeActionPlan::Update(_) | MergeActionPlan::Delete if !self.touched.insert((leaf, id)) => {
+            MergeActionPlan::Update(_) | MergeActionPlan::Delete if self.touched.contains(&(leaf, id)) => {
                 return Err(SqlError::new(code::CARDINALITY_VIOLATION, "MERGE command cannot affect row a second time")
                     .with_hint("Ensure that not more than one source row matches any one target row."));
             }
             MergeActionPlan::Delete => {
-                self.emit("DELETE", combined, Some(target), None)?;
+                if self.before_row(leaf, Event::Delete, None, Some(target))?.is_none() {
+                    return Ok(());
+                }
+                self.touched.insert((leaf, id));
+                self.emit("DELETE", combined, Some((target, self.system(combined))), None)?;
                 self.effects.push(Effect::Delete(leaf, id, target.clone()));
             }
             MergeActionPlan::Update(assignments) => {
@@ -154,12 +320,13 @@ impl<'a> Merger<'a, '_> {
                         },
                     };
                 }
-                apply_generated(&self.plan.rules, &mut new_row, self.ctx)?;
-                let to = self.place(&new_row)?;
+                let Some((to, new_row)) = self.updated_row(leaf, target, new_row)? else { return Ok(()) };
+                self.touched.insert((leaf, id));
                 check_not_null(&self.plan.rules.table, &new_row)?;
                 check_checks(&self.plan.rules, &new_row, self.ctx)?;
                 let current = self.current(&new_row, to, Some(id), combined);
-                self.emit("UPDATE", &current, Some(target), Some(&new_row))?;
+                let new_system = self.system(&current).to_vec();
+                self.emit("UPDATE", &current, Some((target, self.system(combined))), Some((&new_row, &new_system)))?;
                 self.effects.push(if to == leaf {
                     Effect::Update(leaf, id, target.clone(), new_row)
                 } else {
@@ -202,12 +369,15 @@ impl<'a> Merger<'a, '_> {
                 row[i] = eval(d, &[], self.ctx)?;
             }
         }
+        let leaf = self.route(&row)?;
+        let Some(mut row) = self.before_row(leaf, Event::Insert, Some(row), None)? else { return Ok(()) };
         apply_generated(&self.plan.rules, &mut row, self.ctx)?;
-        let leaf = self.place(&row)?;
+        self.place_in(leaf, &row)?;
         check_not_null(&table, &row)?;
         check_checks(&self.plan.rules, &row, self.ctx)?;
         let current = self.current(&row, leaf, None, combined);
-        self.emit("INSERT", &current, None, Some(&row))?;
+        let system = self.system(&current).to_vec();
+        self.emit("INSERT", &current, None, Some((&row, &system)))?;
         self.effects.push(Effect::Insert(leaf, row));
         Ok(())
     }
@@ -306,10 +476,19 @@ struct LeafChanges {
 
 pub fn exec_merge(plan: &MergePlan, txn: &mut Txn, params: &[Value], env: &SessionEnv, state: &StatementState) -> SqlResult<DmlResult> {
     let table = Arc::clone(&plan.rules.table);
+    let trig = MergeTriggers::new(plan);
+    trig.statement(TriggerTiming::Before, &table, txn, env, state)?;
     let (effects, returning) = {
         let ctx = EvalCtx::new(txn, params, env, state);
-        let mut m =
-            Merger { plan, ctx: &ctx, width: table.columns.len(), effects: Vec::new(), returning: Vec::new(), touched: HashSet::new() };
+        let mut m = Merger {
+            plan,
+            ctx: &ctx,
+            triggers: &trig,
+            width: table.columns.len(),
+            effects: Vec::new(),
+            returning: Vec::new(),
+            touched: HashSet::new(),
+        };
         plan_effects(&mut m)?;
         (m.effects, m.returning)
     };
@@ -317,11 +496,13 @@ pub fn exec_merge(plan: &MergePlan, txn: &mut Txn, params: &[Value], env: &Sessi
     let mut leaves: BTreeMap<Oid, LeafChanges> = BTreeMap::new();
     // Rows moved between partitions: an update of the target's row (its layout).
     let (mut moved_old, mut moved_new) = (Vec::new(), Vec::new());
+    let mut after: Vec<AfterRow> = Vec::new();
     for e in effects {
         match e {
             Effect::Insert(oid, row) => {
                 let row = leaf_row(txn, &table, oid, &row);
                 leaves.entry(oid).or_default().new_versions.push(row.clone());
+                after.push((oid, Event::Insert, Some(row.clone()), None));
                 txn.insert(oid, row);
             }
             Effect::Update(oid, id, old, new) => {
@@ -329,16 +510,21 @@ pub fn exec_merge(plan: &MergePlan, txn: &mut Txn, params: &[Value], env: &Sessi
                 let lc = leaves.entry(oid).or_default();
                 lc.new_versions.push(new.clone());
                 lc.updated_new.push(new.clone());
-                lc.updated_old.push(old);
+                lc.updated_old.push(old.clone());
+                after.push((oid, Event::Update, Some(new.clone()), Some(old)));
                 txn.update(oid, id, new);
             }
             Effect::Delete(oid, id, old) => {
-                leaves.entry(oid).or_default().deleted.push(leaf_row(txn, &table, oid, &old));
+                let old = leaf_row(txn, &table, oid, &old);
+                leaves.entry(oid).or_default().deleted.push(old.clone());
+                after.push((oid, Event::Delete, None, Some(old)));
                 txn.delete(oid, id);
             }
             Effect::Move { from, id, to, old, new } => {
                 let row = leaf_row(txn, &table, to, &new);
                 leaves.entry(to).or_default().new_versions.push(row.clone());
+                after.push((from, Event::Delete, None, Some(leaf_row(txn, &table, from, &old))));
+                after.push((to, Event::Insert, Some(row.clone()), None));
                 txn.delete(from, id);
                 txn.insert(to, row);
                 moved_old.push(old);
@@ -362,5 +548,7 @@ pub fn exec_merge(plan: &MergePlan, txn: &mut Txn, params: &[Value], env: &Sessi
         referential_actions(txn, &leaf, &lc.deleted, &[], true, 0, ck)?;
     }
     referential_actions(txn, &table, &moved_old, &moved_new, false, 0, ck)?;
+    trig.after_rows(after, &table, txn, env, state)?;
+    trig.statement(TriggerTiming::After, &table, txn, env, state)?;
     Ok(DmlResult { count, rows: returning })
 }

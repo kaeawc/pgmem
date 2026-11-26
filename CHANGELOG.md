@@ -19,6 +19,12 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
   are routed to their partition (23514 when none accepts the row), updates move rows across
   partitions, and a target that is itself a partition enforces its partition constraint.
   `MERGE ... RETURNING` can read the target's system columns (`tableoid` is the row's leaf).
+- `MERGE` fires triggers: the target's BEFORE / AFTER statement triggers for each action type its
+  WHEN clauses list (even when no row matches), and BEFORE / AFTER row triggers (WHEN, `UPDATE OF`)
+  of the table or leaf partition each row is stored in; BEFORE row triggers can change the new row
+  or skip it. A row moved to another partition fires DELETE and INSERT row triggers.
+- `RETURNING old.tableoid` / `new.tableoid` (and the other system columns of `old` / `new`) work in
+  INSERT, UPDATE, DELETE and MERGE instead of failing with "column does not exist".
 
 ### Changed
 
