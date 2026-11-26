@@ -470,6 +470,7 @@ fn view_table(txn: &Txn, view: &pgmem_catalog::ViewDef) -> TableDef {
         indexes: Vec::new(),
         matview: None,
         unlogged: false,
+        replident: 'd',
         reloptions: Vec::new(),
     }
 }
