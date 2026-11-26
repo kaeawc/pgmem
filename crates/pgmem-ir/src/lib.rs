@@ -1208,6 +1208,8 @@ pub struct CreateIndex {
     pub name: Option<String>,
     pub table: ObjectName,
     pub columns: Vec<OrderByExpr>,
+    /// `INCLUDE (...)` column names.
+    pub include: Vec<String>,
     pub unique: bool,
     pub if_not_exists: bool,
     pub concurrently: bool,
@@ -1217,8 +1219,6 @@ pub struct CreateIndex {
     pub method: Option<String>,
     /// The explicit operator class of each key (parallel to `columns`; the last name part).
     pub opclasses: Vec<Option<String>>,
-    /// `INCLUDE (...)` column names.
-    pub include: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

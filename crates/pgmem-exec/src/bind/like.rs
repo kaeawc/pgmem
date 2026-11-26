@@ -29,6 +29,7 @@ pub struct LikeIndex {
     pub predicate: Option<ir::Expr>,
     pub method: String,
     pub opclasses: Vec<pgmem_catalog::IndexOpclass>,
+    pub include: Vec<String>,
 }
 
 /// Inserts the LIKE sources' columns into `table` (whose columns are the statement's own, in
@@ -157,6 +158,7 @@ fn copy_columns(
                     predicate: idx.predicate.clone(),
                     method: idx.method.clone(),
                     opclasses: idx.opclasses.clone(),
+                    include: idx.include.iter().map(name_of).collect(),
                 }),
             }
         }
@@ -223,6 +225,11 @@ pub fn build_index(b: &Binder, table: &TableDef, li: &LikeIndex, taken: &mut Vec
         &used,
     );
     taken.push(name.clone());
+    let include = li
+        .include
+        .iter()
+        .map(|n| table.column_index(n).ok_or_else(|| SqlError::undefined_column(&format!("\"{n}\""))))
+        .collect::<SqlResult<Vec<_>>>()?;
     Ok(IndexDef {
         method: li.method.clone(),
         opclasses: li.opclasses.clone(),
@@ -230,6 +237,7 @@ pub fn build_index(b: &Binder, table: &TableDef, li: &LikeIndex, taken: &mut Vec
         name,
         columns,
         exprs: li.exprs.clone(),
+        include,
         unique: li.unique,
         primary: false,
         nulls_not_distinct: li.nulls_not_distinct,
