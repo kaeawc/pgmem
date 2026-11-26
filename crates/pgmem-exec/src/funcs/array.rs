@@ -192,6 +192,7 @@ pub fn srf_column_names(name: &str) -> Option<&'static [&'static str]> {
     match name {
         "pg_partition_tree" => Some(&["relid", "parentrelid", "isleaf", "level"]),
         "pg_partition_ancestors" => Some(&["relid"]),
+        "pg_get_keywords" => Some(&["word", "catcode", "barelabel", "catdesc", "baredesc"]),
         _ => None,
     }
 }
@@ -266,6 +267,9 @@ pub fn resolve_srf(name: &str, args: &[Type]) -> SqlResult<Option<SrfResolution>
             }
             let out = targets[0].clone();
             Ok(Some((vec![out], targets, generate_series)))
+        }
+        "pg_get_keywords" if args.is_empty() => {
+            Ok(Some((vec![Type::Text, Type::Char, Type::Bool, Type::Text, Type::Text], vec![], pg_get_keywords)))
         }
         "pg_listening_channels" if args.is_empty() => Ok(Some((vec![Type::Text], vec![], pg_listening_channels))),
         "pg_partition_ancestors" if args.len() == 1 => {
@@ -702,6 +706,27 @@ fn string_to_array(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
 
 fn pg_listening_channels(_: &[Value], ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     Ok(ctx.env.objects.listening.iter().map(|c| vec![Value::Text(c.clone())]).collect())
+}
+
+/// PostgreSQL 18's keyword list (word, catcode, barelabel, catdesc, baredesc), recorded from the server.
+pub(super) const KEYWORDS: &str = include_str!("../catalog_views/pg_keywords.tsv");
+
+/// `pg_get_keywords()`: PostgreSQL 18's keyword list (recorded from the server), in its order.
+fn pg_get_keywords(_: &[Value], _: &EvalCtx) -> SqlResult<Vec<Row>> {
+    Ok(KEYWORDS
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            vec![
+                Value::Text(f[0].to_owned()),
+                Value::Text(f[1].to_owned()),
+                Value::Bool(f[2] == "t"),
+                Value::Text(f[3].to_owned()),
+                Value::Text(f[4].to_owned()),
+            ]
+        })
+        .collect())
 }
 
 fn string_to_table(a: &[Value], ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
