@@ -176,9 +176,10 @@ pub fn deparse_index(catalog: &Catalog, table: &TableDef, index: &IndexDef) -> S
         keys.push(if looks_like_function(&n) || matches!(n, Node::Var { .. }) { text } else { format!("({text})") });
     }
     let mut s = format!(
-        "CREATE {}INDEX {} ON {}.{} USING btree ({})",
+        "CREATE {}INDEX {} ON {}{}.{} USING btree ({})",
         if index.unique { "UNIQUE " } else { "" },
         quote_ident(&index.name),
+        if catalog.is_partitioned(table.oid) { "ONLY " } else { "" },
         quote_ident(&table.schema),
         quote_ident(&table.name),
         keys.join(", ")

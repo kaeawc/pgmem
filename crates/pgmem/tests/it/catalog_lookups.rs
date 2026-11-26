@@ -298,3 +298,23 @@ fn pg_constraint_connamespace_follows_owner() {
         [["public"]]
     );
 }
+
+/// The deparser quotes every keyword that is not unreserved, exactly as `quote_ident` does.
+#[test]
+fn deparse_quotes_every_non_unreserved_keyword() {
+    let (_db, mut c) = setup();
+    let kws: Vec<String> =
+        rows(&mut c, "SELECT word FROM pg_get_keywords() WHERE catcode <> 'U' ORDER BY 1").into_iter().map(|r| r[0].clone()).collect();
+    assert!(kws.len() > 100);
+    for kw in kws {
+        c.batch_execute(&format!("CREATE TABLE kwt (\"{kw}\" int); CREATE INDEX kwt_i ON kwt (\"{kw}\")")).expect("create");
+        let def = rows(&mut c, "SELECT pg_get_indexdef('kwt_i'::regclass)");
+        assert_eq!(def, [[format!("CREATE INDEX kwt_i ON public.kwt USING btree (\"{kw}\")")]], "{kw}");
+        c.batch_execute("DROP TABLE kwt").expect("drop");
+    }
+    c.batch_execute("CREATE TABLE kwu (abort int, \"a$b\" int); CREATE INDEX kwu_i ON kwu (abort, \"a$b\")").expect("create");
+    assert_eq!(
+        rows(&mut c, "SELECT pg_get_indexdef('kwu_i'::regclass)"),
+        [["CREATE INDEX kwu_i ON public.kwu USING btree (abort, \"a$b\")"]]
+    );
+}

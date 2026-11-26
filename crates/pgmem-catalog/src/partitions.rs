@@ -148,3 +148,53 @@ impl Catalog {
         self.partition_keys.contains_key(&table)
     }
 }
+
+/// Partition indexes: the parent index each partition's index is attached to
+/// (`ALTER INDEX ... ATTACH PARTITION`, or the copy made for a partition), and validity.
+impl Catalog {
+    /// The index this partition index is attached to.
+    pub fn index_parent(&self, index: Oid) -> Option<Oid> {
+        self.index_parents.get(&index).copied()
+    }
+
+    pub fn set_index_parent(&mut self, index: Oid, parent: Option<Oid>) {
+        match parent {
+            Some(p) => {
+                self.index_parents.insert(index, p);
+            }
+            None => {
+                self.index_parents.remove(&index);
+            }
+        }
+    }
+
+    /// The indexes attached to `parent`, in OID order.
+    pub fn index_children(&self, parent: Oid) -> Vec<Oid> {
+        self.index_parents.iter().filter(|(_, p)| **p == parent).map(|(c, _)| *c).collect()
+    }
+
+    /// The table and definition of the index with this OID.
+    pub fn index_by_oid(&self, oid: Oid) -> Option<(Arc<TableDef>, crate::IndexDef)> {
+        self.tables().find_map(|t| t.indexes.iter().find(|i| i.oid == oid).map(|i| (Arc::clone(t), i.clone())))
+    }
+
+    /// `pg_index.indisvalid`.
+    pub fn index_valid(&self, index: Oid) -> bool {
+        !self.invalid_indexes.contains(&index)
+    }
+
+    pub fn set_index_valid(&mut self, index: Oid, valid: bool) {
+        if valid {
+            self.invalid_indexes.remove(&index);
+        } else {
+            self.invalid_indexes.insert(index);
+        }
+    }
+
+    /// Forgets a dropped index's links and validity.
+    pub fn forget_index(&mut self, index: Oid) {
+        self.index_parents.remove(&index);
+        self.index_parents.retain(|_, p| *p != index);
+        self.invalid_indexes.remove(&index);
+    }
+}
