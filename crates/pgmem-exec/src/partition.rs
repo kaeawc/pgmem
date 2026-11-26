@@ -711,6 +711,7 @@ pub(crate) fn create_partition(
         indexes: Vec::new(),
         matview: None,
         unlogged: ct.options.unlogged,
+        replident: 'd',
     };
     for c in &ct.columns {
         apply_column_options(&mut table, c)?;

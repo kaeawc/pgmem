@@ -182,6 +182,7 @@ fn domains(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 indexes: vec![],
                 matview: None,
                 unlogged: false,
+                replident: 'd',
             };
             let mut col = pgmem_catalog::ColumnDef::new("value", base.clone());
             col.typmod = *typmod;
