@@ -286,3 +286,20 @@ fn utility_statement_checks() {
     assert_eq!(plan[0].columns()[0].name(), "QUERY PLAN");
     assert_eq!(plan[0].columns()[0].type_(), &postgres::types::Type::JSON);
 }
+
+/// psycopg's server-side cursors DECLARE a cursor, then send Describe for the portal of that name.
+#[test]
+fn describe_portal_of_declared_cursor() {
+    let (db, mut c) = setup();
+    let mut raw = RawConn::connect(&db, &mut c);
+    raw.query("BEGIN");
+    raw.query("DECLARE cur CURSOR FOR SELECT 1 AS a, 'x'::text AS b");
+    raw.send(Some(b'D'), b"Pcur\0");
+    raw.send(Some(b'S'), &[]);
+    let r = raw.reply();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert_eq!(r.row_descriptions, [["a", "b"]]);
+    raw.send(Some(b'D'), b"Pmissing\0");
+    raw.send(Some(b'S'), &[]);
+    assert_eq!(raw.reply().errors, ["34000"]);
+}

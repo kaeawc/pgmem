@@ -78,6 +78,23 @@ fn binary_round_trip() {
     assert_eq!(message(&e), "COPY file signature not recognized");
 }
 
+/// PostgreSQL sends the binary file header in the first row's CopyData message (the trailer's,
+/// without rows); psycopg parses the first message as header plus row.
+#[test]
+fn binary_copy_out_message_framing() {
+    let (db, mut c) = setup();
+    let mut raw = RawConn::connect(&db, &mut c);
+    let header = b"PGCOPY\n\xff\r\n\0\0\0\0\0\0\0\0\0";
+    let r = raw.query("COPY (SELECT 1::int4 UNION ALL SELECT 2) TO STDOUT (FORMAT binary)");
+    assert_eq!(r.copy_data.len(), 3);
+    assert!(r.copy_data[0].starts_with(header));
+    assert_eq!(r.copy_data[0].len(), header.len() + 2 + 4 + 4);
+    assert_eq!(r.copy_data[2], (-1i16).to_be_bytes());
+    let r = raw.query("COPY (SELECT 1 WHERE false) TO STDOUT (FORMAT binary)");
+    assert_eq!(r.copy_data.len(), 1);
+    assert_eq!(r.copy_data[0], [header.as_slice(), &(-1i16).to_be_bytes()].concat());
+}
+
 #[test]
 fn defaults_triggers_and_where() {
     let (_db, mut c) = setup();

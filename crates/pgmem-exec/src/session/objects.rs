@@ -113,6 +113,12 @@ impl Session {
         self.prepared.get(name).cloned()
     }
 
+    /// The result columns of an open SQL cursor and whether it is BINARY (`Describe` of a portal
+    /// named after a `DECLARE`d cursor, as psycopg's server-side cursors do).
+    pub fn cursor_description(&self, name: &str) -> Option<(Vec<OutCol>, bool)> {
+        self.cursors.get(name).map(|c| (c.columns.clone(), c.info.binary))
+    }
+
     /// Protocol `Parse`: prepares `stmt` under `name` (the unnamed statement is replaced).
     pub fn prepare_protocol(&mut self, name: &str, text: &str, stmt: Statement, declared: &[Type]) -> SqlResult<Arc<PreparedStatement>> {
         if !name.is_empty() && self.prepared.contains_key(name) {
