@@ -1010,7 +1010,14 @@ pub(crate) fn exec_update(
     env: &SessionEnv,
     state: &StatementState,
 ) -> SqlResult<QueryResult> {
-    let columns = if u.returning.is_empty() { Vec::new() } else { crate::bind::bind_update(binder, u, ctx)?.returning_cols };
+    // RETURNING bound over the root (its columns, system columns, FROM, old / new): moved rows
+    // are evaluated against it, with their FROM row.
+    let (columns, returning) = if u.returning.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        let plan = crate::bind::bind_update(binder, u, ctx)?;
+        (plan.returning_cols, plan.returning)
+    };
     let alias = u.alias.clone().unwrap_or_else(|| root.name.clone());
     let owner = state.moved_rows.borrow().is_none();
     if owner {
@@ -1035,18 +1042,47 @@ pub(crate) fn exec_update(
     }
     if owner {
         let moved = state.moved_rows.borrow_mut().take().unwrap_or_default();
-        for (leaf_oid, id, row) in moved {
-            let Some(leaf) = txn.catalog().table_by_oid(leaf_oid).cloned() else { continue };
-            txn.delete(leaf_oid, id);
-            let root_row = remap(&row, &leaf, root);
+        for m in moved {
+            let Some(leaf) = txn.catalog().table_by_oid(m.leaf).cloned() else { continue };
+            txn.delete(m.leaf, m.id);
+            let root_row = remap(&m.new, &leaf, root);
             let catalog = Arc::new(txn.catalog().clone());
             let b = Binder::new(&catalog, &[]);
             let (target, target_row) = {
                 let ectx = EvalCtx::new(txn, params, env, state);
                 route(&catalog, &b, root, &root_row, &ectx)?
             };
-            let mut r = insert_into(&target, vec![target_row], &alias, None, u.returning.clone(), txn, env, state)?;
+            // The inserted row (after the target's BEFORE triggers and generated columns) comes
+            // back through the INSERT's RETURNING; the UPDATE's RETURNING is evaluated here.
+            let live: Vec<usize> = target.live_columns().map(|(i, _)| i).collect();
+            let inserted_cols = if returning.is_empty() {
+                Vec::new()
+            } else {
+                target
+                    .live_columns()
+                    .map(|(_, c)| ir::SelectItem::Expr { expr: ir::Expr::Column(vec![c.name.clone()]), alias: None })
+                    .collect()
+            };
+            let mut r = insert_into(&target, vec![target_row], &alias, None, inserted_cols, txn, env, state)?;
             r.tag = "UPDATE 1".into();
+            if !returning.is_empty() {
+                let mut rows = Vec::new();
+                for inserted in std::mem::take(&mut r.rows) {
+                    let mut leaf_row: Row = vec![Value::Null; target.columns.len()];
+                    for (slot, v) in live.iter().zip(inserted) {
+                        leaf_row[*slot] = v;
+                    }
+                    let new = remap(&leaf_row, &target, root);
+                    let old = remap(&m.old, &leaf, root);
+                    let mut current = new.clone();
+                    current.extend(crate::dml::system_values(target.oid, None, 0));
+                    current.extend(m.from.iter().cloned());
+                    let out = crate::dml::returning_row(&current, Some(&old), Some(&new), root.columns.len());
+                    let ectx = EvalCtx::new(txn, params, env, state);
+                    rows.push(returning.iter().map(|e| eval(e, &out, &ectx)).collect::<SqlResult<Vec<_>>>()?);
+                }
+                r.rows = rows;
+            }
             results.push(r);
         }
     }
