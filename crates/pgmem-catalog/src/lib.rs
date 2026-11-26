@@ -174,6 +174,8 @@ pub struct IndexDef {
     pub columns: Vec<usize>,
     /// Expression keys (`lower(email)`), kept unbound; enforced for unique indexes.
     pub exprs: Vec<Expr>,
+    /// `INCLUDE` (covering) column positions: stored in the index but not part of its key.
+    pub include: Vec<usize>,
     pub unique: bool,
     pub primary: bool,
     pub nulls_not_distinct: bool,
