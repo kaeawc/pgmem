@@ -103,6 +103,7 @@ mod nulls_order;
 mod numeric_fidelity;
 mod on_conflict;
 mod partitioning;
+mod pg_depend;
 mod position;
 mod qualified_star;
 mod query_fidelity;
