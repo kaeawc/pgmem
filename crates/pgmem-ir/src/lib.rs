@@ -214,6 +214,13 @@ pub enum Statement {
         cascade: bool,
     },
     CreateFunction(Box<CreateFunction>),
+    /// `ALTER {FUNCTION | PROCEDURE | ROUTINE} name [(types)] action ...` (not `OWNER TO`).
+    AlterFunction {
+        name: ObjectName,
+        types: Option<Vec<TypeName>>,
+        kind: RoutineKind,
+        actions: Vec<AlterFunctionAction>,
+    },
     /// `DROP {FUNCTION | PROCEDURE | ROUTINE} [IF EXISTS] name [(types)], ... [CASCADE]`.
     DropFunction {
         items: Vec<(ObjectName, Option<Vec<TypeName>>)>,
@@ -1341,6 +1348,41 @@ pub struct CreateFunction {
     pub volatility: Option<char>,
     pub strict: bool,
     pub security_definer: bool,
+    pub leakproof: bool,
+    /// `PARALLEL {UNSAFE | RESTRICTED | SAFE}` as `u` / `r` / `s`.
+    pub parallel: Option<char>,
+    pub cost: Option<f64>,
+    pub rows: Option<f64>,
+    /// `SET` / `RESET` options in the order written.
+    pub config: Vec<FunctionConfig>,
+}
+
+/// A `SET name {TO | =} value | FROM CURRENT | DEFAULT` / `RESET name | ALL` function option.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FunctionConfig {
+    /// `SET name TO v1, v2`: the values as written (strings, identifiers, numbers).
+    Set(String, Vec<String>),
+    /// `SET name FROM CURRENT`.
+    FromCurrent(String),
+    /// `SET name TO DEFAULT` / `RESET name`.
+    Reset(String),
+    /// `RESET ALL`.
+    ResetAll,
+}
+
+/// One action of `ALTER {FUNCTION | PROCEDURE | ROUTINE} name [(types)] action ...`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AlterFunctionAction {
+    Volatility(char),
+    Strict(bool),
+    SecurityDefiner(bool),
+    Leakproof(bool),
+    Parallel(char),
+    Cost(f64),
+    Rows(f64),
+    Config(FunctionConfig),
+    RenameTo(String),
+    SetSchema(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
