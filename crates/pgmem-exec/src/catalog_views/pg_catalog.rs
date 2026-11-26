@@ -164,9 +164,11 @@ pub static DEFS: &[Def] = &[
 fn pg_inherits(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let m = snapshot(ctx);
     Ok(rows_of(PG_INHERITS, |s| {
+        let indexes = m.indexes().into_iter().filter_map(|(_, i)| m.catalog.index_parent(i.oid).map(|p| (i.oid, p)));
         m.tables()
             .into_iter()
             .filter_map(|t| m.catalog.partition_of(t.oid).map(|of| (t.oid, of.parent)))
+            .chain(indexes)
             .map(|(child, parent)| {
                 s.row(vec![
                     ("inhrelid", oid(child)),
@@ -473,6 +475,7 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             vec![
                 ("relam", oid(403)),
                 ("relfilenode", oid(if partitioned { 0 } else { idx.oid })),
+                ("relispartition", boolean(m.catalog.index_parent(idx.oid).is_some())),
                 temp_persistence(&t.schema),
                 ("reloptions", crate::reloptions::as_value(&idx.reloptions)),
             ],
@@ -945,6 +948,7 @@ fn pg_index(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("indisunique", boolean(idx.unique)),
                 ("indnullsnotdistinct", boolean(idx.nulls_not_distinct)),
                 ("indisprimary", boolean(idx.primary)),
+                ("indisvalid", boolean(m.catalog.index_valid(idx.oid))),
                 ("indisclustered", boolean(idx.clustered)),
                 ("indisreplident", boolean(idx.replica)),
                 ("indkey", Value::Array(keys)),
