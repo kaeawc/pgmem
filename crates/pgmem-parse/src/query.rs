@@ -140,7 +140,7 @@ fn lower_set_expr(body: sq::SetExpr) -> SqlResult<SetExpr> {
             SetExpr::Select(Box::new(Select {
                 distinct: Distinct::All,
                 projection: vec![SelectItem::Wildcard],
-                from: vec![TableRef::Table { name: pgmem_ir::ObjectName(parts), alias: None }],
+                from: vec![TableRef::Table { name: pgmem_ir::ObjectName(parts), alias: None, only: false }],
                 selection: None,
                 group_by: Vec::new(),
                 grouping_sets: None,
@@ -349,10 +349,11 @@ fn lower_alias(a: Option<sq::TableAlias>) -> Option<TableAlias> {
 
 pub(crate) fn lower_table_factor(f: sq::TableFactor) -> SqlResult<TableRef> {
     Ok(match f {
-        sq::TableFactor::Table { name, alias, args, with_ordinality, .. } => {
+        sq::TableFactor::Table { name, alias, args, with_ordinality, inheritance, .. } => {
             let name = object_name(&name)?;
+            let only = matches!(inheritance, Some(sq::TableInheritance::Only { .. }));
             match args {
-                None => TableRef::Table { name, alias: lower_alias(alias) },
+                None => TableRef::Table { name, alias: lower_alias(alias), only },
                 Some(args) => {
                     let mut call = FunctionCall::new(name.base(), Vec::new());
                     call.name = name;

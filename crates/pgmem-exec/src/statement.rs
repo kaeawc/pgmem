@@ -172,6 +172,18 @@ pub(crate) fn exec_statement(
         Statement::Delete(d) if let Some(root) = crate::partition::partitioned_target(txn.catalog(), &d.table) => {
             crate::partition::exec_delete(d, &root, binder, ctx, txn, params, env, state)?
         }
+        Statement::Update(u)
+            if !u.only
+                && let Some(root) = crate::inherit::target(txn.catalog(), &u.table) =>
+        {
+            crate::inherit::exec_update(u, &root, binder, ctx, txn, params, env, state)?
+        }
+        Statement::Delete(d)
+            if !d.only
+                && let Some(root) = crate::inherit::target(txn.catalog(), &d.table) =>
+        {
+            crate::inherit::exec_delete(d, &root, binder, ctx, txn, params, env, state)?
+        }
         Statement::Insert(i) => {
             let plan = bind::bind_insert(binder, i, ctx)?;
             let r = crate::dml::exec_insert(&plan, txn, params, env, state)?;

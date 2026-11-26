@@ -130,8 +130,12 @@ fn copy_columns(
     if like.constraints {
         for con in &src.constraints {
             if let ConstraintKind::Check { expr } = &con.kind {
-                let timing =
-                    ir::ConstraintTiming { deferrable: con.deferrable, initially_deferred: con.initially_deferred, not_valid: false };
+                let timing = ir::ConstraintTiming {
+                    deferrable: con.deferrable,
+                    initially_deferred: con.initially_deferred,
+                    not_valid: false,
+                    no_inherit: false,
+                };
                 extras.constraints.push((Some(con.name.clone()), ir::TableConstraintKind::Check(expr.clone()), timing));
             }
         }
@@ -173,7 +177,7 @@ fn copy_columns(
 }
 
 fn timing_of(c: &pgmem_catalog::Constraint) -> ir::ConstraintTiming {
-    ir::ConstraintTiming { deferrable: c.deferrable, initially_deferred: c.initially_deferred, not_valid: false }
+    ir::ConstraintTiming { deferrable: c.deferrable, initially_deferred: c.initially_deferred, not_valid: false, no_inherit: false }
 }
 
 /// A new sequence for a copied identity column, with the source sequence's parameters.

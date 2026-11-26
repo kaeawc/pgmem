@@ -19,6 +19,7 @@ mod extensions;
 pub mod funcs;
 pub mod functions;
 mod hashorder;
+mod inherit;
 pub mod partition;
 pub mod plan;
 pub mod plpgsql;

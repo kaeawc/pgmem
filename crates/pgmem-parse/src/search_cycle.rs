@@ -107,7 +107,7 @@ fn literal(text: Option<&str>, fallback: bool) -> SqlResult<Expr> {
 fn self_reference(from: &[TableRef], name: &str) -> Option<String> {
     fn find(t: &TableRef, name: &str) -> Option<String> {
         match t {
-            TableRef::Table { name: n, alias } if n.0.len() == 1 && n.base() == name => {
+            TableRef::Table { name: n, alias, .. } if n.0.len() == 1 && n.base() == name => {
                 Some(alias.as_ref().map_or_else(|| name.to_owned(), |a| a.name.clone()))
             }
             TableRef::Join { left, right, .. } => find(left, name).or_else(|| find(right, name)),

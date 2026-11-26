@@ -46,7 +46,7 @@ fn timing(c: Option<&sq::ConstraintCharacteristics>, what: &str) -> SqlResult<Co
     if deferrable && what == "CHECK" {
         return Err(SqlError::feature_not_supported("CHECK constraints cannot be marked DEFERRABLE"));
     }
-    Ok(ConstraintTiming { deferrable, initially_deferred, not_valid: false })
+    Ok(ConstraintTiming { deferrable, initially_deferred, not_valid: false, no_inherit: false })
 }
 
 fn lower_column_def(c: sq::ColumnDef) -> SqlResult<ColumnDef> {
@@ -90,7 +90,7 @@ fn lower_column_def(c: sq::ColumnDef) -> SqlResult<ColumnDef> {
                 constraints.push(ColumnConstraint {
                     name,
                     kind: ColumnConstraintKind::Check(lower_expr(*chk.expr)?),
-                    timing: ConstraintTiming::default(),
+                    timing: ConstraintTiming { no_inherit: chk.no_inherit, ..ConstraintTiming::default() },
                 });
                 continue;
             }
@@ -166,7 +166,7 @@ fn lower_table_constraint(c: sq::TableConstraint) -> SqlResult<TableConstraint> 
         sq::TableConstraint::Check(chk) => TableConstraint {
             name: chk.name.as_ref().map(ident),
             kind: TableConstraintKind::Check(lower_expr(*chk.expr)?),
-            timing: ConstraintTiming::default(),
+            timing: ConstraintTiming { no_inherit: chk.no_inherit, ..ConstraintTiming::default() },
         },
         sq::TableConstraint::ForeignKey(fk) => TableConstraint {
             name: fk.name.as_ref().map(ident),
@@ -188,8 +188,11 @@ fn lower_table_constraint(c: sq::TableConstraint) -> SqlResult<TableConstraint> 
 }
 
 pub(crate) fn lower_create_table(ct: sq::CreateTable) -> SqlResult<CreateTable> {
-    if ct.clone.is_some() || ct.inherits.is_some() {
-        return Err(unsupported("CREATE TABLE ... INHERITS"));
+    if ct.clone.is_some() {
+        return Err(unsupported("CREATE TABLE ... CLONE"));
+    }
+    if ct.inherits.is_some() && (ct.partition_of.is_some() || ct.query.is_some()) {
+        return Err(SqlError::syntax("syntax error at or near \"INHERITS\""));
     }
     let name = object_name(&ct.name)?;
     let mut options = pgmem_ir::CreateTableOptions {
@@ -209,6 +212,7 @@ pub(crate) fn lower_create_table(ct: sq::CreateTable) -> SqlResult<CreateTable> 
             (Some(_), None) => return Err(SqlError::syntax("syntax error at end of input")),
             _ => None,
         },
+        inherits: ct.inherits.iter().flatten().map(object_name).collect::<SqlResult<Vec<_>>>()?,
     };
     if let Some(sq::CreateTableLikeKind::Parenthesized(l) | sq::CreateTableLikeKind::Plain(l)) = &ct.like {
         let defaults = matches!(l.defaults, Some(sq::CreateTableLikeDefaults::Including));
@@ -388,6 +392,8 @@ pub(crate) fn lower_alter_table(at: sq::AlterTable) -> SqlResult<AlterTable> {
     for op in at.operations {
         use sq::AlterTableOperation as O;
         match op {
+            O::Inherit { parent } => actions.push(AlterTableAction::Inherit(object_name(&parent)?)),
+            O::NoInherit { parent } => actions.push(AlterTableAction::NoInherit(object_name(&parent)?)),
             O::AttachPartitionOf { partition, for_values } => {
                 actions
                     .push(AlterTableAction::AttachPartition { partition: object_name(&partition)?, bound: partition_bound(for_values)? });
@@ -464,7 +470,7 @@ pub(crate) fn lower_alter_table(at: sq::AlterTable) -> SqlResult<AlterTable> {
             other => return Err(unsupported(&format!("ALTER TABLE {other}"))),
         }
     }
-    Ok(AlterTable { name: object_name(&at.name)?, if_exists: at.if_exists, actions })
+    Ok(AlterTable { name: object_name(&at.name)?, if_exists: at.if_exists, only: at.only, actions })
 }
 
 /// The `WITH (...)` storage parameters of a CREATE TABLE / VIEW.

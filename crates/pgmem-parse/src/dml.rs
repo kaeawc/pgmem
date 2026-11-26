@@ -122,16 +122,16 @@ pub(crate) fn lower_insert(i: sq::Insert) -> SqlResult<Insert> {
 }
 
 /// The single target table (with optional alias) of an UPDATE or DELETE.
-fn target_table(t: sq::TableWithJoins) -> SqlResult<(ObjectName, Option<String>)> {
+fn target_table(t: sq::TableWithJoins) -> SqlResult<(ObjectName, Option<String>, bool)> {
     if !t.joins.is_empty() {
         return Err(unsupported("joins in the UPDATE/DELETE target"));
     }
     match lower_table_with_joins(t)? {
-        TableRef::Table { name, alias } => {
+        TableRef::Table { name, alias, only } => {
             if alias.as_ref().is_some_and(|a| !a.columns.is_empty()) {
                 return Err(SqlError::syntax("column aliases are not allowed here"));
             }
-            Ok((name, alias.map(|a| a.name)))
+            Ok((name, alias.map(|a| a.name), only))
         }
         _ => Err(unsupported("this UPDATE/DELETE target")),
     }
@@ -145,7 +145,7 @@ pub(crate) fn lower_update(u: sq::Update) -> SqlResult<Update> {
     if u.limit.is_some() {
         return Err(SqlError::syntax("syntax error at or near \"LIMIT\""));
     }
-    let (table, alias) = target_table(u.table)?;
+    let (table, alias, only) = target_table(u.table)?;
     let from = match u.from {
         None => Vec::new(),
         Some(sq::UpdateTableFromKind::AfterSet(items) | sq::UpdateTableFromKind::BeforeSet(items)) => {
@@ -156,6 +156,7 @@ pub(crate) fn lower_update(u: sq::Update) -> SqlResult<Update> {
         with: None,
         table,
         alias,
+        only,
         assignments: lower_assignments(u.assignments)?,
         from,
         selection: u.selection.map(lower_expr).transpose()?,
@@ -179,7 +180,7 @@ pub(crate) fn lower_delete(d: sq::Delete) -> SqlResult<Delete> {
     if from.len() != 1 {
         return Err(unsupported("DELETE from several tables"));
     }
-    let (table, alias) = target_table(from.remove(0))?;
+    let (table, alias, only) = target_table(from.remove(0))?;
     let using = match d.using {
         None => Vec::new(),
         Some(items) => items.into_iter().map(lower_table_with_joins).collect::<SqlResult<Vec<_>>>()?,
@@ -188,6 +189,7 @@ pub(crate) fn lower_delete(d: sq::Delete) -> SqlResult<Delete> {
         with: None,
         table,
         alias,
+        only,
         using,
         selection: d.selection.map(lower_expr).transpose()?,
         returning: lower_returning(d.returning)?,
@@ -201,7 +203,7 @@ pub(crate) const MERGE_DEFAULT_VALUES: &str = "__pgmem_default_values";
 pub(crate) fn lower_merge(m: sq::Merge) -> SqlResult<pgmem_ir::Merge> {
     use pgmem_ir::{MergeAction, MergeMatch, MergeWhen};
     let (table, alias) = match crate::query::lower_table_factor(m.table)? {
-        TableRef::Table { name, alias } => (name, alias.map(|a| a.name)),
+        TableRef::Table { name, alias, .. } => (name, alias.map(|a| a.name)),
         _ => return Err(unsupported("this MERGE target")),
     };
     let source = crate::query::lower_table_factor(m.source)?;

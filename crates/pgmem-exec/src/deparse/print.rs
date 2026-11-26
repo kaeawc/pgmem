@@ -845,7 +845,10 @@ impl Printer {
 
     fn print_from_item(&mut self, item: &FromItem) {
         match item {
-            FromItem::Rel { schema, relname, refname, print_alias, colaliases } => {
+            FromItem::Rel { schema, relname, refname, print_alias, colaliases, only } => {
+                if *only {
+                    self.push("ONLY ");
+                }
                 if let Some(s) = schema {
                     self.push(&quote_ident(s));
                     self.push(".");

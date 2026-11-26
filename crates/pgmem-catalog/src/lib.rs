@@ -11,8 +11,10 @@ use pgmem_types::{SqlError, SqlResult, Type, Value, code};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+mod inherit;
 mod partitions;
 mod roles;
+pub use inherit::Inherited;
 pub use partitions::{PartitionBound, PartitionKey, PartitionKeyPart, PartitionOf, PartitionStrategy, RangeDatum};
 pub use roles::{DefaultPrivilege, ExtensionDef, Grant, GrantObject, RoleDef};
 
@@ -632,6 +634,8 @@ pub struct Catalog {
     partition_keys: BTreeMap<Oid, PartitionKey>,
     /// Partitions' parents and bounds, by partition OID.
     partition_bounds: BTreeMap<Oid, PartitionOf>,
+    /// Regular table inheritance (`INHERITS`).
+    inheritance: inherit::Inheritance,
     next_oid: Oid,
 }
 
@@ -670,6 +674,7 @@ impl Catalog {
             comments: BTreeMap::new(),
             partition_keys: BTreeMap::new(),
             partition_bounds: BTreeMap::new(),
+            inheritance: inherit::Inheritance::default(),
             next_oid: FIRST_USER_OID,
         }
     }
@@ -1225,6 +1230,7 @@ impl Catalog {
         let dropped = self.tables.remove(name)?;
         self.partition_keys.remove(&dropped.oid);
         self.partition_bounds.remove(&dropped.oid);
+        self.drop_inheritance(&dropped);
         self.triggers.retain(|_, t| t.table != dropped.oid);
         self.grants.retain(|g| g.object.relation_oid() != Some(dropped.oid));
         self.owners.remove(&dropped.oid);

@@ -889,7 +889,7 @@ pub(crate) fn partitioned_target(catalog: &Catalog, name: &ir::ObjectName) -> Op
     }
 }
 
-fn leaf_name(t: &TableDef) -> ir::ObjectName {
+pub(crate) fn leaf_name(t: &TableDef) -> ir::ObjectName {
     ir::ObjectName(vec![t.schema.clone(), t.name.clone()])
 }
 
@@ -943,7 +943,7 @@ fn insert_into(
     top_ctx(|ctx| crate::statement::exec_statement(&Statement::Insert(Box::new(ins)), &b, ctx, txn, &params, env, state))
 }
 
-fn combine(results: Vec<QueryResult>, verb: &str, columns: Vec<crate::plan::OutCol>) -> QueryResult {
+pub(crate) fn combine(results: Vec<QueryResult>, verb: &str, columns: Vec<crate::plan::OutCol>) -> QueryResult {
     let mut count = 0u64;
     let mut rows = Vec::new();
     for r in results {

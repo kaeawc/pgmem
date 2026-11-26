@@ -580,6 +580,8 @@ pub enum Rel {
         slots: Vec<usize>,
         missing: Vec<Value>,
         system: bool,
+        /// Include the rows of the table's inheritance children (no `ONLY`).
+        inherit: bool,
     },
     /// `SELECT srf(...), ...`: the input row extended with one column per set-returning
     /// function, as many rows as the longest function result (shorter ones padded with

@@ -119,7 +119,7 @@ pub fn resolve(catalog: &Catalog, v: &ViewDef) -> SqlResult<Result<Updatable, &'
         return Ok(Err(reason));
     }
     let ir::SetExpr::Select(sel) = &v.query.body else { return Ok(Err("")) };
-    let [ir::TableRef::Table { name, alias }] = sel.from.as_slice() else { return Ok(Err("")) };
+    let [ir::TableRef::Table { name, alias, .. }] = sel.from.as_slice() else { return Ok(Err("")) };
     let qualifier = alias.as_ref().map_or_else(|| name.base().to_owned(), |a| a.name.clone());
     let rel = pgmem_types::context::with_search_path(&v.search_path, || catalog.find_relation(name))?;
     // The columns below this view, by name, and how to write them.

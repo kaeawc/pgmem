@@ -54,6 +54,8 @@ pub struct CreateTablePlan {
     pub sequences: Vec<SequenceDef>,
     /// Column comments copied by `LIKE ... INCLUDING COMMENTS`: (column, text).
     pub comments: Vec<(String, String)>,
+    /// `INHERITS` parents and what the table inherits; `NO INHERIT` constraints.
+    pub inherit: crate::inherit::InheritPlan,
 }
 
 /// Validates an expression stored in the catalog by binding it against the table row.
@@ -163,6 +165,10 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
         }
         table.columns.push(col);
     }
+    let mut inherit = crate::inherit::InheritPlan::default();
+    if !ct.options.inherits.is_empty() {
+        inherit = crate::inherit::merge_columns(b, ct, &mut table)?;
+    }
     let likes = super::like::expand(b, ct, &mut table, &mut sequences, &mut taken)?;
     if !ct.options.likes.is_empty() {
         for (i, c) in table.columns.iter().enumerate() {
@@ -207,13 +213,20 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
         pending.push((name, kind, false, timing));
     }
     for (cname, kind, column_level, timing) in pending {
+        if crate::inherit::merge_local_check(&table, &mut inherit, cname.as_deref(), &kind)? {
+            continue;
+        }
+        let n = table.constraints.len();
         add_constraint(b, &mut table, cname, &kind, column_level, &mut taken, timing)?;
+        if timing.no_inherit && table.constraints.len() > n {
+            inherit.no_inherit.extend(table.constraints.last().map(|c| c.name.clone()));
+        }
     }
     for li in &likes.indexes {
         let idx = super::like::build_index(b, &table, li, &mut taken)?;
         table.indexes.push(idx);
     }
-    Ok(Some(CreateTablePlan { table, sequences, comments: likes.comments }))
+    Ok(Some(CreateTablePlan { table, sequences, comments: likes.comments, inherit }))
 }
 
 /// Functions whose result is not immutable: a generation expression may not call them.
@@ -745,8 +758,11 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
     let mut def = table.clone();
     let not_found = |c: &str| SqlError::undefined_column(&format!("\"{c}\" of relation \"{tname}\""));
     match action {
-        ir::AlterTableAction::AttachPartition { .. } | ir::AlterTableAction::DetachPartition { .. } => {
-            Err(SqlError::internal("ATTACH / DETACH PARTITION are applied by the executor"))
+        ir::AlterTableAction::AttachPartition { .. }
+        | ir::AlterTableAction::DetachPartition { .. }
+        | ir::AlterTableAction::Inherit(_)
+        | ir::AlterTableAction::NoInherit(_) => {
+            Err(SqlError::internal("ATTACH / DETACH PARTITION and [NO] INHERIT are applied by the executor"))
         }
         ir::AlterTableAction::AddColumn { if_not_exists, column } => {
             if def.column_index(&column.name).is_some() {
@@ -1076,7 +1092,8 @@ fn constraint_uses(c: &Constraint, slot: usize, name: &str) -> bool {
         ConstraintKind::PrimaryKey { columns } | ConstraintKind::Unique { columns, .. } | ConstraintKind::ForeignKey { columns, .. } => {
             columns.contains(&slot)
         }
-        ConstraintKind::Check { .. } => false,
+        // Postgres drops table constraints involving a dropped column, CHECKs included.
+        ConstraintKind::Check { expr } => expr_mentions(expr, name),
         ConstraintKind::Exclude { elements, predicate, .. } => {
             elements.iter().map(|(e, _)| e).chain(predicate.iter()).any(|e| expr_mentions(e, name))
         }

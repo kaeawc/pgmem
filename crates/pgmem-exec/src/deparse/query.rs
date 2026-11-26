@@ -96,6 +96,8 @@ pub(super) enum FromItem {
         refname: String,
         print_alias: bool,
         colaliases: Vec<String>,
+        /// `ONLY name`.
+        only: bool,
     },
     Sub {
         query: Box<Query>,
@@ -132,7 +134,7 @@ struct Built {
 
 fn base_refname(t: &ir::TableRef, out: &mut Vec<String>) {
     match t {
-        ir::TableRef::Table { name, alias } => out.push(alias.as_ref().map_or_else(|| name.base().to_owned(), |a| a.name.clone())),
+        ir::TableRef::Table { name, alias, .. } => out.push(alias.as_ref().map_or_else(|| name.base().to_owned(), |a| a.name.clone())),
         ir::TableRef::Subquery { alias, .. } => out.push(alias.as_ref().map_or_else(|| "unnamed_subquery".to_owned(), |a| a.name.clone())),
         ir::TableRef::Function { call, alias, .. } => {
             out.push(alias.as_ref().map_or_else(|| call.name.base().to_owned(), |a| a.name.clone()))
@@ -349,8 +351,9 @@ impl Analyzer<'_> {
 
     fn build_from_item(&mut self, t: &ir::TableRef, names: &mut VecDeque<String>) -> Built {
         match t {
-            ir::TableRef::Table { name, alias } => {
+            ir::TableRef::Table { name, alias, only } => {
                 let refname = names.pop_front().unwrap_or_default();
+                let only = *only;
                 let relname = name.base().to_owned();
                 let schema = self.relation_schema(name);
                 let mut cols = self.relation_columns(name);
@@ -359,7 +362,7 @@ impl Analyzer<'_> {
                 let qualifier = alias.as_ref().map_or_else(|| relname.clone(), |a| a.name.clone());
                 let print_alias = alias.is_some() || refname != relname;
                 let (_, star) = self.push_rte(qualifier, refname.clone(), cols);
-                Built { item: FromItem::Rel { schema, relname, refname, print_alias, colaliases }, star, rtes: 1 }
+                Built { item: FromItem::Rel { schema, relname, refname, print_alias, colaliases, only }, star, rtes: 1 }
             }
             ir::TableRef::Subquery { query, alias, lateral } => {
                 let refname = names.pop_front().unwrap_or_default();

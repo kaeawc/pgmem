@@ -667,8 +667,8 @@ impl Binder<'_> {
     /// items as the immediately enclosing level). Returns whether the item is lateral.
     fn bind_table_ref(&self, item: &ir::TableRef, ctx: &Ctx, left: &Scope) -> SqlResult<(Rel, Scope, bool)> {
         match item {
-            ir::TableRef::Table { name, alias } => {
-                let (rel, scope) = self.bind_relation(name, alias.as_ref(), ctx)?;
+            ir::TableRef::Table { name, alias, only } => {
+                let (rel, scope) = self.bind_relation(name, alias.as_ref(), *only, ctx)?;
                 Ok((rel, scope, false))
             }
             ir::TableRef::Subquery { query, alias, lateral } => {
@@ -1002,7 +1002,7 @@ impl Binder<'_> {
     }
 
     /// A named relation in FROM: CTE, table, view, or virtual catalog table.
-    fn bind_relation(&self, name: &ir::ObjectName, alias: Option<&ir::TableAlias>, ctx: &Ctx) -> SqlResult<(Rel, Scope)> {
+    fn bind_relation(&self, name: &ir::ObjectName, alias: Option<&ir::TableAlias>, only: bool, ctx: &Ctx) -> SqlResult<(Rel, Scope)> {
         let qualifier = alias.map_or_else(|| name.base().to_owned(), |a| a.name.clone());
         if name.0.len() == 1
             && let Some(cte) = ctx.ctes.iter().rev().find(|c| c.name == name.base())
@@ -1073,7 +1073,7 @@ impl Binder<'_> {
                 if let Some(a) = alias {
                     apply_column_aliases(&mut cols, &a.columns, &a.name)?;
                 }
-                Ok((Rel::Scan { table: def.oid, slots, missing, system: true }, Scope::from_cols(cols)))
+                Ok((Rel::Scan { table: def.oid, slots, missing, system: true, inherit: !only }, Scope::from_cols(cols)))
             }
             Some(Relation::View(view)) => {
                 let top = Level::new(Scope::default());
