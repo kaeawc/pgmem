@@ -227,6 +227,7 @@ pub fn build_index(b: &Binder, table: &TableDef, li: &LikeIndex, taken: &mut Vec
         name,
         columns,
         exprs: li.exprs.clone(),
+        include: Vec::new(),
         unique: li.unique,
         primary: false,
         nulls_not_distinct: li.nulls_not_distinct,

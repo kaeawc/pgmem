@@ -183,6 +183,9 @@ pub fn deparse_index(catalog: &Catalog, table: &TableDef, index: &IndexDef) -> S
         quote_ident(&table.name),
         keys.join(", ")
     );
+    if !index.include.is_empty() {
+        s.push_str(&format!(" INCLUDE ({})", index.include.iter().map(|&i| column_list(table, &[i])).collect::<Vec<_>>().join(", ")));
+    }
     if index.nulls_not_distinct {
         s.push_str(" NULLS NOT DISTINCT");
     }
