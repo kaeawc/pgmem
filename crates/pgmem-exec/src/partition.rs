@@ -636,17 +636,28 @@ fn partition_index_name(catalog: &Catalog, table: &TableDef, idx: &IndexDef, tak
 }
 
 /// Copies the parent's indexes (and their key constraints) to a partition whose slots map
-/// `slot_of(parent slot)`.
-fn clone_indexes(catalog: &Catalog, parent: &TableDef, part: &mut TableDef, slot_of: &dyn Fn(usize) -> Option<usize>) {
+/// `slot_of(parent slot)`, except those an existing index of the partition can stand for.
+/// Returns (partition index name, parent index OID) for each index to attach.
+fn clone_indexes(
+    catalog: &Catalog,
+    parent: &TableDef,
+    part: &mut TableDef,
+    slot_of: &dyn Fn(usize) -> Option<usize>,
+) -> Vec<(String, pgmem_catalog::Oid)> {
     let mut taken: Vec<String> = part.indexes.iter().map(|i| i.name.clone()).collect();
     taken.push(part.name.clone());
-    for idx in &parent.indexes {
-        let Some(columns) = idx.columns.iter().map(|c| slot_of(*c)).collect::<Option<Vec<usize>>>() else { continue };
-        if part.indexes.iter().any(|i| i.columns == columns && i.exprs == idx.exprs && i.unique == idx.unique) {
+    let mut links = Vec::new();
+    let plan: Vec<(IndexDef, Option<pgmem_catalog::Oid>)> =
+        crate::partition_index::plan_partition_indexes(catalog, parent, part).into_iter().map(|(i, f)| (i.clone(), f)).collect();
+    for (idx, existing) in plan {
+        if let Some(found) = existing.and_then(|o: pgmem_catalog::Oid| part.indexes.iter().find(|i| i.oid == o)) {
+            links.push((found.name.clone(), idx.oid));
             continue;
         }
+        let Some(columns) = idx.columns.iter().map(|c| slot_of(*c)).collect::<Option<Vec<usize>>>() else { continue };
         let name = partition_index_name(catalog, part, &IndexDef { columns: columns.clone(), ..idx.clone() }, &taken);
         taken.push(name.clone());
+        links.push((name.clone(), idx.oid));
         let constraint = parent.constraints.iter().find(|c| c.name == idx.name).cloned();
         if let Some(mut c) = constraint {
             c.name.clone_from(&name);
@@ -662,6 +673,7 @@ fn clone_indexes(catalog: &Catalog, parent: &TableDef, part: &mut TableDef, slot
         }
         part.indexes.push(IndexDef { oid: 0, name, columns, ..idx.clone() });
     }
+    links
 }
 
 /// `CREATE TABLE name PARTITION OF parent [(constraints)] FOR VALUES ... [PARTITION BY ...]`.
@@ -715,7 +727,7 @@ pub(crate) fn create_partition(
     for c in &ct.columns {
         apply_column_options(&mut table, c)?;
     }
-    clone_indexes(&catalog, &parent, &mut table, &|s| Some(s));
+    let index_links = clone_indexes(&catalog, &parent, &mut table, &|s| Some(s));
     let sub_key = ct.options.partition_by.as_ref().map(|p| bind_key(&b, &table, p)).transpose()?;
     let cat = txn.catalog_mut();
     crate::ddl::assign_oids(cat, &mut table);
@@ -723,6 +735,7 @@ pub(crate) fn create_partition(
     cat.create_table(table)?;
     cat.set_partition_of(oid, Some(PartitionOf { parent: parent.oid, bound }));
     cat.set_partition_key(oid, sub_key);
+    crate::partition_index::link_by_name(cat, oid, &index_links);
     txn.created_table(oid);
     let qualified = txn.catalog().table_by_oid(oid).map(|t| t.qualified()).ok_or_else(|| SqlError::internal("partition vanished"))?;
     for con in &ct.constraints {
@@ -800,12 +813,13 @@ pub(crate) fn attach(
     }
     let mut def = (*part).clone();
     let slot_of = |s: usize| def_slot(&parent, &part, s);
-    clone_indexes(&catalog, &parent, &mut def, &slot_of);
+    let index_links = clone_indexes(&catalog, &parent, &mut def, &slot_of);
     let cat = txn.catalog_mut();
     crate::ddl::assign_oids(cat, &mut def);
     let q = def.qualified();
     cat.replace_table(&q, def);
     cat.set_partition_of(part.oid, Some(PartitionOf { parent: parent.oid, bound }));
+    crate::partition_index::link_by_name(cat, part.oid, &index_links);
     Ok(())
 }
 
@@ -856,6 +870,7 @@ pub(crate) fn detach(parent_name: &pgmem_catalog::QualName, partition: &ir::Obje
         ));
     }
     txn.catalog_mut().set_partition_of(part.oid, None);
+    crate::partition_index::detach_indexes(txn.catalog_mut(), &part);
     Ok(())
 }
 
@@ -1120,16 +1135,55 @@ fn arg_oid(v: &Value) -> Option<pgmem_catalog::Oid> {
     }
 }
 
+/// Whether a relation is in a partition tree: a partition or a partitioned table, or an
+/// attached or partitioned index.
+fn in_tree(catalog: &Catalog, oid: pgmem_catalog::Oid) -> bool {
+    match catalog.index_by_oid(oid) {
+        Some((t, _)) => catalog.index_parent(oid).is_some() || catalog.is_partitioned(t.oid),
+        None => catalog.partition_of(oid).is_some() || catalog.is_partitioned(oid),
+    }
+}
+
+/// A relation's parent in its partition tree (a table's or an index's).
+fn tree_parent(catalog: &Catalog, oid: pgmem_catalog::Oid) -> Option<pgmem_catalog::Oid> {
+    catalog.partition_of(oid).map(|p| p.parent).or_else(|| catalog.index_parent(oid))
+}
+
+/// A relation's children in its partition tree, in OID order.
+fn tree_children(catalog: &Catalog, oid: pgmem_catalog::Oid) -> Vec<pgmem_catalog::Oid> {
+    let mut out: Vec<pgmem_catalog::Oid> = catalog.partitions(oid).into_iter().map(|(t, _)| t.oid).collect();
+    out.extend(catalog.index_children(oid));
+    out
+}
+
+/// Whether a tree member is a leaf: not a partitioned table, nor an index on one.
+fn tree_leaf(catalog: &Catalog, oid: pgmem_catalog::Oid) -> bool {
+    match catalog.index_by_oid(oid) {
+        Some((t, _)) => !catalog.is_partitioned(t.oid),
+        None => !catalog.is_partitioned(oid),
+    }
+}
+
+fn tree_ancestors(catalog: &Catalog, oid: pgmem_catalog::Oid) -> Vec<pgmem_catalog::Oid> {
+    let mut out = Vec::new();
+    let mut cur = oid;
+    while let Some(p) = tree_parent(catalog, cur) {
+        out.push(p);
+        cur = p;
+    }
+    out
+}
+
 /// `pg_partition_ancestors(rel)`: the relation and its ancestors (no rows for a relation that is
 /// neither a partition nor partitioned).
 pub(crate) fn ancestors_srf(a: &[Value], ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let catalog = ctx.txn.catalog();
     let Some(oid) = arg_oid(&a[0]) else { return Ok(Vec::new()) };
-    if catalog.partition_of(oid).is_none() && !catalog.is_partitioned(oid) {
+    if !in_tree(catalog, oid) {
         return Ok(Vec::new());
     }
     let mut out = vec![vec![reg_class(catalog, oid)]];
-    out.extend(catalog.partition_ancestors(oid).into_iter().map(|o| vec![reg_class(catalog, o)]));
+    out.extend(tree_ancestors(catalog, oid).into_iter().map(|o| vec![reg_class(catalog, o)]));
     Ok(out)
 }
 
@@ -1137,23 +1191,22 @@ pub(crate) fn ancestors_srf(a: &[Value], ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
 pub(crate) fn tree_srf(a: &[Value], ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let catalog = ctx.txn.catalog();
     let Some(oid) = arg_oid(&a[0]) else { return Ok(Vec::new()) };
-    if catalog.partition_of(oid).is_none() && !catalog.is_partitioned(oid) {
+    if !in_tree(catalog, oid) {
         return Ok(Vec::new());
     }
     fn walk(catalog: &Catalog, oid: pgmem_catalog::Oid, parent: Option<pgmem_catalog::Oid>, level: i32, out: &mut Vec<Row>) {
         out.push(vec![
             reg_class(catalog, oid),
             parent.map_or(Value::Null, |p| reg_class(catalog, p)),
-            Value::Bool(!catalog.is_partitioned(oid)),
+            Value::Bool(tree_leaf(catalog, oid)),
             Value::Int4(level),
         ]);
-        for (child, _) in catalog.partitions(oid) {
-            walk(catalog, child.oid, Some(oid), level + 1, out);
+        for child in tree_children(catalog, oid) {
+            walk(catalog, child, Some(oid), level + 1, out);
         }
     }
     let mut out = Vec::new();
-    let parent = catalog.partition_of(oid).map(|p| p.parent);
-    walk(catalog, oid, parent, 0, &mut out);
+    walk(catalog, oid, tree_parent(catalog, oid), 0, &mut out);
     Ok(out)
 }
 
@@ -1161,10 +1214,10 @@ pub(crate) fn tree_srf(a: &[Value], ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
 pub(crate) fn root_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
     let catalog = ctx.txn.catalog();
     let Some(oid) = arg_oid(&a[0]) else { return Ok(Value::Null) };
-    if catalog.partition_of(oid).is_none() && !catalog.is_partitioned(oid) {
+    if !in_tree(catalog, oid) {
         return Ok(Value::Null);
     }
-    Ok(reg_class(catalog, catalog.partition_ancestors(oid).last().copied().unwrap_or(oid)))
+    Ok(reg_class(catalog, tree_ancestors(catalog, oid).last().copied().unwrap_or(oid)))
 }
 
 /// The latest rows of a table (a partitioned one's from its leaves, in its layout), as

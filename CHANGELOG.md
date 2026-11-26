@@ -24,6 +24,7 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 ### Fixed
 
 - `pg_get_triggerdef` schema-qualifies the trigger function when its schema is not on `search_path`, and quotes its name.
+- Partitioned indexes: `CREATE INDEX ... ON ONLY` and `ALTER INDEX ... ATTACH PARTITION` (with Postgres' checks and errors); partition indexes are attached to their parent (`pg_inherits`, `relispartition`, `pg_partition_tree` / `pg_partition_ancestors` / `pg_partition_root`), `pg_index.indisvalid` is false until every partition has one, `CREATE INDEX` on a partitioned table and `ATTACH PARTITION` reuse a matching index of the partition, and `pg_get_indexdef` prints `ON ONLY` for an index on a partitioned table.
 - `ALTER TRIGGER ... RENAME TO`, and `ALTER TABLE ... ENABLE REPLICA | ALWAYS TRIGGER` (`pg_trigger.tgenabled` `O`/`D`/`R`/`A`); triggers fire according to `session_replication_role`.
 
 ## [0.1.1] - 2026-11-25

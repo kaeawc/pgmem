@@ -686,7 +686,7 @@ impl Session {
             Statement::CreateView(_) => "CREATE VIEW",
             Statement::RefreshMatview { .. } => "REFRESH MATERIALIZED VIEW",
             Statement::RenameView { .. } => "ALTER VIEW",
-            Statement::RenameIndex { .. } => "ALTER INDEX",
+            Statement::RenameIndex { .. } | Statement::AttachIndexPartition { .. } => "ALTER INDEX",
             Statement::AlterSequence { .. } => "ALTER SEQUENCE",
             Statement::CreateFunction(cf) if cf.procedure => "CREATE PROCEDURE",
             Statement::CreateFunction(_) => "CREATE FUNCTION",

@@ -296,6 +296,7 @@ pub(crate) fn lower_create_index(ci: sq::CreateIndex) -> SqlResult<CreateIndex> 
             sq::IndexType::Custom(i) => ident(&i),
             other => other.to_string().to_lowercase(),
         }),
+        only: crate::take_index_only(),
     })
 }
 

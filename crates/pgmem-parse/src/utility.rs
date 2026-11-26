@@ -15,6 +15,7 @@ pub(crate) enum Utility {
     SetConstraints { names: Vec<sqlparser::ast::ObjectName>, deferred: bool },
     AlterConstraint { table: sqlparser::ast::ObjectName, if_exists: bool, name: sqlparser::ast::Ident, timing: pgmem_ir::ConstraintTiming },
     RenameIndex { name: sqlparser::ast::ObjectName, new_name: sqlparser::ast::Ident, if_exists: bool },
+    AttachIndex { index: sqlparser::ast::ObjectName, partition: sqlparser::ast::ObjectName },
     AlterSequence { name: sqlparser::ast::ObjectName, if_exists: bool, options: RawSeqOptions, rename_to: Option<sqlparser::ast::Ident> },
     AlterColumn { table: sqlparser::ast::ObjectName, if_exists: bool, column: sqlparser::ast::Ident, action: ColumnAction },
     Copy(Box<crate::copy::RawCopy>),
@@ -72,6 +73,9 @@ pub(crate) fn lower(u: Utility) -> SqlResult<Statement> {
                 ColumnAction::DropExpression { if_exists } => pgmem_ir::AlterTableAction::DropExpression { column, if_exists },
             };
             Statement::AlterTable(Box::new(pgmem_ir::AlterTable { name: object_name(&table)?, if_exists, actions: vec![action] }))
+        }
+        Utility::AttachIndex { index, partition } => {
+            Statement::AttachIndexPartition { index: object_name(&index)?, partition: object_name(&partition)? }
         }
         Utility::RenameIndex { name, new_name, if_exists } => {
             Statement::RenameIndex { name: object_name(&name)?, new_name: crate::ident(&new_name), if_exists }
@@ -138,6 +142,16 @@ pub(crate) fn try_parse(p: &mut Parser) -> Result<Option<Utility>, ParserError> 
             p.next_token();
             let new_name = p.parse_identifier()?;
             return Ok(Some(Utility::RenameIndex { name, new_name, if_exists }));
+        }
+        // ALTER INDEX name [. name] ATTACH PARTITION index (no IF EXISTS in gram.y)
+        if n == 2 && word_at(p, k, "ATTACH") && word_at(p, k + 1, "PARTITION") {
+            p.next_token();
+            p.next_token();
+            let index = p.parse_object_name(false)?;
+            p.next_token();
+            p.next_token();
+            let partition = p.parse_object_name(false)?;
+            return Ok(Some(Utility::AttachIndex { index, partition }));
         }
     }
     if word_at(p, 0, "FETCH") || word_at(p, 0, "MOVE") {

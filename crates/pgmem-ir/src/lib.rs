@@ -251,6 +251,11 @@ pub enum Statement {
         options: Box<SequenceOptions>,
         rename_to: Option<String>,
     },
+    /// `ALTER INDEX name ATTACH PARTITION partition_index`.
+    AttachIndexPartition {
+        index: ObjectName,
+        partition: ObjectName,
+    },
     /// `ALTER INDEX [IF EXISTS] name RENAME TO new_name`.
     RenameIndex {
         name: ObjectName,
@@ -1208,6 +1213,8 @@ pub struct CreateIndex {
     pub nulls_not_distinct: bool,
     /// `USING method` (lowercase), if given.
     pub method: Option<String>,
+    /// `ON ONLY table`: a partitioned table's index without its partitions' indexes.
+    pub only: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

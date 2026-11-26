@@ -191,6 +191,7 @@ pub type SrfResolution = (Vec<Type>, Vec<Type>, SrfFn);
 pub fn srf_column_names(name: &str) -> Option<&'static [&'static str]> {
     match name {
         "pg_partition_tree" => Some(&["relid", "parentrelid", "isleaf", "level"]),
+        "pg_partition_ancestors" => Some(&["relid"]),
         _ => None,
     }
 }

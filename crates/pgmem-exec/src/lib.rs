@@ -18,6 +18,7 @@ mod extensions;
 pub mod funcs;
 pub mod functions;
 pub mod partition;
+mod partition_index;
 pub mod plan;
 pub mod plpgsql;
 pub mod portal;
