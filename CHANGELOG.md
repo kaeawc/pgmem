@@ -17,6 +17,11 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - Publishing skips crates already on crates.io, so a failed release can be rerun.
 - Release notes come from this changelog.
 
+### Fixed
+
+- `RETURNING` of a row that `UPDATE ... FROM` moves to another partition can reference the FROM
+  tables, and its `old` values are the row before the update (it failed with `42P01`).
+
 ## [0.1.1] - 2026-11-25
 
 ### Changed
