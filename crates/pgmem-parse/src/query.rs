@@ -349,10 +349,13 @@ fn lower_alias(a: Option<sq::TableAlias>) -> Option<TableAlias> {
 
 pub(crate) fn lower_table_factor(f: sq::TableFactor) -> SqlResult<TableRef> {
     Ok(match f {
-        sq::TableFactor::Table { name, alias, args, with_ordinality, .. } => {
-            let name = object_name(&name)?;
+        sq::TableFactor::Table { name: written, alias, args, with_ordinality, .. } => {
+            let name = object_name(&written)?;
             match args {
-                None => TableRef::Table { name, alias: lower_alias(alias) },
+                None => {
+                    crate::note_name(pgmem_types::ErrorRef::Relation, &written, &name);
+                    TableRef::Table { name, alias: lower_alias(alias) }
+                }
                 Some(args) => {
                     let mut call = FunctionCall::new(name.base(), Vec::new());
                     call.name = name;
