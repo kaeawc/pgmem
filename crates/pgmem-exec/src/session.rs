@@ -37,6 +37,11 @@ impl ServerClock {
     pub fn pin(&self, micros: Option<i64>) {
         *self.pinned.write().unwrap_or_else(std::sync::PoisonError::into_inner) = micros;
     }
+
+    /// The pinned instant (microseconds since the Postgres epoch), if any.
+    pub fn pinned(&self) -> Option<i64> {
+        *self.pinned.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 impl Clock for ServerClock {

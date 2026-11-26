@@ -11,6 +11,9 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - Static Linux binaries (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) on each release.
 - `cargo binstall pgmem` installs the prebuilt binary from the GitHub release.
 - `pg_get_keywords()` returns PostgreSQL 18's keyword list (word, catcode, barelabel, catdesc, baredesc).
+- Database forks: `Embedded::fork()` and `Server::fork()` copy the committed state (catalog, rows, roles and grants, sequence values, pinned `now()`) cheaply, by sharing it copy-on-write; the copies are independent afterwards.
+- In-process embedding API: `pgmem::Embedded` → `session()` with `execute_batch(sql)` (simple-query semantics: implicit transaction block, rollback on error), `query(sql)` (column names and type OIDs, rows as Postgres text) and `DbError` (SQLSTATE, message, detail, hint, object fields). `pgmem::to_pg_text` renders a value in Postgres text form. `Server::embedded()` and `Builder::start_on(&Embedded)` connect the two.
+- The wire server is behind the default-on `server` feature: `pgmem = { default-features = false }` builds the embedding API without tokio.
 
 ### Fixed
 

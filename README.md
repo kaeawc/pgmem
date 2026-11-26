@@ -34,7 +34,29 @@ let id: i32 = row.get(0);
 ```
 
 Test helpers: `Server::set_now(Some(t))` pins `now()` / `CURRENT_TIMESTAMP`; `Server::seed(table,
-rows)` loads rows without SQL.
+rows)` loads rows without SQL; `Server::fork()` starts a second server on an independent copy of
+the first one's committed data.
+
+## Embedding
+
+`pgmem::Embedded` runs the database in-process, without the wire protocol. With
+`pgmem = { version = "...", default-features = false }` it builds without tokio (the `server`
+feature adds `Server` and the binary).
+
+```rust
+let base = pgmem::Embedded::new();
+let mut session = base.session();
+// Simple-query semantics: one implicit transaction, rolled back if any statement fails.
+for result in session.execute_batch("CREATE TABLE t (id serial, v text); INSERT INTO t (v) VALUES ('a')") {
+    result?;                                     // pgmem::DbError: code (SQLSTATE), message, detail, hint
+}
+let out = session.query("SELECT id, v FROM t")?; // columns (name, type OID) and rows as Postgres text
+assert_eq!(out.rows, vec![vec![Some("1".to_owned()), Some("a".to_owned())]]);
+
+let trial = base.fork();                         // cheap copy of the committed state, sequences included
+```
+
+`pgmem::to_pg_text(&value)` renders a value in Postgres text output form.
 
 ## Use it from any language
 

@@ -22,7 +22,7 @@ pub use notify::{Notification, NotifyHub};
 use pgmem_catalog::{Catalog, Oid, SequenceDef, TableDef};
 use pgmem_types::{SqlError, SqlResult, Value, code, compare_values};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 pub type RowId = u64;
@@ -70,6 +70,9 @@ struct SeqState {
     called: bool,
 }
 
+/// The first backend pid handed out (Postgres pids are never small).
+const FIRST_BACKEND_PID: i32 = 10_000;
+
 /// The shared database. One per pgmem server.
 #[derive(Debug)]
 pub struct Database {
@@ -85,6 +88,8 @@ pub struct Database {
     commit_seq: AtomicU64,
     /// Read / write sets of SERIALIZABLE transactions, for write-skew detection.
     ssi: Mutex<Ssi>,
+    /// Backend process ids handed to sessions (wire connections and embedded sessions).
+    next_backend_pid: AtomicI32,
 }
 
 /// Serializable transactions in flight (by id: the commit sequence their snapshot saw) and
@@ -125,7 +130,31 @@ impl Database {
             next_txn_id: AtomicU64::new(1),
             commit_seq: AtomicU64::new(0),
             ssi: Mutex::new(Ssi::default()),
+            next_backend_pid: AtomicI32::new(FIRST_BACKEND_PID),
         }
+    }
+
+    /// An independent copy of the committed state: catalog (schemas, tables, views, types,
+    /// functions, roles, grants...), table contents and sequence values. Cheap: the committed
+    /// state is immutable and shared until either copy writes to it (copy-on-write per
+    /// table). Work in transactions that have not committed is not included, nor are session
+    /// state, LISTEN registrations, advisory or row locks. Afterwards the two databases are
+    /// fully independent.
+    pub fn fork(&self) -> Database {
+        // Under the commit lock, so the state and the sequences come from the same moment.
+        let _guard = lock(&self.commit_lock);
+        let fork = Database::new();
+        *fork.state.write().unwrap_or_else(PoisonError::into_inner) = self.current();
+        *lock(&fork.sequences) = lock(&self.sequences).clone();
+        // Row ids only need to be unique within a database: continue after the source's.
+        fork.next_row_id.store(self.next_row_id.load(Ordering::Relaxed), Ordering::Relaxed);
+        fork.commit_seq.store(self.commit_seq.load(Ordering::SeqCst), Ordering::SeqCst);
+        fork
+    }
+
+    /// A fresh backend process id for a new session (`pg_backend_pid()`, temp schema names).
+    pub fn next_backend_pid(&self) -> i32 {
+        self.next_backend_pid.fetch_add(1, Ordering::Relaxed)
     }
 
     /// The advisory lock table shared by every session.
