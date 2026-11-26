@@ -88,6 +88,7 @@ fn create_from_query(
     with_data: bool,
     matview: bool,
     unlogged: bool,
+    reloptions: Vec<String>,
     txn: &mut Txn,
     binder: &Binder,
     env: &SessionEnv,
@@ -102,7 +103,7 @@ fn create_from_query(
     let oid = txn.catalog_mut().alloc_oid();
     let matview = matview
         .then(|| Box::new(MatView { query: query.clone(), search_path: binder.catalog.resolved_search_path(), populated: with_data }));
-    let def = TableDef { oid, schema, name: base, columns, constraints: Vec::new(), indexes: Vec::new(), matview, unlogged };
+    let def = TableDef { oid, schema, name: base, columns, constraints: Vec::new(), indexes: Vec::new(), matview, unlogged, reloptions };
     txn.catalog_mut().create_table(def)?;
     txn.created_table(oid);
     let count = rows.len();
@@ -129,7 +130,8 @@ pub(crate) fn create_matview(
     if let Some(msg) = already_exists(binder, &cv.name)? {
         return Err(SqlError::new(code::DUPLICATE_TABLE, msg));
     }
-    let n = create_from_query(&cv.name, &cv.columns, &cv.query, cv.with_data, true, false, txn, binder, env, state)?;
+    let reloptions = crate::reloptions::create(crate::reloptions::Target::Heap, &cv.reloptions)?;
+    let n = create_from_query(&cv.name, &cv.columns, &cv.query, cv.with_data, true, false, reloptions, txn, binder, env, state)?;
     Ok(tag(&if cv.with_data { format!("SELECT {n}") } else { "CREATE MATERIALIZED VIEW".to_owned() }))
 }
 
@@ -153,7 +155,20 @@ pub(crate) fn create_table_as(
         return Err(SqlError::new(code::DUPLICATE_TABLE, msg));
     }
     let with_data = ct.options.with_data;
-    let n = create_from_query(&ct.name, &ct.options.column_names, query, with_data, false, ct.options.unlogged, txn, binder, env, state)?;
+    let reloptions = crate::reloptions::table(&ct.options.reloptions, false)?;
+    let n = create_from_query(
+        &ct.name,
+        &ct.options.column_names,
+        query,
+        with_data,
+        false,
+        ct.options.unlogged,
+        reloptions,
+        txn,
+        binder,
+        env,
+        state,
+    )?;
     Ok(tag(&if with_data { format!("SELECT {n}") } else { "CREATE TABLE AS".to_owned() }))
 }
 

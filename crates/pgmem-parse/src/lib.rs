@@ -78,8 +78,8 @@ pub fn parse(sql: &str) -> SqlResult<Vec<Statement>> {
 
 thread_local! {
     /// Trailing `WITH CHECK OPTION` / `WITH [NO] DATA` of CREATE VIEW statements, by view name:
-    /// (check option, with data).
-    static VIEW_OPTIONS: std::cell::RefCell<Vec<(String, bool, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// (check option, local check option, with data).
+    static VIEW_OPTIONS: std::cell::RefCell<Vec<(String, bool, bool, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
     /// The columns of `PRIMARY KEY / UNIQUE (..., c WITHOUT OVERLAPS)` keys, in statement order.
     static TEMPORAL_KEYS: std::cell::RefCell<Vec<Vec<String>>> = const { std::cell::RefCell::new(Vec::new()) };
     /// `CREATE TABLE name (a, b) AS ...` column name lists, by table name.
@@ -97,15 +97,15 @@ thread_local! {
 /// being lowered (`at end of input` when there is none): for syntax sqlparser accepts but
 /// Postgres' grammar rejects.
 /// The options the rewrite stripped from CREATE VIEW `name`: (check option, with data).
-pub(crate) fn take_view_options(name: &str) -> (bool, bool) {
+pub(crate) fn take_view_options(name: &str) -> (bool, bool, bool) {
     VIEW_OPTIONS.with(|v| {
         let mut v = v.borrow_mut();
-        match v.iter().position(|(n, _, _)| n == name) {
+        match v.iter().position(|(n, _, _, _)| n == name) {
             Some(i) => {
-                let (_, c, d) = v.remove(i);
-                (c, d)
+                let (_, c, l, d) = v.remove(i);
+                (c, l, d)
             }
-            None => (false, true),
+            None => (false, false, true),
         }
     })
 }
@@ -497,18 +497,18 @@ fn rewrite_view_options(tokens: &Tokens, sig: &[usize], k: usize, drop: &mut [bo
         return;
     }
     let end = |o: usize| sig.get(k + o).is_none_or(|&j| matches!(tokens[j], Token::SemiColon | Token::EOF));
-    let (len, check, data) = if is_word(tokens, sig, k + 1, "CHECK") && is_word(tokens, sig, k + 2, "OPTION") && end(3) {
-        (3, true, true)
+    let (len, check, local, data) = if is_word(tokens, sig, k + 1, "CHECK") && is_word(tokens, sig, k + 2, "OPTION") && end(3) {
+        (3, true, false, true)
     } else if (is_word(tokens, sig, k + 1, "CASCADED") || is_word(tokens, sig, k + 1, "LOCAL"))
         && is_word(tokens, sig, k + 2, "CHECK")
         && is_word(tokens, sig, k + 3, "OPTION")
         && end(4)
     {
-        (4, true, true)
+        (4, true, is_word(tokens, sig, k + 1, "LOCAL"), true)
     } else if is_word(tokens, sig, k + 1, "DATA") && end(2) {
-        (2, false, true)
+        (2, false, false, true)
     } else if is_word(tokens, sig, k + 1, "NO") && is_word(tokens, sig, k + 2, "DATA") && end(3) {
-        (3, false, false)
+        (3, false, false, false)
     } else {
         return;
     };
@@ -531,7 +531,7 @@ fn rewrite_view_options(tokens: &Tokens, sig: &[usize], k: usize, drop: &mut [bo
     for o in 0..len {
         drop[sig[k + o]] = true;
     }
-    VIEW_OPTIONS.with(|c| c.borrow_mut().push((name, check, data)));
+    VIEW_OPTIONS.with(|c| c.borrow_mut().push((name, check, local, data)));
 }
 
 /// `ON DELETE SET NULL (cols)` / `SET DEFAULT (cols)`: records every such action's column list
@@ -1248,9 +1248,34 @@ pub(crate) fn lower_statement(stmt: sq::Statement) -> SqlResult<Statement> {
                 materialized: av.materialized,
                 if_exists: av.if_exists,
             },
+            sq::AlterViewOperation::SetOptions { options } => Statement::AlterRelOptions {
+                object: if av.materialized { ObjectType::MaterializedView } else { ObjectType::View },
+                name: object_name(&av.name)?,
+                if_exists: av.if_exists,
+                reset: false,
+                options: options.iter().map(ddl::rel_option).collect::<SqlResult<Vec<_>>>()?,
+            },
             _ => return Err(unsupported("this ALTER VIEW action")),
         },
         S::CreateIndex(ci) => Statement::CreateIndex(Box::new(ddl::lower_create_index(ci)?)),
+        S::AlterTable(at)
+            if at.operations.len() == 1
+                && matches!(
+                    at.operations[0],
+                    sq::AlterTableOperation::SetOptionsParens { .. } | sq::AlterTableOperation::ResetOptions { .. }
+                ) =>
+        {
+            let (reset, options) = match &at.operations[0] {
+                sq::AlterTableOperation::SetOptionsParens { options } => {
+                    (false, options.iter().map(ddl::rel_option).collect::<SqlResult<Vec<_>>>()?)
+                }
+                sq::AlterTableOperation::ResetOptions { options } => {
+                    (true, options.iter().map(|n| ddl::rel_option(&sq::SqlOption::Ident(n.clone()))).collect::<SqlResult<Vec<_>>>()?)
+                }
+                _ => unreachable!(),
+            };
+            Statement::AlterRelOptions { object: ObjectType::Table, name: object_name(&at.name)?, if_exists: at.if_exists, reset, options }
+        }
         S::AlterTable(at) => Statement::AlterTable(Box::new(ddl::lower_alter_table(at)?)),
         S::CreateSequence { name, if_not_exists, sequence_options, .. } => {
             Statement::CreateSequence(Box::new(ddl::lower_create_sequence(&name, if_not_exists, &sequence_options)?))
