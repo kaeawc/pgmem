@@ -621,7 +621,7 @@ impl Session {
         let binder = Binder::new(&catalog, param_types);
         let top = Level::new(Scope::default());
         let ctx = Ctx::new(&top);
-        crate::roles::check_statement(stmt, &catalog, &env)?;
+        crate::roles::check_statement(stmt, &catalog, &env, param_types)?;
         let result = crate::statement::exec_statement(stmt, &binder, &ctx, txn, params, &env, &state)?;
         // New relations: their owner (when not the session user) and default privileges.
         let created = match stmt {
