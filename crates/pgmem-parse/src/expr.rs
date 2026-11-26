@@ -1,10 +1,11 @@
 //! Expression lowering.
 
 use crate::query::{lower_order_by_expr, lower_query, lower_window_spec};
-use crate::{ident, object_name, unsupported};
+use crate::{ident, note_ref, object_name, token_location, unsupported};
 use pgmem_ir::{AnyAllRight, Expr, FunctionCall, Literal, Subscript, TypeName, UnaryOp};
-use pgmem_types::{SqlError, SqlResult};
+use pgmem_types::{ErrorRef, SqlError, SqlResult};
 use sqlparser::ast as sq;
+use sqlparser::ast::Spanned;
 
 fn b(e: Expr) -> Box<Expr> {
     Box::new(e)
@@ -13,9 +14,26 @@ fn b(e: Expr) -> Box<Expr> {
 pub(crate) fn lower_expr(e: sq::Expr) -> SqlResult<Expr> {
     use sq::Expr as E;
     Ok(match e {
-        E::Identifier(i) => lower_identifier(&i),
-        E::CompoundIdentifier(parts) => Expr::Column(parts.iter().map(ident).collect()),
-        E::Value(v) => lower_value(v.value)?,
+        E::Identifier(i) => {
+            let e = lower_identifier(&i);
+            if let Expr::Column(parts) = &e {
+                note_ref(ErrorRef::Column(parts.join(".")), i.span.start);
+            }
+            e
+        }
+        E::CompoundIdentifier(parts) => {
+            let names: Vec<String> = parts.iter().map(ident).collect();
+            if let Some(first) = parts.first() {
+                note_ref(ErrorRef::Column(names.join(".")), first.span.start);
+            }
+            Expr::Column(names)
+        }
+        E::Value(v) => {
+            if let Some(s) = string_value(&v.value) {
+                note_ref(ErrorRef::Literal(s), v.span.start);
+            }
+            lower_value(v.value)?
+        }
         E::Nested(inner) => lower_expr(*inner)?,
         E::IsNull(x) => Expr::IsNull { expr: b(lower_expr(*x)?), negated: false },
         E::IsNotNull(x) => Expr::IsNull { expr: b(lower_expr(*x)?), negated: true },
@@ -219,6 +237,7 @@ pub(crate) fn lower_expr(e: sq::Expr) -> SqlResult<Expr> {
             let mut chain = access_chain.into_iter().peekable();
             let mut cur = match *root {
                 root @ (E::Identifier(_) | E::CompoundIdentifier(_)) => {
+                    let start = root.span().start;
                     let mut parts = match &root {
                         E::Identifier(i) => vec![ident(i)],
                         E::CompoundIdentifier(ids) => ids.iter().map(ident).collect(),
@@ -228,7 +247,12 @@ pub(crate) fn lower_expr(e: sq::Expr) -> SqlResult<Expr> {
                         parts.push(ident(i));
                         chain.next();
                     }
-                    if parts.len() == 1 { lower_expr(root)? } else { Expr::Column(parts) }
+                    if parts.len() == 1 {
+                        lower_expr(root)?
+                    } else {
+                        note_ref(ErrorRef::Column(parts.join(".")), start);
+                        Expr::Column(parts)
+                    }
                 }
                 other => lower_expr(other)?,
             };
@@ -484,6 +508,9 @@ fn lower_binary(left: sq::Expr, op: &sq::BinaryOperator, right: sq::Expr) -> Sql
         }
         _ => {
             let name = binary_op_name(op)?;
+            if let Some(at) = token_location(left.span().end, &name) {
+                note_ref(ErrorRef::Operator(name.clone()), at);
+            }
             let (l, r) = (lower_expr(left)?, lower_expr(right)?);
             // `~~` and friends are LIKE spelled as operators.
             let like = |negated, ci| Expr::Like { expr: b(l.clone()), pattern: b(r.clone()), escape: None, negated, case_insensitive: ci };
@@ -658,6 +685,7 @@ fn lower_json_constructor(base: &str, list: sq::FunctionArgumentList, filter: Op
 
 fn lower_function(f: sq::Function) -> SqlResult<Expr> {
     let name = object_name(&f.name)?;
+    crate::note_name(ErrorRef::Function, &f.name, &name);
     let base = name.base().to_owned();
     let mut call = FunctionCall { name: name.clone(), ..FunctionCall::new(&base, Vec::new()) };
     call.name = name;
