@@ -42,6 +42,9 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - `CREATE FUNCTION / TYPE / VIEW / SEQUENCE / DOMAIN pg_temp.x` creates the session's temporary
   schema on demand; temporary views, sequences, composite types and indexes report
   `relpersistence` `t`.
+- UNION / INTERSECT / EXCEPT and `SELECT DISTINCT` without ORDER BY return rows in PostgreSQL's
+  order (sorted, or hash-table order, as its planner picks) for inputs of constants and VALUES
+  lists, instead of first-seen order. Table inputs keep first-seen order.
 
 ### Changed
 
