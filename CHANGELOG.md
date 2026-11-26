@@ -29,6 +29,16 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
   the view's SQL text, not Postgres' node tree), `pg_class.relhasrules`, row-type array types in
   `pg_type`, and `pg_describe_object`, `pg_identify_object`, `pg_identify_object_as_address`.
   Toast tables and the internal triggers of foreign keys are not modelled.
+- Volatile functions may modify data wherever they are called, as in PostgreSQL: BEFORE row
+  triggers, and functions called from SELECT lists, WHERE clauses, VALUES and column defaults
+  (the calling statement keeps its snapshot). Stable and immutable functions get PostgreSQL's
+  `0A000` "INSERT is not allowed in a non-volatile function" (also UPDATE, DELETE, DROP TABLE,
+  ...). Writes made by functions, triggers, CALL and DO in a READ ONLY transaction raise `25006`,
+  and a PL/pgSQL exception block undoes the writes of the functions it called.
+- `CREATE TEMP TABLE` in a READ ONLY transaction raises `25006`, as in PostgreSQL.
+- `CREATE FUNCTION / TYPE / VIEW / SEQUENCE / DOMAIN pg_temp.x` creates the session's temporary
+  schema on demand; temporary views, sequences, composite types and indexes report
+  `relpersistence` `t`.
 - Storage parameters are stored and validated like PostgreSQL: `WITH (...)` on tables, indexes, views and materialized views, `ALTER TABLE / INDEX / VIEW / MATERIALIZED VIEW ... SET / RESET (...)`, `pg_class.reloptions`, `pg_get_indexdef` (`WITH (fillfactor='70')`) and `information_schema.views.check_option` (including `WITH CHECK OPTION` and `check_option`).
 - Storage-parameter gaps: `CREATE TABLE ... PARTITION BY ... WITH (...)` takes PostgreSQL's clause order (the reverse is a syntax error); `PRIMARY KEY`, `UNIQUE` and `EXCLUDE` constraints take `WITH (...)` (in `CREATE TABLE` and `ALTER TABLE ADD`), shown by `pg_get_indexdef` and, for `EXCLUDE`, `pg_get_constraintdef`; `ALTER TABLE ... SET / RESET (...)` combines with other actions; `RESET (x = 1)` and empty `SET ()` / `WITH ()` give PostgreSQL's errors; integer values in hex, octal, binary or with `_` are stored in decimal.
 - `WITH CHECK OPTION` (or `check_option`) on a view that is not automatically updatable fails with `0A000` and PostgreSQL's hint; `LOCAL` and `CASCADED` check options are told apart when a view over views is written, each violation naming the view whose condition failed; `ALTER VIEW ... SET / RESET` keeps the view's grants and owner.
