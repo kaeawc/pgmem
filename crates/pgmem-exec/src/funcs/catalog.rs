@@ -597,6 +597,36 @@ fn partition_function(name: &str, n: usize) -> SqlResult<Option<Resolved>> {
     }
 }
 
+fn table_or_rls_fn(name: &str) -> SqlResult<Option<Resolved>> {
+    if name == "row_security_active" { row_security_active_fn() } else { table_is_visible_fn() }
+}
+
+fn table_is_visible_fn() -> SqlResult<Option<Resolved>> {
+    resolved(
+        strict("pg_table_is_visible", |a, c| {
+            let Some(o) = oid_arg(&a[0]) else { return Ok(Value::Null) };
+            let cat = c.txn.catalog();
+            Ok(match cat.relation_by_oid(o) {
+                Some(r) => Value::Bool(cat.relation_visible(r.schema(), r.name())),
+                None => Value::Null,
+            })
+        }),
+        vec![Type::Oid],
+        Type::Bool,
+    )
+}
+
+fn row_security_active_fn() -> SqlResult<Option<Resolved>> {
+    resolved(
+        strict("row_security_active", |a, c| {
+            let Some(o) = oid_arg(&a[0]) else { return Ok(Value::Null) };
+            crate::rls::row_security_active(c, o).map(Value::Bool)
+        }),
+        vec![Type::Reg(RegKind::Class)],
+        Type::Bool,
+    )
+}
+
 pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
     use Type::{Bool, Int4, Oid, Text};
     let n = args.len();
@@ -606,6 +636,9 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
     }
     match name {
         "format_type" if n == 2 => resolved(lenient("format_type", format_type_fn), vec![Oid, Int4], Text),
+        "pg_describe_object" if n == 3 => {
+            resolved(strict("pg_describe_object", crate::catalog_views::describe_object_fn), vec![Oid, Oid, Int4], Text)
+        }
         "pg_get_function_arguments"
         | "pg_get_function_identity_arguments"
         | "pg_get_function_result"
@@ -630,26 +663,7 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
         "col_description" if n == 2 => resolved(strict("col_description", col_description_fn), vec![Oid, Int4], Text),
         "shobj_description" if n == 2 => resolved(strict("shobj_description", |_, _| Ok(Value::Null)), vec![Oid, name_arg], Text),
         "pg_get_userbyid" if n == 1 => resolved(strict("pg_get_userbyid", userbyid_fn), vec![Oid], Type::Name),
-        "pg_table_is_visible" if n == 1 => resolved(
-            strict("pg_table_is_visible", |a, c| {
-                let Some(o) = oid_arg(&a[0]) else { return Ok(Value::Null) };
-                let cat = c.txn.catalog();
-                Ok(match cat.relation_by_oid(o) {
-                    Some(r) => Value::Bool(cat.relation_visible(r.schema(), r.name())),
-                    None => Value::Null,
-                })
-            }),
-            vec![Oid],
-            Bool,
-        ),
-        "row_security_active" if n == 1 => resolved(
-            strict("row_security_active", |a, c| {
-                let Some(o) = oid_arg(&a[0]) else { return Ok(Value::Null) };
-                crate::rls::row_security_active(c, o).map(Value::Bool)
-            }),
-            vec![Type::Reg(RegKind::Class)],
-            Bool,
-        ),
+        "pg_table_is_visible" | "row_security_active" if n == 1 => table_or_rls_fn(name),
         "pg_type_is_visible" | "pg_function_is_visible" if n == 1 => resolved(strict("pg_type_is_visible", always_true), vec![Oid], Bool),
         _ if privilege_arity(name, n) => privilege_function(name, args),
         "has_table_privilege"

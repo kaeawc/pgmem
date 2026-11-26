@@ -1,0 +1,162 @@
+# ALTER TABLE column / table attributes (no physical effect): statistics, storage,
+# compression, replica identity, clustering, persistence.
+
+statement ok
+CREATE TABLE t (a int, b text, c int NOT NULL, d numeric); CREATE INDEX t_b ON t (b); CREATE UNIQUE INDEX t_c ON t (c); CREATE UNIQUE INDEX t_a_part ON t (a) WHERE a > 0; CREATE UNIQUE INDEX t_expr ON t ((a + 1)); CREATE UNIQUE INDEX t_a ON t (a)
+
+query
+SELECT attname, attstattarget, attstorage, attcompression::text FROM pg_attribute WHERE attrelid = 't'::regclass AND attnum > 0 ORDER BY attnum
+----
+attname:name | attstattarget:int2 | attstorage:char | attcompression:text
+a | NULL | p | (empty)
+b | NULL | x | (empty)
+c | NULL | p | (empty)
+d | NULL | m | (empty)
+
+statement ok
+ALTER TABLE t ALTER COLUMN a SET STATISTICS 500; ALTER TABLE t ALTER COLUMN b SET STORAGE EXTERNAL; ALTER TABLE t ALTER COLUMN b SET COMPRESSION pglz; ALTER TABLE t ALTER COLUMN d SET STORAGE PLAIN
+
+query
+SELECT attname, attstattarget, attstorage, attcompression::text FROM pg_attribute WHERE attrelid = 't'::regclass AND attnum > 0 ORDER BY attnum
+----
+attname:name | attstattarget:int2 | attstorage:char | attcompression:text
+a | 500 | p | (empty)
+b | NULL | e | p
+c | NULL | p | (empty)
+d | NULL | p | (empty)
+
+statement ok
+ALTER TABLE t ALTER COLUMN a SET STATISTICS -1; ALTER TABLE t ALTER COLUMN b SET STORAGE DEFAULT; ALTER TABLE t ALTER COLUMN b SET COMPRESSION DEFAULT; ALTER TABLE t ALTER COLUMN d SET STATISTICS 0
+
+query
+SELECT attname, attstattarget, attstorage, attcompression::text FROM pg_attribute WHERE attrelid = 't'::regclass AND attnum > 0 ORDER BY attnum
+----
+attname:name | attstattarget:int2 | attstorage:char | attcompression:text
+a | NULL | p | (empty)
+b | NULL | x | (empty)
+c | NULL | p | (empty)
+d | 0 | p | (empty)
+
+statement error 22023 statistics target -2 is too low
+ALTER TABLE t ALTER COLUMN a SET STATISTICS -2
+
+statement error 42703 column "nope" of relation "t" does not exist
+ALTER TABLE t ALTER COLUMN nope SET STATISTICS 1
+
+statement error 0A000 column data type integer can only have storage PLAIN
+ALTER TABLE t ALTER COLUMN a SET STORAGE EXTERNAL
+
+statement error 22023 invalid storage type "foo"
+ALTER TABLE t ALTER COLUMN b SET STORAGE foo
+
+statement error 22023 invalid compression method "foo"
+ALTER TABLE t ALTER COLUMN b SET COMPRESSION foo
+
+statement error 0A000 column data type integer does not support compression
+ALTER TABLE t ALTER COLUMN a SET COMPRESSION lz4
+
+statement error 42809 cannot use non-unique index "t_b" as replica identity
+ALTER TABLE t REPLICA IDENTITY USING INDEX t_b
+
+statement error 0A000 cannot use partial index "t_a_part" as replica identity
+ALTER TABLE t REPLICA IDENTITY USING INDEX t_a_part
+
+statement error 0A000 cannot use expression index "t_expr" as replica identity
+ALTER TABLE t REPLICA IDENTITY USING INDEX t_expr
+
+statement error 42809 index "t_a" cannot be used as replica identity because column "a" is nullable
+ALTER TABLE t REPLICA IDENTITY USING INDEX t_a
+
+statement error 42704 index "nope" for table "t" does not exist
+ALTER TABLE t REPLICA IDENTITY USING INDEX nope
+
+statement ok
+ALTER TABLE t REPLICA IDENTITY USING INDEX t_c
+
+query
+SELECT relreplident::text, (SELECT indexrelid::regclass::text FROM pg_index WHERE indrelid = 't'::regclass AND indisreplident) FROM pg_class WHERE oid = 't'::regclass
+----
+relreplident:text | indexrelid:text
+i | t_c
+
+statement ok
+ALTER TABLE t REPLICA IDENTITY FULL
+
+query
+SELECT relreplident::text, (SELECT count(*) FROM pg_index WHERE indrelid = 't'::regclass AND indisreplident) FROM pg_class WHERE oid = 't'::regclass
+----
+relreplident:text | count:int8
+f | 0
+
+statement ok
+ALTER TABLE t REPLICA IDENTITY NOTHING
+
+query
+SELECT relreplident::text FROM pg_class WHERE oid = 't'::regclass
+----
+relreplident:text
+n
+
+statement ok
+ALTER TABLE t REPLICA IDENTITY DEFAULT
+
+statement ok
+ALTER TABLE t CLUSTER ON t_b
+
+statement ok
+ALTER TABLE t CLUSTER ON t_expr
+
+query
+SELECT indexrelid::regclass::text, indisclustered FROM pg_index WHERE indrelid = 't'::regclass ORDER BY 1
+----
+indexrelid:text | indisclustered:bool
+t_a | f
+t_a_part | f
+t_b | f
+t_c | f
+t_expr | t
+
+statement error 42704 index "nope" for table "t" does not exist
+ALTER TABLE t CLUSTER ON nope
+
+statement error 0A000 cannot cluster on partial index "t_a_part"
+ALTER TABLE t CLUSTER ON t_a_part
+
+statement ok
+ALTER TABLE t SET WITHOUT CLUSTER
+
+query
+SELECT count(*) FROM pg_index WHERE indrelid = 't'::regclass AND indisclustered
+----
+count:int8
+0
+
+statement ok
+ALTER TABLE t SET UNLOGGED
+
+query
+SELECT relpersistence::text FROM pg_class WHERE oid = 't'::regclass
+----
+relpersistence:text
+u
+
+statement ok
+ALTER TABLE t SET LOGGED
+
+query
+SELECT relpersistence::text FROM pg_class WHERE oid = 't'::regclass
+----
+relpersistence:text
+p
+
+statement ok
+CREATE TABLE p (a int PRIMARY KEY); CREATE TABLE r (a int REFERENCES p)
+
+statement error 42P16 could not change table "p" to unlogged because it references logged table "r"
+ALTER TABLE p SET UNLOGGED
+
+statement ok
+ALTER TABLE r SET UNLOGGED; ALTER TABLE p SET UNLOGGED
+
+statement error 42P16 could not change table "r" to logged because it references unlogged table "p"
+ALTER TABLE r SET LOGGED

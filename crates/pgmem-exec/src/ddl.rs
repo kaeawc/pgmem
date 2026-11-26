@@ -299,6 +299,9 @@ pub(crate) fn alter_table_action(
     if crate::ddl_sequences::alter_identity(txn, &table, action)? {
         return Ok(current.clone());
     }
+    if crate::ddl_attrs::apply(txn, current, &table, action, state)? {
+        return Ok(current.clone());
+    }
     if let ir::AlterTableAction::OwnerTo(owner) = action {
         crate::roles::set_owner(txn, env, table.oid, owner)?;
         return Ok(current.clone());
