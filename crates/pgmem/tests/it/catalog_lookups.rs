@@ -272,3 +272,29 @@ fn alter_trigger_rename_and_enable_modes() {
     let e = expect_code(c.batch_execute("ALTER TABLE t ENABLE TRIGGER nope"), "42704");
     assert_eq!(message(&e), "trigger \"nope\" for table \"t\" does not exist");
 }
+
+#[test]
+fn pg_constraint_connamespace_follows_owner() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE SCHEMA app; CREATE TABLE app.t (id int PRIMARY KEY, CHECK (id > 0)); \
+         CREATE DOMAIN app.pos AS int CHECK (VALUE > 0); CREATE TABLE pub_t (id int PRIMARY KEY, CHECK (id > 0))",
+    )
+    .expect("setup");
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT conname, connamespace::regnamespace::text FROM pg_constraint WHERE conrelid = 'app.t'::regclass ORDER BY conname"
+        ),
+        [["t_id_check", "app"], ["t_id_not_null", "app"], ["t_pkey", "app"]]
+    );
+    assert_eq!(
+        rows(&mut c, "SELECT conname, connamespace::regnamespace::text FROM pg_constraint WHERE contypid = 'app.pos'::regtype"),
+        [["pos_check", "app"]]
+    );
+    assert_eq!(rows(&mut c, "SELECT count(*) FROM pg_constraint WHERE connamespace = 'app'::regnamespace"), [["4"]]);
+    assert_eq!(
+        rows(&mut c, "SELECT DISTINCT connamespace::regnamespace::text FROM pg_constraint WHERE conrelid = 'pub_t'::regclass"),
+        [["public"]]
+    );
+}
