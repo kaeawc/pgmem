@@ -10,6 +10,7 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 
 - Static Linux binaries (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) on each release.
 - `cargo binstall pgmem` installs the prebuilt binary from the GitHub release.
+- `ALTER EXTENSION name UPDATE [TO version]`, `SET SCHEMA schema` and `ADD` / `DROP` of tables, views, sequences, functions, types, domains and schemas. Extension members cannot be dropped on their own (`2BP01`, "extension requires it"), `DROP EXTENSION` removes them, and `pg_extension.extrelocatable` follows the extension. `Catalog::extension_members()` exposes membership for `pg_depend` rows with deptype `e`.
 - `pg_get_keywords()` returns PostgreSQL 18's keyword list (word, catcode, barelabel, catdesc, baredesc).
 
 ### Fixed

@@ -213,6 +213,11 @@ pub enum Statement {
         if_exists: bool,
         cascade: bool,
     },
+    /// `ALTER EXTENSION name {UPDATE [TO version] | SET SCHEMA s | ADD member | DROP member}`.
+    AlterExtension {
+        name: String,
+        action: AlterExtensionAction,
+    },
     CreateFunction(Box<CreateFunction>),
     /// `DROP {FUNCTION | PROCEDURE | ROUTINE} [IF EXISTS] name [(types)], ... [CASCADE]`.
     DropFunction {
@@ -1579,6 +1584,33 @@ pub enum ObjectType {
     Type,
     Domain,
     Function,
+}
+
+/// What `ALTER EXTENSION` does.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AlterExtensionAction {
+    Update {
+        version: Option<String>,
+    },
+    SetSchema(String),
+    /// `ADD member` (`add`) or `DROP member`.
+    Member {
+        add: bool,
+        member: ExtensionMember,
+    },
+}
+
+/// An object `ALTER EXTENSION ADD / DROP` names.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExtensionMember {
+    Table(ObjectName),
+    View(ObjectName),
+    MaterializedView(ObjectName),
+    Sequence(ObjectName),
+    Function { name: ObjectName, args: Option<Vec<TypeName>>, kind: RoutineKind },
+    Type(ObjectName),
+    Domain(ObjectName),
+    Schema(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]

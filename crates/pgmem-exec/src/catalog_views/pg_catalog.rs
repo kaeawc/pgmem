@@ -1245,7 +1245,7 @@ fn pg_extension(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("extname", name(&e.name)),
                 ("extnamespace", oid(m.namespace(&e.schema))),
                 ("extversion", txt(e.version.clone())),
-                ("extrelocatable", boolean(true)),
+                ("extrelocatable", boolean(crate::ext_alter::relocatable(&e.name))),
             ]));
         }
         rows

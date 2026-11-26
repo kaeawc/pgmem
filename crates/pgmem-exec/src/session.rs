@@ -716,6 +716,7 @@ impl Session {
             Statement::Truncate(_) => "TRUNCATE TABLE",
             Statement::CreateSchema(_) => "CREATE SCHEMA",
             Statement::AlterSchema { .. } => "ALTER SCHEMA",
+            Statement::AlterExtension { .. } => "ALTER EXTENSION",
             Statement::SetSchema { .. } => "ALTER TABLE",
             Statement::Comment { .. } => "COMMENT",
             Statement::Query(q) => match q.locking.first().map(|l| l.strength) {
