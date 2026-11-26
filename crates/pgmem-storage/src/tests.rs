@@ -303,3 +303,110 @@ fn sequences_are_not_transactional() {
     db.setval(&seq, 10, false).expect("setval");
     assert_eq!(db.nextval(&seq).ok(), Some(10));
 }
+
+/// `items` with a unique index on `id` (index lookups and the commit-time recheck, #218).
+fn db_with_unique_id() -> (Arc<Database>, Oid) {
+    let (db, oids) = db_with_tables(&["items"], &[(1, "alpha"), (2, "beta")]);
+    let mut tx = db.begin(Isolation::ReadCommitted);
+    tx.begin_statement();
+    let def = tx.catalog().table_by_oid(oids[0]).cloned().expect("items");
+    let mut def = (*def).clone();
+    def.indexes.push(pgmem_catalog::IndexDef {
+        oid: 0,
+        name: "items_id_key".into(),
+        columns: vec![0],
+        exprs: vec![],
+        unique: true,
+        primary: false,
+        nulls_not_distinct: false,
+        predicate: None,
+    });
+    let name = def.qualified();
+    tx.catalog_mut().replace_table(&name, def);
+    tx.commit().expect("add index");
+    (db, oids[0])
+}
+
+fn lookup_ids(tx: &Txn, oid: Oid, id: i32) -> Vec<i32> {
+    let def = tx.catalog().table_by_oid(oid).cloned().expect("table");
+    tx.lookup_latest(&def, &[0], &[Value::Int4(id)])
+        .into_iter()
+        .map(|(_, r)| match r[0] {
+            Value::Int4(n) => n,
+            _ => panic!("not int4"),
+        })
+        .collect()
+}
+
+#[test]
+fn lookup_sees_committed_pending_deleted_and_savepoint_state() {
+    let (db, t) = db_with_unique_id();
+    let mut tx = db.begin(Isolation::ReadCommitted);
+    tx.begin_statement();
+    assert_eq!(lookup_ids(&tx, t, 1), [1]);
+    assert_eq!(lookup_ids(&tx, t, 3), Vec::<i32>::new());
+    tx.insert(t, row(3));
+    assert_eq!(lookup_ids(&tx, t, 3), [3], "a pending insert");
+    tx.savepoint("sp");
+    let committed_one = tx.scan(t).into_iter().find(|(_, r)| r[0] == Value::Int4(1)).expect("row 1").0;
+    tx.delete(t, committed_one);
+    let pending_three = tx.scan(t).into_iter().find(|(_, r)| r[0] == Value::Int4(3)).expect("row 3").0;
+    tx.update(t, pending_three, row(4));
+    assert_eq!(lookup_ids(&tx, t, 1), Vec::<i32>::new(), "a deleted committed row");
+    assert_eq!(lookup_ids(&tx, t, 3), Vec::<i32>::new(), "an updated pending row's old key");
+    assert_eq!(lookup_ids(&tx, t, 4), [4]);
+    tx.rollback_to("sp").expect("rollback to");
+    assert_eq!(lookup_ids(&tx, t, 1), [1], "restored by ROLLBACK TO");
+    assert_eq!(lookup_ids(&tx, t, 3), [3]);
+    assert_eq!(lookup_ids(&tx, t, 4), Vec::<i32>::new());
+    tx.commit().expect("commit");
+    let mut after = db.begin(Isolation::ReadCommitted);
+    after.begin_statement();
+    assert_eq!(lookup_ids(&after, t, 3), [3], "committed into the maintained index");
+    assert_eq!(committed_ids(&db, t), [1, 2, 3]);
+}
+
+/// A commit applied in place must not change what an older snapshot sees.
+#[test]
+fn commit_leaves_an_open_snapshot_unchanged() {
+    let (db, t) = db_with_unique_id();
+    let mut reader = db.begin(Isolation::RepeatableRead);
+    reader.begin_statement();
+    assert_eq!(lookup_ids(&reader, t, 1), [1]);
+    let mut writer = db.begin(Isolation::ReadCommitted);
+    writer.begin_statement();
+    let one = writer.scan(t)[0].0;
+    writer.delete(t, one);
+    writer.insert(t, row(5));
+    writer.commit().expect("commit");
+    reader.begin_statement();
+    assert_eq!(ids(&reader, t), [1, 2]);
+    assert_eq!(lookup_ids(&reader, t, 1), [1]);
+    assert_eq!(lookup_ids(&reader, t, 5), Vec::<i32>::new());
+    assert_eq!(committed_ids(&db, t), [2, 5]);
+}
+
+/// Concurrent inserts of one key: the later COMMIT fails with 23505 and changes nothing.
+#[test]
+fn commit_rechecks_unique_keys_committed_concurrently() {
+    let (db, t) = db_with_unique_id();
+    let mut a = db.begin(Isolation::ReadCommitted);
+    a.begin_statement();
+    let mut b = db.begin(Isolation::ReadCommitted);
+    b.begin_statement();
+    a.insert(t, row(7));
+    b.insert(t, row(8));
+    b.insert(t, row(7));
+    a.commit().expect("commit A");
+    let err = b.commit().expect_err("duplicate key");
+    assert_eq!(err.code, "23505");
+    assert_eq!(committed_ids(&db, t), [1, 2, 7]);
+    // A key freed by the committing transaction's own delete is not a duplicate.
+    let mut c = db.begin(Isolation::ReadCommitted);
+    c.begin_statement();
+    let seven = c.scan(t).into_iter().find(|(_, r)| r[0] == Value::Int4(7)).expect("row 7").0;
+    c.delete(t, seven);
+    c.insert(t, row(7));
+    c.commit().expect("delete and reinsert one key");
+    assert_eq!(committed_ids(&db, t), [1, 2, 7]);
+}
