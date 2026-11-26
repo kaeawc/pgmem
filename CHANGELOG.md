@@ -19,6 +19,7 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - The SQL deparser (`pg_get_viewdef`, `pg_get_constraintdef`, `pg_get_indexdef`, column defaults) quotes identifiers with the same recorded keyword data as `quote_ident()`.
 - Function lookup and `pg_get_triggerdef` never resolve functions through `pg_temp` implicitly (a temp trigger function prints as `pg_temp.f()`), and a user function shadowed by a same-signature `pg_catalog` builtin is schema-qualified.
 - `pg_constraint.connamespace` is the namespace of the owning table or domain instead of always `public`.
+- `pg_get_indexdef` and `pg_indexes.indexdef` print `INCLUDE (...)` for covering indexes, and `pg_index.indnatts`, `indnkeyatts`, `indkey` and `pg_class.relnatts` count the INCLUDE columns like PostgreSQL.
 
 ### Changed
 
