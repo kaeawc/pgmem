@@ -19,6 +19,7 @@ mod extensions;
 pub mod funcs;
 pub mod functions;
 mod ownership;
+mod hashorder;
 pub mod partition;
 pub mod plan;
 pub mod plpgsql;
