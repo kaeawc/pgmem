@@ -169,3 +169,106 @@ fn client_catalog_support() {
     let stmt = c.prepare_typed("SELECT $1::text", std::slice::from_ref(&mood)).expect("prepare with a user type OID");
     assert_eq!(stmt.params(), [mood]);
 }
+
+/// `pg_get_triggerdef` qualifies the trigger function exactly when the search path would not
+/// find it by its bare name (ruleutils `generate_function_name`).
+#[test]
+fn triggerdef_qualifies_function_by_visibility() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        r#"CREATE SCHEMA app; CREATE SCHEMA "Odd s";
+           CREATE FUNCTION app.touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+           CREATE FUNCTION public.pt() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+           CREATE FUNCTION "Odd s"."My F"() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+           CREATE TABLE app.t (id int);
+           CREATE TRIGGER tr BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION app.touch();
+           CREATE TRIGGER tr2 BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION public.pt();
+           CREATE TRIGGER tr3 BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION "Odd s"."My F"();"#,
+    )
+    .expect("setup");
+    let q =
+        "SELECT tgname, pg_get_triggerdef(oid), pg_get_triggerdef(oid, true) FROM pg_trigger WHERE tgrelid = 'app.t'::regclass ORDER BY 1";
+    assert_eq!(
+        rows(&mut c, q),
+        [
+            [
+                "tr",
+                "CREATE TRIGGER tr BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION app.touch()",
+                "CREATE TRIGGER tr BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION app.touch()"
+            ],
+            [
+                "tr2",
+                "CREATE TRIGGER tr2 BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION pt()",
+                "CREATE TRIGGER tr2 BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION pt()"
+            ],
+            [
+                "tr3",
+                "CREATE TRIGGER tr3 BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION \"Odd s\".\"My F\"()",
+                "CREATE TRIGGER tr3 BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION \"Odd s\".\"My F\"()"
+            ],
+        ]
+    );
+    c.batch_execute("SET search_path = app, public").expect("path");
+    assert_eq!(
+        rows(&mut c, q),
+        [
+            [
+                "tr",
+                "CREATE TRIGGER tr BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION touch()",
+                "CREATE TRIGGER tr BEFORE UPDATE ON t FOR EACH ROW EXECUTE FUNCTION touch()"
+            ],
+            [
+                "tr2",
+                "CREATE TRIGGER tr2 BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION pt()",
+                "CREATE TRIGGER tr2 BEFORE UPDATE ON t FOR EACH ROW EXECUTE FUNCTION pt()"
+            ],
+            [
+                "tr3",
+                "CREATE TRIGGER tr3 BEFORE UPDATE ON app.t FOR EACH ROW EXECUTE FUNCTION \"Odd s\".\"My F\"()",
+                "CREATE TRIGGER tr3 BEFORE UPDATE ON t FOR EACH ROW EXECUTE FUNCTION \"Odd s\".\"My F\"()"
+            ],
+        ]
+    );
+}
+
+/// `ALTER TRIGGER ... RENAME TO` and `ALTER TABLE ... ENABLE / DISABLE [REPLICA | ALWAYS] TRIGGER`.
+#[test]
+fn alter_trigger_rename_and_enable_modes() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        r#"CREATE TABLE t (id int); CREATE TABLE log (msg text);
+           CREATE FUNCTION f() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO log VALUES (TG_NAME); RETURN NEW; END $$;
+           CREATE TRIGGER tr AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f();
+           CREATE TRIGGER tr2 AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f();
+           CREATE TRIGGER tr3 AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f();"#,
+    )
+    .expect("setup");
+    c.batch_execute("ALTER TRIGGER tr ON t RENAME TO tr_new").expect("rename");
+    c.batch_execute(
+        "ALTER TABLE t DISABLE TRIGGER tr2; ALTER TABLE t ENABLE REPLICA TRIGGER tr3; ALTER TABLE t ENABLE ALWAYS TRIGGER tr_new",
+    )
+    .expect("modes");
+    let q = "SELECT tgname, tgenabled FROM pg_trigger WHERE tgrelid = 't'::regclass ORDER BY 1";
+    assert_eq!(rows(&mut c, q), [["tr2", "D"], ["tr3", "R"], ["tr_new", "A"]]);
+    assert_eq!(
+        rows(&mut c, "SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'tr_new'"),
+        [["CREATE TRIGGER tr_new AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION f()"]]
+    );
+    // Origin role: ALWAYS fires, REPLICA and DISABLED do not.
+    c.batch_execute("INSERT INTO t VALUES (1)").expect("insert");
+    assert_eq!(rows(&mut c, "SELECT msg FROM log ORDER BY 1"), [["tr_new"]]);
+    // Replica role: ALWAYS and REPLICA fire, ORIGIN and DISABLED do not.
+    c.batch_execute("ALTER TABLE t ENABLE TRIGGER tr2; TRUNCATE log; SET session_replication_role = replica; INSERT INTO t VALUES (2); SET session_replication_role = origin")
+        .expect("replica");
+    assert_eq!(rows(&mut c, "SELECT msg FROM log ORDER BY 1"), [["tr3"], ["tr_new"]]);
+    c.batch_execute("ALTER TABLE t DISABLE TRIGGER USER").expect("disable user");
+    assert_eq!(rows(&mut c, q), [["tr2", "D"], ["tr3", "D"], ["tr_new", "D"]]);
+    c.batch_execute("ALTER TABLE t ENABLE TRIGGER ALL").expect("enable all");
+    assert_eq!(rows(&mut c, q), [["tr2", "O"], ["tr3", "O"], ["tr_new", "O"]]);
+    let e = expect_code(c.batch_execute("ALTER TRIGGER nope ON t RENAME TO x"), "42704");
+    assert_eq!(message(&e), "trigger \"nope\" for table \"t\" does not exist");
+    let e = expect_code(c.batch_execute("ALTER TRIGGER tr2 ON t RENAME TO tr3"), "42710");
+    assert_eq!(message(&e), "trigger \"tr3\" for relation \"t\" already exists");
+    let e = expect_code(c.batch_execute("ALTER TABLE t ENABLE TRIGGER nope"), "42704");
+    assert_eq!(message(&e), "trigger \"nope\" for table \"t\" does not exist");
+}
