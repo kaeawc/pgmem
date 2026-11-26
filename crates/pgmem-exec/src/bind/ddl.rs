@@ -100,6 +100,7 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
         indexes: Vec::new(),
         matview: None,
         unlogged: ct.options.unlogged,
+        replident: 'd',
         reloptions: crate::reloptions::table(&ct.options.reloptions, ct.options.partition_by.is_some())?,
     };
     let mut sequences = Vec::new();
@@ -436,6 +437,8 @@ pub fn add_constraint(
                 primary,
                 nulls_not_distinct,
                 predicate: None,
+                clustered: false,
+                replica: false,
                 reloptions: Vec::new(),
             });
             let ckind = if primary {
@@ -688,6 +691,8 @@ pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(
             primary: false,
             nulls_not_distinct: ci.nulls_not_distinct,
             predicate: ci.predicate.clone(),
+            clustered: false,
+            replica: false,
             reloptions,
         },
     )))
@@ -885,7 +890,15 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
         | ir::AlterTableAction::SetIdentity { .. }
         | ir::AlterTableAction::DropIdentity { .. }
         | ir::AlterTableAction::EnableTrigger { .. }
-        | ir::AlterTableAction::OwnerTo(_) => Err(SqlError::internal("identity, trigger and owner actions run in ddl::alter_table_action")),
+        | ir::AlterTableAction::OwnerTo(_)
+        | ir::AlterTableAction::SetStatistics { .. }
+        | ir::AlterTableAction::SetStorage { .. }
+        | ir::AlterTableAction::SetCompression { .. }
+        | ir::AlterTableAction::ReplicaIdentity { .. }
+        | ir::AlterTableAction::ClusterOn(_)
+        | ir::AlterTableAction::SetUnlogged(_) => {
+            Err(SqlError::internal("identity, trigger, owner and attribute actions run in ddl::alter_table_action"))
+        }
         ir::AlterTableAction::SetExpression { column, expr } => {
             let slot = def.column_index(column).ok_or_else(|| not_found(column))?;
             if def.columns[slot].generated.is_none() {
@@ -986,6 +999,9 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
             }
             def.columns[slot].ty = t;
             def.columns[slot].typmod = typmod;
+            // The column takes the new type's storage and compression defaults.
+            def.columns[slot].storage = None;
+            def.columns[slot].compression = None;
             Ok(AlterOutcome::Replace {
                 def: Box::new(def),
                 rename_from: None,
@@ -1169,6 +1185,8 @@ fn add_exclusion(
         primary: false,
         nulls_not_distinct: false,
         predicate: predicate.clone(),
+        clustered: false,
+        replica: false,
         reloptions: Vec::new(),
     });
     table.constraints.push(Constraint {
