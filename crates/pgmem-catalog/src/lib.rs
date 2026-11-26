@@ -1206,7 +1206,7 @@ impl Catalog {
         self.partition_keys.remove(&dropped.oid);
         self.partition_bounds.remove(&dropped.oid);
         self.triggers.retain(|_, t| t.table != dropped.oid);
-        self.grants.retain(|g| g.object != GrantObject::Relation(dropped.oid));
+        self.grants.retain(|g| g.object.relation_oid() != Some(dropped.oid));
         self.owners.remove(&dropped.oid);
         // Sequences owned by the table's columns go with it.
         self.sequences.retain(|_, s| s.schema != name.schema || s.owned_by.as_ref().is_none_or(|(t, _)| *t != name.name));
@@ -1228,7 +1228,7 @@ impl Catalog {
     pub fn drop_view(&mut self, name: &QualName) -> Option<Arc<ViewDef>> {
         let dropped = self.views.remove(name)?;
         self.triggers.retain(|_, t| t.table != dropped.oid);
-        self.grants.retain(|g| g.object != GrantObject::Relation(dropped.oid));
+        self.grants.retain(|g| g.object.relation_oid() != Some(dropped.oid));
         self.owners.remove(&dropped.oid);
         Some(dropped)
     }
