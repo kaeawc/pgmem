@@ -171,10 +171,14 @@ pub fn run_trigger(def: &FunctionDef, call: &TriggerCall, exec: &mut Exec) -> Sq
     let block = parse_src(&def.body)?;
     let mut vars = trigger_vars(call);
     vars.extend(arg_vars(def, &[]));
-    let mut it = Interp::new(exec, vars);
-    it.run_block(&block)?;
-    match it.result_row.take() {
-        Some(row) => Ok(row),
-        None => Err(SqlError::new(code::FUNCTION_EXECUTED_NO_RETURN_STATEMENT, "control reached end of trigger procedure without RETURN")),
-    }
+    exec.for_function(def, |exec| {
+        let mut it = Interp::new(exec, vars);
+        it.run_block(&block)?;
+        match it.result_row.take() {
+            Some(row) => Ok(row),
+            None => {
+                Err(SqlError::new(code::FUNCTION_EXECUTED_NO_RETURN_STATEMENT, "control reached end of trigger procedure without RETURN"))
+            }
+        }
+    })
 }
