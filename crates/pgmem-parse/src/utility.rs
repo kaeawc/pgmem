@@ -52,6 +52,12 @@ pub(crate) enum Utility {
         action: ColumnAction,
     },
     Copy(Box<crate::copy::RawCopy>),
+    /// `ALTER TABLE t` with column / table attribute actions only (`attr_action`).
+    AlterAttrs {
+        table: sqlparser::ast::ObjectName,
+        if_exists: bool,
+        actions: Vec<pgmem_ir::AlterTableAction>,
+    },
     RelOptions {
         object: pgmem_ir::ObjectType,
         name: sqlparser::ast::ObjectName,
@@ -117,6 +123,9 @@ pub(crate) fn lower(u: Utility) -> SqlResult<Statement> {
         Utility::AttachIndex { index, partition } => {
             Statement::AttachIndexPartition { index: object_name(&index)?, partition: object_name(&partition)? }
         }
+        Utility::AlterAttrs { table, if_exists, actions } => {
+            Statement::AlterTable(Box::new(pgmem_ir::AlterTable { name: object_name(&table)?, if_exists, actions }))
+        }
         Utility::RelOptions { object, name, if_exists, reset, options } => Statement::AlterRelOptions {
             object,
             name: object_name(&name)?,
@@ -167,6 +176,11 @@ pub(crate) fn try_parse(p: &mut Parser) -> Result<Option<Utility>, ParserError> 
         p.next_token();
         p.next_token();
         return alter_sequence(p).map(Some);
+    }
+    if word_at(p, 0, "ALTER") && word_at(p, 1, "TABLE") && alter_attrs_ahead(p) {
+        p.next_token();
+        p.next_token();
+        return alter_attrs(p).map(Some);
     }
     if word_at(p, 0, "ALTER") && word_at(p, 1, "TABLE") && alter_column_ahead(p) {
         p.next_token();
@@ -625,4 +639,124 @@ fn alter_column(p: &mut Parser) -> Result<Utility, ParserError> {
         return p.expected("end of statement", p.peek_token());
     }
     Ok(Utility::AlterColumn { table, if_exists, column, action })
+}
+
+/// The token index after `ALTER TABLE [IF EXISTS] [ONLY] name`.
+fn after_table_name(p: &Parser) -> usize {
+    let mut n = 2;
+    if word_at(p, n, "IF") && word_at(p, n + 1, "EXISTS") {
+        n += 2;
+    }
+    if word_at(p, n, "ONLY") {
+        n += 1;
+    }
+    n += 1;
+    while p.peek_nth_token(n).token == Token::Period {
+        n += 2;
+    }
+    n
+}
+
+/// Whether the first action of `ALTER TABLE name ...` is a column / table attribute one
+/// (`SET STATISTICS | STORAGE | COMPRESSION`, `REPLICA IDENTITY`, `CLUSTER ON`,
+/// `SET WITHOUT CLUSTER`, `SET [UN]LOGGED`).
+fn alter_attrs_ahead(p: &Parser) -> bool {
+    let mut n = after_table_name(p);
+    if word_at(p, n, "ALTER") {
+        n += 1;
+        if word_at(p, n, "COLUMN") {
+            n += 1;
+        }
+        // The column name (or number).
+        n += 1;
+        return word_at(p, n, "SET") && ["STATISTICS", "STORAGE", "COMPRESSION"].iter().any(|w| word_at(p, n + 1, w));
+    }
+    word_at(p, n, "REPLICA")
+        || (word_at(p, n, "CLUSTER") && word_at(p, n + 1, "ON"))
+        || (word_at(p, n, "SET")
+            && (word_at(p, n + 1, "LOGGED")
+                || word_at(p, n + 1, "UNLOGGED")
+                || (word_at(p, n + 1, "WITHOUT") && word_at(p, n + 2, "CLUSTER"))))
+}
+
+/// `ALTER TABLE [IF EXISTS] [ONLY] name action [, ...]` for the attribute actions.
+fn alter_attrs(p: &mut Parser) -> Result<Utility, ParserError> {
+    let if_exists = eat_word(p, "IF") && eat_word(p, "EXISTS");
+    let _ = eat_word(p, "ONLY");
+    let table = p.parse_object_name(false)?;
+    let mut actions = Vec::new();
+    loop {
+        actions.push(attr_action(p)?);
+        if p.consume_token(&Token::Comma) {
+            continue;
+        }
+        break;
+    }
+    if !matches!(p.peek_token().token, Token::SemiColon | Token::EOF) {
+        return p.expected("end of statement", p.peek_token());
+    }
+    Ok(Utility::AlterAttrs { table, if_exists, actions })
+}
+
+fn attr_action(p: &mut Parser) -> Result<pgmem_ir::AlterTableAction, ParserError> {
+    use pgmem_ir::AlterTableAction as A;
+    if eat_word(p, "ALTER") {
+        let _ = eat_word(p, "COLUMN");
+        let column = crate::ident(&p.parse_identifier()?);
+        if !eat_word(p, "SET") {
+            return p.expected("SET", p.peek_token());
+        }
+        if eat_word(p, "STATISTICS") {
+            let Some(target) = signed_int(p)? else { return p.expected("an integer", p.peek_token()) };
+            return Ok(A::SetStatistics { column, target });
+        }
+        let storage = eat_word(p, "STORAGE");
+        if !storage && !eat_word(p, "COMPRESSION") {
+            return p.expected("STATISTICS, STORAGE or COMPRESSION", p.peek_token());
+        }
+        let value = crate::ident(&p.parse_identifier()?);
+        return Ok(if storage { A::SetStorage { column, storage: value } } else { A::SetCompression { column, method: value } });
+    }
+    if eat_word(p, "REPLICA") {
+        if !eat_word(p, "IDENTITY") {
+            return p.expected("IDENTITY", p.peek_token());
+        }
+        if eat_word(p, "USING") {
+            if !eat_word(p, "INDEX") {
+                return p.expected("INDEX", p.peek_token());
+            }
+            let index = crate::ident(&p.parse_identifier()?);
+            return Ok(A::ReplicaIdentity { kind: 'i', index: Some(index) });
+        }
+        let kind = if eat_word(p, "DEFAULT") {
+            'd'
+        } else if eat_word(p, "FULL") {
+            'f'
+        } else if eat_word(p, "NOTHING") {
+            'n'
+        } else {
+            return p.expected("DEFAULT, FULL, NOTHING or USING INDEX", p.peek_token());
+        };
+        return Ok(A::ReplicaIdentity { kind, index: None });
+    }
+    if eat_word(p, "CLUSTER") {
+        if !eat_word(p, "ON") {
+            return p.expected("ON", p.peek_token());
+        }
+        return Ok(A::ClusterOn(Some(crate::ident(&p.parse_identifier()?))));
+    }
+    if !eat_word(p, "SET") {
+        return p.expected("an ALTER TABLE action", p.peek_token());
+    }
+    if eat_word(p, "WITHOUT") {
+        if !eat_word(p, "CLUSTER") {
+            return p.expected("CLUSTER", p.peek_token());
+        }
+        return Ok(A::ClusterOn(None));
+    }
+    let unlogged = eat_word(p, "UNLOGGED");
+    if !unlogged && !eat_word(p, "LOGGED") {
+        return p.expected("LOGGED or UNLOGGED", p.peek_token());
+    }
+    Ok(A::SetUnlogged(unlogged))
 }
