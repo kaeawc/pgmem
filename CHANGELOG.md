@@ -15,6 +15,7 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 
 ### Fixed
 
+- Errors carry PostgreSQL's `position` field (`P`, the 1-based character offset into the query string, shown by psql as `LINE n:` with a caret) for syntax errors and for undefined columns, relations and functions, missing FROM-clause entries, ambiguous columns, undefined operators and invalid literal input, in simple and extended (`Parse`) queries; a statement of a multi-statement query is located in the whole string. Errors inside function and `DO` bodies carry none.
 - Range types follow PostgreSQL more closely (part of #116): `daterange` keeps `infinity` bounds inclusive, `@>` / `<@` with an element need the exact subtype and range constructors take only implicit casts, `min` / `max` reject ranges, `range || text` concatenates, and `pg_range.rngsubopc` / `rngsubdiff` and the range rows' `pg_type.typalign` / `typanalyze` match PostgreSQL.
 - Function attributes are stored and shown: `SECURITY DEFINER`, `SET param = value` (`pg_proc.proconfig`), `PARALLEL`, `COST`, `ROWS` and `LEAKPROOF` appear in `pg_proc` and `pg_get_functiondef` as PostgreSQL prints them (procedures use `$procedure$`), and a function's `SET` options apply during its call.
 - `ALTER FUNCTION / PROCEDURE / ROUTINE` supports `SET` / `RESET`, `[EXTERNAL] SECURITY`, volatility, `[NOT] LEAKPROOF`, `STRICT` / `CALLED ON NULL INPUT`, `PARALLEL`, `COST`, `ROWS`, `RENAME TO` and `SET SCHEMA`.

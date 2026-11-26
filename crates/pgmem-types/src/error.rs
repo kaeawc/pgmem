@@ -23,6 +23,48 @@ pub struct ErrorFields {
     pub table: Option<String>,
     pub column: Option<String>,
     pub constraint: Option<String>,
+    /// The 1-based character offset into the query string the error points at (`P`).
+    pub position: Option<u32>,
+    /// What the error is about, for [`SourceRefs::resolve`] to turn into a `position` once the
+    /// statement's source locations are at hand (the binder only sees the IR).
+    pub subject: Option<ErrorRef>,
+}
+
+/// A reference in the statement text an error can point at, keyed by its folded name.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ErrorRef {
+    /// A column reference as written, parts joined with `.` (`a`, `t.a`).
+    Column(String),
+    /// A relation named in FROM or as a DML target, parts joined with `.`.
+    Relation(String),
+    /// A function call by its name as written, parts joined with `.`.
+    Function(String),
+    /// A binary or prefix operator by its Postgres name.
+    Operator(String),
+    /// A string literal by its value.
+    Literal(String),
+}
+
+/// The source positions of the references in one statement: `(ref, 1-based character offset
+/// into the whole query string)`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SourceRefs(pub Vec<(ErrorRef, u32)>);
+
+impl SourceRefs {
+    /// Gives `e` the position of its subject when the statement holds exactly one reference
+    /// that matches it (several matches are ambiguous: no position rather than a wrong one).
+    pub fn resolve(&self, mut e: SqlError) -> SqlError {
+        let Some(f) = e.fields.as_deref_mut() else { return e };
+        let Some(subject) = f.subject.take() else { return e };
+        if f.position.is_some() {
+            return e;
+        }
+        let mut found = self.0.iter().filter(|(r, _)| *r == subject).map(|(_, p)| *p);
+        if let (Some(p), None) = (found.next(), found.next()) {
+            f.position = Some(p);
+        }
+        e
+    }
 }
 
 pub type SqlResult<T> = Result<T, SqlError>;
@@ -46,6 +88,35 @@ impl SqlError {
 
     pub fn hint(&self) -> Option<&str> {
         self.fields().and_then(|f| f.hint.as_deref())
+    }
+
+    /// The 1-based character offset into the query string the error points at.
+    pub fn position(&self) -> Option<u32> {
+        self.fields().and_then(|f| f.position)
+    }
+
+    pub fn with_position(mut self, position: u32) -> Self {
+        self.fields_mut().position = Some(position);
+        self
+    }
+
+    /// Records what the error is about (see [`SourceRefs::resolve`]), unless the error already
+    /// has a position or a subject: the innermost reference wins.
+    pub fn about(mut self, subject: ErrorRef) -> Self {
+        if self.fields().is_none_or(|f| f.position.is_none() && f.subject.is_none()) {
+            self.fields_mut().subject = Some(subject);
+        }
+        self
+    }
+
+    /// Drops the position and subject: for errors raised while processing text other than the
+    /// query string (function bodies, stored definitions), whose offsets mean nothing to it.
+    pub fn without_position(mut self) -> Self {
+        if let Some(f) = self.fields.as_deref_mut() {
+            f.position = None;
+            f.subject = None;
+        }
+        self
     }
 
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
