@@ -112,6 +112,7 @@ mod recursive_cte;
 mod regex;
 mod regexp_funcs;
 mod regrole_default_acl;
+mod reloptions;
 mod returning_star;
 mod roles_privileges;
 mod savepoint;
