@@ -105,6 +105,11 @@ pub(crate) fn drop_extension(names: &[String], if_exists: bool, cascade: bool, t
                 });
             }
         }
+        // Functions marked DEPENDS ON EXTENSION go with it (no CASCADE needed).
+        let marked: Vec<u32> = txn.catalog().functions().filter(|f| f.extensions.contains(name)).map(|f| f.oid).collect();
+        for oid in marked {
+            txn.catalog_mut().drop_function(oid);
+        }
         txn.catalog_mut().drop_extension(name);
     }
     Ok(QueryResult { tag: "DROP EXTENSION".into(), notices, ..Default::default() })

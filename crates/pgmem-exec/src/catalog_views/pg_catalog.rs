@@ -1250,7 +1250,7 @@ pub fn available_extension(ext: &str) -> Option<(&'static str, &'static str)> {
 fn pg_extension(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let m = snapshot(ctx);
     Ok(rows_of(PG_EXTENSION, |s| {
-        let mut rows = vec![s.row(vec![("oid", oid(13_558)), ("extname", name("plpgsql")), ("extversion", txt("1.0"))])];
+        let mut rows = vec![s.row(vec![("oid", oid(PLPGSQL_EXTENSION_OID)), ("extname", name("plpgsql")), ("extversion", txt("1.0"))])];
         for e in m.catalog.extensions() {
             rows.push(s.row(vec![
                 ("oid", oid(e.oid)),
@@ -1289,6 +1289,10 @@ fn pg_available_extensions(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     }))
 }
 
+/// The built-in plpgsql extension's `pg_extension` OID.
+pub(crate) const PLPGSQL_EXTENSION_OID: u32 = 13_558;
+const EXTENSION_CLASS_OID: u32 = 3079;
+
 fn pg_depend(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let m = snapshot(ctx);
     let s = Spec::parse(PG_DEPEND);
@@ -1320,6 +1324,22 @@ fn pg_depend(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             ("refobjsubid", Value::Int4(0)),
             ("deptype", ch('i')),
         ]));
+    }
+    // Functions marked DEPENDS ON EXTENSION: 'x'.
+    for f in m.catalog.functions() {
+        for e in &f.extensions {
+            let ext = if e == "plpgsql" { Some(PLPGSQL_EXTENSION_OID) } else { m.catalog.extension(e).map(|x| x.oid) };
+            let Some(ext) = ext else { continue };
+            rows.push(s.row(vec![
+                ("classid", oid(super::PROC_CLASS_OID)),
+                ("objid", oid(f.oid)),
+                ("objsubid", Value::Int4(0)),
+                ("refclassid", oid(EXTENSION_CLASS_OID)),
+                ("refobjid", oid(ext)),
+                ("refobjsubid", Value::Int4(0)),
+                ("deptype", ch('x')),
+            ]));
+        }
     }
     let _ = ATTRDEF_CLASS_OID;
     Ok(rows)

@@ -1169,6 +1169,7 @@ impl Binder<'_> {
             }
             return Ok(None);
         };
+        self.note_function(call.def.oid);
         let mut args = vec![Expr::Const(Value::Oid(call.def.oid))];
         for ((e, et), target) in bound.into_iter().zip(&call.targets) {
             args.push(coerce(self, e, &et, target, CoercionContext::Implicit)?);

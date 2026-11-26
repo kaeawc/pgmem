@@ -1383,6 +1383,13 @@ pub enum AlterFunctionAction {
     Config(FunctionConfig),
     RenameTo(String),
     SetSchema(String),
+    /// `OWNER TO role` (CURRENT_USER / SESSION_USER / CURRENT_ROLE resolved when run).
+    OwnerTo(String),
+    /// `[NO] DEPENDS ON EXTENSION name`.
+    DependsOnExtension {
+        extension: String,
+        remove: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

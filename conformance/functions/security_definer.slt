@@ -1,0 +1,175 @@
+# SECURITY DEFINER, function ownership, EXECUTE privileges, a function's SET search_path, and
+# ALTER FUNCTION ... OWNER TO / DEPENDS ON EXTENSION. Roles are cluster-wide on PostgreSQL, so
+# names are unique and dropped at the end.
+
+statement ok
+DROP ROLE IF EXISTS conf_sd_owner
+
+statement ok
+DROP ROLE IF EXISTS conf_sd_caller
+
+statement ok
+CREATE ROLE conf_sd_owner; CREATE ROLE conf_sd_caller; GRANT CREATE ON SCHEMA public TO conf_sd_owner
+
+statement ok
+CREATE TABLE sd_secret (v int); INSERT INTO sd_secret VALUES (42); GRANT SELECT ON sd_secret TO conf_sd_owner
+
+statement ok
+SET ROLE conf_sd_owner
+
+statement ok
+CREATE FUNCTION sd_who() RETURNS text LANGUAGE sql SECURITY DEFINER AS $$ SELECT current_user || '/' || current_setting('role') $$
+
+statement ok
+CREATE FUNCTION sd_inv() RETURNS text LANGUAGE sql AS $$ SELECT current_user::text $$
+
+statement ok
+CREATE FUNCTION sd_read() RETURNS int LANGUAGE sql SECURITY DEFINER AS $$ SELECT v FROM sd_secret $$
+
+statement ok
+CREATE FUNCTION sd_read_inv() RETURNS int LANGUAGE sql AS $$ SELECT v FROM sd_secret $$
+
+statement ok
+CREATE FUNCTION sd_err() RETURNS int LANGUAGE plpgsql SECURITY DEFINER AS $$ BEGIN RAISE EXCEPTION 'boom %', current_user; END $$
+
+statement ok
+RESET ROLE
+
+query
+SELECT p.proname, r.rolname, p.prosecdef FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner WHERE p.proname LIKE 'sd\_%' ORDER BY 1
+----
+proname:name | rolname:name | prosecdef:bool
+sd_err | conf_sd_owner | t
+sd_inv | conf_sd_owner | f
+sd_read | conf_sd_owner | t
+sd_read_inv | conf_sd_owner | f
+sd_who | conf_sd_owner | t
+
+statement ok
+SET ROLE conf_sd_caller
+
+query
+SELECT sd_who(), sd_inv(), sd_read(), current_user
+----
+sd_who:text | sd_inv:text | sd_read:int4 | current_user:name
+conf_sd_owner/conf_sd_caller | conf_sd_caller | 42 | conf_sd_caller
+
+statement error 42501 permission denied for table sd_secret
+SELECT sd_read_inv()
+
+statement error P0001 boom conf_sd_owner
+SELECT sd_err()
+
+query
+SELECT current_user
+----
+current_user:name
+conf_sd_caller
+
+statement ok
+RESET ROLE
+
+statement ok
+CREATE FUNCTION sd_setrole() RETURNS int LANGUAGE sql SECURITY DEFINER SET role = conf_sd_owner AS 'select 1'
+
+statement error 42501 cannot set parameter "role" within security-definer function
+SELECT sd_setrole()
+
+statement ok
+CREATE FUNCTION ex_f() RETURNS int LANGUAGE sql AS 'select 1'; CREATE PROCEDURE ex_p() LANGUAGE sql AS 'select 1'; CREATE TABLE ex_empty (i int); GRANT SELECT ON ex_empty TO conf_sd_caller
+
+statement ok
+REVOKE EXECUTE ON FUNCTION ex_f() FROM PUBLIC; REVOKE EXECUTE ON PROCEDURE ex_p() FROM PUBLIC
+
+query
+SELECT has_function_privilege('conf_sd_caller', 'ex_f()', 'EXECUTE'), has_function_privilege('conf_sd_caller', 'sd_inv()', 'EXECUTE')
+----
+has_function_privilege:bool | has_function_privilege:bool
+f | t
+
+statement ok
+SET ROLE conf_sd_caller
+
+statement error 42501 permission denied for function ex_f
+SELECT ex_f()
+
+statement error 42501 permission denied for function ex_f
+SELECT ex_f() FROM ex_empty
+
+statement error 42501 permission denied for procedure ex_p
+CALL ex_p()
+
+statement ok
+RESET ROLE
+
+statement ok
+CREATE SCHEMA sp_a; CREATE TABLE sp_a.t (v int); INSERT INTO sp_a.t VALUES (5); CREATE TABLE t (v int); INSERT INTO t VALUES (1)
+
+statement ok
+CREATE FUNCTION sp_sql() RETURNS int LANGUAGE sql SET search_path = sp_a AS 'select v from t'
+
+statement ok
+CREATE FUNCTION sp_pl() RETURNS int LANGUAGE plpgsql SET search_path = sp_a, public AS $$ DECLARE n int; BEGIN SELECT v INTO n FROM t; RETURN n; END $$
+
+query
+SELECT sp_sql(), sp_pl(), (SELECT v FROM t)
+----
+sp_sql:int4 | sp_pl:int4 | v:int4
+5 | 5 | 1
+
+statement ok
+CREATE FUNCTION ow(int) RETURNS int LANGUAGE sql AS 'select 1'; CREATE FUNCTION ow(text) RETURNS int LANGUAGE sql AS 'select 2'
+
+statement ok
+ALTER FUNCTION ow(text) OWNER TO conf_sd_owner
+
+query
+SELECT p.oid::regprocedure::text, r.rolname = current_user FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner WHERE p.proname = 'ow' ORDER BY 1
+----
+oid:text | ?column?:bool
+ow(integer) | t
+ow(text) | f
+
+statement error 42725 function name "ow" is not unique
+ALTER FUNCTION ow OWNER TO conf_sd_owner
+
+statement error 42704 extension "nosuch" does not exist
+ALTER FUNCTION ow(int) DEPENDS ON EXTENSION nosuch
+
+statement ok
+CREATE EXTENSION pg_trgm
+
+statement ok
+ALTER FUNCTION ow(int) DEPENDS ON EXTENSION pg_trgm
+
+statement ok
+DROP EXTENSION pg_trgm
+
+query
+SELECT oid::regprocedure::text FROM pg_proc WHERE proname = 'ow'
+----
+oid:text
+ow(text)
+
+query
+SELECT routine_name, routine_body, is_null_call, sql_data_access, security_type, parameter_style, dtd_identifier FROM information_schema.routines WHERE routine_name LIKE 'sd\_%' ORDER BY 1
+----
+routine_name:name | routine_body:varchar | is_null_call:varchar | sql_data_access:varchar | security_type:varchar | parameter_style:varchar | dtd_identifier:name
+sd_err | EXTERNAL | NO | MODIFIES | DEFINER | GENERAL | 0
+sd_inv | SQL | NO | MODIFIES | INVOKER | GENERAL | 0
+sd_read | SQL | NO | MODIFIES | DEFINER | GENERAL | 0
+sd_read_inv | SQL | NO | MODIFIES | INVOKER | GENERAL | 0
+sd_setrole | SQL | NO | MODIFIES | DEFINER | GENERAL | 0
+sd_who | SQL | NO | MODIFIES | DEFINER | GENERAL | 0
+
+statement ok
+DROP OWNED BY conf_sd_owner
+
+statement ok
+DROP OWNED BY conf_sd_caller
+
+statement ok
+DROP ROLE conf_sd_owner
+
+statement ok
+DROP ROLE conf_sd_caller

@@ -16,6 +16,12 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 
 - Function attributes are stored and shown: `SECURITY DEFINER`, `SET param = value` (`pg_proc.proconfig`), `PARALLEL`, `COST`, `ROWS` and `LEAKPROOF` appear in `pg_proc` and `pg_get_functiondef` as PostgreSQL prints them (procedures use `$procedure$`), and a function's `SET` options apply during its call.
 - `ALTER FUNCTION / PROCEDURE / ROUTINE` supports `SET` / `RESET`, `[EXTERNAL] SECURITY`, volatility, `[NOT] LEAKPROOF`, `STRICT` / `CALLED ON NULL INPUT`, `PARALLEL`, `COST`, `ROWS`, `RENAME TO` and `SET SCHEMA`.
+- `SECURITY DEFINER` functions, procedures and trigger functions run as their owner: `current_user` and privilege checks inside the body are the owner's (session_user and the `role` setting are unchanged), restored after the call even when it fails; `SET role` in one fails when called (`42501 cannot set parameter "role" within security-definer function`).
+- Statements inside function bodies are checked for the current user's privileges, and calling a function needs EXECUTE (`42501 permission denied for function f` / `procedure p`), checked before the statement runs; `REVOKE EXECUTE ... FROM PUBLIC` takes away the default, and `has_function_privilege` answers from the grants.
+- A function's `SET search_path` applies to the names its statements resolve, not only to `current_setting`.
+- Functions are owned by the role that creates them (`pg_proc.proowner`); `ALTER FUNCTION f(args) OWNER TO` changes the named overload; `REASSIGN OWNED` and `DROP OWNED` cover functions.
+- `ALTER FUNCTION ... [NO] DEPENDS ON EXTENSION`: recorded in `pg_depend` (`x`), and dropping the extension drops the function.
+- `information_schema.routines` has PostgreSQL's 82 columns (`routine_body` is `SQL` for SQL functions; `is_null_call`, `sql_data_access`, `parameter_style`, `type_udt_*`, ...), lists only routines the current user owns or may execute, and shows `routine_definition` to the owner only.
 - `pg_constraint.connamespace` is the namespace of the owning table or domain instead of always `public`.
 - `pg_get_indexdef` and `pg_indexes.indexdef` print `INCLUDE (...)` for covering indexes, and `pg_index.indnatts`, `indnkeyatts`, `indkey` and `pg_class.relnatts` count the INCLUDE columns like PostgreSQL.
 

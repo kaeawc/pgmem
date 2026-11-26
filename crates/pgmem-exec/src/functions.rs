@@ -137,6 +137,7 @@ pub(crate) fn create_function(cf: &ir::CreateFunction, txn: &mut Txn, env: &Sess
         cost: cf.cost.unwrap_or(100.0),
         rows: 0.0,
         config: Vec::new(),
+        extensions: Vec::new(),
     };
     if cf.procedure
         && (cf.volatility.is_some() || cf.strict || cf.leakproof || cf.parallel.is_some() || cf.cost.is_some() || cf.rows.is_some())
@@ -152,6 +153,7 @@ pub(crate) fn create_function(cf: &ir::CreateFunction, txn: &mut Txn, env: &Sess
     }
     let inputs = def.input_types();
     let existing = catalog.functions().find(|f| f.schema == schema && f.name == name && f.input_types() == inputs).cloned();
+    let new = existing.is_none();
     match existing {
         Some(old) if !cf.or_replace => {
             return Err(SqlError::new(
@@ -177,6 +179,7 @@ pub(crate) fn create_function(cf: &ir::CreateFunction, txn: &mut Txn, env: &Sess
                 .with_hint(format!("Use DROP FUNCTION {} first.", signature(&name, &inputs))));
             }
             def.oid = old.oid;
+            def.extensions.clone_from(&old.extensions);
         }
         None => def.oid = txn.catalog_mut().alloc_oid(),
     }
@@ -186,7 +189,13 @@ pub(crate) fn create_function(cf: &ir::CreateFunction, txn: &mut Txn, env: &Sess
     } else {
         crate::plpgsql::parse(&def.body)?;
     }
+    let oid = def.oid;
     txn.catalog_mut().put_function(def);
+    // A new function is owned by the role that creates it.
+    let role = crate::roles::current_role(env);
+    if new && role != env.user {
+        txn.catalog_mut().set_owner(oid, Some(&role));
+    }
     Ok(tag(if cf.procedure { "CREATE PROCEDURE" } else { "CREATE FUNCTION" }))
 }
 
@@ -208,7 +217,8 @@ fn config_name(name: &str) -> SqlResult<String> {
     let lower = name.to_ascii_lowercase();
     match crate::settings::lookup(&lower) {
         Some(def) => Ok(def.name.to_owned()),
-        None if crate::settings::is_custom(&lower) => Ok(lower),
+        // `role` is not listed in pg_settings, but a function may set it.
+        None if crate::settings::is_custom(&lower) || lower == "role" => Ok(lower),
         None => Err(crate::settings::unrecognized(&lower)),
     }
 }
@@ -341,6 +351,7 @@ pub(crate) fn alter_function(
         return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("{sig} is not a procedure")));
     }
     let mut def = (*f).clone();
+    let mut owner = None;
     for a in actions {
         match a {
             A::RenameTo(new) | A::SetSchema(new) => {
@@ -363,6 +374,16 @@ pub(crate) fn alter_function(
             }
             A::Config(c) => apply_config(&mut def.config, c, &catalog, env)?,
             A::SecurityDefiner(v) => def.security_definer = *v,
+            A::OwnerTo(role) => owner = Some(role),
+            A::DependsOnExtension { extension, remove } => {
+                if extension != "plpgsql" && catalog.extension(extension).is_none() {
+                    return Err(SqlError::new(code::UNDEFINED_OBJECT, format!("extension \"{extension}\" does not exist")));
+                }
+                def.extensions.retain(|e| e != extension);
+                if !remove {
+                    def.extensions.push(extension.clone());
+                }
+            }
             _ if def.procedure => return Err(procedure_attribute()),
             A::Volatility(v) => def.volatility = *v,
             A::Strict(v) => def.strict = *v,
@@ -377,7 +398,11 @@ pub(crate) fn alter_function(
             }
         }
     }
+    let oid = def.oid;
     txn.catalog_mut().put_function(def);
+    if let Some(role) = owner {
+        crate::roles::set_owner(txn, env, oid, role)?;
+    }
     Ok(tag(match kind {
         ir::RoutineKind::Procedure => "ALTER PROCEDURE",
         ir::RoutineKind::Routine => "ALTER ROUTINE",
@@ -611,6 +636,9 @@ impl Exec<'_, '_> {
     /// Runs one statement with `params` ($1, $2, ... of `types`).
     pub fn statement(&mut self, stmt: &ir::Statement, types: &[Type], params: &[Value]) -> SqlResult<QueryResult> {
         let catalog = self.txn().catalog().clone();
+        // Statements in a function body are checked for the current user: the caller, or
+        // the owner of a SECURITY DEFINER function.
+        crate::roles::check_statement(stmt, &catalog, self.env(), types)?;
         let binder = Binder::new(&catalog, types);
         let top = Level::new(Scope::default());
         let ctx = Ctx::new(&top);
@@ -671,25 +699,44 @@ fn run_sql(def: &FunctionDef, args: &[Value], exec: &mut Exec) -> SqlResult<Vec<
 
 /// Runs function `def` on `args`: its result rows (one row for a scalar function).
 pub fn run_function(def: &FunctionDef, args: &[Value], exec: &mut Exec) -> SqlResult<Vec<Row>> {
-    if def.config.is_empty() {
-        return run_function_in(def, args, exec);
+    in_function_env(def, exec, |exec| run_function_in(def, args, exec))
+}
+
+/// Runs `f` (the body of `def`) in the function's environment (`fmgr_security_definer`):
+/// a SECURITY DEFINER function runs as its owner, and its `SET` options apply to the call
+/// (`search_path` to the names its statements resolve). All of it ends with the call,
+/// whether it returns or fails.
+pub fn in_function_env<R>(def: &FunctionDef, exec: &mut Exec, f: impl FnOnce(&mut Exec) -> SqlResult<R>) -> SqlResult<R> {
+    if def.config.is_empty() && !def.security_definer {
+        return f(exec);
     }
-    // The function's `SET` options apply to the call and are gone after it: the body runs
-    // against a copy of the session environment.
     let mut env = exec.env().clone();
+    let mut path = pgmem_types::context::search_path();
+    if def.security_definer {
+        let owner = crate::roles::owner_of(exec.txn().catalog(), &env, def.oid);
+        path.user.clone_from(&owner);
+        env.security_definer = Some(owner);
+    }
     for entry in &def.config {
         let (name, value) = entry.split_once('=').unwrap_or((entry, ""));
         let lower = name.to_ascii_lowercase();
+        if lower == "role" && env.security_definer.is_some() {
+            return Err(SqlError::new(code::INSUFFICIENT_PRIVILEGE, "cannot set parameter \"role\" within security-definer function"));
+        }
+        if lower == "search_path" {
+            path.entries = pgmem_types::context::SearchPath::parse(value);
+        }
         // Stored in the form the session keeps it (units resolved), as `SET` would.
         let stored = crate::session::validate_setting(&lower, value, env.setting(&lower).as_deref()).unwrap_or_else(|_| value.to_owned());
         env.settings.insert(lower, stored);
     }
+    let _path = pgmem_types::context::enter(pgmem_types::context::Context { search_path: path, ..pgmem_types::context::current() });
     match exec {
         Exec::Read(c) => {
             let ctx = EvalCtx { txn: c.txn, params: c.params, env: &env, state: c.state, outer: c.outer.clone() };
-            run_function_in(def, args, &mut Exec::Read(&ctx))
+            f(&mut Exec::Read(&ctx))
         }
-        Exec::Write { txn, state, .. } => run_function_in(def, args, &mut Exec::Write { txn, env: &env, state }),
+        Exec::Write { txn, state, .. } => f(&mut Exec::Write { txn, env: &env, state }),
     }
 }
 
@@ -771,6 +818,7 @@ pub(crate) fn call(
         return Err(SqlError::undefined_function(format!("procedure {} does not exist", signature(&name.to_string(), &types)))
             .with_hint("No procedure matches the given name and argument types. You might need to add explicit type casts."));
     };
+    crate::roles::check_execute(&catalog, env, &call.def)?;
     let mut values = Vec::with_capacity(call.targets.len());
     {
         let ectx = EvalCtx::new(txn, &[], env, state);

@@ -256,7 +256,7 @@ pub(crate) fn fire_row(
         {
             continue;
         }
-        let result = crate::plpgsql::run_trigger(f, &call, exec)?;
+        let result = crate::functions::in_function_env(f, exec, |exec| crate::plpgsql::run_trigger(f, &call, exec))?;
         if t.timing == TriggerTiming::After {
             continue;
         }
@@ -298,7 +298,7 @@ pub(crate) fn fire_statement(
             old: None,
             args: &t.args,
         };
-        crate::plpgsql::run_trigger(f, &call, exec)?;
+        crate::functions::in_function_env(f, exec, |exec| crate::plpgsql::run_trigger(f, &call, exec))?;
     }
     Ok(())
 }

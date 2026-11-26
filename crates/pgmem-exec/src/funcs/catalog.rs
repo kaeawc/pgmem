@@ -100,7 +100,9 @@ fn routine_text_function(name: &str, n: usize) -> SqlResult<Option<Resolved>> {
 /// argument count (otherwise it falls through to the generic always-true arm).
 fn privilege_arity(name: &str, n: usize) -> bool {
     match name {
-        "has_table_privilege" | "has_schema_privilege" | "has_sequence_privilege" | "pg_has_role" => n == 2 || n == 3,
+        "has_table_privilege" | "has_schema_privilege" | "has_sequence_privilege" | "has_function_privilege" | "pg_has_role" => {
+            n == 2 || n == 3
+        }
         "has_column_privilege" => n == 3 || n == 4,
         "has_any_column_privilege" => n == 2 || n == 3,
         _ => false,
@@ -113,6 +115,7 @@ fn privilege_function(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> 
         "has_table_privilege" => strict("has_table_privilege", |a, c| privilege_check(a, c, PrivKind::Table)),
         "has_sequence_privilege" => strict("has_sequence_privilege", |a, c| privilege_check(a, c, PrivKind::Sequence)),
         "has_schema_privilege" => strict("has_schema_privilege", |a, c| privilege_check(a, c, PrivKind::Schema)),
+        "has_function_privilege" => strict("has_function_privilege", |a, c| privilege_check(a, c, PrivKind::Function)),
         "has_column_privilege" => strict("has_column_privilege", |a, c| column_privilege_check(a, c, false)),
         "has_any_column_privilege" => strict("has_any_column_privilege", |a, c| column_privilege_check(a, c, true)),
         _ => strict("pg_has_role", |a, c| privilege_check(a, c, PrivKind::Role)),
@@ -202,6 +205,7 @@ enum PrivKind {
     Sequence,
     Schema,
     Role,
+    Function,
 }
 
 /// A role argument: a name, or an OID of the session user / a created role.
@@ -261,6 +265,23 @@ fn privilege_check(a: &[Value], ctx: &EvalCtx, kind: PrivKind) -> SqlResult<Valu
             }
             (pgmem_catalog::GrantObject::Schema(s), "usage create")
         }
+        PrivKind::Function => {
+            // A function by `name(types)` (42883 when there is none) or OID (NULL when unknown).
+            let oid = match object {
+                Value::Text(t) => match crate::reg::to_reg(Value::Text(t.clone()), RegKind::Procedure, cat)? {
+                    Value::Reg(_, o, _) => o,
+                    _ => 0,
+                },
+                other => {
+                    let o = oid_arg(other).unwrap_or(0);
+                    if cat.function_by_oid(o).is_none() && !crate::catalog_views::builtin_procs().iter().any(|p| p.oid == o) {
+                        return Ok(Value::Null);
+                    }
+                    o
+                }
+            };
+            (pgmem_catalog::GrantObject::Function(oid), "execute")
+        }
         _ => {
             let rel = match object {
                 Value::Text(t) => crate::reg::relation_from_text(t, cat)?,
@@ -305,6 +326,7 @@ fn privilege_check(a: &[Value], ctx: &EvalCtx, kind: PrivKind) -> SqlResult<Valu
             "trigger" => 't',
             "maintain" => 'm',
             "usage" => 'U',
+            "execute" => 'X',
             _ => 'C',
         };
         held |= crate::roles::has_privilege(cat, ctx.env, &user, &object, letter);
