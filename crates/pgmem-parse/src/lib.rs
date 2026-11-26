@@ -1524,7 +1524,7 @@ pub(crate) fn lower_statement(stmt: sq::Statement) -> SqlResult<Statement> {
             Statement::Explain(Box::new(explain))
         }
         S::Lock(l) => Statement::Lock {
-            tables: l.tables.iter().map(|t| object_name(&t.name)).collect::<SqlResult<Vec<_>>>()?,
+            tables: l.tables.iter().map(|t| Ok((object_name(&t.name)?, t.only))).collect::<SqlResult<Vec<_>>>()?,
             mode: match l.lock_mode {
                 Some(sq::LockTableMode::AccessShare) => 1,
                 Some(sq::LockTableMode::RowShare) => 2,

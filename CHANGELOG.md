@@ -11,6 +11,10 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - Static Linux binaries (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) on each release.
 - `cargo binstall pgmem` installs the prebuilt binary from the GitHub release.
 - `pg_get_keywords()` returns PostgreSQL 18's keyword list (word, catcode, barelabel, catdesc, baredesc).
+- `pg_locks` lists relation locks: the ones queries (with the indexes the planner opens), DML,
+  `LOCK TABLE` and DDL take, at PostgreSQL's lock level for each statement and ALTER TABLE
+  subcommand. They are held to the end of the transaction (or released by `ROLLBACK TO`) and
+  conflict with `LOCK ... NOWAIT` in other sessions.
 
 ### Fixed
 
@@ -43,6 +47,8 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - UNION / INTERSECT / EXCEPT and `SELECT DISTINCT` without ORDER BY return rows in PostgreSQL's
   order (sorted, or hash-table order, as its planner picks) for inputs of constants and VALUES
   lists, instead of first-seen order. Table inputs keep first-seen order.
+- `LOCK TABLE` locks a partitioned table's partitions (not with `ONLY`) and a view's base
+  relations, and refuses sequences and indexes (`42809 cannot lock relation`).
 - Storage parameters are stored and validated like PostgreSQL: `WITH (...)` on tables, indexes, views and materialized views, `ALTER TABLE / INDEX / VIEW / MATERIALIZED VIEW ... SET / RESET (...)`, `pg_class.reloptions`, `pg_get_indexdef` (`WITH (fillfactor='70')`) and `information_schema.views.check_option` (including `WITH CHECK OPTION` and `check_option`).
 - Storage-parameter gaps: `CREATE TABLE ... PARTITION BY ... WITH (...)` takes PostgreSQL's clause order (the reverse is a syntax error); `PRIMARY KEY`, `UNIQUE` and `EXCLUDE` constraints take `WITH (...)` (in `CREATE TABLE` and `ALTER TABLE ADD`), shown by `pg_get_indexdef` and, for `EXCLUDE`, `pg_get_constraintdef`; `ALTER TABLE ... SET / RESET (...)` combines with other actions; `RESET (x = 1)` and empty `SET ()` / `WITH ()` give PostgreSQL's errors; integer values in hex, octal, binary or with `_` are stored in decimal.
 - `WITH CHECK OPTION` (or `check_option`) on a view that is not automatically updatable fails with `0A000` and PostgreSQL's hint; `LOCAL` and `CASCADED` check options are told apart when a view over views is written, each violation naming the view whose condition failed; `ALTER VIEW ... SET / RESET` keeps the view's grants and owner.
