@@ -929,14 +929,25 @@ impl Catalog {
     }
 
     /// ruleutils' `FunctionIsVisible` for a function `f`: the first schema on the search path
-    /// with a function of that name and argument types holds `f`.
-    pub fn function_visible(&self, f: &FunctionDef) -> bool {
+    /// with a function of that name and argument types holds `f`. Functions are never looked up
+    /// in the temporary schema, and pg_catalog (searched in its path position) holds the builtins:
+    /// `builtin(name, input_types)` says whether one with that signature exists.
+    pub fn function_visible(&self, f: &FunctionDef, builtin: &dyn Fn(&str, &[Type]) -> bool) -> bool {
         let types = f.input_types();
+        let temp = pgmem_types::context::search_path().temp_schema;
         for e in self.search_path() {
-            if let PathEntry::Schema(s) = e
-                && self.functions.values().any(|g| g.schema == s && g.name == f.name && g.input_types() == types)
-            {
-                return s == f.schema;
+            match e {
+                PathEntry::System => {
+                    if builtin(&f.name, &types) {
+                        return false;
+                    }
+                }
+                PathEntry::Schema(s) if temp.as_deref() == Some(s.as_str()) => {}
+                PathEntry::Schema(s) => {
+                    if self.functions.values().any(|g| g.schema == s && g.name == f.name && g.input_types() == types) {
+                        return s == f.schema;
+                    }
+                }
             }
         }
         false
@@ -1089,8 +1100,12 @@ impl Catalog {
         if name.0.len() > 1 {
             return in_schema(&self.resolve_schema_name(&name.0[name.0.len() - 2]));
         }
+        let temp = pgmem_types::context::search_path().temp_schema;
         for e in self.search_path() {
-            if let PathEntry::Schema(s) = e {
+            // Functions are never resolved through pg_temp implicitly.
+            if let PathEntry::Schema(s) = e
+                && temp.as_deref() != Some(s.as_str())
+            {
                 let found = in_schema(&s);
                 if !found.is_empty() {
                     return found;

@@ -124,6 +124,16 @@ pub fn defs() -> impl Iterator<Item = &'static Def> {
 /// type OIDs.
 const PG_PROC_DATA: &str = include_str!("pg_proc.tsv");
 
+/// Whether pg_catalog has a builtin function `name` taking exactly these argument types.
+pub fn builtin_function_exists(name: &str, args: &[pgmem_types::Type]) -> bool {
+    let want: Vec<String> = args.iter().map(|t| t.oid().to_string()).collect();
+    let want = want.join(" ");
+    PG_PROC_DATA.lines().any(|l| {
+        let mut it = l.split('\t');
+        it.nth(1) == Some(name) && it.next().unwrap_or("") == want
+    })
+}
+
 /// Every builtin type's name and `format_type` text, recorded from Postgres 18 (`oid`,
 /// `typname`, `format_type(oid, NULL)`), for the types pgmem does not model.
 const PG_TYPE_NAMES: &str = include_str!("pg_type_names.tsv");

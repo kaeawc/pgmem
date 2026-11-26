@@ -238,7 +238,13 @@ pub fn trigger_def(catalog: &Catalog, t: &TriggerDef, pretty: bool) -> String {
         .function_by_oid(t.function)
         .map(|f| {
             let name = crate::funcs::string::quote_ident(&f.name);
-            if catalog.function_visible(f) { name } else { format!("{}.{name}", crate::funcs::string::quote_ident(&f.schema)) }
+            if catalog.function_visible(f, &super::builtin_function_exists) {
+                return name;
+            }
+            // ruleutils' `get_namespace_name_or_temp`: the session's temp schema prints as pg_temp.
+            let is_temp = pgmem_types::context::search_path().temp_schema.as_deref() == Some(f.schema.as_str());
+            let schema = if is_temp { "pg_temp".to_owned() } else { crate::funcs::string::quote_ident(&f.schema) };
+            format!("{schema}.{name}")
         })
         .unwrap_or_default();
     let mut s = format!(
