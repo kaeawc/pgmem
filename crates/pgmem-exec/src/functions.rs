@@ -86,7 +86,7 @@ fn kind_word(procedure: bool) -> &'static str {
 }
 
 /// CREATE [OR REPLACE] FUNCTION / PROCEDURE.
-pub(crate) fn create_function(cf: &ir::CreateFunction, txn: &mut Txn) -> SqlResult<QueryResult> {
+pub(crate) fn create_function(cf: &ir::CreateFunction, txn: &mut Txn, env: &SessionEnv) -> SqlResult<QueryResult> {
     let catalog = txn.catalog().clone();
     let schema = catalog.creation_schema(&cf.name)?;
     let name = cf.name.base().to_owned();
@@ -132,7 +132,24 @@ pub(crate) fn create_function(cf: &ir::CreateFunction, txn: &mut Txn) -> SqlResu
         volatility: cf.volatility.unwrap_or('v'),
         strict: cf.strict,
         security_definer: cf.security_definer,
+        leakproof: cf.leakproof,
+        parallel: cf.parallel.unwrap_or('u'),
+        cost: cf.cost.unwrap_or(100.0),
+        rows: 0.0,
+        config: Vec::new(),
     };
+    if cf.procedure
+        && (cf.volatility.is_some() || cf.strict || cf.leakproof || cf.parallel.is_some() || cf.cost.is_some() || cf.rows.is_some())
+    {
+        return Err(procedure_attribute());
+    }
+    if cf.rows.is_some() && !def.returns_set() {
+        return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, "ROWS is not applicable when function does not return a set"));
+    }
+    def.rows = cf.rows.unwrap_or(if def.returns_set() { 1000.0 } else { 0.0 });
+    for c in &cf.config {
+        apply_config(&mut def.config, c, txn.catalog(), env)?;
+    }
     let inputs = def.input_types();
     let existing = catalog.functions().find(|f| f.schema == schema && f.name == name && f.input_types() == inputs).cloned();
     match existing {
@@ -171,6 +188,201 @@ pub(crate) fn create_function(cf: &ir::CreateFunction, txn: &mut Txn) -> SqlResu
     }
     txn.catalog_mut().put_function(def);
     Ok(tag(if cf.procedure { "CREATE PROCEDURE" } else { "CREATE FUNCTION" }))
+}
+
+fn procedure_attribute() -> SqlError {
+    SqlError::new(code::INVALID_FUNCTION_DEFINITION, "invalid attribute in procedure definition")
+}
+
+/// Parameters whose values are lists that `proconfig` stores identifier-quoted.
+fn is_list_quote(name: &str) -> bool {
+    matches!(
+        name,
+        "search_path" | "temp_tablespaces" | "session_preload_libraries" | "shared_preload_libraries" | "local_preload_libraries"
+    )
+}
+
+/// A function `SET` parameter's name as `proconfig` spells it (`DateStyle`, `x.y`), erroring
+/// for a parameter that does not exist.
+fn config_name(name: &str) -> SqlResult<String> {
+    let lower = name.to_ascii_lowercase();
+    match crate::settings::lookup(&lower) {
+        Some(def) => Ok(def.name.to_owned()),
+        None if crate::settings::is_custom(&lower) => Ok(lower),
+        None => Err(crate::settings::unrecognized(&lower)),
+    }
+}
+
+/// Applies one `SET` / `RESET` option to a `proconfig` array (`GUCArrayAdd` / `GUCArrayDelete`).
+fn apply_config(config: &mut Vec<String>, c: &ir::FunctionConfig, catalog: &Catalog, env: &SessionEnv) -> SqlResult<()> {
+    let (name, value) = match c {
+        ir::FunctionConfig::ResetAll => {
+            config.clear();
+            return Ok(());
+        }
+        ir::FunctionConfig::Reset(n) => {
+            let n = config_name(n)?;
+            config.retain(|e| e.split_once('=').map(|(k, _)| k) != Some(n.as_str()));
+            return Ok(());
+        }
+        ir::FunctionConfig::FromCurrent(n) => {
+            let n = config_name(n)?;
+            let lower = n.to_ascii_lowercase();
+            let def = crate::settings::lookup(&lower);
+            let stored = env.setting(&lower).or_else(|| def.and_then(|d| d.boot).map(str::to_owned)).unwrap_or_default();
+            (n, crate::settings::show(def, &stored))
+        }
+        ir::FunctionConfig::Set(n, values) => {
+            let n = config_name(n)?;
+            let lower = n.to_ascii_lowercase();
+            if lower == "role" {
+                let target = values.join(", ");
+                if !target.eq_ignore_ascii_case("none") && !crate::roles::role_exists(catalog, env, &target) {
+                    return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, format!("role \"{target}\" does not exist")));
+                }
+            } else {
+                crate::session::validate_setting(&lower, &values.join(", "), env.setting(&lower).as_deref())?;
+            }
+            let value = if is_list_quote(&lower) {
+                values.iter().map(|v| crate::deparse::pg::quote_ident(v)).collect::<Vec<_>>().join(", ")
+            } else {
+                values.join(", ")
+            };
+            (n, value)
+        }
+    };
+    let entry = format!("{name}={value}");
+    match config.iter_mut().find(|e| e.split_once('=').map(|(k, _)| k) == Some(name.as_str())) {
+        Some(slot) => *slot = entry,
+        None => config.push(entry),
+    }
+    Ok(())
+}
+
+/// The values of a stored `proconfig` entry's list, split as `SplitGUCList` does.
+pub(crate) fn split_guc_list(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = s.chars().peekable();
+    loop {
+        while chars.peek().is_some_and(|c| c.is_whitespace()) {
+            chars.next();
+        }
+        if chars.peek().is_none() {
+            break;
+        }
+        let mut cur = String::new();
+        if chars.peek() == Some(&'"') {
+            chars.next();
+            while let Some(c) = chars.next() {
+                if c == '"' {
+                    if chars.peek() == Some(&'"') {
+                        chars.next();
+                        cur.push('"');
+                    } else {
+                        break;
+                    }
+                } else {
+                    cur.push(c);
+                }
+            }
+            while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                chars.next();
+            }
+        } else {
+            while let Some(&c) = chars.peek() {
+                if c == ',' || c.is_whitespace() {
+                    break;
+                }
+                cur.push(c);
+                chars.next();
+            }
+            while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                chars.next();
+            }
+        }
+        out.push(cur);
+        if chars.peek() == Some(&',') {
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+/// ALTER {FUNCTION | PROCEDURE | ROUTINE} name [(types)] action ....
+pub(crate) fn alter_function(
+    name: &ir::ObjectName,
+    types: Option<&[ir::TypeName]>,
+    kind: ir::RoutineKind,
+    actions: &[ir::AlterFunctionAction],
+    txn: &mut Txn,
+    env: &SessionEnv,
+) -> SqlResult<QueryResult> {
+    use ir::AlterFunctionAction as A;
+    let catalog = txn.catalog().clone();
+    let word = match kind {
+        ir::RoutineKind::Procedure => "procedure",
+        ir::RoutineKind::Routine => "routine",
+        ir::RoutineKind::Function => "function",
+    };
+    let Some(f) = find_for_drop(&catalog, name, types, kind)? else {
+        let shown = match types {
+            Some(ts) => signature(&name.to_string(), &ts.iter().map(|t| resolve_type(&catalog, t)).collect::<SqlResult<Vec<_>>>()?),
+            None => name.to_string(),
+        };
+        return Err(SqlError::undefined_function(format!("{word} {shown} does not exist")));
+    };
+    let sig = signature(&f.name, &f.input_types());
+    if kind == ir::RoutineKind::Function && f.procedure {
+        return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("{sig} is not a function")));
+    }
+    if kind == ir::RoutineKind::Procedure && !f.procedure {
+        return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("{sig} is not a procedure")));
+    }
+    let mut def = (*f).clone();
+    for a in actions {
+        match a {
+            A::RenameTo(new) | A::SetSchema(new) => {
+                let (schema, base) =
+                    if matches!(a, A::RenameTo(_)) { (def.schema.clone(), new.clone()) } else { (new.clone(), def.name.clone()) };
+                if matches!(a, A::SetSchema(_)) && catalog.schema(&schema).is_none() {
+                    return Err(pgmem_catalog::undefined_schema(&schema));
+                }
+                let clash = catalog
+                    .functions()
+                    .any(|g| g.oid != def.oid && g.schema == schema && g.name == base && g.input_types() == def.input_types());
+                if clash {
+                    return Err(SqlError::new(
+                        code::DUPLICATE_FUNCTION,
+                        format!("function {} already exists in schema \"{schema}\"", signature(&base, &def.input_types())),
+                    ));
+                }
+                def.schema = schema;
+                def.name = base;
+            }
+            A::Config(c) => apply_config(&mut def.config, c, &catalog, env)?,
+            A::SecurityDefiner(v) => def.security_definer = *v,
+            _ if def.procedure => return Err(procedure_attribute()),
+            A::Volatility(v) => def.volatility = *v,
+            A::Strict(v) => def.strict = *v,
+            A::Leakproof(v) => def.leakproof = *v,
+            A::Parallel(v) => def.parallel = *v,
+            A::Cost(v) => def.cost = *v,
+            A::Rows(v) => {
+                if !def.returns_set() {
+                    return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, "ROWS is not applicable when function does not return a set"));
+                }
+                def.rows = *v;
+            }
+        }
+    }
+    txn.catalog_mut().put_function(def);
+    Ok(tag(match kind {
+        ir::RoutineKind::Procedure => "ALTER PROCEDURE",
+        ir::RoutineKind::Routine => "ALTER ROUTINE",
+        ir::RoutineKind::Function => "ALTER FUNCTION",
+    }))
 }
 
 /// The routine `name [(types)]` names (COMMENT ON FUNCTION, ...): exactly one.
@@ -459,6 +671,29 @@ fn run_sql(def: &FunctionDef, args: &[Value], exec: &mut Exec) -> SqlResult<Vec<
 
 /// Runs function `def` on `args`: its result rows (one row for a scalar function).
 pub fn run_function(def: &FunctionDef, args: &[Value], exec: &mut Exec) -> SqlResult<Vec<Row>> {
+    if def.config.is_empty() {
+        return run_function_in(def, args, exec);
+    }
+    // The function's `SET` options apply to the call and are gone after it: the body runs
+    // against a copy of the session environment.
+    let mut env = exec.env().clone();
+    for entry in &def.config {
+        let (name, value) = entry.split_once('=').unwrap_or((entry, ""));
+        let lower = name.to_ascii_lowercase();
+        // Stored in the form the session keeps it (units resolved), as `SET` would.
+        let stored = crate::session::validate_setting(&lower, value, env.setting(&lower).as_deref()).unwrap_or_else(|_| value.to_owned());
+        env.settings.insert(lower, stored);
+    }
+    match exec {
+        Exec::Read(c) => {
+            let ctx = EvalCtx { txn: c.txn, params: c.params, env: &env, state: c.state, outer: c.outer.clone() };
+            run_function_in(def, args, &mut Exec::Read(&ctx))
+        }
+        Exec::Write { txn, state, .. } => run_function_in(def, args, &mut Exec::Write { txn, env: &env, state }),
+    }
+}
+
+fn run_function_in(def: &FunctionDef, args: &[Value], exec: &mut Exec) -> SqlResult<Vec<Row>> {
     let _guard = enter_call()?;
     if def.strict && args.iter().any(Value::is_null) {
         return Ok(if def.returns_set() { Vec::new() } else { vec![vec![Value::Null]] });

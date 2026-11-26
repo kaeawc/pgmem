@@ -14,6 +14,8 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 
 ### Fixed
 
+- Function attributes are stored and shown: `SECURITY DEFINER`, `SET param = value` (`pg_proc.proconfig`), `PARALLEL`, `COST`, `ROWS` and `LEAKPROOF` appear in `pg_proc` and `pg_get_functiondef` as PostgreSQL prints them (procedures use `$procedure$`), and a function's `SET` options apply during its call.
+- `ALTER FUNCTION / PROCEDURE / ROUTINE` supports `SET` / `RESET`, `[EXTERNAL] SECURITY`, volatility, `[NOT] LEAKPROOF`, `STRICT` / `CALLED ON NULL INPUT`, `PARALLEL`, `COST`, `ROWS`, `RENAME TO` and `SET SCHEMA`.
 - The SQL deparser (`pg_get_viewdef`, `pg_get_constraintdef`, `pg_get_indexdef`, column defaults) quotes identifiers with the same recorded keyword data as `quote_ident()`.
 - Function lookup and `pg_get_triggerdef` never resolve functions through `pg_temp` implicitly (a temp trigger function prints as `pg_temp.f()`), and a user function shadowed by a same-signature `pg_catalog` builtin is schema-qualified.
 - `pg_constraint.connamespace` is the namespace of the owning table or domain instead of always `public`.
