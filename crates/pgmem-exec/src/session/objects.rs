@@ -630,21 +630,36 @@ impl Session {
             return Err(SqlError::new(code::ACTIVE_SQL_TRANSACTION, format!("{tag_name} cannot run inside a transaction block")));
         }
         self.check_relations(tables)?;
+        // ANALYZE in a transaction block holds SHARE UPDATE EXCLUSIVE on each table and reads
+        // its indexes.
+        if tag_name == "ANALYZE"
+            && let Some(txn) = self.txn.as_ref()
+        {
+            let catalog = self.catalog_snapshot();
+            for t in tables {
+                if let Ok(Some(pgmem_catalog::Relation::Table(def))) = catalog.find_relation(t) {
+                    txn.lock_relation(def.oid, crate::lock_levels::SHARE_UPDATE_EXCLUSIVE);
+                    for i in &def.indexes {
+                        txn.lock_relation(i.oid, crate::lock_levels::ACCESS_SHARE);
+                    }
+                }
+            }
+        }
         Ok(tag(tag_name))
     }
 
-    pub(super) fn lock_tables(&self, tables: &[ir::ObjectName], mode: u8, nowait: bool) -> SqlResult<QueryResult> {
+    /// `LOCK [TABLE] [ONLY] name [, ...] [IN mode MODE] [NOWAIT]`: each table with its
+    /// partitions (not with ONLY), each view with the relations it reads.
+    pub(super) fn lock_tables(&self, tables: &[(ir::ObjectName, bool)], mode: u8, nowait: bool) -> SqlResult<QueryResult> {
         if !self.in_block() {
             return Err(SqlError::new(code::NO_ACTIVE_SQL_TRANSACTION, "LOCK TABLE can only be used in transaction blocks"));
         }
-        self.check_relations(tables)?;
         let _ctx = pgmem_types::context::enter(self.format_context());
         let catalog = self.catalog_snapshot();
-        if let Some(txn) = self.txn.as_ref() {
-            for t in tables {
-                if let Some(rel) = catalog.find_relation(t)? {
-                    txn.lock_table(rel.oid(), t.base(), mode, nowait)?;
-                }
+        let Some(txn) = self.txn.as_ref() else { return Ok(tag("LOCK TABLE")) };
+        for (name, only) in tables {
+            for (oid, rel_name) in crate::lock_levels::lock_statement_targets(&catalog, name, *only)? {
+                txn.lock_table(oid, &rel_name, mode, nowait)?;
             }
         }
         Ok(tag("LOCK TABLE"))
