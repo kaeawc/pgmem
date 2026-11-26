@@ -200,6 +200,7 @@ fn domains(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 indexes: vec![],
                 matview: None,
                 unlogged: false,
+                replident: 'd',
                 reloptions: Vec::new(),
             };
             let mut col = pgmem_catalog::ColumnDef::new("value", base.clone());
