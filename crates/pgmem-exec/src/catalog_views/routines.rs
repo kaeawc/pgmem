@@ -184,7 +184,7 @@ pub(super) fn pg_trigger(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             s.row(vec![
                 ("oid", oid(t.oid)),
                 ("tgrelid", oid(t.table)),
-                ("tgparentid", oid(0)),
+                ("tgparentid", oid(t.parent)),
                 ("tgname", name(&t.name)),
                 ("tgfoid", oid(t.function)),
                 ("tgtype", Value::Int2(tgtype(t))),

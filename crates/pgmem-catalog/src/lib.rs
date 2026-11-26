@@ -415,6 +415,9 @@ pub struct TriggerDef {
     /// `pg_trigger.tgenabled`: 'O' fires in origin / local role, 'D' disabled, 'R' fires in
     /// replica role, 'A' always.
     pub enabled: char,
+    /// `pg_trigger.tgparentid`: the partitioned table's trigger this one was cloned from (0:
+    /// none).
+    pub parent: Oid,
 }
 
 /// A named CHECK constraint of a domain; `expr` refers to the value as `VALUE`.
