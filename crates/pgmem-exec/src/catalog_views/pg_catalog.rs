@@ -1550,11 +1550,26 @@ fn pg_cursors(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     }))
 }
 
-/// Advisory locks of every session (other lock types are not tracked).
+/// Relation locks and advisory locks of every session (row locks, which Postgres keeps in
+/// the tuples, are not listed; virtual and transaction ID locks are not tracked).
 fn pg_locks(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let relations = ctx.txn.database().relation_locks();
     let held = ctx.txn.database().advisory().held();
     Ok(rows_of(PG_LOCKS, |s| {
-        held.iter()
+        let relation_rows = relations.iter().map(|l| {
+            s.row(vec![
+                ("locktype", txt("relation")),
+                ("database", oid(5)),
+                ("relation", oid(l.relation)),
+                ("pid", Value::Int4(l.pid)),
+                ("mode", txt(pgmem_storage::locks::table_mode_name(l.mode))),
+                ("granted", boolean(true)),
+                // Postgres takes the weak modes through the backend's fast-path slots.
+                ("fastpath", boolean(l.mode <= crate::lock_levels::ROW_EXCLUSIVE)),
+            ])
+        });
+        let advisory_rows: Vec<Row> = held
+            .iter()
             .map(|l| {
                 s.row(vec![
                     ("locktype", txt("advisory")),
@@ -1568,7 +1583,8 @@ fn pg_locks(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                     ("fastpath", boolean(false)),
                 ])
             })
-            .collect()
+            .collect();
+        relation_rows.chain(advisory_rows).collect()
     }))
 }
 
