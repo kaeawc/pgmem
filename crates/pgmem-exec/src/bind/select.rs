@@ -284,6 +284,7 @@ impl Binder<'_> {
                     }
                     for &i in &level.scope.star {
                         let c = &level.scope.cols[i];
+                        self.note_read(c);
                         exprs.push(Expr::Col(i));
                         columns.push(OutCol {
                             name: c.name.clone(),
@@ -301,6 +302,7 @@ impl Binder<'_> {
                     }
                     for i in level.scope.qualified_star(qual) {
                         let c = &level.scope.cols[i];
+                        self.note_read(c);
                         exprs.push(Expr::Col(i));
                         columns.push(OutCol {
                             name: c.name.clone(),
@@ -708,6 +710,7 @@ impl Binder<'_> {
                                 n.typmod = c.typmod;
                                 n.table_oid = c.table_oid;
                                 n.attnum = c.attnum;
+                                n.perm = c.perm;
                                 n
                             })
                             .collect();
@@ -762,6 +765,8 @@ impl Binder<'_> {
                 SqlError::new(code::UNDEFINED_COLUMN, format!("column \"{name}\" specified in USING clause does not exist in right table"))
             })?;
             let (lt, rt) = (lscope.cols[li].ty.clone(), rscope.cols[ri].ty.clone());
+            self.note_read(&lscope.cols[li]);
+            self.note_read(&rscope.cols[ri]);
             let common = super::expr::common_of(&[lt.clone(), rt.clone()], "JOIN/USING")?;
             pairs.push((li, ri, lt, rt, common));
         }
@@ -1056,11 +1061,15 @@ impl Binder<'_> {
                     sc.table_oid = def.oid;
                     sc.attnum = i16::try_from(i + 1).unwrap_or(i16::MAX);
                     sc.typmod = c.typmod;
+                    sc.perm = Some((def.oid, sc.attnum));
                     cols.push(sc);
                     slots.push(i);
                     missing.push(c.missing.clone());
                 }
-                cols.extend(super::system_scope_cols(&qualifier));
+                cols.extend(super::system_scope_cols(&qualifier).into_iter().map(|mut c| {
+                    c.perm = Some((def.oid, c.attnum));
+                    c
+                }));
                 if let Some(a) = alias {
                     apply_column_aliases(&mut cols, &a.columns, &a.name)?;
                 }
@@ -1069,12 +1078,19 @@ impl Binder<'_> {
             Some(Relation::View(view)) => {
                 let top = Level::new(Scope::default());
                 let vctx = Ctx::new(&top);
-                let bound = pgmem_types::context::with_search_path(&view.search_path, || self.bind_query(&view.query, &vctx))?;
+                // The view's query runs with its owner's privileges.
+                let bound =
+                    self.quietly(|| pgmem_types::context::with_search_path(&view.search_path, || self.bind_query(&view.query, &vctx)))?;
                 let mut cols: Vec<ScopeCol> = bound
                     .columns
                     .iter()
                     .zip(&view.columns)
-                    .map(|(c, n)| ScopeCol::new(Some(qualifier.clone()), n.clone(), c.ty.clone()))
+                    .enumerate()
+                    .map(|(i, (c, n))| {
+                        let mut sc = ScopeCol::new(Some(qualifier.clone()), n.clone(), c.ty.clone());
+                        sc.perm = Some((view.oid, i16::try_from(i + 1).unwrap_or(i16::MAX)));
+                        sc
+                    })
                     .collect();
                 if let Some(a) = alias {
                     apply_column_aliases(&mut cols, &a.columns, &a.name)?;
