@@ -181,6 +181,8 @@ pub struct IndexDef {
     pub nulls_not_distinct: bool,
     /// Partial index predicate.
     pub predicate: Option<Expr>,
+    /// `pg_class.reloptions` (`name=value`, in Postgres' order); empty means NULL.
+    pub reloptions: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -197,6 +199,8 @@ pub struct TableDef {
     pub matview: Option<Box<MatView>>,
     /// `CREATE UNLOGGED TABLE` (`relpersistence = 'u'`).
     pub unlogged: bool,
+    /// `pg_class.reloptions` (`name=value`, in Postgres' order); empty means NULL.
+    pub reloptions: Vec<String>,
 }
 
 impl TableDef {
@@ -242,6 +246,8 @@ pub struct ViewDef {
     pub search_path: Vec<String>,
     /// `WITH CHECK OPTION`: rows written through the view must stay visible in it.
     pub check_option: bool,
+    /// `pg_class.reloptions` (`name=value`, in Postgres' order); empty means NULL.
+    pub reloptions: Vec<String>,
 }
 
 /// What makes a table a materialized view: its defining query and whether it holds data.
@@ -409,6 +415,9 @@ pub struct TriggerDef {
     /// `pg_trigger.tgenabled`: 'O' fires in origin / local role, 'D' disabled, 'R' fires in
     /// replica role, 'A' always.
     pub enabled: char,
+    /// `pg_trigger.tgparentid`: the partitioned table's trigger this one was cloned from (0:
+    /// none).
+    pub parent: Oid,
 }
 
 /// A named CHECK constraint of a domain; `expr` refers to the value as `VALUE`.
@@ -1305,6 +1314,7 @@ mod tests {
             indexes: vec![],
             matview: None,
             unlogged: false,
+            reloptions: Vec::new(),
         }
     }
 

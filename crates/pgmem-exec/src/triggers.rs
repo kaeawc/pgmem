@@ -2,11 +2,12 @@
 //! triggers around INSERT, UPDATE and DELETE (`trigger.c`). Trigger functions see the live
 //! columns of the row as NEW / OLD.
 
+use crate::eval::StatementState;
 use crate::functions::Exec;
 use crate::plan::Row;
 use crate::plpgsql::TriggerCall;
 use crate::session::{Notice, QueryResult};
-use pgmem_catalog::{FuncReturn, FunctionDef, Relation, TableDef, TriggerDef, TriggerTiming};
+use pgmem_catalog::{FuncReturn, FunctionDef, Oid, Relation, TableDef, TriggerDef, TriggerTiming};
 use pgmem_ir as ir;
 use pgmem_storage::Txn;
 use pgmem_types::{SqlError, SqlResult, Type, Value, code};
@@ -71,19 +72,10 @@ pub(crate) fn create_trigger(ct: &ir::CreateTrigger, txn: &mut Txn) -> SqlResult
     if func.ret != FuncReturn::Scalar(Type::Unknown) {
         return Err(SqlError::new(code::INVALID_OBJECT_DEFINITION, format!("function {} must return type trigger", ct.function)));
     }
-    let table_oid = rel.oid();
-    let existing = catalog.triggers().find(|t| t.table == table_oid && t.name == ct.name).cloned();
-    let oid = match existing {
-        Some(_) if !ct.or_replace => {
-            return Err(SqlError::new(code::DUPLICATE_OBJECT, format!("trigger \"{}\" for relation \"{base}\" already exists", ct.name)));
-        }
-        Some(t) => t.oid,
-        None => txn.catalog_mut().alloc_oid(),
-    };
-    txn.catalog_mut().put_trigger(TriggerDef {
-        oid,
+    let def = TriggerDef {
+        oid: 0,
         name: ct.name.clone(),
-        table: table_oid,
+        table: rel.oid(),
         timing: timing(ct.timing),
         insert: ct.insert,
         delete: ct.delete,
@@ -94,8 +86,81 @@ pub(crate) fn create_trigger(ct: &ir::CreateTrigger, txn: &mut Txn) -> SqlResult
         function: func.oid,
         args: ct.args.clone(),
         enabled: 'O',
-    });
+        parent: 0,
+    };
+    install(txn, def, base, ct.or_replace, false)?;
     Ok(QueryResult { tag: "CREATE TRIGGER".into(), ..Default::default() })
+}
+
+/// Adds `def` to relation `rel_name` (replacing a same-name trigger with OR REPLACE) and, for a
+/// row trigger on a partitioned table, clones it to every partition (`CreateTriggerFiringOn`).
+/// Clones (`in_partition`) and the partitioned table's trigger share name, function, events and
+/// WHEN condition; `UPDATE OF` columns and WHEN refer to columns by name, so they hold whatever
+/// the partition's column order.
+fn install(txn: &mut Txn, mut def: TriggerDef, rel_name: &str, or_replace: bool, in_partition: bool) -> SqlResult<Oid> {
+    let existing = txn.catalog().triggers().find(|t| t.table == def.table && t.name == def.name).cloned();
+    def.oid = match existing {
+        Some(_) if !or_replace => {
+            return Err(SqlError::new(
+                code::DUPLICATE_OBJECT,
+                format!("trigger \"{}\" for relation \"{rel_name}\" already exists", def.name),
+            ));
+        }
+        Some(t) if t.parent != 0 && !in_partition => {
+            return Err(SqlError::new(
+                code::DUPLICATE_OBJECT,
+                format!("trigger \"{}\" for relation \"{rel_name}\" is an internal or a child trigger", def.name),
+            ));
+        }
+        Some(t) => t.oid,
+        None => txn.catalog_mut().alloc_oid(),
+    };
+    let oid = def.oid;
+    let (table, row) = (def.table, def.for_each_row);
+    txn.catalog_mut().put_trigger(def.clone());
+    if row && txn.catalog().is_partitioned(table) {
+        let parts: Vec<Arc<TableDef>> = txn.catalog().partitions(table).into_iter().map(|(t, _)| t).collect();
+        for part in parts {
+            install(txn, TriggerDef { table: part.oid, parent: oid, ..def.clone() }, &part.name, or_replace, true)?;
+        }
+    }
+    Ok(oid)
+}
+
+/// Clones the row triggers of partitioned table `parent` to its new partition `part` (and on
+/// to `part`'s own partitions), with their enabled state (`CloneRowTriggersToPartition`).
+pub(crate) fn clone_to_partition(txn: &mut Txn, parent: Oid, part: &TableDef) -> SqlResult<()> {
+    for t in txn.catalog().table_triggers(parent) {
+        if t.for_each_row {
+            install(txn, TriggerDef { oid: 0, table: part.oid, parent: t.oid, ..(*t).clone() }, &part.name, false, true)?;
+        }
+    }
+    Ok(())
+}
+
+/// Drops the triggers cloned from `trigger`, at every partition level.
+fn drop_clones_of(txn: &mut Txn, trigger: Oid) {
+    let clones: Vec<Oid> = txn.catalog().triggers().filter(|t| t.parent == trigger).map(|t| t.oid).collect();
+    for c in clones {
+        txn.catalog_mut().drop_trigger(c);
+        drop_clones_of(txn, c);
+    }
+}
+
+/// DETACH PARTITION: the partition's cloned triggers (and their clones below it) go
+/// (`DropClonedTriggersFromPartition`).
+pub(crate) fn drop_partition_clones(txn: &mut Txn, part: Oid) {
+    let clones: Vec<Oid> = txn.catalog().triggers().filter(|t| t.table == part && t.parent != 0).map(|t| t.oid).collect();
+    for c in clones {
+        txn.catalog_mut().drop_trigger(c);
+        drop_clones_of(txn, c);
+    }
+}
+
+/// The table of the trigger `t` was cloned from.
+fn parent_table_name(txn: &Txn, t: &TriggerDef) -> String {
+    let cat = txn.catalog();
+    cat.triggers().find(|p| p.oid == t.parent).and_then(|p| cat.table_by_oid(p.table)).map(|p| p.name.clone()).unwrap_or_default()
 }
 
 /// DROP TRIGGER [IF EXISTS] name ON table.
@@ -119,8 +184,17 @@ pub(crate) fn drop_trigger(name: &str, table: &ir::ObjectName, if_exists: bool, 
     };
     let found = txn.catalog().triggers().find(|t| t.table == rel.oid() && t.name == name).cloned();
     match found {
+        Some(t) if t.parent != 0 => {
+            let parent = parent_table_name(txn, &t);
+            Err(SqlError::new(
+                code::DEPENDENT_OBJECTS_STILL_EXIST,
+                format!("cannot drop trigger {name} on table {base} because trigger {name} on table {parent} requires it"),
+            )
+            .with_hint(format!("You can drop trigger {name} on table {parent} instead.")))
+        }
         Some(t) => {
             txn.catalog_mut().drop_trigger(t.oid);
+            drop_clones_of(txn, t.oid);
             Ok(QueryResult { tag: "DROP TRIGGER".into(), ..Default::default() })
         }
         None if if_exists => Ok(QueryResult {
@@ -146,11 +220,37 @@ pub(crate) fn rename_trigger(name: &str, table: &ir::ObjectName, new_name: &str,
         .find(|t| t.table == rel.oid() && t.name == name)
         .cloned()
         .ok_or_else(|| SqlError::new(code::UNDEFINED_OBJECT, format!("trigger \"{name}\" for table \"{base}\" does not exist")))?;
-    if name != new_name && txn.catalog().triggers().any(|o| o.table == rel.oid() && o.name == new_name) {
-        return Err(SqlError::new(code::DUPLICATE_OBJECT, format!("trigger \"{new_name}\" for relation \"{base}\" already exists")));
+    if t.parent != 0 {
+        let parent = parent_table_name(txn, &t);
+        return Err(SqlError::feature_not_supported(format!("cannot rename trigger \"{name}\" on table \"{base}\""))
+            .with_hint(format!("Rename the trigger on the partitioned table \"{parent}\" instead.")));
     }
-    txn.catalog_mut().put_trigger(TriggerDef { name: new_name.to_owned(), ..(*t).clone() });
+    rename_one(txn, &t, &base, new_name)?;
     Ok(QueryResult { tag: "ALTER TRIGGER".into(), ..Default::default() })
+}
+
+/// Renames trigger `t` of relation `rel_name`, then its clones on the partitions
+/// (`renametrig_partition`).
+fn rename_one(txn: &mut Txn, t: &TriggerDef, rel_name: &str, new_name: &str) -> SqlResult<()> {
+    if t.name != new_name && txn.catalog().triggers().any(|o| o.table == t.table && o.name == new_name) {
+        return Err(SqlError::new(code::DUPLICATE_OBJECT, format!("trigger \"{new_name}\" for relation \"{rel_name}\" already exists")));
+    }
+    txn.catalog_mut().put_trigger(TriggerDef { name: new_name.to_owned(), ..t.clone() });
+    let clones: Vec<Arc<TriggerDef>> = txn.catalog().triggers().filter(|c| c.parent == t.oid).cloned().collect();
+    for c in clones {
+        let part = txn.catalog().table_by_oid(c.table).map(|p| p.name.clone()).unwrap_or_default();
+        rename_one(txn, &c, &part, new_name)?;
+    }
+    Ok(())
+}
+
+/// Sets the enabled state of the clones of `trigger`, at every partition level.
+fn set_clones_enabled(txn: &mut Txn, trigger: Oid, enabled: char) {
+    let clones: Vec<Arc<TriggerDef>> = txn.catalog().triggers().filter(|c| c.parent == trigger).cloned().collect();
+    for c in clones {
+        txn.catalog_mut().put_trigger(TriggerDef { enabled, ..(*c).clone() });
+        set_clones_enabled(txn, c.oid, enabled);
+    }
 }
 
 /// `ALTER TABLE ... {ENABLE [REPLICA | ALWAYS] | DISABLE} TRIGGER {name | ALL | USER}`.
@@ -161,6 +261,10 @@ pub(crate) fn set_enabled(table: &TableDef, name: Option<&str>, enabled: char, t
         if name.is_none_or(|n| n == t.name) {
             any = true;
             txn.catalog_mut().put_trigger(TriggerDef { enabled, ..(*t).clone() });
+            // On a partitioned table the row triggers' clones follow (`EnableDisableTrigger`).
+            if t.for_each_row {
+                set_clones_enabled(txn, t.oid, enabled);
+            }
         }
     }
     if let Some(n) = name
@@ -277,6 +381,34 @@ pub(crate) fn fire_row(
     })
 }
 
+/// Runs `f`, a statement on leaf partition `leaf` that a statement on a partitioned table
+/// became, with the leaf's statement-level triggers suppressed: only the partitioned table's
+/// fire (`root_statement`).
+pub(crate) fn routed<R>(state: &StatementState, leaf: Oid, f: impl FnOnce() -> R) -> R {
+    state.routed_leaf.set(Some(leaf));
+    let r = f();
+    state.routed_leaf.set(None);
+    r
+}
+
+/// Fires the statement-level triggers of the partitioned table a statement targets.
+pub(crate) fn root_statement(
+    txn: &mut Txn,
+    root: &TableDef,
+    event: Event,
+    when: TriggerTiming,
+    updated: Option<&[String]>,
+    env: &crate::session::SessionEnv,
+    state: &StatementState,
+) -> SqlResult<()> {
+    let list = load(txn, root, event, when, false, updated, env);
+    if list.is_empty() {
+        return Ok(());
+    }
+    let mut exec = Exec::Write { txn, env, state };
+    fire_statement(&list, root, event, &mut exec)
+}
+
 /// Fires statement-level triggers.
 pub(crate) fn fire_statement(
     triggers: &[(Arc<TriggerDef>, Arc<FunctionDef>)],
@@ -338,6 +470,7 @@ fn view_table(txn: &Txn, view: &pgmem_catalog::ViewDef) -> TableDef {
         indexes: Vec::new(),
         matview: None,
         unlogged: false,
+        reloptions: Vec::new(),
     }
 }
 
