@@ -606,6 +606,9 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
     }
     match name {
         "format_type" if n == 2 => resolved(lenient("format_type", format_type_fn), vec![Oid, Int4], Text),
+        "pg_describe_object" if n == 3 => {
+            resolved(strict("pg_describe_object", crate::catalog_views::describe_object_fn), vec![Oid, Oid, Int4], Text)
+        }
         "pg_get_function_arguments"
         | "pg_get_function_identity_arguments"
         | "pg_get_function_result"
