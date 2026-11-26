@@ -23,6 +23,7 @@ fn db_with_tables(names: &[&str], seed: &[(i32, &str)]) -> (Arc<Database>, Vec<O
                 indexes: vec![],
                 matview: None,
                 unlogged: false,
+                reloptions: Vec::new(),
             })
             .expect("create");
         tx.created_table(oid);
