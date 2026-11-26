@@ -616,6 +616,10 @@ impl Session {
                     None => Ok(QueryResult { tag: "ALTER SCHEMA".into(), ..Default::default() }),
                 };
             }
+            (_, Some(temp)) if in_temp_schema(stmt, temp) => {
+                ensure_temp_schema(txn, temp, &user);
+                stmt
+            }
             _ => stmt,
         };
         let catalog = Arc::new(txn.catalog().clone());
@@ -676,64 +680,7 @@ impl Session {
 
     /// The command a READ ONLY transaction may not run (writes to temporary tables are allowed).
     fn read_only_violation(&self, stmt: &Statement) -> Option<&'static str> {
-        let temp = |name: &ir::ObjectName| {
-            let catalog = self.catalog_snapshot();
-            matches!(catalog.find_relation(name), Ok(Some(Relation::Table(t))) if Some(&t.schema) == self.temp_schema.as_ref())
-        };
-        Some(match stmt {
-            Statement::Insert(i) if !temp(&i.table) => "INSERT",
-            Statement::Copy(c) if c.from && !c.table.as_ref().is_some_and(temp) => "COPY FROM",
-            Statement::Update(u) if !temp(&u.table) => "UPDATE",
-            Statement::Delete(d) if !temp(&d.table) => "DELETE",
-            Statement::Merge(m) if !temp(&m.table) => "MERGE",
-            Statement::CreateTable(ct) if !ct.temporary => "CREATE TABLE",
-            Statement::CreateView(cv) if cv.materialized => "CREATE MATERIALIZED VIEW",
-            Statement::CreateView(_) => "CREATE VIEW",
-            Statement::RefreshMatview { .. } => "REFRESH MATERIALIZED VIEW",
-            Statement::RenameView { .. } => "ALTER VIEW",
-            Statement::RenameIndex { .. } => "ALTER INDEX",
-            Statement::AlterRelOptions { object, .. } => crate::reloptions::alter_tag(*object),
-            Statement::AlterSequence { .. } => "ALTER SEQUENCE",
-            Statement::CreateFunction(cf) if cf.procedure => "CREATE PROCEDURE",
-            Statement::CreateFunction(_) => "CREATE FUNCTION",
-            Statement::AlterFunction { .. } => "ALTER FUNCTION",
-            Statement::DropFunction { .. } => "DROP FUNCTION",
-            Statement::CreateTrigger(_) => "CREATE TRIGGER",
-            Statement::DropTrigger { .. } => "DROP TRIGGER",
-            Statement::RenameTrigger { .. } => "ALTER TRIGGER",
-            Statement::CreateIndex(_) => "CREATE INDEX",
-            Statement::CreateSequence(_) => "CREATE SEQUENCE",
-            Statement::AlterTable(_) => "ALTER TABLE",
-            Statement::CreateType(_) => "CREATE TYPE",
-            Statement::CreateDomain(_) => "CREATE DOMAIN",
-            Statement::AlterType(_) => "ALTER TYPE",
-            Statement::AlterDomain(_) => "ALTER DOMAIN",
-            Statement::Drop(d) => match d.object_type {
-                ir::ObjectType::Table => "DROP TABLE",
-                ir::ObjectType::View => "DROP VIEW",
-                ir::ObjectType::MaterializedView => "DROP MATERIALIZED VIEW",
-                ir::ObjectType::Index => "DROP INDEX",
-                ir::ObjectType::Sequence => "DROP SEQUENCE",
-                ir::ObjectType::Schema => "DROP SCHEMA",
-                ir::ObjectType::Type => "DROP TYPE",
-                ir::ObjectType::Domain => "DROP DOMAIN",
-                ir::ObjectType::Extension => "DROP EXTENSION",
-                ir::ObjectType::Function => "DROP FUNCTION",
-            },
-            Statement::Truncate(_) => "TRUNCATE TABLE",
-            Statement::CreateSchema(_) => "CREATE SCHEMA",
-            Statement::AlterSchema { .. } => "ALTER SCHEMA",
-            Statement::SetSchema { .. } => "ALTER TABLE",
-            Statement::Comment { .. } => "COMMENT",
-            Statement::Query(q) => match q.locking.first().map(|l| l.strength) {
-                Some(ir::LockStrength::Update) => "SELECT FOR UPDATE",
-                Some(ir::LockStrength::NoKeyUpdate) => "SELECT FOR NO KEY UPDATE",
-                Some(ir::LockStrength::Share) => "SELECT FOR SHARE",
-                Some(ir::LockStrength::KeyShare) => "SELECT FOR KEY SHARE",
-                None => return None,
-            },
-            _ => return None,
-        })
+        read_only_violation(stmt, &self.catalog_snapshot(), self.temp_schema.as_deref())
     }
 
     /// Drops the session's temporary objects (at disconnect).
@@ -1291,6 +1238,122 @@ fn returning(cols: Vec<OutCol>) -> Option<Vec<OutCol>> {
 
 #[allow(dead_code)]
 fn unused(_: ConstraintKind) {}
+
+/// The command a READ ONLY transaction may not run: writes to the session's temporary
+/// tables (in `temp`) are allowed. Shared by top-level statements and the statements of
+/// functions, procedures, DO blocks and triggers.
+pub(crate) fn read_only_violation(stmt: &Statement, catalog: &pgmem_catalog::Catalog, temp: Option<&str>) -> Option<&'static str> {
+    let is_temp = |name: &ir::ObjectName| {
+        temp.is_some() && matches!(catalog.find_relation(name), Ok(Some(Relation::Table(t))) if Some(t.schema.as_str()) == temp)
+    };
+    match stmt {
+        Statement::Insert(i) if is_temp(&i.table) => None,
+        Statement::Update(u) if is_temp(&u.table) => None,
+        Statement::Delete(d) if is_temp(&d.table) => None,
+        Statement::Merge(m) if is_temp(&m.table) => None,
+        Statement::Copy(c) if c.table.as_ref().is_some_and(is_temp) => None,
+        _ => write_command_name(stmt),
+    }
+}
+
+/// The name of a command a non-volatile function may not run (Postgres' `CreateCommandName`
+/// of anything but a plain query), if pgmem knows it.
+pub(crate) fn command_name(stmt: &Statement) -> Option<&'static str> {
+    Some(match stmt {
+        Statement::Query(_) => write_command_name(stmt).unwrap_or("SELECT"),
+        Statement::Copy(_) => write_command_name(stmt).unwrap_or("COPY"),
+        Statement::Set { .. } => "SET",
+        Statement::Reset { .. } => "RESET",
+        Statement::Show { .. } => "SHOW",
+        Statement::Explain(_) => "EXPLAIN",
+        Statement::Lock { .. } => "LOCK TABLE",
+        Statement::Notify { .. } => "NOTIFY",
+        Statement::Listen { .. } => "LISTEN",
+        Statement::Unlisten { .. } => "UNLISTEN",
+        Statement::Call { .. } => "CALL",
+        Statement::Do { .. } => "DO",
+        Statement::SetConstraints { .. } => "SET CONSTRAINTS",
+        Statement::CreateExtension { .. } => "CREATE EXTENSION",
+        Statement::CreateRole { .. } => "CREATE ROLE",
+        Statement::AlterRole { .. } => "ALTER ROLE",
+        Statement::DropRole { .. } => "DROP ROLE",
+        _ => return write_command_name(stmt),
+    })
+}
+
+/// The name of a command that modifies data or the catalog (refused in a READ ONLY
+/// transaction).
+fn write_command_name(stmt: &Statement) -> Option<&'static str> {
+    Some(match stmt {
+        Statement::Insert(_) => "INSERT",
+        Statement::Copy(c) if c.from => "COPY FROM",
+        Statement::Update(_) => "UPDATE",
+        Statement::Delete(_) => "DELETE",
+        Statement::Merge(_) => "MERGE",
+        Statement::CreateTable(_) => "CREATE TABLE",
+        Statement::CreateView(cv) if cv.materialized => "CREATE MATERIALIZED VIEW",
+        Statement::CreateView(_) => "CREATE VIEW",
+        Statement::RefreshMatview { .. } => "REFRESH MATERIALIZED VIEW",
+        Statement::RenameView { .. } => "ALTER VIEW",
+        Statement::RenameIndex { .. } => "ALTER INDEX",
+        Statement::AlterRelOptions { object, .. } => crate::reloptions::alter_tag(*object),
+        Statement::AlterSequence { .. } => "ALTER SEQUENCE",
+        Statement::CreateFunction(cf) if cf.procedure => "CREATE PROCEDURE",
+        Statement::CreateFunction(_) => "CREATE FUNCTION",
+        Statement::AlterFunction { .. } => "ALTER FUNCTION",
+        Statement::DropFunction { .. } => "DROP FUNCTION",
+        Statement::CreateTrigger(_) => "CREATE TRIGGER",
+        Statement::DropTrigger { .. } => "DROP TRIGGER",
+        Statement::RenameTrigger { .. } => "ALTER TRIGGER",
+        Statement::CreateIndex(_) => "CREATE INDEX",
+        Statement::CreateSequence(_) => "CREATE SEQUENCE",
+        Statement::AlterTable(_) => "ALTER TABLE",
+        Statement::CreateType(_) => "CREATE TYPE",
+        Statement::CreateDomain(_) => "CREATE DOMAIN",
+        Statement::AlterType(_) => "ALTER TYPE",
+        Statement::AlterDomain(_) => "ALTER DOMAIN",
+        Statement::Drop(d) => match d.object_type {
+            ir::ObjectType::Table => "DROP TABLE",
+            ir::ObjectType::View => "DROP VIEW",
+            ir::ObjectType::MaterializedView => "DROP MATERIALIZED VIEW",
+            ir::ObjectType::Index => "DROP INDEX",
+            ir::ObjectType::Sequence => "DROP SEQUENCE",
+            ir::ObjectType::Schema => "DROP SCHEMA",
+            ir::ObjectType::Type => "DROP TYPE",
+            ir::ObjectType::Domain => "DROP DOMAIN",
+            ir::ObjectType::Extension => "DROP EXTENSION",
+            ir::ObjectType::Function => "DROP FUNCTION",
+        },
+        Statement::Truncate(_) => "TRUNCATE TABLE",
+        Statement::CreateSchema(_) => "CREATE SCHEMA",
+        Statement::AlterSchema { .. } => "ALTER SCHEMA",
+        Statement::SetSchema { .. } => "ALTER TABLE",
+        Statement::Comment { .. } => "COMMENT",
+        Statement::Query(q) => match q.locking.first().map(|l| l.strength) {
+            Some(ir::LockStrength::Update) => "SELECT FOR UPDATE",
+            Some(ir::LockStrength::NoKeyUpdate) => "SELECT FOR NO KEY UPDATE",
+            Some(ir::LockStrength::Share) => "SELECT FOR SHARE",
+            Some(ir::LockStrength::KeyShare) => "SELECT FOR KEY SHARE",
+            None => return None,
+        },
+        _ => return None,
+    })
+}
+
+/// Whether `stmt` creates an object in the session's temporary schema (named `pg_temp` or
+/// `temp`), which Postgres creates on demand.
+fn in_temp_schema(stmt: &Statement, temp: &str) -> bool {
+    let name = match stmt {
+        Statement::CreateTable(ct) => &ct.name,
+        Statement::CreateView(cv) => &cv.name,
+        Statement::CreateSequence(cs) => &cs.name,
+        Statement::CreateFunction(cf) => &cf.name,
+        Statement::CreateType(ct) => &ct.name,
+        Statement::CreateDomain(cd) => &cd.name,
+        _ => return false,
+    };
+    matches!(name.0.as_slice(), [schema, _] if schema == "pg_temp" || schema == temp)
+}
 
 fn ensure_temp_schema(txn: &mut Txn, temp: &str, user: &str) {
     if txn.catalog().schema(temp).is_none() {
