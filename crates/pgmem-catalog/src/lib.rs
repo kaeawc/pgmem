@@ -183,6 +183,8 @@ pub struct IndexDef {
     pub nulls_not_distinct: bool,
     /// Partial index predicate.
     pub predicate: Option<Expr>,
+    /// `pg_class.reloptions` (`name=value`, in Postgres' order); empty means NULL.
+    pub reloptions: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -199,6 +201,8 @@ pub struct TableDef {
     pub matview: Option<Box<MatView>>,
     /// `CREATE UNLOGGED TABLE` (`relpersistence = 'u'`).
     pub unlogged: bool,
+    /// `pg_class.reloptions` (`name=value`, in Postgres' order); empty means NULL.
+    pub reloptions: Vec<String>,
 }
 
 impl TableDef {
@@ -244,6 +248,8 @@ pub struct ViewDef {
     pub search_path: Vec<String>,
     /// `WITH CHECK OPTION`: rows written through the view must stay visible in it.
     pub check_option: bool,
+    /// `pg_class.reloptions` (`name=value`, in Postgres' order); empty means NULL.
+    pub reloptions: Vec<String>,
 }
 
 /// What makes a table a materialized view: its defining query and whether it holds data.
@@ -1307,6 +1313,7 @@ mod tests {
             indexes: vec![],
             matview: None,
             unlogged: false,
+            reloptions: Vec::new(),
         }
     }
 

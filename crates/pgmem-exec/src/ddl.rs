@@ -157,6 +157,9 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
             crate::ddl_views::refresh_matview(name, *concurrently, *with_data, txn, env, state)
         }
         Statement::RenameIndex { name, new_name, if_exists } => rename_index(name, new_name, *if_exists, txn),
+        Statement::AlterRelOptions { object, name, if_exists, reset, options } => {
+            crate::reloptions::alter_relation(*object, name, *if_exists, *reset, options, txn)
+        }
         Statement::CreateExtension { name, if_not_exists, schema, version } => {
             crate::extensions::create_extension(name, *if_not_exists, schema.as_deref(), version.as_deref(), txn)
         }
