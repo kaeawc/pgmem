@@ -1,0 +1,132 @@
+# Function attributes in pg_proc and pg_get_functiondef; ALTER FUNCTION / PROCEDURE.
+
+statement ok
+CREATE FUNCTION f1() RETURNS int LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog PARALLEL SAFE COST 5 AS 'select 1'
+
+statement ok
+CREATE FUNCTION f2() RETURNS setof int LANGUAGE sql STABLE STRICT LEAKPROOF PARALLEL RESTRICTED ROWS 7 SET work_mem = '1MB' SET search_path TO a, "B c", 'd' SET statement_timeout = 5 AS 'select 1'
+
+statement ok
+CREATE FUNCTION f3() RETURNS int LANGUAGE sql SET x.y = on SET DateStyle = 'ISO, DMY' PARALLEL UNSAFE COST 0.5 AS 'select 1'
+
+statement ok
+CREATE FUNCTION f4() RETURNS setof int LANGUAGE sql ROWS 1000 COST 100 AS 'select 1'
+
+statement ok
+CREATE PROCEDURE p1() LANGUAGE sql SECURITY DEFINER SET search_path = public AS 'select 1'
+
+query
+SELECT proname, prosecdef, proconfig, proparallel, procost, prorows, proleakproof, proisstrict, provolatile FROM pg_proc WHERE proname IN ('f1', 'f2', 'f3', 'f4', 'p1') ORDER BY proname
+----
+proname:name | prosecdef:bool | proconfig:_text | proparallel:char | procost:float4 | prorows:float4 | proleakproof:bool | proisstrict:bool | provolatile:char
+f1 | t | {search_path=pg_catalog} | s | 5 | 0 | f | f | v
+f2 | f | {work_mem=1MB,"search_path=a, \"B c\", d",statement_timeout=5} | r | 100 | 7 | t | t | s
+f3 | f | {x.y=on,"DateStyle=ISO, DMY"} | u | 0.5 | 0 | f | f | v
+f4 | f | NULL | u | 100 | 1000 | f | f | v
+p1 | t | {search_path=public} | u | 100 | 0 | f | f | v
+
+query
+SELECT replace(pg_get_functiondef(oid), E'\n', '~') FROM pg_proc WHERE proname IN ('f1', 'f2', 'f3', 'f4', 'p1') ORDER BY proname
+----
+replace:text
+CREATE OR REPLACE FUNCTION public.f1()~ RETURNS integer~ LANGUAGE sql~ PARALLEL SAFE SECURITY DEFINER COST 5~ SET search_path TO 'pg_catalog'~AS $function$select 1$function$~
+CREATE OR REPLACE FUNCTION public.f2()~ RETURNS SETOF integer~ LANGUAGE sql~ STABLE PARALLEL RESTRICTED STRICT LEAKPROOF ROWS 7~ SET work_mem TO '1MB'~ SET search_path TO 'a', 'B c', 'd'~ SET statement_timeout TO '5'~AS $function$select 1$function$~
+CREATE OR REPLACE FUNCTION public.f3()~ RETURNS integer~ LANGUAGE sql~ COST 0.5~ SET "x.y" TO 'on'~ SET "DateStyle" TO 'ISO, DMY'~AS $function$select 1$function$~
+CREATE OR REPLACE FUNCTION public.f4()~ RETURNS SETOF integer~ LANGUAGE sql~AS $function$select 1$function$~
+CREATE OR REPLACE PROCEDURE public.p1()~ LANGUAGE sql~ SECURITY DEFINER~ SET search_path TO 'public'~AS $procedure$select 1$procedure$~
+
+statement error 22023 ROWS is not applicable when function does not return a set
+CREATE FUNCTION e1() RETURNS int LANGUAGE sql ROWS 5 AS 'select 1'
+
+statement error 22023 COST must be positive
+CREATE FUNCTION e1() RETURNS int LANGUAGE sql COST -1 AS 'select 1'
+
+statement error 42601 conflicting or redundant options
+CREATE FUNCTION e1() RETURNS int LANGUAGE sql SECURITY DEFINER SECURITY INVOKER AS 'select 1'
+
+statement error 42704 unrecognized configuration parameter "nosuch"
+CREATE FUNCTION e1() RETURNS int LANGUAGE sql SET nosuch = 1 AS 'select 1'
+
+statement error 42P13 invalid attribute in procedure definition
+CREATE PROCEDURE e1() LANGUAGE sql IMMUTABLE AS 'select 1'
+
+statement ok
+ALTER FUNCTION f1() IMMUTABLE STRICT EXTERNAL SECURITY INVOKER LEAKPROOF PARALLEL RESTRICTED COST 3 SET search_path = public SET work_mem = '2MB'
+
+statement ok
+ALTER FUNCTION f1() SET search_path = pg_catalog
+
+statement ok
+ALTER FUNCTION f1() RESET work_mem
+
+query
+SELECT replace(pg_get_functiondef('f1'::regproc), E'\n', '~'), proconfig FROM pg_proc WHERE proname = 'f1'
+----
+replace:text | proconfig:_text
+CREATE OR REPLACE FUNCTION public.f1()~ RETURNS integer~ LANGUAGE sql~ IMMUTABLE PARALLEL RESTRICTED STRICT LEAKPROOF COST 3~ SET search_path TO 'pg_catalog'~AS $function$select 1$function$~ | {search_path=pg_catalog}
+
+statement ok
+ALTER FUNCTION f1() RESET ALL NOT LEAKPROOF CALLED ON NULL INPUT VOLATILE PARALLEL UNSAFE COST 100
+
+query
+SELECT prosecdef, proconfig, proparallel, procost, proleakproof, proisstrict, provolatile FROM pg_proc WHERE proname = 'f1'
+----
+prosecdef:bool | proconfig:_text | proparallel:char | procost:float4 | proleakproof:bool | proisstrict:bool | provolatile:char
+f | NULL | u | 100 | f | f | v
+
+statement ok
+ALTER FUNCTION f2() ROWS 3 COST 2
+
+statement ok
+ALTER PROCEDURE p1() SET work_mem = '4MB'; ALTER ROUTINE p1() RESET search_path
+
+query
+SELECT proname, proconfig, prorows, procost FROM pg_proc WHERE proname IN ('f2', 'p1') ORDER BY proname
+----
+proname:name | proconfig:_text | prorows:float4 | procost:float4
+f2 | {work_mem=1MB,"search_path=a, \"B c\", d",statement_timeout=5} | 3 | 2
+p1 | {work_mem=4MB} | 0 | 100
+
+statement error 22023 ROWS is not applicable when function does not return a set
+ALTER FUNCTION f1() ROWS 3
+
+statement error 22023 ROWS must be positive
+ALTER FUNCTION f2() ROWS 0
+
+statement error 42601 conflicting or redundant options
+ALTER FUNCTION f1() VOLATILE STABLE
+
+statement error 42601 parameter "parallel" must be SAFE, RESTRICTED, or UNSAFE
+ALTER FUNCTION f1() PARALLEL x
+
+statement error 42704 unrecognized configuration parameter "nosuch"
+ALTER FUNCTION f1() RESET nosuch
+
+statement error 42883 function nope() does not exist
+ALTER FUNCTION nope() IMMUTABLE
+
+statement error 42809 p1() is not a function
+ALTER FUNCTION p1() IMMUTABLE
+
+statement error 42P13 invalid attribute in procedure definition
+ALTER PROCEDURE p1() PARALLEL SAFE
+
+statement ok
+CREATE SCHEMA other; CREATE FUNCTION r1(int) RETURNS int LANGUAGE sql AS 'select 1'; CREATE FUNCTION other.r2(int) RETURNS int LANGUAGE sql AS 'select 2'; CREATE FUNCTION r2(int) RETURNS int LANGUAGE sql AS 'select 3'
+
+statement error 42723 function r2(integer) already exists in schema "public"
+ALTER FUNCTION r1(int) RENAME TO r2
+
+statement error 42723 function r2(integer) already exists in schema "other"
+ALTER FUNCTION r2(int) SET SCHEMA other
+
+statement ok
+ALTER FUNCTION r1(int) RENAME TO r3; ALTER FUNCTION r3(int) SET SCHEMA other
+
+query
+SELECT r.proname, n.nspname FROM pg_proc r JOIN pg_namespace n ON n.oid = r.pronamespace WHERE r.proname IN ('r1', 'r2', 'r3') ORDER BY 1, 2
+----
+proname:name | nspname:name
+r2 | other
+r2 | public
+r3 | other
