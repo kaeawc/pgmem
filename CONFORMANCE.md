@@ -7,13 +7,13 @@ PostgreSQL 18; CI re-verifies every record against PostgreSQL and runs it agains
 A record passes when pgmem returns the same column names, column types and text values, or
 the same SQLSTATE and error message.
 
-pgmem passes **3420 / 3421 records (100.0%)**.
+pgmem passes **3435 / 3436 records (100.0%)**.
 
 | Area | Records | Pass | Rate |
 |---|---:|---:|---:|
 | catalog | 239 | 239 | 100.0% |
 | constraints | 171 | 171 | 100.0% |
-| ddl | 485 | 485 | 100.0% |
+| ddl | 500 | 500 | 100.0% |
 | dml | 282 | 282 | 100.0% |
 | functions | 445 | 445 | 100.0% |
 | queries | 440 | 439 | 99.8% |
@@ -46,7 +46,7 @@ pgmem passes **3420 / 3421 records (100.0%)**.
 | ddl/identity.slt | 38 | 38 | 100.0% |
 | ddl/indexes.slt | 33 | 33 | 100.0% |
 | ddl/migrations.slt | 58 | 58 | 100.0% |
-| ddl/partitioning.slt | 82 | 82 | 100.0% |
+| ddl/partitioning.slt | 97 | 97 | 100.0% |
 | ddl/schema.slt | 31 | 31 | 100.0% |
 | ddl/sequences.slt | 34 | 34 | 100.0% |
 | ddl/triggers.slt | 17 | 17 | 100.0% |
