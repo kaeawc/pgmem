@@ -809,10 +809,28 @@ fn digest<D: sha2::Digest>(v: &Value) -> Vec<u8> {
     D::digest(bytes).to_vec()
 }
 
+/// Whether `quote_ident` must quote `word`: every keyword that is not unreserved, per the
+/// recorded `pg_get_keywords()` list.
+fn is_quoted_keyword(word: &str) -> bool {
+    static QUOTED: std::sync::OnceLock<std::collections::HashSet<&'static str>> = std::sync::OnceLock::new();
+    QUOTED
+        .get_or_init(|| {
+            super::array::KEYWORDS
+                .lines()
+                .filter_map(|l| {
+                    let mut f = l.split('\t');
+                    let (w, cat) = (f.next()?, f.next()?);
+                    (cat != "U").then_some(w)
+                })
+                .collect()
+        })
+        .contains(word)
+}
+
 pub fn quote_ident(id: &str) -> String {
     let simple = id.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '_')
         && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-        && !crate::bind::is_reserved_keyword(id);
+        && !is_quoted_keyword(id);
     if simple { id.to_owned() } else { format!("\"{}\"", id.replace('"', "\"\"")) }
 }
 
