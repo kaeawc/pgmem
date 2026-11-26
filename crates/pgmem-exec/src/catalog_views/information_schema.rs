@@ -200,6 +200,7 @@ fn domains(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 indexes: vec![],
                 matview: None,
                 unlogged: false,
+                reloptions: Vec::new(),
             };
             let mut col = pgmem_catalog::ColumnDef::new("value", base.clone());
             col.typmod = *typmod;
@@ -603,6 +604,17 @@ fn check_constraints(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         .collect())
 }
 
+/// `information_schema.views.check_option`, read from the view's `reloptions`.
+fn check_option(reloptions: &[String]) -> &'static str {
+    if reloptions.iter().any(|o| o == "check_option=cascaded") {
+        "CASCADED"
+    } else if reloptions.iter().any(|o| o == "check_option=local") {
+        "LOCAL"
+    } else {
+        "NONE"
+    }
+}
+
 fn views(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let m = snapshot(ctx);
     let s = Spec::parse(VIEWS);
@@ -615,6 +627,7 @@ fn views(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("table_schema", name(&v.schema)),
                 ("table_name", name(&v.name)),
                 ("view_definition", txt(crate::deparse::deparse_view(m.catalog, v).unwrap_or_default())),
+                ("check_option", txt(check_option(&v.reloptions))),
                 ("is_updatable", yes_no(updatable)),
                 ("is_insertable_into", yes_no(updatable)),
             ])
