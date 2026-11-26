@@ -8,6 +8,7 @@ pub mod cast;
 pub mod catalog_views;
 pub mod copy;
 pub mod ddl;
+mod ddl_attrs;
 mod ddl_sequences;
 mod ddl_views;
 pub mod deparse;
