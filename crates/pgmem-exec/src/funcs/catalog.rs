@@ -295,7 +295,12 @@ fn indexdef_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
         let key = if let Some(c) = idx.columns.get(k) {
             t.columns.get(*c).map(|c| quote_ident(&c.name))
         } else {
-            idx.exprs.get(k - idx.columns.len()).map(|e| crate::deparse::deparse_expr(m.catalog, t, e).unwrap_or_default())
+            match idx.exprs.get(k - idx.columns.len()) {
+                Some(e) => Some(crate::deparse::deparse_expr(m.catalog, t, e).unwrap_or_default()),
+                None => {
+                    idx.include.get(k - idx.columns.len() - idx.exprs.len()).and_then(|c| t.columns.get(*c)).map(|c| quote_ident(&c.name))
+                }
+            }
         };
         return Ok(key.map_or(Value::Null, Value::Text));
     }

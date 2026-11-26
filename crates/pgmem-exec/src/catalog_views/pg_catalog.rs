@@ -450,7 +450,7 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         }
     }
     for (t, idx) in m.indexes() {
-        let natts = idx.columns.len() + idx.exprs.len();
+        let natts = idx.columns.len() + idx.exprs.len() + idx.include.len();
         let partitioned = m.catalog.is_partitioned(t.oid);
         rows.push(class_row(
             &s,
@@ -873,6 +873,8 @@ fn pg_index(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 .map(|c| oid(t.columns.get(*c).map_or(0, |col| if col.ty.is_string() { DEFAULT_COLLATION_OID } else { 0 })))
                 .chain(idx.exprs.iter().map(|_| oid(0)))
                 .collect();
+            let nkey = keys.len();
+            keys.extend(idx.include.iter().map(|c| int2(c + 1)));
             let n = keys.len();
             let exprs = (!idx.exprs.is_empty()).then(|| {
                 idx.exprs.iter().map(|e| crate::deparse::deparse_expr(m.catalog, t, e).unwrap_or_default()).collect::<Vec<_>>().join(", ")
@@ -882,14 +884,14 @@ fn pg_index(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("indexrelid", oid(idx.oid)),
                 ("indrelid", oid(t.oid)),
                 ("indnatts", int2(n)),
-                ("indnkeyatts", int2(n)),
+                ("indnkeyatts", int2(nkey)),
                 ("indisunique", boolean(idx.unique)),
                 ("indnullsnotdistinct", boolean(idx.nulls_not_distinct)),
                 ("indisprimary", boolean(idx.primary)),
                 ("indkey", Value::Array(keys)),
                 ("indcollation", Value::Array(collations)),
-                ("indclass", Value::Array(vec![oid(0); n])),
-                ("indoption", Value::Array(vec![Value::Int2(0); n])),
+                ("indclass", Value::Array(vec![oid(0); nkey])),
+                ("indoption", Value::Array(vec![Value::Int2(0); nkey])),
                 ("indexprs", exprs.map_or(Value::Null, txt)),
                 ("indpred", pred.map_or(Value::Null, txt)),
             ])

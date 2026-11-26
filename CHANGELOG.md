@@ -11,6 +11,10 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - Static Linux binaries (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) on each release.
 - `cargo binstall pgmem` installs the prebuilt binary from the GitHub release.
 
+### Fixed
+
+- `pg_get_indexdef` and `pg_indexes.indexdef` print `INCLUDE (...)` for covering indexes, and `pg_index.indnatts`, `indnkeyatts`, `indkey` and `pg_class.relnatts` count the INCLUDE columns like PostgreSQL.
+
 ### Changed
 
 - Releases go through a PR: `scripts/release.sh X.Y.Z` opens it, and merging it publishes.

@@ -645,6 +645,7 @@ fn clone_indexes(catalog: &Catalog, parent: &TableDef, part: &mut TableDef, slot
         if part.indexes.iter().any(|i| i.columns == columns && i.exprs == idx.exprs && i.unique == idx.unique) {
             continue;
         }
+        let Some(include) = idx.include.iter().map(|c| slot_of(*c)).collect::<Option<Vec<usize>>>() else { continue };
         let name = partition_index_name(catalog, part, &IndexDef { columns: columns.clone(), ..idx.clone() }, &taken);
         taken.push(name.clone());
         let constraint = parent.constraints.iter().find(|c| c.name == idx.name).cloned();
@@ -660,7 +661,7 @@ fn clone_indexes(catalog: &Catalog, parent: &TableDef, part: &mut TableDef, slot
             };
             part.constraints.push(c);
         }
-        part.indexes.push(IndexDef { oid: 0, name, columns, ..idx.clone() });
+        part.indexes.push(IndexDef { oid: 0, name, columns, include, ..idx.clone() });
     }
 }
 

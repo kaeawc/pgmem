@@ -182,6 +182,15 @@ impl<'a> Model<'a> {
             };
             out.push(Att { attnum: 0, name, ty: Type::Text, typmod: -1, not_null: false, dropped: false, column: None });
         }
+        out.extend(idx.include.iter().filter_map(|&c| t.columns.get(c)).map(|c| Att {
+            attnum: 0,
+            name: c.name.clone(),
+            ty: c.ty.clone(),
+            typmod: c.typmod,
+            not_null: false,
+            dropped: false,
+            column: None,
+        }));
         // Postgres disambiguates repeated names (`expr`, `expr1`, ...).
         let mut seen: Vec<String> = Vec::new();
         for (i, a) in out.iter_mut().enumerate() {
@@ -360,6 +369,10 @@ pub fn index_def(model: &Model, t: &TableDef, idx: &IndexDef) -> String {
         quote_ident(&t.name),
         keys.join(", ")
     );
+    if !idx.include.is_empty() {
+        let cols: Vec<String> = idx.include.iter().filter_map(|c| t.columns.get(*c)).map(|c| quote_ident(&c.name)).collect();
+        s.push_str(&format!(" INCLUDE ({})", cols.join(", ")));
+    }
     if idx.nulls_not_distinct {
         s.push_str(" NULLS NOT DISTINCT");
     }
