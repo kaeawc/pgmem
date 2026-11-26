@@ -184,7 +184,7 @@ pub(super) fn pg_trigger(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("tgname", name(&t.name)),
                 ("tgfoid", oid(t.function)),
                 ("tgtype", Value::Int2(tgtype(t))),
-                ("tgenabled", ch(if t.enabled { 'O' } else { 'D' })),
+                ("tgenabled", ch(t.enabled)),
                 ("tgisinternal", boolean(false)),
                 ("tgconstrrelid", oid(0)),
                 ("tgconstrindid", oid(0)),
@@ -233,7 +233,14 @@ pub fn trigger_def(catalog: &Catalog, t: &TriggerDef, pretty: bool) -> String {
             }
         })
         .unwrap_or_default();
-    let func = catalog.function_by_oid(t.function).map(|f| f.name.clone()).unwrap_or_default();
+    // ruleutils' `generate_function_name`: schema-qualified unless the search path finds it.
+    let func = catalog
+        .function_by_oid(t.function)
+        .map(|f| {
+            let name = crate::funcs::string::quote_ident(&f.name);
+            if catalog.function_visible(f) { name } else { format!("{}.{name}", crate::funcs::string::quote_ident(&f.schema)) }
+        })
+        .unwrap_or_default();
     let mut s = format!(
         "CREATE TRIGGER {} {} {} ON {table} FOR EACH {}",
         crate::funcs::string::quote_ident(&t.name),

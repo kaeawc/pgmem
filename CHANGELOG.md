@@ -21,6 +21,11 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - Publishing skips crates already on crates.io, so a failed release can be rerun.
 - Release notes come from this changelog.
 
+### Fixed
+
+- `pg_get_triggerdef` schema-qualifies the trigger function when its schema is not on `search_path`, and quotes its name.
+- `ALTER TRIGGER ... RENAME TO`, and `ALTER TABLE ... ENABLE REPLICA | ALWAYS TRIGGER` (`pg_trigger.tgenabled` `O`/`D`/`R`/`A`); triggers fire according to `session_replication_role`.
+
 ## [0.1.1] - 2026-11-25
 
 ### Changed
