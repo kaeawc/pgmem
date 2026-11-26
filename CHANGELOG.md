@@ -23,6 +23,7 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - `pg_constraint.connamespace` is the namespace of the owning table or domain instead of always `public`.
 - `pg_get_indexdef` and `pg_indexes.indexdef` print `INCLUDE (...)` for covering indexes, and `pg_index.indnatts`, `indnkeyatts`, `indkey` and `pg_class.relnatts` count the INCLUDE columns like PostgreSQL.
 - Storage parameters are stored and validated like PostgreSQL: `WITH (...)` on tables, indexes, views and materialized views, `ALTER TABLE / INDEX / VIEW / MATERIALIZED VIEW ... SET / RESET (...)`, `pg_class.reloptions`, `pg_get_indexdef` (`WITH (fillfactor='70')`) and `information_schema.views.check_option` (including `WITH CHECK OPTION` and `check_option`). `security_invoker` is stored but not yet enforced.
+- Row triggers on a partitioned table are cloned to its partitions (existing, created, attached and sub-partitions; `pg_trigger.tgparentid`) and fire on the leaf partition. The clones follow the parent trigger through `DROP TRIGGER`, `ALTER TRIGGER ... RENAME`, `ENABLE` / `DISABLE` and `CREATE OR REPLACE TRIGGER`, cannot be dropped or renamed on their own, and go with `DETACH PARTITION`. Statement triggers of a partitioned table fire for statements on it, and its partitions' statement triggers no longer do.
 - `LOCK TABLE` locks a partitioned table's partitions (not with `ONLY`) and a view's base
   relations, and refuses sequences and indexes (`42809 cannot lock relation`).
 
