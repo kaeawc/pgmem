@@ -15,6 +15,10 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 ### Fixed
 
 - `pg_constraint.connamespace` is the namespace of the owning table or domain instead of always `public`.
+- `MERGE` into a partitioned table acts on the rows of its leaf partitions instead of none: inserts
+  are routed to their partition (23514 when none accepts the row), updates move rows across
+  partitions, and a target that is itself a partition enforces its partition constraint.
+  `MERGE ... RETURNING` can read the target's system columns (`tableoid` is the row's leaf).
 
 ### Changed
 

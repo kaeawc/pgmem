@@ -262,3 +262,113 @@ fn partition_of_after_dropped_column() {
     );
     assert_eq!(rows(&mut c, "DELETE FROM dp WHERE a = 3 RETURNING tableoid::regclass::text, *"), [["dp2b", "3", "dflt", "1", "7"]]);
 }
+
+#[test]
+fn merge_into_partitioned_table() {
+    let (_db, mut c) = setup();
+    schema(&mut c);
+    c.batch_execute("INSERT INTO ev VALUES (1, 'eu', '2024-03-01', 1), (2, 'us', '2024-03-01', 2), (3, 'eu', '2025-03-01', 3)")
+        .expect("seed");
+    // MATCHED UPDATE (in place and moving to another partition), DELETE, NOT MATCHED INSERT
+    // routed to its leaf; RETURNING sees each row's leaf as tableoid.
+    let mut out = rows(
+        &mut c,
+        "MERGE INTO ev t USING (VALUES (1, 'us'), (2, 'us'), (4, 'eu'), (3, 'eu')) s(id, r) ON t.id = s.id
+           WHEN MATCHED AND s.id = 1 THEN UPDATE SET region = s.r, v = 10
+           WHEN MATCHED AND s.id = 2 THEN UPDATE SET v = 20
+           WHEN MATCHED AND s.id = 3 THEN DELETE
+           WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.r, '2025-05-05')
+           RETURNING merge_action(), t.tableoid::regclass::text, t.id::text, t.region, coalesce(old.v::text, '-'), coalesce(new.v::text, '-')",
+    );
+    out.sort();
+    assert_eq!(
+        out,
+        [
+            ["DELETE", "ev_eu_25", "3", "eu", "3", "-"],
+            ["INSERT", "ev_eu_25", "4", "eu", "-", "7"],
+            ["UPDATE", "ev_us", "1", "us", "1", "10"],
+            ["UPDATE", "ev_us", "2", "us", "2", "20"],
+        ]
+    );
+    assert_eq!(
+        rows(&mut c, "SELECT tableoid::regclass::text, id::text, region, at::text, v::text FROM ev ORDER BY id"),
+        [["ev_us", "1", "us", "2024-03-01", "10"], ["ev_us", "2", "us", "2024-03-01", "20"], ["ev_eu_25", "4", "eu", "2025-05-05", "7"]]
+    );
+    let e = expect_code(
+        c.batch_execute("MERGE INTO ev t USING (VALUES (9, 'mars')) s(id, r) ON t.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.r, '2025-05-05')"),
+        "23514",
+    );
+    assert_eq!(message(&e), "no partition of relation \"ev\" found for row");
+    // NOT MATCHED BY SOURCE, DO NOTHING.
+    let mut out = rows(
+        &mut c,
+        "MERGE INTO ev t USING (VALUES (1)) s(id) ON t.id = s.id WHEN NOT MATCHED BY SOURCE THEN DELETE RETURNING merge_action(), t.tableoid::regclass::text, t.id::text",
+    );
+    out.sort();
+    assert_eq!(out, [["DELETE", "ev_eu_25", "4"], ["DELETE", "ev_us", "2"]]);
+    let n = c.execute("MERGE INTO ev t USING (VALUES (1)) s(id) ON t.id = s.id WHEN MATCHED THEN DO NOTHING", &[]).expect("do nothing");
+    assert_eq!(n, 0);
+    // Unique keys are checked per partition (named after it).
+    c.batch_execute("INSERT INTO ev VALUES (2, 'us', '2024-03-01')").expect("seed");
+    let e =
+        expect_code(c.batch_execute("MERGE INTO ev t USING (VALUES (1)) s(a) ON t.id = s.a WHEN MATCHED THEN UPDATE SET id = 2"), "23505");
+    assert_eq!(message(&e), "duplicate key value violates unique constraint \"ev_us_pkey\"");
+    // A target that is itself a partition: its constraint, then routing below it.
+    c.batch_execute("INSERT INTO ev VALUES (5, 'eu', '2024-02-02')").expect("seed");
+    let e = expect_code(
+        c.batch_execute("MERGE INTO ev_eu t USING (VALUES (5)) s(id) ON t.id = s.id WHEN MATCHED THEN UPDATE SET region = 'us'"),
+        "23514",
+    );
+    assert_eq!(message(&e), "new row for relation \"ev_eu\" violates partition constraint");
+    let e = expect_code(
+        c.batch_execute("MERGE INTO ev_eu t USING (VALUES (5)) s(id) ON t.id = s.id WHEN MATCHED THEN UPDATE SET at = '2030-01-01'"),
+        "23514",
+    );
+    assert_eq!(message(&e), "no partition of relation \"ev_eu\" found for row");
+    let e = expect_code(
+        c.batch_execute("MERGE INTO ev_us t USING (VALUES (2)) s(id) ON t.id = s.id WHEN MATCHED THEN UPDATE SET region = 'eu'"),
+        "23514",
+    );
+    assert_eq!(message(&e), "new row for relation \"ev_us\" violates partition constraint");
+    assert_eq!(
+        rows(
+            &mut c,
+            "MERGE INTO ev_eu t USING (VALUES (5)) s(id) ON t.id = s.id WHEN MATCHED THEN UPDATE SET at = '2025-02-02' RETURNING t.tableoid::regclass::text"
+        ),
+        [["ev_eu_25"]]
+    );
+}
+
+#[test]
+fn merge_returning_system_columns() {
+    let (_db, mut c) = setup();
+    c.batch_execute("CREATE TABLE mp (a int); INSERT INTO mp VALUES (1)").expect("setup");
+    let mut out = rows(
+        &mut c,
+        "MERGE INTO mp p USING (VALUES (1), (2)) s(a) ON p.a = s.a WHEN MATCHED THEN UPDATE SET a = 3
+           WHEN NOT MATCHED THEN INSERT VALUES (s.a) RETURNING p.tableoid::regclass::text, merge_action(), p.a::text",
+    );
+    out.sort();
+    assert_eq!(out, [["mp", "INSERT", "2"], ["mp", "UPDATE", "3"]]);
+}
+
+#[test]
+fn merge_into_partitioned_table_foreign_keys() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE ma (id int PRIMARY KEY) PARTITION BY HASH (id);
+         CREATE TABLE ma0 PARTITION OF ma FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+         CREATE TABLE ma1 PARTITION OF ma FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+         INSERT INTO ma SELECT generate_series(1, 4);
+         CREATE TABLE mt (acct int REFERENCES ma ON DELETE CASCADE);
+         INSERT INTO mt VALUES (1), (2), (3)",
+    )
+    .expect("setup");
+    assert_eq!(
+        c.execute("MERGE INTO ma t USING (VALUES (1), (2), (9)) s(id) ON t.id = s.id WHEN MATCHED THEN DELETE WHEN NOT MATCHED THEN INSERT VALUES (s.id)", &[])
+            .expect("merge"),
+        3
+    );
+    assert_eq!(rows(&mut c, "SELECT string_agg(acct::text, ',' ORDER BY acct) FROM mt"), [["3"]]);
+    assert_eq!(rows(&mut c, "SELECT string_agg(id::text, ',' ORDER BY id) FROM ma"), [["3,4,9"]]);
+}
