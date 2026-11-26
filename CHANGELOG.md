@@ -56,6 +56,12 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
   relations, and refuses sequences and indexes (`42809 cannot lock relation`).
 - `regrole` input and output (`'role'::regrole`, `to_regrole()`, casts to and from `oid`), `pg_class.relowner` for objects owned by other roles, and the `pg_policies` view (empty until row-level security exists).
 - `ALTER DEFAULT PRIVILEGES [FOR ROLE r] [IN SCHEMA s]` is stored in `pg_default_acl` (as in Postgres, global entries start from the hard-wired defaults and vanish when equal to them) and applied to tables, views and sequences created afterwards by that role.
+- Single-row `INSERT`, and `UPDATE` / `DELETE` by key, no longer slow down as the table or the
+  transaction grows: unique, primary key and foreign key checks, `ON CONFLICT` and `WHERE col =
+  constant` use hash indexes, and `COMMIT` applies its changes in place instead of copying the
+  table. 5,000 inserts in one transaction: 5.5 s → 0.7 s; 5,000 autocommit inserts into a
+  5,000-row table: 15.9 s → 0.7 s; 5,000 updates plus 5,000 deletes by primary key in one
+  transaction: 52 s → 1.6 s. Cost per statement is now flat (20,000 inserts: 2.7 s).
 
 ### Changed
 

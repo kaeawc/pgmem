@@ -43,6 +43,7 @@ mod delete;
 mod derived_table;
 mod distinct;
 mod distinct_on;
+mod dml_scaling;
 mod drop_table;
 mod error_position;
 mod example_analytics;
