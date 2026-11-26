@@ -7,6 +7,7 @@
 //! rows. Builtin data that never changes (builtin types, predefined roles) is recorded from
 //! Postgres 18 in the `*.tsv` files next to this module.
 
+mod depend;
 mod information_schema;
 mod model;
 mod pg_catalog;
@@ -16,6 +17,7 @@ use crate::eval::EvalCtx;
 use crate::plan::{Row, VirtualRowsFn};
 use pgmem_types::{Type, Value, text};
 
+pub use depend::{describe_object_fn, identify_object_as_address_srf, identify_object_srf};
 pub use model::rowtype_oid as rowtype_oid_of;
 pub use model::{
     ATTRDEF_CLASS_OID, CLASS_CLASS_OID, CONSTRAINT_CLASS_OID, INFORMATION_SCHEMA_NAMESPACE_OID, Model, NAMESPACE_CLASS_OID, PROC_CLASS_OID,
