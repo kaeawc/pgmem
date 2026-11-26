@@ -96,6 +96,17 @@ fn routine_text_function(name: &str, n: usize) -> SqlResult<Option<Resolved>> {
     }
 }
 
+/// Whether `name` is one of the implemented privilege functions called with a supported
+/// argument count (otherwise it falls through to the generic always-true arm).
+fn privilege_arity(name: &str, n: usize) -> bool {
+    match name {
+        "has_table_privilege" | "has_schema_privilege" | "has_sequence_privilege" | "pg_has_role" => n == 2 || n == 3,
+        "has_column_privilege" => n == 3 || n == 4,
+        "has_any_column_privilege" => n == 2 || n == 3,
+        _ => false,
+    }
+}
+
 fn privilege_function(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
     let targets = args.iter().map(|t| if *t == Type::Unknown { Type::Text } else { t.clone() }).collect();
     let f = match name {
@@ -577,11 +588,7 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
             Bool,
         ),
         "pg_type_is_visible" | "pg_function_is_visible" if n == 1 => resolved(strict("pg_type_is_visible", always_true), vec![Oid], Bool),
-        "has_table_privilege" | "has_schema_privilege" | "has_sequence_privilege" | "pg_has_role" if n == 2 || n == 3 => {
-            privilege_function(name, args)
-        }
-        "has_column_privilege" if n == 3 || n == 4 => privilege_function(name, args),
-        "has_any_column_privilege" if n == 2 || n == 3 => privilege_function(name, args),
+        _ if privilege_arity(name, n) => privilege_function(name, args),
         "has_table_privilege"
         | "has_schema_privilege"
         | "has_database_privilege"
