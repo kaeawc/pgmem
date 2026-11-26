@@ -140,6 +140,7 @@ struct ViewTarget {
 /// delete), or Postgres' error for a view that is not automatically updatable.
 fn view_target(b: &Binder, name: &ir::ObjectName, verb: &str) -> SqlResult<Option<ViewTarget>> {
     let Some(pgmem_catalog::Relation::View(v)) = b.catalog.find_relation(name)? else { return Ok(None) };
+    b.lock(v.oid, crate::lock_levels::ROW_EXCLUSIVE);
     match crate::views::resolve(b.catalog, &v)? {
         Ok(u) => Ok(Some(ViewTarget { view: v.name.clone(), u })),
         Err(reason) => {
@@ -464,6 +465,7 @@ pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<Inser
         return Ok(plan);
     }
     let table = lookup_table(b, &ins.table)?;
+    b.lock(table.oid, crate::lock_levels::ROW_EXCLUSIVE);
     let qualifier = ins.alias.clone().unwrap_or_else(|| table.name.clone());
     let rules = b.bind_row_rules(&table)?;
     let columns: Vec<usize> = if ins.columns.is_empty() {
@@ -717,6 +719,7 @@ pub fn bind_update(b: &Binder, upd: &ir::Update, outer: &Ctx) -> SqlResult<Updat
         return Ok(plan);
     }
     let table = lookup_table(b, &upd.table)?;
+    b.lock_table_and_indexes(&table, crate::lock_levels::ROW_EXCLUSIVE);
     let qualifier = upd.alias.clone().unwrap_or_else(|| table.name.clone());
     let rules = b.bind_row_rules(&table)?;
     let target_scope = target_scope(&table, &qualifier);
@@ -753,6 +756,7 @@ pub fn bind_delete(b: &Binder, del: &ir::Delete, outer: &Ctx) -> SqlResult<Delet
         return Ok(plan);
     }
     let table = lookup_table(b, &del.table)?;
+    b.lock_table_and_indexes(&table, crate::lock_levels::ROW_EXCLUSIVE);
     let qualifier = del.alias.clone().unwrap_or_else(|| table.name.clone());
     let target_scope = target_scope(&table, &qualifier);
     let width = target_scope.width();

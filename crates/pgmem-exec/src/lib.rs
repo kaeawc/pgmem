@@ -17,6 +17,7 @@ pub mod eval;
 mod extensions;
 pub mod funcs;
 pub mod functions;
+pub mod lock_levels;
 pub mod partition;
 pub mod plan;
 pub mod plpgsql;

@@ -11,10 +11,16 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - Static Linux binaries (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) on each release.
 - `cargo binstall pgmem` installs the prebuilt binary from the GitHub release.
 - `pg_get_keywords()` returns PostgreSQL 18's keyword list (word, catcode, barelabel, catdesc, baredesc).
+- `pg_locks` lists relation locks: the ones queries (with the indexes the planner opens), DML,
+  `LOCK TABLE` and DDL take, at PostgreSQL's lock level for each statement and ALTER TABLE
+  subcommand. They are held to the end of the transaction (or released by `ROLLBACK TO`) and
+  conflict with `LOCK ... NOWAIT` in other sessions.
 
 ### Fixed
 
 - `pg_constraint.connamespace` is the namespace of the owning table or domain instead of always `public`.
+- `LOCK TABLE` locks a partitioned table's partitions (not with `ONLY`) and a view's base
+  relations, and refuses sequences and indexes (`42809 cannot lock relation`).
 
 ### Changed
 
