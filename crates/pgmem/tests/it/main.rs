@@ -14,6 +14,7 @@ mod agg_filter;
 mod aggregates;
 mod alter_column_notnull;
 mod alter_table;
+mod alter_table_attrs;
 mod arithmetic;
 mod array;
 mod array_agg_unnest;
