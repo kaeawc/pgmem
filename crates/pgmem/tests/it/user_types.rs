@@ -62,6 +62,124 @@ fn alter_enum_add_and_rename_values() {
     expect_code(c.simple_query("CREATE TYPE dup AS ENUM ('a', 'a')"), "23505");
 }
 
+/// `check_safe_enum_use`: a label `ALTER TYPE ... ADD VALUE` added cannot be used until the
+/// transaction that added it commits (55P04), wherever text becomes the enum (`enum_in`) and
+/// in the enum functions that return it.
+#[test]
+fn new_enum_values_are_unusable_until_commit() {
+    const HINT: &str = "New enum values must be committed before they can be used.";
+    let (_db, mut c) = setup();
+    c.batch_execute("CREATE TYPE mood AS ENUM ('a', 'b'); CREATE TABLE t (m mood)").expect("setup");
+    let unsafe_use = |c: &mut postgres::Client, setup: &str, sql: &str| {
+        c.batch_execute(&format!("BEGIN; {setup}")).expect(setup);
+        let e = expect_code(c.simple_query(sql), "55P04");
+        assert_eq!(message(&e), "unsafe use of new value \"zz\" of enum type mood", "{sql}");
+        assert_eq!(e.as_db_error().and_then(|d| d.hint()), Some(HINT), "{sql}");
+        c.batch_execute("ROLLBACK").expect("rollback");
+    };
+    let add = "ALTER TYPE mood ADD VALUE 'zz'";
+    for sql in [
+        "INSERT INTO t VALUES ('zz')",
+        "ALTER TABLE t ALTER COLUMN m SET DEFAULT 'zz'",
+        "CREATE TABLE t2 (v mood DEFAULT 'zz')",
+        "ALTER TABLE t ADD CONSTRAINT c CHECK (m <> 'zz')",
+        "SELECT 'zz'::mood",
+        "SELECT 'zz'::text::mood",
+        "SELECT '{a,zz}'::mood[]",
+        "SELECT m FROM t WHERE m = 'zz'",
+        "SELECT enum_range(NULL::mood)",
+        "SELECT enum_last(NULL::mood)",
+    ] {
+        unsafe_use(&mut c, add, sql);
+    }
+    // The enum functions check only the labels they return.
+    unsafe_use(&mut c, "ALTER TYPE mood ADD VALUE 'zz' BEFORE 'a'", "SELECT enum_first(NULL::mood)");
+    unsafe_use(&mut c, "ALTER TYPE mood ADD VALUE 'zz' BEFORE 'a'", "SELECT enum_range(NULL, 'a'::mood)");
+    unsafe_use(&mut c, "ALTER TYPE mood ADD VALUE 'zz' AFTER 'a'", "SELECT enum_range('a'::mood, 'b'::mood)");
+    c.batch_execute("BEGIN; ALTER TYPE mood ADD VALUE 'zz' BEFORE 'a'").expect("before");
+    assert_eq!(one(&mut c, "SELECT enum_last(NULL::mood)"), "b");
+    assert_eq!(one(&mut c, "SELECT enum_range('a'::mood, NULL)"), "{a,b}");
+    assert_eq!(one(&mut c, "SELECT 'a'::mood < 'b'::mood"), "t");
+    // The catalog row is there; only its use as a value is refused.
+    let labels = texts(&mut c, "SELECT enumlabel FROM pg_enum WHERE enumtypid = 'mood'::regtype ORDER BY enumsortorder");
+    let labels: Vec<String> = labels.into_iter().filter_map(|r| r[0].clone()).collect();
+    assert_eq!(labels, ["zz", "a", "b"]);
+    c.batch_execute("ROLLBACK").expect("rollback");
+    // Renaming keeps the label's identity, so it stays unsafe.
+    c.batch_execute("BEGIN; ALTER TYPE mood ADD VALUE 'zz'; ALTER TYPE mood RENAME VALUE 'zz' TO 'yy'").expect("rename");
+    let e = expect_code(c.simple_query("SELECT 'yy'::mood"), "55P04");
+    assert_eq!(message(&e), "unsafe use of new value \"yy\" of enum type mood");
+    c.batch_execute("ROLLBACK").expect("rollback");
+    // IF NOT EXISTS of an existing label adds nothing.
+    c.batch_execute("BEGIN; ALTER TYPE mood ADD VALUE IF NOT EXISTS 'a'").expect("if not exists");
+    assert_eq!(one(&mut c, "SELECT 'a'::mood"), "a");
+    c.batch_execute("ROLLBACK").expect("rollback");
+    // A label added in a savepoint that rolled back no longer exists.
+    c.batch_execute("BEGIN; SAVEPOINT s; ALTER TYPE mood ADD VALUE 'zz'; ROLLBACK TO s").expect("rollback to");
+    expect_code(c.simple_query("SELECT 'zz'::mood"), "22P02");
+    c.batch_execute("ROLLBACK").expect("rollback");
+    // Releasing the savepoint does not commit it.
+    unsafe_use(&mut c, "SAVEPOINT s; ALTER TYPE mood ADD VALUE 'zz'; RELEASE s", "SELECT 'zz'::mood");
+    // In one simple-query string the statements share an implicit transaction.
+    let e = expect_code(c.batch_execute("ALTER TYPE mood ADD VALUE 'qq'; SELECT 'qq'::mood"), "55P04");
+    assert_eq!(message(&e), "unsafe use of new value \"qq\" of enum type mood");
+    expect_code(c.simple_query("SELECT 'qq'::mood"), "22P02");
+    // After the error is rolled back to a savepoint, the label commits with the transaction.
+    c.batch_execute("BEGIN; ALTER TYPE mood ADD VALUE 'zz'; SAVEPOINT s").expect("add");
+    expect_code(c.simple_query("SELECT 'zz'::mood"), "55P04");
+    c.batch_execute("ROLLBACK TO s; COMMIT").expect("commit");
+    c.batch_execute("INSERT INTO t VALUES ('zz'); ALTER TABLE t ALTER COLUMN m SET DEFAULT 'zz'").expect("committed");
+    assert_eq!(one(&mut c, "SELECT enum_range(NULL::mood)"), "{a,b,zz}");
+    assert_eq!(one(&mut c, "SELECT m FROM t"), "zz");
+}
+
+/// A label added to a type the same transaction created is safe, but only when both the
+/// type and the label were made outside any savepoint (`EnumValuesCreate` registers the type
+/// only at top level, and `AddEnumLabel` trusts the registration only at top level).
+#[test]
+fn new_values_of_a_type_created_in_the_transaction() {
+    let (_db, mut c) = setup();
+    c.batch_execute("BEGIN; CREATE TYPE m2 AS ENUM ('x'); ALTER TYPE m2 ADD VALUE 'y'; SAVEPOINT s").expect("create");
+    assert_eq!(one(&mut c, "SELECT 'y'::m2"), "y");
+    assert_eq!(one(&mut c, "SELECT enum_range(NULL::m2)"), "{x,y}");
+    c.batch_execute("CREATE TABLE t (v m2 DEFAULT 'y'); INSERT INTO t DEFAULT VALUES").expect("default");
+    assert_eq!(one(&mut c, "SELECT v FROM t"), "y");
+    c.batch_execute("ROLLBACK").expect("rollback");
+    // Renaming the type keeps its identity.
+    c.batch_execute("BEGIN; CREATE TYPE m2 AS ENUM ('x'); ALTER TYPE m2 RENAME TO m3; ALTER TYPE m3 ADD VALUE 'y'").expect("rename");
+    assert_eq!(one(&mut c, "SELECT 'y'::m3"), "y");
+    c.batch_execute("ROLLBACK").expect("rollback");
+    // The exemption is per type.
+    c.batch_execute("CREATE TYPE mood AS ENUM ('a')").expect("mood");
+    c.batch_execute("BEGIN; ALTER TYPE mood ADD VALUE 'zz'; CREATE TYPE m2 AS ENUM ('x'); ALTER TYPE m2 ADD VALUE 'y'").expect("two types");
+    assert_eq!(one(&mut c, "SELECT 'y'::m2"), "y");
+    expect_code(c.simple_query("SELECT 'zz'::mood"), "55P04");
+    c.batch_execute("ROLLBACK").expect("rollback");
+    // An implicit transaction counts too.
+    c.batch_execute("CREATE TYPE m4 AS ENUM ('x'); ALTER TYPE m4 ADD VALUE 'y'; SELECT 'y'::m4").expect("implicit");
+    c.batch_execute("DROP TYPE m4").expect("drop");
+    for (setup, why) in [
+        ("CREATE TYPE m2 AS ENUM ('x'); SAVEPOINT s; ALTER TYPE m2 ADD VALUE 'y'", "label added in a savepoint"),
+        ("CREATE TYPE m2 AS ENUM ('x'); SAVEPOINT s; ALTER TYPE m2 ADD VALUE 'y'; RELEASE s", "label added in a released savepoint"),
+        ("SAVEPOINT s; CREATE TYPE m2 AS ENUM ('x'); ALTER TYPE m2 ADD VALUE 'y'", "type and label in a savepoint"),
+        ("SAVEPOINT s; CREATE TYPE m2 AS ENUM ('x'); RELEASE s; ALTER TYPE m2 ADD VALUE 'y'", "type created in a savepoint"),
+        // ROLLBACK TO keeps the savepoint open, so the next label is added inside it.
+        (
+            "CREATE TYPE m2 AS ENUM ('x'); SAVEPOINT s; ALTER TYPE m2 ADD VALUE 'z'; ROLLBACK TO s; ALTER TYPE m2 ADD VALUE 'y'",
+            "label added after ROLLBACK TO",
+        ),
+    ] {
+        c.batch_execute(&format!("BEGIN; {setup}")).expect(why);
+        let e = expect_code(c.simple_query("SELECT 'y'::m2"), "55P04");
+        assert_eq!(message(&e), "unsafe use of new value \"y\" of enum type m2", "{why}");
+        c.batch_execute("ROLLBACK").expect("rollback");
+    }
+    // Labels the type was created with are always safe.
+    c.batch_execute("BEGIN; SAVEPOINT s; CREATE TYPE m2 AS ENUM ('x'); RELEASE s").expect("create in savepoint");
+    assert_eq!(one(&mut c, "SELECT 'x'::m2"), "x");
+    c.batch_execute("ROLLBACK").expect("rollback");
+}
+
 #[test]
 fn drop_type_reports_dependents_and_cascades() {
     let (_db, mut c) = setup();

@@ -8,7 +8,7 @@
 
 use crate::{SqlError, SqlResult, Type, Value, code};
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// `record`: the type of `ROW(...)` and of rows without a named composite type.
@@ -86,6 +86,9 @@ pub struct Registry {
     types: HashMap<u32, Arc<UserType>>,
     /// Array type OID → element type OID.
     arrays: HashMap<u32, u32>,
+    /// Enum labels the running transaction added that it may not use yet (Postgres'
+    /// `uncommitted_enum_values`, see [`check_safe_enum_use`]).
+    uncommitted_enum_values: HashSet<u32>,
 }
 
 impl Registry {
@@ -98,6 +101,13 @@ impl Registry {
             r.types.insert(t.oid, t);
         }
         r
+    }
+
+    /// Marks these enum label OIDs as added by the running transaction and not yet usable.
+    #[must_use]
+    pub fn with_uncommitted_enum_values(mut self, labels: impl IntoIterator<Item = u32>) -> Registry {
+        self.uncommitted_enum_values.extend(labels);
+        self
     }
 
     pub fn get(&self, oid: u32) -> Option<&Arc<UserType>> {
@@ -244,15 +254,31 @@ pub fn domain_base(oid: u32) -> Option<(Type, i32)> {
 // Enums
 // ---------------------------------------------------------------------------------------------
 
-/// `enum_in`.
+/// `enum_in` (and `enum_recv`).
 pub fn parse_enum(s: &str, type_oid: u32) -> SqlResult<Value> {
     let t = lookup(type_oid).ok_or_else(|| SqlError::internal(format!("cache lookup failed for type {type_oid}")))?;
     let UserKind::Enum { labels } = &t.kind else { return Err(SqlError::internal(format!("type {} is not an enum", t.name))) };
-    labels
+    let l = labels
         .iter()
         .find(|l| l.label == s)
-        .map(|l| Value::Enum(type_oid, l.oid))
-        .ok_or_else(|| SqlError::new(code::INVALID_TEXT_REPRESENTATION, format!("invalid input value for enum {}: \"{s}\"", t.name)))
+        .ok_or_else(|| SqlError::new(code::INVALID_TEXT_REPRESENTATION, format!("invalid input value for enum {}: \"{s}\"", t.name)))?;
+    check_safe_enum_use(type_oid, l)?;
+    Ok(Value::Enum(type_oid, l.oid))
+}
+
+/// `check_safe_enum_use`: a label added by `ALTER TYPE ... ADD VALUE` in the running
+/// transaction cannot be used until that transaction commits (its OID could end up in an
+/// index whose type rolls back), unless the transaction also created the type (at top
+/// level, and the label was added at top level: `EnumTypeUncommitted`).
+pub fn check_safe_enum_use(type_oid: u32, label: &EnumLabel) -> SqlResult<()> {
+    if !crate::context::with_types(|r| r.uncommitted_enum_values.contains(&label.oid)) {
+        return Ok(());
+    }
+    Err(SqlError::new(
+        code::UNSAFE_NEW_ENUM_VALUE_USAGE,
+        format!("unsafe use of new value \"{}\" of enum type {}", label.label, type_name(type_oid)),
+    )
+    .with_hint("New enum values must be committed before they can be used."))
 }
 
 /// `enum_out`.

@@ -621,14 +621,20 @@ fn enum_labels(a: &[Value]) -> SqlResult<(u32, Vec<pgmem_types::usertype::EnumLa
     }
 }
 
+/// An enum value the functions return, after `check_safe_enum_use`.
+fn safe_enum(oid: u32, l: &pgmem_types::usertype::EnumLabel) -> SqlResult<Value> {
+    pgmem_types::usertype::check_safe_enum_use(oid, l)?;
+    Ok(Value::Enum(oid, l.oid))
+}
+
 pub fn enum_first(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     let (oid, labels) = enum_labels(a)?;
-    Ok(labels.first().map_or(Value::Null, |l| Value::Enum(oid, l.oid)))
+    labels.first().map_or(Ok(Value::Null), |l| safe_enum(oid, l))
 }
 
 pub fn enum_last(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     let (oid, labels) = enum_labels(a)?;
-    Ok(labels.last().map_or(Value::Null, |l| Value::Enum(oid, l.oid)))
+    labels.last().map_or(Ok(Value::Null), |l| safe_enum(oid, l))
 }
 
 /// `enum_range(e)`: every label; `enum_range(lo, hi)`: the labels from `lo` to `hi`
@@ -643,7 +649,7 @@ pub fn enum_range(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
         2 => (0, labels.len()),
         _ => (pos(&a[1]).unwrap_or(0), pos(&a[2]).map_or(labels.len(), |p| p + 1)),
     };
-    let items = if lo < hi { labels[lo..hi].iter().map(|l| Value::Enum(oid, l.oid)).collect() } else { Vec::new() };
+    let items = if lo < hi { labels[lo..hi].iter().map(|l| safe_enum(oid, l)).collect::<SqlResult<_>>()? } else { Vec::new() };
     Ok(Value::Array(items))
 }
 

@@ -75,7 +75,11 @@ pub fn create_type(ct: &ir::CreateType, txn: &mut Txn, binder: &Binder) -> SqlRe
         (TypeDefKind::Composite { fields, .. }, _) => TypeDefKind::Composite { fields, relid: cat.alloc_oid() },
         (other, _) => other,
     };
+    let is_enum = matches!(kind, TypeDefKind::Enum { .. });
     cat.create_type(TypeDef { oid, array_oid, schema, name, kind })?;
+    if is_enum {
+        txn.created_enum_type(oid);
+    }
     Ok(tag("CREATE TYPE"))
 }
 
@@ -169,6 +173,7 @@ pub fn alter_type(at: &ir::AlterType, txn: &mut Txn, binder: &Binder) -> SqlResu
     let mut notices = Vec::new();
     let not_enum = || SqlError::new(code::WRONG_OBJECT_TYPE, format!("{name} is not an enum"));
     let not_composite = || SqlError::new(code::WRONG_OBJECT_TYPE, format!("{name} is not a composite type"));
+    let mut added = None;
     let cat = txn.catalog_mut();
     match &at.action {
         ir::AlterTypeAction::AddValue { value, if_not_exists, neighbor } => {
@@ -194,7 +199,9 @@ pub fn alter_type(at: &ir::AlterType, txn: &mut Txn, binder: &Binder) -> SqlResu
                     if *before { i } else { i + 1 }
                 }
             };
-            insert_label(labels, pos, value.clone(), cat.alloc_oid());
+            let label_oid = cat.alloc_oid();
+            insert_label(labels, pos, value.clone(), label_oid);
+            added = Some(label_oid);
         }
         ir::AlterTypeAction::RenameValue { from, to } => {
             let TypeDefKind::Enum { labels } = &mut def.kind else { return Err(not_enum()) };
@@ -250,7 +257,11 @@ pub fn alter_type(at: &ir::AlterType, txn: &mut Txn, binder: &Binder) -> SqlResu
         ir::AlterTypeAction::NoOp => return Ok(tag("ALTER TYPE")),
     }
     let key = QualName::new(&def.schema, &name);
+    let type_oid = def.oid;
     cat.replace_type(&key, def);
+    if let Some(label_oid) = added {
+        txn.added_enum_value(type_oid, label_oid);
+    }
     Ok(QueryResult { tag: "ALTER TYPE".into(), notices, ..Default::default() })
 }
 

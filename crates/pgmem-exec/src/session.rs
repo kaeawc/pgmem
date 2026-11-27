@@ -438,8 +438,8 @@ impl Session {
         };
         let extra_float_digits = self.settings.get("extra_float_digits").and_then(|v| v.parse().ok()).unwrap_or(1);
         let types = match &self.txn {
-            Some(t) => crate::usertypes::registry(t.catalog()),
-            None => crate::usertypes::registry(&self.db.current().catalog),
+            Some(t) => crate::usertypes::registry(t.catalog(), t.uncommitted_enum_values()),
+            None => crate::usertypes::registry(&self.db.current().catalog, &std::collections::HashSet::new()),
         };
         let bytea_escape = self.settings.get("bytea_output").is_some_and(|v| v.eq_ignore_ascii_case("escape"));
         let search_path = self.search_path_context();
