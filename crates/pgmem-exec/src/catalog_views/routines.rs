@@ -94,7 +94,7 @@ pub(super) fn pg_proc(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("oid", oid(f.oid)),
                 ("proname", name(&f.name)),
                 ("pronamespace", oid(m.namespace(&f.schema))),
-                ("proowner", oid(10)),
+                ("proowner", oid(owner_oid(ctx, m.catalog, f))),
                 ("prolang", oid(lang_oid(f))),
                 ("procost", Value::Float4(f.cost as f32)),
                 ("prorows", Value::Float4(f.rows as f32)),
@@ -107,6 +107,11 @@ pub(super) fn pg_proc(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("proretset", boolean(f.returns_set())),
                 ("provolatile", ch(f.volatility)),
                 ("proparallel", ch(f.parallel)),
+                (
+                    "proacl",
+                    crate::roles::acl_items(m.catalog, ctx.env, &pgmem_catalog::GrantObject::Function(f.oid), f.oid, false)
+                        .map_or(Value::Null, |items| Value::Array(items.into_iter().map(Value::Text).collect())),
+                ),
                 (
                     "proconfig",
                     if f.config.is_empty() { Value::Null } else { Value::Array(f.config.iter().cloned().map(Value::Text).collect()) },
@@ -242,7 +247,13 @@ pub fn trigger_def(catalog: &Catalog, t: &TriggerDef, pretty: bool) -> String {
         .function_by_oid(t.function)
         .map(|f| {
             let name = crate::funcs::string::quote_ident(&f.name);
-            if catalog.function_visible(f) { name } else { format!("{}.{name}", crate::funcs::string::quote_ident(&f.schema)) }
+            if catalog.function_visible(f, &super::builtin_function_exists) {
+                return name;
+            }
+            // ruleutils' `get_namespace_name_or_temp`: the session's temp schema prints as pg_temp.
+            let is_temp = pgmem_types::context::search_path().temp_schema.as_deref() == Some(f.schema.as_str());
+            let schema = if is_temp { "pg_temp".to_owned() } else { crate::funcs::string::quote_ident(&f.schema) };
+            format!("{schema}.{name}")
         })
         .unwrap_or_default();
     let mut s = format!(
@@ -260,33 +271,75 @@ pub fn trigger_def(catalog: &Catalog, t: &TriggerDef, pretty: bool) -> String {
     s
 }
 
+/// The OID of the role that owns function `f` (`proowner`).
+fn owner_oid(ctx: &EvalCtx, catalog: &Catalog, f: &FunctionDef) -> u32 {
+    let owner = crate::roles::owner_of(catalog, ctx.env, f.oid);
+    if owner == ctx.env.user {
+        return super::model::SUPERUSER_OID;
+    }
+    catalog.role(&owner).map(|r| r.oid).or_else(|| super::pg_catalog::predefined_role(&owner)).unwrap_or(super::model::SUPERUSER_OID)
+}
+
+/// `information_schema.routines`: the routines the current user owns (through membership)
+/// or may execute; the definition only to the owner.
 pub(super) fn is_routines(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let m = snapshot(ctx);
     let s = Spec::parse(super::information_schema::ROUTINES);
+    let me = crate::roles::current_role(ctx.env);
+    let superuser = crate::roles::is_superuser(m.catalog, ctx.env, &me);
+    let member_of_owner =
+        |f: &FunctionDef| superuser || m.catalog.roles_of(&me).contains(&crate::roles::owner_of(m.catalog, ctx.env, f.oid));
+    let yes_no = |b: bool| txt(if b { "YES" } else { "NO" });
     Ok(m.catalog
         .functions()
+        .filter(|f| {
+            member_of_owner(f) || crate::roles::has_privilege(m.catalog, ctx.env, &me, &pgmem_catalog::GrantObject::Function(f.oid), 'X')
+        })
         .map(|f| {
             let specific = format!("{}_{}", f.name, f.oid);
-            let data_type = match &f.ret {
-                FuncReturn::None => Value::Null,
-                FuncReturn::Scalar(Type::Unknown) => txt("trigger"),
-                FuncReturn::Scalar(t) | FuncReturn::SetOf(t) => txt(super::information_schema::data_type_name(t)),
-                FuncReturn::Table(_) => txt("record"),
+            let ret = match &f.ret {
+                FuncReturn::None => None,
+                FuncReturn::Scalar(Type::Unknown) => Some((txt("trigger"), "pg_catalog".to_owned(), "trigger".to_owned())),
+                FuncReturn::Table(_) => Some((txt("record"), "pg_catalog".to_owned(), "record".to_owned())),
+                FuncReturn::Scalar(t) | FuncReturn::SetOf(t) => {
+                    let data_type = match t {
+                        Type::Domain(_) => "USER-DEFINED".to_owned(),
+                        _ => super::information_schema::data_type_name(t),
+                    };
+                    let schema = match t {
+                        Type::Array(_) => "pg_catalog".to_owned(),
+                        _ => super::information_schema::type_schema(t),
+                    };
+                    Some((txt(data_type), schema, t.typname()))
+                }
             };
+            let catalog = super::information_schema::catalog_name(ctx);
+            let routine = !f.procedure;
             s.row(vec![
-                ("specific_catalog", super::information_schema::catalog_name(ctx)),
+                ("specific_catalog", catalog.clone()),
                 ("specific_schema", name(&f.schema)),
                 ("specific_name", name(&specific)),
-                ("routine_catalog", super::information_schema::catalog_name(ctx)),
+                ("routine_catalog", catalog.clone()),
                 ("routine_schema", name(&f.schema)),
                 ("routine_name", name(&f.name)),
                 ("routine_type", txt(if f.procedure { "PROCEDURE" } else { "FUNCTION" })),
-                ("data_type", data_type),
-                ("routine_body", txt("EXTERNAL")),
-                ("routine_definition", txt(f.body.clone())),
+                ("data_type", ret.as_ref().map_or(Value::Null, |r| r.0.clone())),
+                ("type_udt_catalog", if ret.is_some() { catalog } else { Value::Null }),
+                ("type_udt_schema", ret.as_ref().map_or(Value::Null, |r| name(&r.1))),
+                ("type_udt_name", ret.as_ref().map_or(Value::Null, |r| name(&r.2))),
+                ("dtd_identifier", if routine { name("0") } else { Value::Null }),
+                ("routine_body", txt(if f.language == "sql" { "SQL" } else { "EXTERNAL" })),
+                ("routine_definition", if member_of_owner(f) { txt(f.body.clone()) } else { Value::Null }),
                 ("external_language", txt(f.language.to_uppercase())),
-                ("is_deterministic", txt(if f.volatility == 'i' { "YES" } else { "NO" })),
+                ("parameter_style", txt("GENERAL")),
+                ("is_deterministic", yes_no(f.volatility == 'i')),
+                ("sql_data_access", txt("MODIFIES")),
+                ("is_null_call", if routine { yes_no(f.strict) } else { Value::Null }),
+                ("schema_level_routine", txt("YES")),
+                ("max_dynamic_result_sets", int4(0)),
                 ("security_type", txt(if f.security_definer { "DEFINER" } else { "INVOKER" })),
+                ("as_locator", txt("NO")),
+                ("is_udt_dependent", txt("NO")),
             ])
         })
         .collect())

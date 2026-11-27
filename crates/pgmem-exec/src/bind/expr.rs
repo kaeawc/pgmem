@@ -19,7 +19,9 @@ pub fn coerce(b: &Binder, e: Expr, from: &Type, to: &Type, context: CoercionCont
 
 /// Assignment coercion into a column of type `to` with modifier `typmod` (INSERT / UPDATE).
 pub fn coerce_assignment(b: &Binder, e: Expr, from: &Type, to: &Type, typmod: i32, column: &str) -> SqlResult<Expr> {
-    if cast_context(from, to).is_none_or(|c| c > CoercionContext::Assignment) {
+    if cast_context(from, to).is_none_or(|c| c > CoercionContext::Assignment)
+        && crate::usercast::find(b.catalog, from, to, CoercionContext::Assignment).is_none()
+    {
         return Err(SqlError::datatype_mismatch(format!(
             "column \"{column}\" is of type {} but expression is of type {}",
             to.name(),
@@ -30,12 +32,25 @@ pub fn coerce_assignment(b: &Binder, e: Expr, from: &Type, to: &Type, typmod: i3
     coerce_inner(b, e, from, to, typmod, CoercionContext::Assignment, false)
 }
 
-fn coerce_inner(b: &Binder, e: Expr, from: &Type, to: &Type, typmod: i32, context: CoercionContext, explicit: bool) -> SqlResult<Expr> {
+fn coerce_inner(b: &Binder, mut e: Expr, from: &Type, to: &Type, typmod: i32, context: CoercionContext, explicit: bool) -> SqlResult<Expr> {
     if *to == Type::Unknown {
         return Ok(e);
     }
     if from == to && typmod < 0 {
         return Ok(e);
+    }
+    // Out of int2vector / oidvector: text is space-separated, arrays start at subscript 0.
+    if matches!(from, Type::Int2Vector | Type::OidVector) && (to.is_string() || matches!(to, Type::Array(_))) {
+        let (func, mid) = if to.is_string() {
+            (crate::funcs::strict("vector_text", crate::cast::vector_text_fn), Type::Text)
+        } else {
+            (
+                crate::funcs::strict("vector_array", crate::cast::vector_array_fn),
+                Type::Array(Box::new(from.element().cloned().unwrap_or(Type::Int2))),
+            )
+        };
+        let call = Expr::Call { func, args: vec![e] };
+        return coerce_inner(b, call, &mid, to, typmod, context, explicit);
     }
     // Into a domain: convert to its base type, then check its constraints.
     if let Type::Domain(oid) = to {
@@ -44,6 +59,11 @@ fn coerce_inner(b: &Binder, e: Expr, from: &Type, to: &Type, typmod: i32, contex
     // Out of a domain: the value already is a value of the base type.
     if from.is_domain() {
         return coerce_inner(b, e, &from.base(), to, typmod, context, explicit);
+    }
+    // A CREATE CAST conversion takes precedence over the builtin rules.
+    if let Some(cast) = crate::usercast::find(b.catalog, from, to, context) {
+        e = apply_user_cast(e, &cast, to, typmod, context);
+        return Ok(e);
     }
     if let Type::Composite(oid) = to
         && *from == Type::Record
@@ -93,6 +113,29 @@ fn coerce_inner(b: &Binder, e: Expr, from: &Type, to: &Type, typmod: i32, contex
         return Ok(Expr::Const(cast_value_ctx(v.clone(), to, typmod, explicit)?));
     }
     Ok(Expr::Cast { expr: Box::new(e), to: to.clone(), typmod, explicit })
+}
+
+/// Applies a `CREATE CAST` conversion to `e`: its function, the value through text (`WITH
+/// INOUT`), or unchanged (binary-coercible).
+fn apply_user_cast(e: Expr, cast: &pgmem_catalog::CastDef, to: &Type, typmod: i32, context: CoercionContext) -> Expr {
+    match cast.function {
+        Some(oid) => {
+            let mut args = vec![Expr::Const(Value::Oid(oid)), e];
+            let n = cast.function_args;
+            if n > 1 {
+                args.push(Expr::Const(Value::Int4(typmod)));
+            }
+            if n > 2 {
+                args.push(Expr::Const(Value::Bool(context == CoercionContext::Explicit)));
+            }
+            Expr::Call { func: funcs::lenient("user function", crate::functions::call_scalar), args }
+        }
+        None if cast.method == 'i' => {
+            let text = Expr::Cast { expr: Box::new(e), to: Type::Text, typmod: -1, explicit: true };
+            Expr::Cast { expr: Box::new(text), to: to.clone(), typmod: -1, explicit: true }
+        }
+        None => e,
+    }
 }
 
 impl Binder<'_> {
@@ -976,7 +1019,10 @@ impl Binder<'_> {
             return Ok((Expr::Const(Value::Array(Vec::new())), t));
         }
         let (e, et) = self.bind_expr(expr, ctx)?;
-        if et != Type::Unknown && cast_context(&et, &t).is_none() {
+        if et != Type::Unknown
+            && cast_context(&et, &t).is_none()
+            && crate::usercast::find(self.catalog, &et, &t, CoercionContext::Explicit).is_none()
+        {
             return Err(SqlError::cannot_coerce(&et.name(), &t.name()));
         }
         let out = coerce_inner(self, e, &et, &t, typmod, CoercionContext::Explicit, true)?;
@@ -1176,6 +1222,7 @@ impl Binder<'_> {
             }
             return Ok(None);
         };
+        self.note_function(call.def.oid);
         let mut args = vec![Expr::Const(Value::Oid(call.def.oid))];
         for ((e, et), target) in bound.into_iter().zip(&call.targets) {
             args.push(coerce(self, e, &et, target, CoercionContext::Implicit)?);

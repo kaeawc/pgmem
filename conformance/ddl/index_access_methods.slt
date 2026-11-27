@@ -1,0 +1,114 @@
+# Index access methods and operator classes.
+
+statement ok
+CREATE TABLE am (a int, b int, c text, j jsonb, r int4range, arr int[])
+
+statement ok
+CREATE INDEX am_hash ON am USING hash (a); CREATE INDEX am_gin ON am USING gin (j); CREATE INDEX am_gist ON am USING gist (r); CREATE INDEX am_brin ON am USING brin (a, c); CREATE INDEX am_spgist ON am USING spgist (c); CREATE INDEX am_btree ON am USING btree (a)
+
+query
+SELECT c.relname, c.relam, a.amname FROM pg_class c JOIN pg_am a ON a.oid = c.relam WHERE c.relname LIKE 'am\_%' AND c.relkind = 'i' ORDER BY 1
+----
+relname:name | relam:oid | amname:name
+am_brin | 3580 | brin
+am_btree | 403 | btree
+am_gin | 2742 | gin
+am_gist | 783 | gist
+am_hash | 405 | hash
+am_spgist | 4000 | spgist
+
+query
+SELECT indexdef FROM pg_indexes WHERE tablename = 'am' ORDER BY indexname
+----
+indexdef:text
+CREATE INDEX am_brin ON public.am USING brin (a, c)
+CREATE INDEX am_btree ON public.am USING btree (a)
+CREATE INDEX am_gin ON public.am USING gin (j)
+CREATE INDEX am_gist ON public.am USING gist (r)
+CREATE INDEX am_hash ON public.am USING hash (a)
+CREATE INDEX am_spgist ON public.am USING spgist (c)
+
+statement ok
+CREATE INDEX am_jpath ON am USING gin (j jsonb_path_ops); CREATE INDEX am_pattern ON am USING btree (c text_pattern_ops); CREATE INDEX am_textops ON am USING btree (c text_ops); CREATE INDEX am_varchar ON am USING btree (c varchar_ops); CREATE INDEX am_arr ON am USING gin (arr)
+
+query
+SELECT c.relname, array_to_string(i.indclass::oid[], ' '), pg_get_indexdef(c.oid) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = 'am'::regclass ORDER BY 1
+----
+relname:name | array_to_string:text | pg_get_indexdef:text
+am_arr | 10064 | CREATE INDEX am_arr ON public.am USING gin (arr)
+am_brin | 10104 10107 | CREATE INDEX am_brin ON public.am USING brin (a, c)
+am_btree | 1978 | CREATE INDEX am_btree ON public.am USING btree (a)
+am_gin | 10090 | CREATE INDEX am_gin ON public.am USING gin (j)
+am_gist | 10078 | CREATE INDEX am_gist ON public.am USING gist (r)
+am_hash | 10020 | CREATE INDEX am_hash ON public.am USING hash (a)
+am_jpath | 10091 | CREATE INDEX am_jpath ON public.am USING gin (j jsonb_path_ops)
+am_pattern | 4217 | CREATE INDEX am_pattern ON public.am USING btree (c text_pattern_ops)
+am_spgist | 10086 | CREATE INDEX am_spgist ON public.am USING spgist (c)
+am_textops | 3126 | CREATE INDEX am_textops ON public.am USING btree (c)
+am_varchar | 10044 | CREATE INDEX am_varchar ON public.am USING btree (c varchar_ops)
+
+statement ok
+CREATE TABLE amk (id int PRIMARY KEY, email text UNIQUE)
+
+query
+SELECT c.relname, array_to_string(i.indclass::oid[], ' ') FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = 'amk'::regclass ORDER BY 1
+----
+relname:name | array_to_string:text
+amk_email_key | 3126
+amk_pkey | 1978
+
+statement error 42704 access method "foo" does not exist
+CREATE INDEX x ON am USING foo (a)
+
+statement error 0A000 access method "hash" does not support unique indexes
+CREATE UNIQUE INDEX x ON am USING hash (a)
+
+statement error 0A000 access method "gin" does not support unique indexes
+CREATE UNIQUE INDEX x ON am USING gin (j)
+
+statement error 0A000 access method "hash" does not support multicolumn indexes
+CREATE INDEX x ON am USING hash (a, b)
+
+statement error 0A000 access method "spgist" does not support multicolumn indexes
+CREATE INDEX x ON am USING spgist (c, c)
+
+statement error 0A000 access method "hash" does not support included columns
+CREATE INDEX x ON am USING hash (a) INCLUDE (b)
+
+statement error 0A000 access method "gin" does not support included columns
+CREATE INDEX x ON am USING gin (j) INCLUDE (a)
+
+statement error 42704 data type integer has no default operator class for access method "gin"
+CREATE INDEX x ON am USING gin (a)
+
+statement error 42704 data type text has no default operator class for access method "gist"
+CREATE INDEX x ON am USING gist (c)
+
+statement error 42704 operator class "nosuch_ops" does not exist for access method "btree"
+CREATE INDEX x ON am USING btree (a nosuch_ops)
+
+statement error 42804 operator class "text_pattern_ops" does not accept data type integer
+CREATE INDEX x ON am USING btree (a text_pattern_ops)
+
+statement ok
+CREATE INDEX am_hash_nnd ON am USING hash (a) NULLS NOT DISTINCT
+
+statement ok
+CREATE TABLE amcopy (LIKE am INCLUDING INDEXES)
+
+query
+SELECT pg_get_indexdef(indexrelid) FROM pg_index WHERE indrelid = 'amcopy'::regclass ORDER BY 1
+----
+pg_get_indexdef:text
+CREATE INDEX amcopy_a_c_idx ON public.amcopy USING brin (a, c)
+CREATE INDEX amcopy_a_idx ON public.amcopy USING hash (a)
+CREATE INDEX amcopy_a_idx1 ON public.amcopy USING btree (a)
+CREATE INDEX amcopy_a_idx2 ON public.amcopy USING hash (a) NULLS NOT DISTINCT
+CREATE INDEX amcopy_arr_idx ON public.amcopy USING gin (arr)
+CREATE INDEX amcopy_c_idx ON public.amcopy USING spgist (c)
+CREATE INDEX amcopy_c_idx1 ON public.amcopy USING btree (c text_pattern_ops)
+CREATE INDEX amcopy_c_idx2 ON public.amcopy USING btree (c)
+CREATE INDEX amcopy_c_idx3 ON public.amcopy USING btree (c varchar_ops)
+CREATE INDEX amcopy_j_idx ON public.amcopy USING gin (j)
+CREATE INDEX amcopy_j_idx1 ON public.amcopy USING gin (j jsonb_path_ops)
+CREATE INDEX amcopy_r_idx ON public.amcopy USING gist (r)

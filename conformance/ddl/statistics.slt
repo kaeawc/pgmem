@@ -1,0 +1,205 @@
+# CREATE / ALTER / DROP STATISTICS, pg_statistic_ext and pg_get_statisticsobjdef*.
+
+statement ok
+CREATE SCHEMA st
+
+statement ok
+CREATE TABLE st.t (a int, b int, c text, d int[], j json)
+
+statement ok
+CREATE STATISTICS st.s_all (ndistinct, dependencies, mcv) ON a, b FROM st.t
+
+statement ok
+CREATE STATISTICS st.s_nd (mcv, ndistinct) ON c, a, b FROM st.t
+
+statement ok
+CREATE STATISTICS st.s_mixed ON a, (a + b), lower(c) FROM st.t
+
+statement ok
+CREATE STATISTICS st.s_exprs (dependencies) ON (a + b), (a * b) FROM st.t
+
+statement ok
+CREATE STATISTICS st.s_one_expr ON (a + b) FROM st.t
+
+query
+SELECT stxname, stxkeys, stxstattarget, stxkind FROM pg_statistic_ext ORDER BY stxname
+----
+stxname:name | stxkeys:int2vector | stxstattarget:int2 | stxkind:_char
+s_all | 1 2 | NULL | {d,f,m}
+s_exprs | (empty) | NULL | {f,e}
+s_mixed | 1 | NULL | {d,f,m,e}
+s_nd | 1 2 3 | NULL | {d,m}
+s_one_expr | (empty) | NULL | {e}
+
+query
+SELECT stxname, pg_get_statisticsobjdef(oid), pg_get_statisticsobjdef_columns(oid), pg_get_statisticsobjdef_expressions(oid) FROM pg_statistic_ext ORDER BY stxname
+----
+stxname:name | pg_get_statisticsobjdef:text | pg_get_statisticsobjdef_columns:text | pg_get_statisticsobjdef_expressions:_text
+s_all | CREATE STATISTICS st.s_all ON a, b FROM st.t | a, b | NULL
+s_exprs | CREATE STATISTICS st.s_exprs (dependencies) ON (a + b), (a * b) FROM st.t | (a + b), (a * b) | {"(a + b)","(a * b)"}
+s_mixed | CREATE STATISTICS st.s_mixed ON a, (a + b), lower(c) FROM st.t | a, (a + b), lower(c) | {"(a + b)",lower(c)}
+s_nd | CREATE STATISTICS st.s_nd (ndistinct, mcv) ON a, b, c FROM st.t | a, b, c | NULL
+s_one_expr | CREATE STATISTICS st.s_one_expr ON (a + b) FROM st.t | (a + b) | {"(a + b)"}
+
+query
+SELECT pg_get_statisticsobjdef(0) IS NULL, pg_get_statisticsobjdef_columns(0) IS NULL, pg_get_statisticsobjdef_expressions(0) IS NULL
+----
+?column?:bool | ?column?:bool | ?column?:bool
+t | t | t
+
+# Generated names
+statement ok
+CREATE STATISTICS ON c, (a + b), a FROM st.t
+
+statement ok
+CREATE STATISTICS ON b, a FROM st.t
+
+statement ok
+CREATE STATISTICS ON b, a FROM st.t
+
+query
+SELECT stxname FROM pg_statistic_ext WHERE stxname LIKE 't\_%' ORDER BY stxname
+----
+stxname:name
+t_b_a_stat
+t_b_a_stat1
+t_c_expr_a_stat
+
+# Errors
+statement error 42710 statistics object "s_all" already exists
+CREATE STATISTICS st.s_all ON a, b FROM st.t
+
+statement ok
+CREATE STATISTICS IF NOT EXISTS st.s_all ON a, b FROM st.t
+
+statement error 42P17 extended statistics require at least 2 columns
+CREATE STATISTICS st.e ON a FROM st.t
+
+statement error 42701 duplicate column name in statistics definition
+CREATE STATISTICS st.e ON a, a FROM st.t
+
+statement error 42701 duplicate expression in statistics definition
+CREATE STATISTICS st.e ON (a + b), (a + b) FROM st.t
+
+statement error 42601 unrecognized statistics kind "foo"
+CREATE STATISTICS st.e (foo) ON a, b FROM st.t
+
+statement error 42703 column "nosuch" does not exist
+CREATE STATISTICS st.e ON a, nosuch FROM st.t
+
+statement error 42P01 relation "st.nosuch" does not exist
+CREATE STATISTICS st.e ON a, b FROM st.nosuch
+
+statement error 0A000 statistics creation on system columns is not supported
+CREATE STATISTICS st.e ON a, ctid FROM st.t
+
+statement error 0A000 column "j" cannot be used in statistics because its type json has no default btree operator class
+CREATE STATISTICS st.e ON a, j FROM st.t
+
+statement error 0A000 when building statistics on a single expression, statistics kinds may not be specified
+CREATE STATISTICS st.e (ndistinct) ON (a + 1) FROM st.t
+
+statement error 0A000 only a single relation is allowed in CREATE STATISTICS
+CREATE STATISTICS st.e ON a, b FROM st.t, st.t
+
+statement error 54011 cannot have more than 8 columns in statistics
+CREATE STATISTICS st.e ON a, b, a, b, a, b, a, b, (a + 1) FROM st.t
+
+statement ok
+CREATE VIEW st.v AS SELECT 1 AS a, 2 AS b
+
+statement error 42809 cannot define statistics for relation "v"
+CREATE STATISTICS st.e ON a, b FROM st.v
+
+# ALTER, COMMENT
+statement ok
+CREATE SCHEMA st2
+
+statement ok
+ALTER STATISTICS st.s_nd RENAME TO s_nd2
+
+statement ok
+ALTER STATISTICS st.s_nd2 SET SCHEMA st2
+
+statement ok
+ALTER STATISTICS st2.s_nd2 SET STATISTICS 100
+
+statement ok
+COMMENT ON STATISTICS st2.s_nd2 IS 'a comment'
+
+query
+SELECT stxname, stxnamespace::regnamespace, stxstattarget, obj_description(oid, 'pg_statistic_ext') FROM pg_statistic_ext WHERE stxname = 's_nd2'
+----
+stxname:name | stxnamespace:regnamespace | stxstattarget:int2 | obj_description:text
+s_nd2 | st2 | 100 | a comment
+
+statement ok
+ALTER STATISTICS st2.s_nd2 SET STATISTICS -1
+
+query
+SELECT stxstattarget FROM pg_statistic_ext WHERE stxname = 's_nd2'
+----
+stxstattarget:int2
+NULL
+
+statement error 22023 statistics target -2 is too low
+ALTER STATISTICS st2.s_nd2 SET STATISTICS -2
+
+statement error 42710 statistics object "s_mixed" already exists in schema "st"
+ALTER STATISTICS st.s_all RENAME TO s_mixed
+
+statement error 42704 statistics object "st.nosuch" does not exist
+ALTER STATISTICS st.nosuch RENAME TO x
+
+statement ok
+ALTER STATISTICS IF EXISTS st.nosuch SET STATISTICS 1
+
+# psql's \d footer query
+query
+SELECT stxrelid::regclass, stxnamespace::regnamespace::text AS nsp, stxname, pg_get_statisticsobjdef_columns(oid) AS columns, 'd' = any(stxkind) AS ndist_enabled, 'f' = any(stxkind) AS deps_enabled, 'm' = any(stxkind) AS mcv_enabled, stxstattarget FROM pg_statistic_ext WHERE stxrelid = 'st.t'::regclass ORDER BY nsp, stxname
+----
+stxrelid:regclass | nsp:text | stxname:name | columns:text | ndist_enabled:bool | deps_enabled:bool | mcv_enabled:bool | stxstattarget:int2
+st.t | st | s_all | a, b | t | t | t | NULL
+st.t | st | s_exprs | (a + b), (a * b) | f | t | f | NULL
+st.t | st | s_mixed | a, (a + b), lower(c) | t | t | t | NULL
+st.t | st | s_one_expr | (a + b) | f | f | f | NULL
+st.t | st | t_b_a_stat | a, b | t | t | t | NULL
+st.t | st | t_b_a_stat1 | a, b | t | t | t | NULL
+st.t | st | t_c_expr_a_stat | a, c, (a + b) | t | t | t | NULL
+st.t | st2 | s_nd2 | a, b, c | t | f | t | NULL
+
+# Columns and tables take their statistics along
+statement ok
+ALTER TABLE st.t RENAME COLUMN b TO bb
+
+query
+SELECT stxname, pg_get_statisticsobjdef_columns(oid) FROM pg_statistic_ext WHERE stxname IN ('s_all', 's_mixed', 's_exprs') ORDER BY stxname
+----
+stxname:name | pg_get_statisticsobjdef_columns:text
+s_all | a, bb
+s_exprs | (a + bb), (a * bb)
+s_mixed | a, (a + bb), lower(c)
+
+statement ok
+ALTER TABLE st.t DROP COLUMN bb
+
+query
+SELECT stxname FROM pg_statistic_ext ORDER BY stxname
+----
+stxname:name
+
+# DROP
+statement error 42704 statistics object "st.nosuch" does not exist
+DROP STATISTICS st.nosuch
+
+statement ok
+DROP STATISTICS IF EXISTS st.nosuch, st2.s_nd2
+
+statement ok
+DROP TABLE st.t
+
+query
+SELECT count(*) FROM pg_statistic_ext
+----
+count:int8
+0

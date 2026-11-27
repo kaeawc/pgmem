@@ -52,8 +52,25 @@ const COLUMN_PRIVILEGES: &str = "grantor:name, grantee:name, table_catalog:name,
 const ENABLED_ROLES: &str = "role_name:name";
 const APPLICABLE_ROLES: &str = "grantee:name, role_name:name, is_grantable:varchar";
 pub(super) const ROUTINES: &str = "specific_catalog:name, specific_schema:name, specific_name:name, routine_catalog:name, routine_schema:name, \
-    routine_name:name, routine_type:varchar, data_type:varchar, type_udt_name:name, routine_body:varchar, routine_definition:varchar, \
-    external_language:varchar, is_deterministic:varchar, security_type:varchar";
+    routine_name:name, routine_type:varchar, module_catalog:name, module_schema:name, module_name:name, udt_catalog:name, \
+    udt_schema:name, udt_name:name, data_type:varchar, character_maximum_length:int4, character_octet_length:int4, \
+    character_set_catalog:name, character_set_schema:name, character_set_name:name, collation_catalog:name, \
+    collation_schema:name, collation_name:name, numeric_precision:int4, numeric_precision_radix:int4, numeric_scale:int4, \
+    datetime_precision:int4, interval_type:varchar, interval_precision:int4, type_udt_catalog:name, type_udt_schema:name, \
+    type_udt_name:name, scope_catalog:name, scope_schema:name, scope_name:name, maximum_cardinality:int4, \
+    dtd_identifier:name, routine_body:varchar, routine_definition:varchar, external_name:varchar, external_language:varchar, \
+    parameter_style:varchar, is_deterministic:varchar, sql_data_access:varchar, is_null_call:varchar, sql_path:varchar, \
+    schema_level_routine:varchar, max_dynamic_result_sets:int4, is_user_defined_cast:varchar, is_implicitly_invocable:varchar, \
+    security_type:varchar, to_sql_specific_catalog:name, to_sql_specific_schema:name, to_sql_specific_name:name, \
+    as_locator:varchar, created:timestamptz, last_altered:timestamptz, new_savepoint_level:varchar, is_udt_dependent:varchar, \
+    result_cast_from_data_type:varchar, result_cast_as_locator:varchar, result_cast_char_max_length:int4, \
+    result_cast_char_octet_length:int4, result_cast_char_set_catalog:name, result_cast_char_set_schema:name, \
+    result_cast_char_set_name:name, result_cast_collation_catalog:name, result_cast_collation_schema:name, \
+    result_cast_collation_name:name, result_cast_numeric_precision:int4, result_cast_numeric_precision_radix:int4, \
+    result_cast_numeric_scale:int4, result_cast_datetime_precision:int4, result_cast_interval_type:varchar, \
+    result_cast_interval_precision:int4, result_cast_type_udt_catalog:name, result_cast_type_udt_schema:name, \
+    result_cast_type_udt_name:name, result_cast_scope_catalog:name, result_cast_scope_schema:name, \
+    result_cast_scope_name:name, result_cast_maximum_cardinality:int4, result_cast_dtd_identifier:name";
 pub(super) const PARAMETERS: &str = "specific_catalog:name, specific_schema:name, specific_name:name, ordinal_position:int4, \
     parameter_mode:varchar, is_result:varchar, as_locator:varchar, parameter_name:name, data_type:varchar, udt_name:name, \
     parameter_default:varchar";
@@ -94,7 +111,7 @@ pub static DEFS: &[Def] = &[
     def!("views", 13_108, VIEWS, views),
     def!("sequences", 13_109, SEQUENCES, sequences),
     def!("table_privileges", 13_110, TABLE_PRIVILEGES, table_privileges),
-    def!("role_table_grants", 13_111, TABLE_PRIVILEGES, table_privileges),
+    def!("role_table_grants", 13_111, TABLE_PRIVILEGES, role_table_grants),
     def!("column_privileges", 13_112, COLUMN_PRIVILEGES, column_privileges),
     def!("enabled_roles", 13_113, ENABLED_ROLES, enabled_roles),
     def!("applicable_roles", 13_114, APPLICABLE_ROLES, empty),
@@ -227,7 +244,7 @@ fn domain_constraints(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
 }
 
 /// The schema of a user type (or of an array's element type).
-fn type_schema(t: &Type) -> String {
+pub(super) fn type_schema(t: &Type) -> String {
     match t {
         Type::Array(e) => type_schema(e),
         Type::Enum(o) | Type::Domain(o) | Type::Composite(o) => pgmem_types::usertype::schema_of(*o).unwrap_or_else(|| "public".to_owned()),
@@ -654,9 +671,27 @@ fn sequences(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         .collect())
 }
 
+/// `table_privileges`: each table privilege whose grantor or grantee is a role the current
+/// user has the privileges of, or whose grantee is PUBLIC.
 fn table_privileges(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    table_privilege_rows(ctx, true)
+}
+
+/// `role_table_grants`: [`table_privileges`] whose grantor or grantee is an enabled role.
+fn role_table_grants(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    table_privilege_rows(ctx, false)
+}
+
+fn table_privilege_rows(ctx: &EvalCtx, public_visible: bool) -> SqlResult<Vec<Row>> {
     let m = snapshot(ctx);
     let s = Spec::parse(TABLE_PRIVILEGES);
+    let me = crate::roles::current_role(ctx.env);
+    let mine = m.catalog.roles_of(&me);
+    let superuser = crate::roles::is_superuser(m.catalog, ctx.env, &me);
+    let enabled = |r: &str| superuser || mine.iter().any(|x| x == r);
+    let visible = |grantor: &str, grantee: &str| {
+        enabled(grantor) || (!grantee.is_empty() && enabled(grantee)) || (public_visible && grantee.is_empty())
+    };
     let rels: Vec<(u32, String, String)> = m
         .tables()
         .into_iter()
@@ -679,10 +714,17 @@ fn table_privileges(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     for (oid, schema, rel) in rels {
         // The owner holds every privilege, grantable.
         let owner = crate::roles::owner_of(m.catalog, ctx.env, oid);
-        for p in ["INSERT", "SELECT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"] {
-            rows.push(row(&owner, &owner, &schema, &rel, p, true));
+        if visible(&owner, &owner) {
+            for p in ["INSERT", "SELECT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"] {
+                rows.push(row(&owner, &owner, &schema, &rel, p, true));
+            }
         }
-        for g in m.catalog.grants().iter().filter(|g| g.object == pgmem_catalog::GrantObject::Relation(oid)) {
+        for g in m
+            .catalog
+            .grants()
+            .iter()
+            .filter(|g| g.object == pgmem_catalog::GrantObject::Relation(oid) && g.grantee != owner && visible(&g.grantor, &g.grantee))
+        {
             for c in "arwdDxt".chars().filter(|c| g.privileges.contains(c)) {
                 rows.push(row(&g.grantor, &g.grantee, &schema, &rel, crate::roles::privilege_name(c), g.grantable.contains(&c)));
             }

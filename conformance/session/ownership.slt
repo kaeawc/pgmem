@@ -1,0 +1,211 @@
+# Ownership checks: ALTER / DROP / COMMENT ON / CREATE OR REPLACE by a role that does not own
+# the object (nor belongs to its owner), OWNER TO, CREATE TRIGGER's privileges, $user and
+# schema USAGE in the search path. Roles are cluster-wide on PostgreSQL, so names are unique
+# and dropped at the end.
+
+statement ok
+DROP ROLE IF EXISTS conf_own_a
+
+statement ok
+DROP ROLE IF EXISTS conf_own_b
+
+statement ok
+DROP ROLE IF EXISTS conf_own_m
+
+statement ok
+CREATE ROLE conf_own_a; CREATE ROLE conf_own_b; CREATE ROLE conf_own_m IN ROLE conf_own_a; GRANT CREATE ON SCHEMA public TO conf_own_a, conf_own_b
+
+statement ok
+CREATE SCHEMA own_s AUTHORIZATION conf_own_a
+
+statement ok
+CREATE FUNCTION own_trig() RETURNS trigger LANGUAGE plpgsql AS 'begin return new; end'; REVOKE EXECUTE ON FUNCTION own_trig() FROM PUBLIC
+
+statement ok
+SET ROLE conf_own_a
+
+statement ok
+CREATE FUNCTION own_f() RETURNS int LANGUAGE sql AS 'select 1'
+
+statement ok
+CREATE PROCEDURE own_p() LANGUAGE sql AS 'select 1'
+
+statement ok
+CREATE TABLE own_t (id int); CREATE INDEX own_t_i ON own_t (id); CREATE VIEW own_v AS SELECT 1 AS x; CREATE SEQUENCE own_seq
+
+statement ok
+CREATE TYPE own_ty AS ENUM ('a'); CREATE DOMAIN own_d AS int
+
+statement ok
+CREATE FUNCTION own_tf() RETURNS trigger LANGUAGE plpgsql AS 'begin return new; end'
+
+statement ok
+CREATE TRIGGER own_tr BEFORE INSERT ON own_t FOR EACH ROW EXECUTE FUNCTION own_tf()
+
+statement error 42501 permission denied for function own_trig
+CREATE TRIGGER own_tr2 BEFORE INSERT ON own_t FOR EACH ROW EXECUTE FUNCTION own_trig()
+
+statement ok
+RESET ROLE
+
+statement ok
+SET ROLE conf_own_b
+
+statement error 42501 must be owner of function own_f
+CREATE OR REPLACE FUNCTION own_f() RETURNS int LANGUAGE sql AS 'select 2'
+
+statement error 42501 must be owner of function own_f
+ALTER FUNCTION own_f() SECURITY DEFINER
+
+statement error 42501 must be owner of function own_f
+ALTER FUNCTION own_f() OWNER TO conf_own_b
+
+statement error 42501 must be owner of function own_f
+DROP FUNCTION own_f()
+
+statement error 42501 must be owner of function own_f
+COMMENT ON FUNCTION own_f() IS 'x'
+
+statement error 42501 must be owner of procedure own_p
+DROP PROCEDURE own_p()
+
+statement error 42501 must be owner of procedure own_p
+ALTER PROCEDURE own_p() SECURITY DEFINER
+
+statement error 42501 must be owner of routine own_p
+DROP ROUTINE own_p()
+
+statement error 42501 must be owner of table own_t
+DROP TABLE own_t
+
+statement error 42501 must be owner of table own_t
+ALTER TABLE own_t ADD COLUMN y int
+
+statement error 42501 must be owner of relation own_t
+COMMENT ON COLUMN own_t.id IS 'x'
+
+statement error 42501 must be owner of table own_t
+CREATE INDEX ON own_t (id)
+
+statement error 42501 must be owner of index own_t_i
+DROP INDEX own_t_i
+
+statement error 42501 must be owner of view own_v
+DROP VIEW own_v
+
+statement error 42501 must be owner of view own_v
+CREATE OR REPLACE VIEW own_v AS SELECT 2 AS x
+
+statement error 42501 must be owner of sequence own_seq
+ALTER SEQUENCE own_seq RESTART
+
+statement error 42501 must be owner of type own_ty
+DROP TYPE own_ty
+
+statement error 42501 must be owner of type own_d
+ALTER DOMAIN own_d SET NOT NULL
+
+statement error 42501 must be owner of type own_d
+DROP DOMAIN own_d
+
+statement error 42501 must be owner of schema own_s
+DROP SCHEMA own_s
+
+statement error 42501 must be owner of schema own_s
+COMMENT ON SCHEMA own_s IS 'x'
+
+statement error 42501 must be owner of relation own_t
+DROP TRIGGER own_tr ON own_t
+
+statement error 42501 must be owner of table own_t
+ALTER TRIGGER own_tr ON own_t RENAME TO own_tr3
+
+statement error 42501 permission denied for table own_t
+CREATE TRIGGER own_tr4 BEFORE INSERT ON own_t FOR EACH ROW EXECUTE FUNCTION own_tf()
+
+statement ok
+RESET ROLE
+
+statement ok
+SET ROLE conf_own_m
+
+statement ok
+ALTER FUNCTION own_f() SECURITY DEFINER
+
+statement error 42501 must be able to SET ROLE "conf_own_b"
+ALTER FUNCTION own_f() OWNER TO conf_own_b
+
+statement ok
+DROP INDEX own_t_i
+
+statement ok
+RESET ROLE
+
+statement ok
+ALTER FUNCTION own_f() OWNER TO conf_own_b
+
+statement ok
+SET ROLE conf_own_a
+
+query
+SHOW search_path
+----
+search_path:text
+"$user", public
+
+query
+SELECT current_schema(), current_schemas(false)::text
+----
+current_schema:name | current_schemas:text
+public | {public}
+
+statement ok
+REVOKE USAGE ON SCHEMA own_s FROM conf_own_a
+
+statement ok
+RESET ROLE
+
+statement ok
+CREATE SCHEMA own_hidden; CREATE TABLE own_hidden.h (id int); GRANT SELECT ON own_hidden.h TO conf_own_a
+
+statement ok
+SET ROLE conf_own_a
+
+statement ok
+SET search_path = own_hidden, public
+
+query
+SELECT current_schema(), current_schemas(false)::text
+----
+current_schema:name | current_schemas:text
+public | {public}
+
+statement error 42501 permission denied for schema own_hidden
+SELECT * FROM own_hidden.h
+
+statement ok
+RESET ROLE
+
+statement ok
+RESET search_path
+
+statement ok
+DROP SCHEMA own_hidden CASCADE
+
+statement ok
+DROP FUNCTION own_trig()
+
+statement ok
+DROP OWNED BY conf_own_a
+
+statement ok
+DROP OWNED BY conf_own_b
+
+statement ok
+DROP ROLE conf_own_a
+
+statement ok
+DROP ROLE conf_own_b
+
+statement ok
+DROP ROLE conf_own_m

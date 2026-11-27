@@ -180,12 +180,20 @@ pub fn deparse_index(catalog: &Catalog, table: &TableDef, index: &IndexDef) -> S
         let text = expr_text(&n);
         keys.push(if looks_like_function(&n) || matches!(n, Node::Var { .. }) { text } else { format!("({text})") });
     }
+    for (key, oc) in keys.iter_mut().zip(&index.opclasses) {
+        if let Some(name) = &oc.shown {
+            key.push(' ');
+            key.push_str(&quote_ident(name));
+        }
+    }
     let mut s = format!(
-        "CREATE {}INDEX {} ON {}.{} USING btree ({})",
+        "CREATE {}INDEX {} ON {}{}.{} USING {} ({})",
         if index.unique { "UNIQUE " } else { "" },
         quote_ident(&index.name),
+        if catalog.is_partitioned(table.oid) { "ONLY " } else { "" },
         quote_ident(&table.schema),
         quote_ident(&table.name),
+        index.method,
         keys.join(", ")
     );
     if !index.include.is_empty() {
