@@ -22,7 +22,7 @@ pub use notify::{Notification, NotifyHub};
 use pgmem_catalog::{Catalog, Oid, SequenceDef, TableDef};
 use pgmem_types::{GroupKey, SqlError, SqlResult, Value, code};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
 
@@ -297,6 +297,9 @@ impl Database {
             seq_undo: SeqUndo { db: Arc::clone(self), entries: Vec::new() },
             side: std::cell::RefCell::new(None),
             forked: false,
+            outer_savepoints: 0,
+            uncommitted_enum_types: HashSet::new(),
+            uncommitted_enum_values: HashSet::new(),
         }
     }
 
@@ -496,6 +499,15 @@ pub struct Txn {
     side: std::cell::RefCell<Option<Box<Txn>>>,
     /// A [`Txn::with_side`] copy: dropping it releases nothing (the transaction owns its locks).
     forked: bool,
+    /// Savepoints open in the transaction a [`Txn::with_side`] copy was made from.
+    outer_savepoints: usize,
+    /// Enum types this transaction created outside any savepoint (`uncommitted_enum_types`):
+    /// labels added to them outside a savepoint are usable at once.
+    uncommitted_enum_types: HashSet<Oid>,
+    /// Enum labels added by this transaction that may not be used until it commits
+    /// (`uncommitted_enum_values`). Like Postgres' list it is only cleared at the end of the
+    /// transaction; a label a ROLLBACK TO removed is simply no longer found.
+    uncommitted_enum_values: HashSet<Oid>,
 }
 
 impl Txn {
@@ -528,6 +540,9 @@ impl Txn {
                 seq_undo: SeqUndo { db: Arc::clone(&self.db), entries: Vec::new() },
                 side: std::cell::RefCell::new(None),
                 forked: true,
+                outer_savepoints: self.outer_savepoints + self.savepoints.len(),
+                uncommitted_enum_types: self.uncommitted_enum_types.clone(),
+                uncommitted_enum_values: self.uncommitted_enum_values.clone(),
             })
         });
         f(fork)
@@ -587,6 +602,8 @@ impl Txn {
         self.held_rows.get_mut().append(fork.held_rows.get_mut());
         self.reads.get_mut().append(fork.reads.get_mut());
         self.seq_undo.entries.append(&mut fork.seq_undo.entries);
+        self.uncommitted_enum_types = std::mem::take(&mut fork.uncommitted_enum_types);
+        self.uncommitted_enum_values = std::mem::take(&mut fork.uncommitted_enum_values);
     }
 
     /// Until [`Txn::thaw_reads`], reads see this transaction's changes as of now; writes and
@@ -766,6 +783,31 @@ impl Txn {
         ch.truncated = true;
         ch.clear_inserted();
         ch.deleted.clear();
+    }
+
+    /// Records `CREATE TYPE ... AS ENUM` (`EnumValuesCreate`): outside a savepoint, labels
+    /// later added to the type at top level are safe to use before commit.
+    pub fn created_enum_type(&mut self, type_oid: Oid) {
+        self.settle();
+        if self.outer_savepoints + self.savepoints.len() == 0 {
+            self.uncommitted_enum_types.insert(type_oid);
+        }
+    }
+
+    /// Records `ALTER TYPE ... ADD VALUE` (`AddEnumLabel`): the label is unsafe to use until
+    /// commit unless the type is one [`Txn::created_enum_type`] registered and no savepoint
+    /// is open.
+    pub fn added_enum_value(&mut self, type_oid: Oid, label_oid: Oid) {
+        self.settle();
+        if self.outer_savepoints + self.savepoints.len() == 0 && self.uncommitted_enum_types.contains(&type_oid) {
+            return;
+        }
+        self.uncommitted_enum_values.insert(label_oid);
+    }
+
+    /// The enum labels [`Txn::added_enum_value`] marked unsafe.
+    pub fn uncommitted_enum_values(&self) -> &HashSet<Oid> {
+        &self.uncommitted_enum_values
     }
 
     /// Marks a table created by this transaction (no committed rows can be visible).

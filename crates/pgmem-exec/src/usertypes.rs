@@ -5,10 +5,12 @@ use crate::catalog_views::rowtype_oid_of;
 use pgmem_catalog::{Catalog, TypeDef, TypeDefKind};
 use pgmem_types::usertype::{Field, Registry, UserKind, UserType};
 use pgmem_types::{SqlError, SqlResult, Type, code};
+use std::collections::HashSet;
 use std::sync::Arc;
 
-/// The user types visible in `catalog`, including every table's composite row type.
-pub fn registry(catalog: &Catalog) -> Arc<Registry> {
+/// The user types visible in `catalog`, including every table's composite row type, with the
+/// enum labels the running transaction may not use yet.
+pub fn registry(catalog: &Catalog, uncommitted_enum_values: &HashSet<u32>) -> Arc<Registry> {
     let user = catalog.types().map(|t| Arc::new(t.user_type()));
     let rows = catalog.tables().map(|t| {
         let fields = t.live_columns().map(|(_, c)| Field { name: c.name.clone(), ty: c.ty.clone(), typmod: c.typmod }).collect();
@@ -20,7 +22,7 @@ pub fn registry(catalog: &Catalog) -> Arc<Registry> {
             kind: UserKind::Composite { fields, relid: t.oid },
         })
     });
-    Arc::new(Registry::new(user.chain(rows)))
+    Arc::new(Registry::new(user.chain(rows)).with_uncommitted_enum_values(uncommitted_enum_values.iter().copied()))
 }
 
 /// A user type (or a table's row type) by possibly qualified name, through the search path.

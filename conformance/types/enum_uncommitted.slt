@@ -1,0 +1,219 @@
+# ALTER TYPE ... ADD VALUE: a new label cannot be used until its transaction commits
+# (check_safe_enum_use), unless the transaction also created the type
+statement ok
+CREATE TYPE mood AS ENUM ('a', 'b')
+
+statement ok
+CREATE TABLE t (m mood)
+
+# INSERT of the new value
+statement ok
+BEGIN
+
+statement ok
+ALTER TYPE mood ADD VALUE 'zz'
+
+statement error 55P04 unsafe use of new value "zz" of enum type mood
+INSERT INTO t VALUES ('zz')
+
+statement ok
+ROLLBACK
+
+# SET DEFAULT
+statement ok
+BEGIN
+
+statement ok
+ALTER TYPE mood ADD VALUE 'zz'
+
+statement error 55P04 unsafe use of new value "zz" of enum type mood
+ALTER TABLE t ALTER COLUMN m SET DEFAULT 'zz'
+
+statement ok
+ROLLBACK
+
+# Casts and comparisons
+statement ok
+BEGIN
+
+statement ok
+ALTER TYPE mood ADD VALUE 'zz'
+
+query
+SELECT 'a'::mood < 'b'::mood AS lt
+----
+lt:bool
+t
+
+statement ok
+SAVEPOINT s
+
+statement error 55P04 unsafe use of new value "zz" of enum type mood
+SELECT 'zz'::mood AS m
+
+statement ok
+ROLLBACK TO s
+
+statement error 55P04 unsafe use of new value "zz" of enum type mood
+SELECT 'zz'::text::mood AS m
+
+statement ok
+ROLLBACK TO s
+
+statement error 55P04 unsafe use of new value "zz" of enum type mood
+SELECT m FROM t WHERE m = 'zz'
+
+statement ok
+ROLLBACK TO s
+
+statement error 55P04 unsafe use of new value "zz" of enum type mood
+SELECT enum_range(NULL::mood) AS r
+
+statement ok
+ROLLBACK TO s
+
+query
+SELECT enumlabel FROM pg_enum WHERE enumtypid = 'mood'::regtype ORDER BY enumsortorder
+----
+enumlabel:name
+a
+b
+zz
+
+statement ok
+ROLLBACK
+
+# BEFORE: the enum functions check only the labels they return
+statement ok
+BEGIN
+
+statement ok
+ALTER TYPE mood ADD VALUE 'zz' BEFORE 'a'
+
+query
+SELECT enum_last(NULL::mood) AS l, enum_range('a'::mood, NULL) AS r
+----
+l:mood | r:_mood
+b | {a,b}
+
+statement ok
+SAVEPOINT s
+
+statement error 55P04 unsafe use of new value "zz" of enum type mood
+SELECT enum_first(NULL::mood) AS f
+
+statement ok
+ROLLBACK TO s
+
+statement error 55P04 unsafe use of new value "zz" of enum type mood
+SELECT enum_range(NULL, 'a'::mood) AS r
+
+statement ok
+ROLLBACK
+
+# IF NOT EXISTS of an existing label
+statement ok
+BEGIN
+
+statement ok
+ALTER TYPE mood ADD VALUE IF NOT EXISTS 'a'
+
+query
+SELECT 'a'::mood AS m
+----
+m:mood
+a
+
+statement ok
+ROLLBACK
+
+# A savepoint that rolled back the label; one that was released
+statement ok
+BEGIN
+
+statement ok
+SAVEPOINT s
+
+statement ok
+ALTER TYPE mood ADD VALUE 'zz'
+
+statement ok
+ROLLBACK TO s
+
+statement error 22P02 invalid input value for enum mood: "zz"
+SELECT 'zz'::mood AS m
+
+statement ok
+ROLLBACK
+
+statement ok
+BEGIN
+
+statement ok
+SAVEPOINT s
+
+statement ok
+ALTER TYPE mood ADD VALUE 'zz'
+
+statement ok
+RELEASE s
+
+statement error 55P04 unsafe use of new value "zz" of enum type mood
+SELECT 'zz'::mood AS m
+
+statement ok
+ROLLBACK
+
+# A type created in the same transaction
+statement ok
+BEGIN
+
+statement ok
+CREATE TYPE m2 AS ENUM ('x')
+
+statement ok
+ALTER TYPE m2 ADD VALUE 'y'
+
+query
+SELECT 'y'::m2 AS m, enum_range(NULL::m2) AS r
+----
+m:m2 | r:_m2
+y | {x,y}
+
+statement ok
+SAVEPOINT s
+
+statement ok
+ALTER TYPE m2 ADD VALUE 'z'
+
+statement error 55P04 unsafe use of new value "z" of enum type m2
+SELECT 'z'::m2 AS m
+
+statement ok
+ROLLBACK
+
+# One simple-query string is one implicit transaction
+statement error 55P04 unsafe use of new value "qq" of enum type mood
+ALTER TYPE mood ADD VALUE 'qq'; SELECT 'qq'::mood
+
+statement ok
+CREATE TYPE m4 AS ENUM ('x'); ALTER TYPE m4 ADD VALUE 'y'; SELECT 'y'::m4
+
+# After COMMIT the label is usable
+statement ok
+BEGIN
+
+statement ok
+ALTER TYPE mood ADD VALUE 'zz'
+
+statement ok
+COMMIT
+
+statement ok
+INSERT INTO t VALUES ('zz')
+
+query
+SELECT m, enum_range(NULL::mood) AS r FROM t
+----
+m:mood | r:_mood
+zz | {a,b,zz}
