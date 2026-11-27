@@ -90,10 +90,40 @@ fn display(v: &Value) -> String {
     if v.is_null() { "null".into() } else { text::encode(v, &v.natural_type()).unwrap_or_default() }
 }
 
-/// `Failing row contains (1, null, x).`
-pub(crate) fn failing_row(table: &TableDef, row: &Row) -> String {
-    let vals: Vec<String> = table.live_columns().map(|(i, _)| display(row.get(i).unwrap_or(&Value::Null))).collect();
-    format!("Failing row contains ({}).", vals.join(", "))
+/// `Failing row contains (1, null, x).`, or `Failing row contains (a, c) = (1, x).` with only
+/// the columns the role may see; None when it may see none.
+pub(crate) fn failing_row(table: &TableDef, row: &Row) -> Option<String> {
+    // A row routed into a partition reads in the statement target's layout.
+    if let Some(root) = crate::detail_privileges::routed_layout(table) {
+        let mapped: Row =
+            root.columns.iter().map(|c| table.column_index(&c.name).and_then(|i| row.get(i).cloned()).unwrap_or(Value::Null)).collect();
+        return describe_row(&root, &mapped);
+    }
+    describe_row(table, row)
+}
+
+fn describe_row(table: &TableDef, row: &Row) -> Option<String> {
+    let value = |i: usize| display(row.get(i).unwrap_or(&Value::Null));
+    match crate::detail_privileges::row_columns(table) {
+        None => {
+            let vals: Vec<String> = table.live_columns().map(|(i, _)| value(i)).collect();
+            Some(format!("Failing row contains ({}).", vals.join(", ")))
+        }
+        Some(cols) if cols.is_empty() => None,
+        Some(cols) => {
+            let names: Vec<&str> = cols.iter().map(|&i| table.columns[i].name.as_str()).collect();
+            let vals: Vec<String> = cols.iter().map(|&i| value(i)).collect();
+            Some(format!("Failing row contains ({}) = ({}).", names.join(", "), vals.join(", ")))
+        }
+    }
+}
+
+/// `e` with DETAIL `detail`, when there is one.
+pub(crate) fn with_detail(e: SqlError, detail: Option<String>) -> SqlError {
+    match detail {
+        Some(d) => e.with_detail(d),
+        None => e,
+    }
 }
 
 pub(crate) fn pad(row: &mut Row, table: &TableDef) {
@@ -106,11 +136,13 @@ pub(crate) fn pad(row: &mut Row, table: &TableDef) {
 fn check_not_null(table: &TableDef, row: &Row) -> SqlResult<()> {
     for (i, c) in table.live_columns() {
         if c.not_null && row.get(i).is_none_or(Value::is_null) {
-            return Err(SqlError::new(
-                code::NOT_NULL_VIOLATION,
-                format!("null value in column \"{}\" of relation \"{}\" violates not-null constraint", c.name, table.name),
+            return Err(with_detail(
+                SqlError::new(
+                    code::NOT_NULL_VIOLATION,
+                    format!("null value in column \"{}\" of relation \"{}\" violates not-null constraint", c.name, table.name),
+                ),
+                failing_row(table, row),
             )
-            .with_detail(failing_row(table, row))
             .with_table(&table.name)
             .with_column(&c.name));
         }
@@ -122,11 +154,13 @@ fn check_checks(rules: &RowRules, row: &Row, ctx: &EvalCtx) -> SqlResult<()> {
     for (name, pred) in &rules.checks {
         // A CHECK passes unless it is FALSE (NULL passes).
         if matches!(eval(pred, row, ctx)?, Value::Bool(false)) {
-            return Err(SqlError::new(
-                code::CHECK_VIOLATION,
-                format!("new row for relation \"{}\" violates check constraint \"{name}\"", rules.table.name),
+            return Err(with_detail(
+                SqlError::new(
+                    code::CHECK_VIOLATION,
+                    format!("new row for relation \"{}\" violates check constraint \"{name}\"", rules.table.name),
+                ),
+                failing_row(&rules.table, row),
             )
-            .with_detail(failing_row(&rules.table, row))
             .with_table(&rules.table.name)
             .with_constraint(name));
         }
@@ -138,9 +172,10 @@ fn check_checks(rules: &RowRules, row: &Row, ctx: &EvalCtx) -> SqlResult<()> {
 fn check_view_options(table: &TableDef, checks: &[(String, crate::plan::Expr)], row: &Row, ctx: &EvalCtx) -> SqlResult<()> {
     for (view, pred) in checks {
         if !eval_pred(pred, row, ctx)? {
-            return Err(
-                SqlError::new("44000", format!("new row violates check option for view \"{view}\"")).with_detail(failing_row(table, row))
-            );
+            return Err(with_detail(
+                SqlError::new("44000", format!("new row violates check option for view \"{view}\"")),
+                failing_row(table, row),
+            ));
         }
     }
     Ok(())
@@ -181,8 +216,10 @@ fn unique_violation(table: &TableDef, u: &UniqueCheck, row: &Row, ctx: &EvalCtx)
     } else {
         u.exprs.iter().map(|e| ("expr".to_owned(), eval(e, row, ctx).map(|v| display(&v)).unwrap_or_default())).unzip()
     };
-    SqlError::new(code::UNIQUE_VIOLATION, format!("duplicate key value violates unique constraint \"{}\"", u.name))
-        .with_detail(format!("Key ({})=({}) already exists.", cols.join(", "), vals.join(", ")))
+    let keys: Vec<Option<usize>> = if u.exprs.is_empty() { u.columns.iter().map(|c| Some(*c)).collect() } else { vec![None] };
+    let detail = crate::detail_privileges::key_visible(table.oid, keys)
+        .then(|| format!("Key ({})=({}) already exists.", cols.join(", "), vals.join(", ")));
+    with_detail(SqlError::new(code::UNIQUE_VIOLATION, format!("duplicate key value violates unique constraint \"{}\"", u.name)), detail)
         .with_table(&table.name)
         .with_constraint(&u.name)
 }
@@ -350,13 +387,27 @@ fn check_foreign_keys(table: &TableDef, rows: &[&Row], txn: &Txn, own_final: Opt
                     code::FOREIGN_KEY_VIOLATION,
                     format!("insert or update on table \"{}\" violates foreign key constraint \"{}\"", table.name, con.name),
                 )
-                .with_detail(format!("Key ({})=({}) is not present in table \"{}\".", names.join(", "), vals.join(", "), ref_table.name))
+                .with_detail(if crate::detail_privileges::key_visible(table.oid, columns.iter().map(|c| Some(*c))) {
+                    format!("Key ({})=({}) is not present in table \"{}\".", names.join(", "), vals.join(", "), ref_table.name)
+                } else {
+                    format!("Key is not present in table \"{}\".", ref_table.name)
+                })
                 .with_table(&table.name)
                 .with_constraint(&con.name));
             }
         }
     }
     Ok(())
+}
+
+/// `Key (a)=(1) is still referenced from table "child".`, without the key when the role may
+/// not select every referenced column of `table`.
+fn still_referenced(table: &TableDef, ref_columns: &[usize], names: &[&str], vals: &[String], child: &str) -> String {
+    if crate::detail_privileges::key_visible(table.oid, ref_columns.iter().map(|c| Some(*c))) {
+        format!("Key ({})=({}) is still referenced from table \"{child}\".", names.join(", "), vals.join(", "))
+    } else {
+        format!("Key is still referenced from table \"{child}\".")
+    }
 }
 
 /// Parent-side referential actions after rows of `table` were deleted or had referenced
@@ -462,12 +513,7 @@ fn referential_actions(
                             table.name, con.name, child.name
                         ),
                     )
-                    .with_detail(format!(
-                        "Key ({})=({}) is still referenced from table \"{}\".",
-                        names.join(", "),
-                        vals.join(", "),
-                        child.name
-                    ))
+                    .with_detail(still_referenced(table, ref_columns, &names, &vals, &child.name))
                     .with_table(&child.name)
                     .with_constraint(&con.name));
                 }
@@ -557,12 +603,7 @@ fn referential_actions(
                                     table.name, con.name, child.name
                                 ),
                             )
-                            .with_detail(format!(
-                                "Key ({})=({}) is still referenced from table \"{}\".",
-                                names.join(", "),
-                                vals.join(", "),
-                                child.name
-                            )));
+                            .with_detail(still_referenced(table, ref_columns, &names, &vals, &child.name)));
                         }
                     }
                     referential_actions(txn, &child, &old_versions, &new_versions, false, depth + 1, ck)?;

@@ -81,6 +81,10 @@ pub fn bind_merge(b: &Binder, m: &ir::Merge, outer: &Ctx) -> SqlResult<MergePlan
                     }
                     out
                 };
+                // DEFAULT VALUES inserts no column of the statement's own.
+                for &slot in slots.iter().filter(|_| values.is_some()) {
+                    b.note_target_use(table.oid, i16::try_from(slot + 1).unwrap_or(i16::MAX), 'a');
+                }
                 let values = match values {
                     None => None,
                     Some(vals) => {

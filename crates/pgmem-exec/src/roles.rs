@@ -3,6 +3,7 @@
 //! the `has_*_privilege` functions. The session user is a superuser; so are roles created
 //! SUPERUSER.
 
+use crate::privilege_uses::Need;
 use crate::session::{Notice, QueryResult, SessionEnv};
 use pgmem_catalog::{Catalog, DefaultPrivilege, GrantObject, Oid, Relation, RoleDef};
 use pgmem_ir as ir;
@@ -903,11 +904,11 @@ struct ColumnCheck {
     only_if_used: bool,
 }
 
-/// Checks the current role may run `stmt`: SELECT on every relation it reads, the DML
-/// privilege on its target. Superusers skip the checks. Without the table-level privilege,
-/// column privileges decide: the statement is bound (not run) to find the columns it reads,
-/// inserts and updates, and each needs the privilege (a statement that reads no column needs
-/// it on some column).
+/// Checks the current role may run `stmt`: SELECT on every relation it reads (FROM / USING,
+/// subqueries, the INSERT or MERGE source, WITH queries), the DML privileges on each target.
+/// Superusers skip the checks. Without the table-level privilege, column privileges decide:
+/// the statement is bound (not run) to find the columns it reads, inserts and updates, and
+/// each needs the privilege (a statement that reads no column needs it on some column).
 pub(crate) fn check_statement(
     stmt: &ir::Statement,
     catalog: &Catalog,
@@ -918,120 +919,163 @@ pub(crate) fn check_statement(
     if is_superuser(catalog, env, &role) {
         return Ok(());
     }
-    // (relation, privilege) in the order Postgres checks them, then the DML target whose
-    // own columns need SELECT when read.
-    let mut needs: Vec<(&ir::ObjectName, char)> = Vec::new();
-    let reads = |q: &ir::Query| -> Vec<ir::ObjectName> { crate::views::referenced_relations(q) };
-    let mut read_names: Vec<ir::ObjectName> = Vec::new();
-    let mut target: Option<&ir::ObjectName> = None;
-    match stmt {
-        ir::Statement::Query(q) => read_names = reads(q),
-        ir::Statement::Insert(i) => {
-            needs.push((&i.table, 'a'));
-            if matches!(&i.on_conflict, Some(ir::OnConflict { action: ir::ConflictAction::Update { .. }, .. })) {
-                needs.push((&i.table, 'w'));
-            }
-            if let ir::InsertSource::Query(q) = &i.source {
-                read_names = reads(q);
-            }
-            if !i.returning.is_empty() || i.on_conflict.is_some() {
-                target = Some(&i.table);
-            }
-        }
-        ir::Statement::Update(u) => {
-            needs.push((&u.table, 'w'));
-            target = Some(&u.table);
-        }
-        ir::Statement::Delete(d) => {
-            needs.push((&d.table, 'd'));
-            target = Some(&d.table);
-        }
-        ir::Statement::Truncate(t) => needs.extend(t.tables.iter().map(|n| (n, 'D'))),
-        _ => {}
-    }
-    needs.extend(read_names.iter().map(|n| (n, 'r')));
-    let mut columns: Vec<ColumnCheck> = Vec::new();
-    for (name, p) in needs {
-        let Ok(Some(rel)) = catalog.find_relation(name) else { continue };
-        if matches!(rel, Relation::Index { .. }) {
-            continue;
-        }
-        let (kind, oid) = (relation_kind(&rel), rel.oid());
-        if has_privilege(catalog, env, &role, &GrantObject::Relation(oid), p) {
-            continue;
-        }
-        if "rawx".contains(p) && !matches!(rel, Relation::Sequence(_)) && has_any_column_privilege(catalog, env, &role, oid, p) {
-            columns.push(ColumnCheck { rel: oid, kind, name: rel.name().to_owned(), privilege: p, only_if_used: false });
-            continue;
-        }
-        return Err(permission_denied(kind, rel.name()));
-    }
+    let uses = crate::privilege_uses::statement_uses(stmt);
     // A view target written by INSTEAD OF triggers (or not automatically updatable) is not
     // bound onto a base table: its columns come from the statement's column names.
     let trigger_view = target_view_columns(stmt, catalog);
-    if let Some(name) = target
-        && trigger_view.is_none()
-        && let Ok(Some(rel @ (Relation::Table(_) | Relation::View(_)))) = catalog.find_relation(name)
-        && !has_privilege(catalog, env, &role, &GrantObject::Relation(rel.oid()), 'r')
-    {
-        columns.push(ColumnCheck {
-            rel: rel.oid(),
-            kind: relation_kind(&rel),
-            name: rel.name().to_owned(),
-            privilege: 'r',
-            only_if_used: true,
-        });
+    let mut columns: Vec<ColumnCheck> = Vec::new();
+    for (name, need) in &uses {
+        let Ok(Some(rel)) = catalog.find_relation(name) else { continue };
+        if let Some(c) = relation_check(catalog, env, &role, &rel, *need)? {
+            match columns.iter_mut().find(|x| x.rel == c.rel && x.privilege == c.privilege) {
+                Some(x) => x.only_if_used &= c.only_if_used,
+                None => columns.push(c),
+            }
+        }
     }
     if columns.is_empty() {
         return Ok(());
     }
-    let deny = |c: &ColumnCheck| permission_denied(c.kind, &c.name);
     let binder = crate::bind::Binder::new(catalog, param_types);
     binder.record_column_use();
-    let top = crate::bind::Level::new(crate::bind::Scope::default());
-    let ctx = crate::bind::Ctx::new(&top);
-    let bound = if let Some(uses) = &trigger_view {
-        for &(rel, attnum, p) in uses {
-            binder.note_use(rel, attnum, p);
-        }
-        match stmt {
-            ir::Statement::Insert(i) => match &i.source {
-                ir::InsertSource::Query(q) => binder.bind_query(q, &ctx).map(drop),
-                _ => Ok(()),
-            },
-            _ => Ok(()),
-        }
-    } else if crate::statement::leading_with(stmt).is_some() {
-        crate::statement::describe_with(stmt, &binder, &ctx).map(drop)
-    } else {
-        match stmt {
-            ir::Statement::Query(q) => binder.bind_query(q, &ctx).map(drop),
-            ir::Statement::Insert(i) => crate::bind::bind_insert(&binder, i, &ctx).map(drop),
-            ir::Statement::Update(u) => crate::bind::bind_update(&binder, u, &ctx).map(drop),
-            ir::Statement::Delete(d) => crate::bind::bind_delete(&binder, d, &ctx).map(drop),
-            _ => Ok(()),
-        }
-    };
     // A statement that fails to bind reports that, as Postgres reports parse-analysis errors
     // before permission errors.
-    bound?;
+    bind_for_columns(stmt, &binder, trigger_view.as_deref())?;
     let used = binder.column_use();
     for c in &columns {
         let mut cols: Vec<i16> = used.iter().filter(|(rel, _, p)| *rel == c.rel && *p == c.privilege).map(|(_, a, _)| *a).collect();
         cols.sort_unstable();
         cols.dedup();
-        if cols.is_empty() {
-            if c.only_if_used || has_any_column_privilege(catalog, env, &role, c.rel, c.privilege) {
-                continue;
-            }
-            return Err(deny(c));
-        }
-        // System columns (attnum < 0) have no column grants here: table-level only.
-        if cols.iter().any(|&a| a <= 0 || !column_granted(catalog, &role, c.rel, a, c.privilege)) {
-            return Err(deny(c));
+        let granted = if cols.is_empty() {
+            c.only_if_used || has_any_column_privilege(catalog, env, &role, c.rel, c.privilege)
+        } else {
+            // System columns (attnum < 0) have no column grants here: table-level only.
+            cols.iter().all(|&a| a > 0 && column_granted(catalog, &role, c.rel, a, c.privilege))
+        };
+        if !granted {
+            return Err(permission_denied(c.kind, &c.name));
         }
     }
     Ok(())
+}
+
+/// What `need` on `rel` requires of `role`: nothing (Ok(None)), a check of the columns the
+/// statement uses, or a permission error.
+fn relation_check(catalog: &Catalog, env: &SessionEnv, role: &str, rel: &Relation, need: Need) -> SqlResult<Option<ColumnCheck>> {
+    if matches!(rel, Relation::Index { .. }) {
+        return Ok(None);
+    }
+    let (kind, oid) = (relation_kind(rel), rel.oid());
+    let column_check =
+        |privilege: char, only_if_used: bool| ColumnCheck { rel: oid, kind, name: rel.name().to_owned(), privilege, only_if_used };
+    match need {
+        Need::TargetRead => Ok((matches!(rel, Relation::Table(_) | Relation::View(_))
+            && !has_privilege(catalog, env, role, &GrantObject::Relation(oid), 'r'))
+        .then(|| column_check('r', true))),
+        Need::Privilege(p) => {
+            if has_privilege(catalog, env, role, &GrantObject::Relation(oid), p) {
+                return Ok(None);
+            }
+            if "rawx".contains(p) && !matches!(rel, Relation::Sequence(_)) && has_any_column_privilege(catalog, env, role, oid, p) {
+                return Ok(Some(column_check(p, false)));
+            }
+            Err(permission_denied(kind, rel.name()))
+        }
+    }
+}
+
+/// Binds `stmt` to record the columns it uses. A view target with INSTEAD OF triggers
+/// (`trigger_view`: the view columns inserted or updated) is bound as the query its trigger
+/// rows come from.
+fn bind_for_columns(stmt: &ir::Statement, binder: &crate::bind::Binder, trigger_view: Option<&[(Oid, i16, char)]>) -> SqlResult<()> {
+    let top = crate::bind::Level::new(crate::bind::Scope::default());
+    let ctx = crate::bind::Ctx::new(&top);
+    if let Some(uses) = trigger_view {
+        for &(rel, attnum, p) in uses {
+            binder.note_use(rel, attnum, p);
+        }
+        if let ir::Statement::Insert(i) = stmt
+            && let ir::InsertSource::Query(q) = &i.source
+        {
+            binder.bind_query(q, &ctx)?;
+        }
+        return match trigger_view_reads(stmt) {
+            Some(q) => binder.bind_query(&q, &ctx).map(drop),
+            None => Ok(()),
+        };
+    }
+    if crate::statement::leading_with(stmt).is_some() {
+        return crate::statement::describe_with(stmt, binder, &ctx).map(drop);
+    }
+    match stmt {
+        ir::Statement::Query(q) => binder.bind_query(q, &ctx).map(drop),
+        ir::Statement::Insert(i) => crate::bind::bind_insert(binder, i, &ctx).map(drop),
+        ir::Statement::Update(u) => crate::bind::bind_update(binder, u, &ctx).map(drop),
+        ir::Statement::Delete(d) => crate::bind::bind_delete(binder, d, &ctx).map(drop),
+        ir::Statement::Merge(m) => crate::bind::merge::bind_merge(binder, m, &ctx).map(drop),
+        _ => Ok(()),
+    }
+}
+
+/// What an INSERT / UPDATE / DELETE on a view with INSTEAD OF triggers reads of the view, as
+/// a query over it: SET expressions, WHERE and RETURNING.
+fn trigger_view_reads(stmt: &ir::Statement) -> Option<ir::Query> {
+    let (table, alias, from, values, selection, returning) = match stmt {
+        ir::Statement::Insert(i) if !i.returning.is_empty() => (&i.table, &i.alias, &[][..], Vec::new(), None, &i.returning),
+        ir::Statement::Update(u) => (&u.table, &u.alias, &u.from[..], set_sources(&u.assignments), u.selection.clone(), &u.returning),
+        ir::Statement::Delete(d) => (&d.table, &d.alias, &d.using[..], Vec::new(), d.selection.clone(), &d.returning),
+        _ => return None,
+    };
+    let alias = alias.as_ref().map(|a| ir::TableAlias { name: a.clone(), columns: Vec::new(), column_types: Vec::new() });
+    let mut projection: Vec<ir::SelectItem> = values.into_iter().map(|expr| ir::SelectItem::Expr { expr, alias: None }).collect();
+    projection.extend(returning.iter().cloned());
+    let mut tables = vec![ir::TableRef::Table { name: table.clone(), alias }];
+    tables.extend(from.iter().cloned());
+    Some(ir::Query::from_body(ir::SetExpr::Select(Box::new(ir::Select { projection, from: tables, selection, ..Default::default() }))))
+}
+
+/// The expressions an UPDATE's SET list reads: DEFAULT (alone or in a row) reads nothing.
+fn set_sources(assignments: &[ir::Assignment]) -> Vec<ir::Expr> {
+    let mut out = Vec::new();
+    for a in assignments {
+        match &a.value {
+            ir::Expr::Default => {}
+            ir::Expr::Row(items) => out.extend(items.iter().filter(|e| !matches!(e, ir::Expr::Default)).cloned()),
+            e => out.push(e.clone()),
+        }
+    }
+    out
+}
+
+/// COPY of relation `rel`: SELECT (COPY TO) or INSERT (COPY FROM) on the table, or on each
+/// copied column (`columns`, or every column but generated ones). Checked before the copy
+/// starts and before the relation kind; an unknown column is left to the caller to report.
+pub(crate) fn check_copy(catalog: &Catalog, env: &SessionEnv, rel: &Relation, columns: &[String], from: bool) -> SqlResult<()> {
+    let role = current_role(env);
+    let p = if from { 'a' } else { 'r' };
+    let oid = rel.oid();
+    if has_privilege(catalog, env, &role, &GrantObject::Relation(oid), p) {
+        return Ok(());
+    }
+    let generated = |a: i16| match rel {
+        Relation::Table(t) => usize::try_from(a - 1).ok().and_then(|i| t.columns.get(i)).is_some_and(|c| c.generated.is_some()),
+        _ => false,
+    };
+    let all = relation_columns(catalog, oid);
+    let mut copied: Vec<i16> = Vec::new();
+    if columns.is_empty() {
+        copied.extend(all.iter().map(|(a, _)| *a).filter(|a| !generated(*a)));
+    } else {
+        for name in columns {
+            let Some((a, _)) = all.iter().find(|(_, n)| n == name) else { return Ok(()) };
+            copied.push(*a);
+        }
+    }
+    let columnar = matches!(rel, Relation::Table(_) | Relation::View(_));
+    if columnar && !copied.is_empty() && copied.iter().all(|&a| column_granted(catalog, &role, oid, a, p)) {
+        return Ok(());
+    }
+    Err(permission_denied(relation_kind(rel), rel.name()))
 }
 
 /// For INSERT / UPDATE / DELETE on a view with an INSTEAD OF trigger for it, or one that is

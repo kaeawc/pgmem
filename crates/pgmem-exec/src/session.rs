@@ -631,7 +631,9 @@ impl Session {
         for (oid, mode) in crate::lock_levels::ddl_locks(stmt, &catalog) {
             txn.lock_relation(oid, mode);
         }
-        let result = crate::statement::exec_statement(stmt, &binder, &ctx, txn, params, &env, &state)?;
+        let result = crate::detail_privileges::as_viewer(&catalog, &env, stmt, || {
+            crate::statement::exec_statement(stmt, &binder, &ctx, txn, params, &env, &state)
+        })?;
         for (oid, mode) in crate::lock_levels::created_locks(stmt, &catalog, txn.catalog()) {
             txn.lock_relation(oid, mode);
         }
