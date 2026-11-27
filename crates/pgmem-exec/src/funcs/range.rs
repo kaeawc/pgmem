@@ -130,6 +130,15 @@ fn upper_inf(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     flag(a, |r| !r.empty && r.upper.is_none())
 }
 
+/// `range_cmp` / `multirange_cmp`: the btree support function (-1, 0 or 1).
+fn cmp(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+    let o = match (&a[0], &a[1]) {
+        (Value::Multirange(_, x), Value::Multirange(_, y)) => range::compare_multi(x, y)?,
+        (x, y) => range::compare(rng(x)?, rng(y)?)?,
+    };
+    Ok(Value::Int4(o as i32))
+}
+
 fn merge(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     Ok(range_value(range::union(rng(&a[0])?, rng(&a[1])?, false)?))
 }
@@ -190,19 +199,98 @@ fn multi_contains_elem(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     Ok(Value::Bool(any_range(multi(&a[0])?, |r| range::contains_elem(r, &a[1]))?))
 }
 
-fn multi_contains_range(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
-    let inner = rng(&a[1])?;
-    Ok(Value::Bool(inner.empty || any_range(multi(&a[0])?, |r| range::contains(r, inner))?))
+/// A range or multirange operand as its list of (non-empty) ranges.
+fn ranges_of(v: &Value) -> SqlResult<Vec<Range>> {
+    match v {
+        Value::Multirange(_, rs) => Ok(rs.clone()),
+        Value::Range(r) if r.empty => Ok(Vec::new()),
+        Value::Range(r) => Ok(vec![(**r).clone()]),
+        _ => Err(SqlError::internal("range or multirange value expected")),
+    }
 }
 
-fn multi_overlaps_range(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
-    let other = rng(&a[1])?;
-    Ok(Value::Bool(any_range(multi(&a[0])?, |r| range::overlaps(r, other))?))
+/// The smallest range containing a range or multirange operand.
+fn hull_of(v: &Value) -> SqlResult<Range> {
+    match v {
+        Value::Multirange(sub, rs) => range::hull(rs, sub),
+        other => Ok(rng(other)?.clone()),
+    }
 }
 
-fn multi_overlaps_multi(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
-    let other = multi(&a[1])?;
-    Ok(Value::Bool(any_range(multi(&a[0])?, |r| any_range(other, |o| range::overlaps(r, o)))?))
+macro_rules! multi_pred {
+    ($name:ident, |$a:ident, $b:ident| $body:expr) => {
+        fn $name(args: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+            let ($a, $b) = (&args[0], &args[1]);
+            Ok(Value::Bool($body))
+        }
+    };
+}
+multi_pred!(mr_contains, |a, b| range::multi_contains(&ranges_of(a)?, &ranges_of(b)?)?);
+multi_pred!(mr_contained, |a, b| range::multi_contains(&ranges_of(b)?, &ranges_of(a)?)?);
+multi_pred!(mr_overlaps, |a, b| range::multi_overlaps(&ranges_of(a)?, &ranges_of(b)?)?);
+multi_pred!(mr_before, |a, b| range::before(&hull_of(a)?, &hull_of(b)?)?);
+multi_pred!(mr_after, |a, b| range::before(&hull_of(b)?, &hull_of(a)?)?);
+multi_pred!(mr_overleft, |a, b| range::overleft(&hull_of(a)?, &hull_of(b)?)?);
+multi_pred!(mr_overright, |a, b| range::overright(&hull_of(a)?, &hull_of(b)?)?);
+multi_pred!(mr_adjacent, |a, b| range::adjacent(&hull_of(a)?, &hull_of(b)?)?);
+multi_pred!(elem_contained_multi, |a, b| any_range(multi(b)?, |r| range::contains_elem(r, a))?);
+
+macro_rules! multi_setop {
+    ($name:ident, $f:path) => {
+        fn $name(args: &[Value], _: &EvalCtx) -> SqlResult<Value> {
+            let Value::Multirange(sub, a) = &args[0] else { return Err(SqlError::internal("multirange value expected")) };
+            Ok(Value::Multirange(sub.clone(), $f(a, multi(&args[1])?)?))
+        }
+    };
+}
+multi_setop!(mr_union, range::multi_union);
+multi_setop!(mr_intersect, range::multi_intersect);
+multi_setop!(mr_minus, range::multi_minus);
+
+/// An operator with a multirange on at least one side (an unknown literal already took the
+/// other side's type). Position operators compare the operands' bounding ranges, as
+/// `multirangetypes.c` does.
+fn resolve_multi_operator(op: &str, l: Type, r: Type) -> SqlResult<Option<Resolved>> {
+    let bool_op = |f, lt: Type, rt: Type| resolved(f, vec![lt, rt], Type::Bool);
+    let ranged = |t: &Type| is_range(t) || is_multi(t);
+    // An element on the other side of @> / <@.
+    if op == "@>" && is_multi(&l) && !ranged(&r) {
+        let sub = subtype(&l);
+        if r != sub {
+            return Err(no_operator(op, Some(&l), &r));
+        }
+        return bool_op(strict("@>", multi_contains_elem), l, sub);
+    }
+    if op == "<@" && is_multi(&r) && !ranged(&l) {
+        let sub = subtype(&r);
+        if l != sub {
+            return Err(no_operator(op, Some(&l), &r));
+        }
+        return bool_op(strict("<@", elem_contained_multi), sub, r);
+    }
+    if !ranged(&l) || !ranged(&r) || subtype(&l) != subtype(&r) {
+        return Err(no_operator(op, Some(&l), &r));
+    }
+    let f = match op {
+        "+" | "*" | "-" if l == r => {
+            let f = match op {
+                "+" => strict("+", mr_union),
+                "*" => strict("*", mr_intersect),
+                _ => strict("-", mr_minus),
+            };
+            return resolved(f, vec![l.clone(), l.clone()], l);
+        }
+        "@>" => strict("@>", mr_contains),
+        "<@" => strict("<@", mr_contained),
+        "&&" => strict("&&", mr_overlaps),
+        "<<" => strict("<<", mr_before),
+        ">>" => strict(">>", mr_after),
+        "&<" => strict("&<", mr_overleft),
+        "&>" => strict("&>", mr_overright),
+        "-|-" => strict("-|-", mr_adjacent),
+        _ => return Err(no_operator(op, Some(&l), &r)),
+    };
+    bool_op(f, l, r)
 }
 
 fn multi_lower(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
@@ -246,7 +334,8 @@ fn the_range(args: &[Type]) -> Option<Type> {
 pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
     let n = args.len();
     if let Some((_, sub, f, _)) = CONSTRUCTORS.iter().find(|(c, ..)| *c == name) {
-        if n == 2 || n == 3 {
+        // The bounds take implicit casts only (int4range(numeric, ...) does not exist).
+        if (n == 2 || n == 3) && args[..2].iter().all(|a| *a == Type::Unknown || super::implicit_ok(a, sub)) {
             let mut types = vec![sub.clone(), sub.clone()];
             if n == 3 {
                 types.push(Type::Text);
@@ -259,6 +348,11 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
     if let Some((_, sub, _, f)) = CONSTRUCTORS.iter().find(|(c, ..)| c.replace("range", "multirange") == name) {
         let r = Type::Range(Box::new(sub.clone()));
         return resolved(super::lenient("multirange", *f), vec![r; n], Type::Multirange(Box::new(sub.clone())));
+    }
+    if n == 2 && (name == "range_cmp" || name == "multirange_cmp") {
+        let want: fn(&Type) -> bool = if name == "range_cmp" { is_range } else { is_multi };
+        let t = args.iter().find(|t| want(t)).cloned().ok_or_else(|| no_function(name, args))?;
+        return resolved(strict(if name == "range_cmp" { "range_cmp" } else { "multirange_cmp" }, cmp), vec![t.clone(), t], Type::Int4);
     }
     let [arg] = args else {
         if name == "range_merge"
@@ -301,36 +395,33 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
 }
 
 pub fn resolve_operator(op: &str, l: &Type, r: &Type) -> SqlResult<Option<Resolved>> {
-    if !(is_range(l) || is_range(r) || is_multi(l) || is_multi(r)) {
+    // Other operators (`||`, comparisons) resolve as for any type.
+    const RANGE_OPS: &[&str] = &["@>", "<@", "&&", "<<", ">>", "&<", "&>", "-|-", "+", "*", "-"];
+    if !(is_range(l) || is_range(r) || is_multi(l) || is_multi(r)) || !RANGE_OPS.contains(&op) {
         return Ok(None);
     }
     let bool_op = |f, lt: Type, rt: Type| resolved(f, vec![lt, rt], Type::Bool);
     // An unknown literal on the other side is read as the same range type.
     let (l, r) = match (l, r) {
-        (Type::Unknown, t) | (t, Type::Unknown) if !matches!(op, "@>" | "<@") => (t.clone(), t.clone()),
+        (Type::Unknown, t) | (t, Type::Unknown) if is_multi(t) || !matches!(op, "@>" | "<@") => (t.clone(), t.clone()),
         _ => (l.clone(), r.clone()),
     };
-    if is_multi(&l) {
-        let sub = subtype(&l);
-        return match (op, &r) {
-            ("@>", Type::Range(_)) => bool_op(strict("@>", multi_contains_range), l.clone(), r.clone()),
-            ("@>", _) if r == Type::Unknown || super::common_type(&sub, &r).is_some() => {
-                bool_op(strict("@>", multi_contains_elem), l.clone(), sub)
-            }
-            ("&&", Type::Range(_)) => bool_op(strict("&&", multi_overlaps_range), l.clone(), r.clone()),
-            ("&&", Type::Multirange(_)) => bool_op(strict("&&", multi_overlaps_multi), l.clone(), r.clone()),
-            _ => Err(no_operator(op, Some(&l), &r)),
-        };
+    if is_multi(&l) || is_multi(&r) {
+        return resolve_multi_operator(op, l, r);
     }
     match op {
         "@>" if is_range(&l) && !is_range(&r) && r != Type::Unknown => {
             let sub = subtype(&l);
-            super::common_type(&sub, &r).ok_or_else(|| no_operator(op, Some(&l), &r))?;
+            if r != sub {
+                return Err(no_operator(op, Some(&l), &r));
+            }
             bool_op(strict("@>", op_contains_elem), l.clone(), sub)
         }
         "<@" if is_range(&r) && !is_range(&l) && l != Type::Unknown => {
             let sub = subtype(&r);
-            super::common_type(&sub, &l).ok_or_else(|| no_operator(op, Some(&l), &r))?;
+            if l != sub {
+                return Err(no_operator(op, Some(&l), &r));
+            }
             bool_op(strict("<@", op_elem_contained), sub, r.clone())
         }
         _ => {

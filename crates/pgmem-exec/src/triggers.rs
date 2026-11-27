@@ -13,7 +13,7 @@ use pgmem_storage::Txn;
 use pgmem_types::{SqlError, SqlResult, Type, Value, code};
 use std::sync::Arc;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Event {
     Insert,
     Update,
@@ -360,7 +360,8 @@ pub(crate) fn fire_row(
         {
             continue;
         }
-        let result = crate::plpgsql::run_trigger(f, &call, exec).map_err(SqlError::without_position)?;
+        let result = crate::functions::in_function_env(f, exec, |exec| crate::plpgsql::run_trigger(f, &call, exec))
+            .map_err(SqlError::without_position)?;
         if t.timing == TriggerTiming::After {
             continue;
         }
@@ -430,7 +431,8 @@ pub(crate) fn fire_statement(
             old: None,
             args: &t.args,
         };
-        crate::plpgsql::run_trigger(f, &call, exec).map_err(SqlError::without_position)?;
+        crate::functions::in_function_env(f, exec, |exec| crate::plpgsql::run_trigger(f, &call, exec))
+            .map_err(SqlError::without_position)?;
     }
     Ok(())
 }
@@ -584,7 +586,16 @@ pub(crate) fn instead_of(
                             .ok_or_else(|| SqlError::undefined_column(&format!("\"{}\" of relation \"{}\"", c[0], view.name)))?;
                         targets.push(slot);
                     }
-                    exprs.push(a.value.clone());
+                    // `SET (a, b) = (x, y)` sets each column; DEFAULT is the view column's
+                    // default, which a view without one has as NULL.
+                    let values = match &a.value {
+                        ir::Expr::Row(items) if a.columns.len() > 1 && items.len() == a.columns.len() => items.clone(),
+                        v => vec![v.clone()],
+                    };
+                    exprs.extend(values.into_iter().map(|e| match e {
+                        ir::Expr::Default => ir::Expr::Literal(ir::Literal::Null),
+                        e => e,
+                    }));
                 }
                 let q = select_from(&u.table, u.alias.as_ref(), exprs, u.selection.clone());
                 let bound = binder.bind_query(&q, &ctx)?;

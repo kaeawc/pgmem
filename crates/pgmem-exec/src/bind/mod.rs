@@ -276,6 +276,11 @@ pub struct Binder<'a> {
     /// Parameter types: declared by the client or inferred; `Unknown` until resolved.
     pub params: RefCell<Vec<Type>>,
     next_id: Cell<usize>,
+    /// Takes the relation locks parse analysis takes in Postgres (set for executed statements).
+    locker: Option<pgmem_storage::Locker>,
+    /// While a FROM clause under FOR UPDATE / SHARE binds: the tables it locks (empty: all),
+    /// which take ROW SHARE instead of ACCESS SHARE.
+    row_share: RefCell<Option<Vec<String>>>,
     /// When recording: the columns the statement uses, as (relation, attnum, privilege
     /// letter): `r` read, `a` inserted, `w` updated (Postgres' selectedCols / insertedCols /
     /// updatedCols).
@@ -303,6 +308,9 @@ pub struct Binder<'a> {
     /// While binding a policy's expressions: the relations they read, as written and as
     /// resolved when the policy was created.
     rel_pins: RefCell<Vec<(pgmem_ir::ObjectName, Oid)>>,
+    /// The user functions the bound statements call (their EXECUTE privilege is checked
+    /// before the statement runs).
+    function_use: RefCell<Vec<Oid>>,
 }
 
 impl<'a> Binder<'a> {
@@ -320,7 +328,63 @@ impl<'a> Binder<'a> {
             rls_lock: RefCell::new(None),
             rls_lock_next: Cell::new(false),
             rel_pins: RefCell::new(Vec::new()),
+            function_use: RefCell::new(Vec::new()),
+            locker: None,
+            row_share: RefCell::new(None),
         }
+    }
+
+    /// The user functions bound so far, each once.
+    pub fn function_use(&self) -> Vec<Oid> {
+        self.function_use.borrow().clone()
+    }
+
+    pub(crate) fn note_function(&self, oid: Oid) {
+        let mut used = self.function_use.borrow_mut();
+        if !used.contains(&oid) {
+            used.push(oid);
+        }
+    }
+
+    /// A binder that takes the statement's relation locks for a transaction.
+    pub fn with_locker(mut self, locker: pgmem_storage::Locker) -> Binder<'a> {
+        self.locker = Some(locker);
+        self
+    }
+
+    /// Locks one relation (no-op without a locker).
+    pub fn lock(&self, oid: pgmem_catalog::Oid, mode: pgmem_storage::locks::TableLockMode) {
+        if let Some(l) = &self.locker {
+            l.lock(oid, mode);
+        }
+    }
+
+    /// Locks a table with its indexes and partitions, as the planner opens them.
+    pub fn lock_table_and_indexes(&self, table: &pgmem_catalog::TableDef, mode: pgmem_storage::locks::TableLockMode) {
+        if self.locker.is_some() {
+            let mut locks = Vec::new();
+            crate::lock_levels::table_with_indexes(self.catalog, table, mode, &mut locks);
+            for (oid, m) in locks {
+                self.lock(oid, m);
+            }
+        }
+    }
+
+    /// The lock a query takes on a relation it reads as `qualifier`: ROW SHARE when a
+    /// FOR UPDATE / SHARE clause applies to it, ACCESS SHARE otherwise.
+    pub(crate) fn read_lock_mode(&self, qualifier: &str) -> pgmem_storage::locks::TableLockMode {
+        match &*self.row_share.borrow() {
+            Some(names) if names.is_empty() || names.iter().any(|n| n == qualifier) => crate::lock_levels::ROW_SHARE,
+            _ => crate::lock_levels::ACCESS_SHARE,
+        }
+    }
+
+    /// Runs `f` with the FOR UPDATE / SHARE targets of the FROM clause it binds.
+    pub(crate) fn with_row_share<T>(&self, targets: Option<Vec<String>>, f: impl FnOnce() -> T) -> T {
+        let saved = self.row_share.replace(targets);
+        let out = f();
+        *self.row_share.borrow_mut() = saved;
+        out
     }
 
     /// Runs `f` with the DML target's column uses noted on `view` instead of `base`.
@@ -527,6 +591,11 @@ pub fn resolve_type_name(catalog: &Catalog, t: &pgmem_ir::TypeName) -> SqlResult
     let base = match builtin {
         Some(b) => b,
         None => {
+            if let Some(s) = &t.schema
+                && pgmem_types::context::search_path().no_usage.contains(s)
+            {
+                return Err(SqlError::new(code::INSUFFICIENT_PRIVILEGE, format!("permission denied for schema {s}")));
+            }
             let mut parts: Vec<String> = t.schema.iter().cloned().collect();
             parts.push(t.name.clone());
             let qualified = parts.join(".");

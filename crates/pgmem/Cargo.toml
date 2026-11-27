@@ -18,13 +18,26 @@ doctest = false
 name = "pgmem"
 path = "src/bin/pgmem.rs"
 test = false
+required-features = ["server"]
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
+required-features = ["server"]
+
+[features]
+default = ["server"]
+# The Postgres wire-protocol server (`Server`, the `pgmem` binary). Without it, pgmem is the
+# in-process `Embedded` API only and does not depend on tokio.
+server = ["dep:pgmem-wire", "dep:tokio"]
 
 [dependencies]
 pgmem-exec = { workspace = true }
+pgmem-parse = { workspace = true }
 pgmem-storage = { workspace = true }
 pgmem-types = { workspace = true }
-pgmem-wire = { workspace = true }
-tokio = { workspace = true }
+pgmem-wire = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 pgmem-types = { workspace = true }

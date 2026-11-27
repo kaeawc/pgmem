@@ -115,11 +115,24 @@ fn comment_target(
             })?;
             (crate::rls::POLICY_CLASS_OID, p.oid, 0)
         }
+        T::Statistics => {
+            let st = crate::statistics::lookup(catalog, name)?.ok_or_else(|| crate::statistics::missing(name))?;
+            (crate::statistics::STATISTIC_EXT_CLASS_OID, st.oid, 0)
+        }
+        T::Cast(source, target) => {
+            let (s, _) = crate::bind::resolve_type_name(catalog, source)?;
+            let (t, _) = crate::bind::resolve_type_name(catalog, target)?;
+            let c = catalog.find_cast(&s, &t).ok_or_else(|| {
+                SqlError::new(code::UNDEFINED_OBJECT, format!("cast from type {} to type {} does not exist", s.name(), t.name()))
+            })?;
+            (crate::usercast::CAST_CLASS_OID, c.oid, 0)
+        }
         T::Other => return Ok(None),
     }))
 }
 
 pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &SessionEnv, state: &StatementState) -> SqlResult<QueryResult> {
+    crate::ext_alter::check_member_drop(stmt, txn.catalog())?;
     match stmt {
         Statement::Comment { target, name, text } => {
             if let Some((classoid, objoid, subid)) = comment_target(txn.catalog(), target, name)? {
@@ -170,14 +183,17 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
         Statement::CreateExtension { name, if_not_exists, schema, version } => {
             crate::extensions::create_extension(name, *if_not_exists, schema.as_deref(), version.as_deref(), txn)
         }
-        Statement::DropExtension { names, if_exists, cascade } => crate::extensions::drop_extension(names, *if_exists, *cascade, txn),
+        Statement::DropExtension { names, if_exists, cascade } => {
+            crate::extensions::drop_extension(names, *if_exists, *cascade, txn, env, state)
+        }
+        Statement::AlterExtension { name, action } => crate::ext_alter::alter_extension(name, action, txn),
         Statement::CreateRole { name, options, if_not_exists } => crate::roles::create_role(name, options, *if_not_exists, txn, env),
         Statement::AlterRole { name, action } => crate::roles::alter_role(name, action, txn, env),
         Statement::DropRole { names, if_exists } => crate::roles::drop_role(names, *if_exists, txn, env),
         Statement::Grant(g) => crate::roles::grant(g, txn, env),
         Statement::GrantRole { roles, members, admin, revoke } => crate::roles::grant_role(roles, members, *admin, *revoke, txn, env),
-        Statement::AlterDefaultPrivileges { schemas, kind, grant } => {
-            crate::roles::alter_default_privileges(schemas, *kind, grant, txn, env)
+        Statement::AlterDefaultPrivileges { roles, schemas, kind, grant } => {
+            crate::roles::alter_default_privileges(roles, schemas, *kind, grant, txn, env)
         }
         Statement::DropOwned { roles, .. } => crate::roles::drop_owned(roles, txn, env),
         Statement::ReassignOwned { roles, to } => crate::roles::reassign_owned(roles, to, txn, env),
@@ -191,6 +207,11 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
         }
         Statement::Call { name, args } => crate::functions::call(name, args, txn, env, state),
         Statement::Do { language, body } => crate::functions::do_block(language, body, txn, env, state),
+        Statement::CreateStatistics(cs) => crate::statistics::create_statistics(cs, txn, binder, env),
+        Statement::AlterStatistics { name, if_exists, action } => crate::statistics::alter_statistics(name, *if_exists, action, txn, env),
+        Statement::DropStatistics { names, if_exists, .. } => crate::statistics::drop_statistics(names, *if_exists, txn),
+        Statement::CreateCast(cc) => crate::usercast::create_cast(cc, txn),
+        Statement::DropCast { source, target, if_exists, .. } => crate::usercast::drop_cast(source, target, *if_exists, txn),
         Statement::CreateTrigger(ct) => crate::triggers::create_trigger(ct, txn),
         Statement::RenameTrigger { name, table, new_name } => crate::triggers::rename_trigger(name, table, new_name, txn),
         Statement::DropTrigger { name, table, if_exists, .. } => crate::triggers::drop_trigger(name, table, *if_exists, txn),
@@ -213,39 +234,8 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
             cat.create_sequence(seq)?;
             Ok(tag("CREATE SEQUENCE"))
         }
-        Statement::CreateIndex(ci) => {
-            let Some((tname, mut idx)) = bind::bind_create_index(binder, ci)? else {
-                return Ok(notice(
-                    "CREATE INDEX",
-                    format!("relation \"{}\" already exists, skipping", ci.name.clone().unwrap_or_default()),
-                ));
-            };
-            let table = txn.catalog().table_q(&tname).cloned().ok_or_else(|| SqlError::undefined_table(&tname.name))?;
-            let mut def = (*table).clone();
-            idx.oid = txn.catalog_mut().alloc_oid();
-            let unique = idx.unique;
-            let name = idx.name.clone();
-            def.indexes.push(idx);
-            if unique {
-                validate_unique(txn, &def, &name, env, state)?;
-            }
-            if let Some(key) = txn.catalog().partition_key(def.oid).cloned() {
-                crate::partition::check_unique_keys(&def, &key)?;
-            }
-            let partitions = txn.catalog().partitions(def.oid).into_iter().map(|(t, _)| t).collect::<Vec<_>>();
-            txn.catalog_mut().replace_table(&tname, def);
-            // An index on a partitioned table is created on each partition too.
-            for p in partitions {
-                let mut child = (**ci).clone();
-                child.name = None;
-                child.if_not_exists = false;
-                child.table = ir::ObjectName(vec![p.schema.clone(), p.name.clone()]);
-                let snapshot = txn.catalog().clone();
-                let b = Binder::new(&snapshot, &[]);
-                execute_ddl(&Statement::CreateIndex(Box::new(child)), txn, &b, env, state)?;
-            }
-            Ok(tag("CREATE INDEX"))
-        }
+        Statement::CreateIndex(ci) => crate::partition_index::create_index(ci, txn, binder, env, state),
+        Statement::AttachIndexPartition { index, partition } => crate::partition_index::attach_index(index, partition, txn),
         Statement::AlterTable(at) => {
             let name = at.name.base().to_owned();
             let current = match txn.catalog().lookup_relation(&at.name)? {
@@ -299,6 +289,10 @@ pub(crate) fn alter_table_action(
     if crate::ddl_sequences::alter_identity(txn, &table, action)? {
         return Ok(current.clone());
     }
+    if let ir::AlterTableAction::RelOptions { reset, options } = action {
+        crate::reloptions::alter_table(txn, &table, *reset, options)?;
+        return Ok(current.clone());
+    }
     if crate::ddl_attrs::apply(txn, current, &table, action, state)? {
         return Ok(current.clone());
     }
@@ -341,6 +335,17 @@ pub(crate) fn alter_table_action(
     }
     let table = txn.catalog().table_q(current).cloned().ok_or_else(|| SqlError::undefined_table(&current.name))?;
     column_view_dependencies(txn, &table, action)?;
+    match action {
+        ir::AlterTableAction::DropColumn { name, .. } => {
+            if let Some(slot) = table.column_index(name) {
+                crate::statistics::drop_for_column(txn, &table, slot, name);
+            }
+        }
+        ir::AlterTableAction::RenameColumn { old, new } if table.column_index(old).is_some() => {
+            crate::statistics::rename_column(txn, &table, old, new);
+        }
+        _ => {}
+    }
     let has_rows = !txn.scan(table.oid).is_empty();
     let snapshot = txn.catalog().clone();
     let b = Binder::new(&snapshot, &[]);
@@ -374,9 +379,20 @@ pub(crate) fn alter_table_action(
             txn.catalog_mut().replace_table(rename_from.as_ref().unwrap_or(current), def);
             // Most actions on a partitioned table apply to its partitions too.
             if let Some(child_action) = crate::partition::recurses(action) {
-                let partitions: Vec<QualName> = txn.catalog().partitions(oid).into_iter().map(|(t, _)| t.qualified()).collect();
-                for p in partitions {
+                let partitions: Vec<(pgmem_catalog::Oid, QualName, Vec<pgmem_catalog::Oid>)> = txn
+                    .catalog()
+                    .partitions(oid)
+                    .into_iter()
+                    .map(|(t, _)| (t.oid, t.qualified(), t.indexes.iter().map(|i| i.oid).collect()))
+                    .collect();
+                let new_indexes: Vec<pgmem_catalog::Oid> = txn
+                    .catalog()
+                    .table_by_oid(oid)
+                    .map(|t| t.indexes.iter().filter(|i| table.indexes.iter().all(|o| o.oid != i.oid)).map(|i| i.oid).collect())
+                    .unwrap_or_default();
+                for (part, p, before) in partitions {
                     alter_table_action(txn, &p, &child_action, env, state)?;
+                    crate::partition_index::link_new_indexes(txn.catalog_mut(), oid, &new_indexes, part, &before);
                 }
             }
             Ok(new_name)
@@ -483,7 +499,7 @@ pub(crate) fn padded_rows(txn: &Txn, def: &TableDef) -> Vec<(u64, Vec<Value>)> {
 }
 
 /// `CREATE UNIQUE INDEX` / `ADD PRIMARY KEY` over existing rows.
-fn validate_unique(txn: &Txn, def: &TableDef, index: &str, env: &SessionEnv, state: &StatementState) -> SqlResult<()> {
+pub(crate) fn validate_unique(txn: &Txn, def: &TableDef, index: &str, env: &SessionEnv, state: &StatementState) -> SqlResult<()> {
     let mut catalog = txn.catalog().clone();
     catalog.replace_table(&def.qualified(), def.clone());
     let b = Binder::new(&catalog, &[]);
@@ -509,11 +525,11 @@ fn validate_unique(txn: &Txn, def: &TableDef, index: &str, env: &SessionEnv, sta
         if !seen.insert(key) {
             let cols: Vec<String> =
                 if u.exprs.is_empty() { u.columns.iter().map(|c| def.columns[*c].name.clone()).collect() } else { vec!["expr".into()] };
-            return Err(SqlError::new(code::UNIQUE_VIOLATION, format!("could not create unique index \"{index}\"")).with_detail(format!(
-                "Key ({})=({}) is duplicated.",
-                cols.join(", "),
-                vals.iter().map(display).collect::<Vec<_>>().join(", ")
-            )));
+            let keys: Vec<Option<usize>> = if u.exprs.is_empty() { u.columns.iter().map(|c| Some(*c)).collect() } else { vec![None] };
+            let detail = crate::detail_privileges::key_visible(def.oid, keys)
+                .then(|| format!("Key ({})=({}) is duplicated.", cols.join(", "), vals.iter().map(display).collect::<Vec<_>>().join(", ")));
+            let e = SqlError::new(code::UNIQUE_VIOLATION, format!("could not create unique index \"{index}\""));
+            return Err(crate::dml::with_detail(e, detail));
         }
     }
     Ok(())
@@ -868,6 +884,7 @@ fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> 
             (ObjectType::Sequence, Some(_)) => return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{base}\" is not a sequence"))),
             (ObjectType::Index, Some(Relation::Index { table, index })) => {
                 let t = txn.catalog().table_q(&table).cloned().ok_or_else(|| SqlError::undefined_table(&table.name))?;
+                crate::partition_index::check_drop(txn.catalog(), &index)?;
                 if t.has_constraint(&index.name) {
                     let tname = display_name(txn.catalog(), &table);
                     return Err(SqlError::new(
@@ -879,6 +896,7 @@ fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> 
                 let mut def = (*t).clone();
                 def.indexes.retain(|i| i.name != index.name);
                 txn.catalog_mut().replace_table(&table, def);
+                crate::partition_index::drop_children(txn.catalog_mut(), index.oid);
             }
             (ObjectType::Index, Some(_)) => return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{base}\" is not an index"))),
             (_, None) => {
@@ -1008,22 +1026,34 @@ pub(crate) fn create_schema(cs: &ir::CreateSchema, txn: &mut Txn, user: &str) ->
     Ok(tag("CREATE SCHEMA"))
 }
 
-/// The objects in a schema, as `DROP SCHEMA ... CASCADE` reports them ("table app.items").
+/// The objects in a schema, as `DROP SCHEMA ... CASCADE` reports them ("table app.items"), in
+/// creation (OID) order. Postgres names procedures "function" here too.
 fn schema_members(cat: &Catalog, schema: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for t in cat.tables().filter(|t| t.schema == schema) {
-        out.push(format!("table {schema}.{}", t.name));
+    let mut found: Vec<(pgmem_catalog::Oid, String)> = Vec::new();
+    // Partitions are dropped with their parent, so they are not listed.
+    for t in cat.tables().filter(|t| t.schema == schema && cat.partition_of(t.oid).is_none()) {
+        let kind = if t.matview.is_some() { "materialized view" } else { "table" };
+        found.push((t.oid, format!("{kind} {}", display_name(cat, &t.qualified()))));
     }
     for v in cat.views().filter(|v| v.schema == schema) {
-        out.push(format!("view {schema}.{}", v.name));
+        found.push((v.oid, format!("view {}", display_name(cat, &QualName::new(schema, &v.name)))));
     }
     for s in cat.sequences().filter(|s| s.schema == schema && s.owned_by.is_none()) {
-        out.push(format!("sequence {schema}.{}", s.name));
+        found.push((s.oid, format!("sequence {}", display_name(cat, &QualName::new(schema, &s.name)))));
     }
+    let on_path = cat.resolved_search_path().iter().any(|p| p == schema);
+    let qual = |name: &str| if on_path { name.to_owned() } else { format!("{schema}.{name}") };
+    // Postgres labels domains (and enums, composites) "type".
     for t in cat.types().filter(|t| t.schema == schema) {
-        out.push(format!("{} {schema}.{}", t.kind_name(), t.name));
+        found.push((t.oid, format!("type {}", qual(&t.name))));
     }
-    out
+    for f in cat.functions().filter(|f| f.schema == schema) {
+        let args = f.input_types().iter().map(pgmem_types::Type::name).collect::<Vec<_>>().join(",");
+        found.push((f.oid, format!("function {}({args})", qual(&f.name))));
+    }
+    // PostgreSQL reports dependents in creation (OID) order.
+    found.sort_by_key(|(oid, _)| *oid);
+    found.into_iter().map(|(_, m)| m).collect()
 }
 
 fn drop_schemas(d: &ir::Drop, txn: &mut Txn) -> SqlResult<QueryResult> {
@@ -1062,7 +1092,7 @@ fn drop_schemas(d: &ir::Drop, txn: &mut Txn) -> SqlResult<QueryResult> {
 }
 
 /// Postgres' "drop cascades to ..." notice: one line, or a count with the list as detail.
-fn cascade_notice(members: &[String]) -> Notice {
+pub(crate) fn cascade_notice(members: &[String]) -> Notice {
     let message = if members.len() == 1 {
         format!("drop cascades to {}", members[0])
     } else {
@@ -1083,6 +1113,10 @@ pub(crate) fn drop_schema_contents(txn: &mut Txn, schema: &str) {
         }
     }
     let cat = txn.catalog_mut();
+    let stats: Vec<u32> = cat.statistics().filter(|s| s.schema == schema).map(|s| s.oid).collect();
+    for oid in stats {
+        cat.drop_statistics(oid);
+    }
     for t in &tables {
         cat.drop_comments(t.oid);
         cat.drop_table(&t.qualified());
@@ -1098,6 +1132,11 @@ pub(crate) fn drop_schema_contents(txn: &mut Txn, schema: &str) {
     let types: Vec<QualName> = cat.types().filter(|t| t.schema == schema).map(|t| QualName::new(&t.schema, &t.name)).collect();
     for t in types {
         cat.drop_type(&t);
+    }
+    let funcs: Vec<pgmem_catalog::Oid> = cat.functions().filter(|f| f.schema == schema).map(|f| f.oid).collect();
+    for oid in funcs {
+        cat.drop_comments(oid);
+        cat.drop_function(oid);
     }
 }
 
@@ -1132,7 +1171,7 @@ pub(crate) fn alter_schema(name: &str, rename_to: &str, txn: &mut Txn) -> SqlRes
 
 /// `ALTER ... SET SCHEMA`: moves a relation or type (a table takes its indexes, row type and
 /// owned sequences along, as `AlterTableNamespace` does).
-fn set_schema(kind: ObjectType, name: &ir::ObjectName, if_exists: bool, schema: &str, txn: &mut Txn) -> SqlResult<QueryResult> {
+pub(crate) fn set_schema(kind: ObjectType, name: &ir::ObjectName, if_exists: bool, schema: &str, txn: &mut Txn) -> SqlResult<QueryResult> {
     let tag_name = match kind {
         ObjectType::Table => "ALTER TABLE",
         ObjectType::View => "ALTER VIEW",
@@ -1325,15 +1364,20 @@ pub(crate) fn validate_constraint(
                 });
                 if !found {
                     let names: Vec<&str> = columns.iter().map(|c| def.columns[*c].name.as_str()).collect();
+                    let detail = if crate::detail_privileges::key_visible(def.oid, columns.iter().map(|c| Some(*c))) {
+                        format!(
+                            "Key ({})=({}) is not present in table \"{ref_table}\".",
+                            names.join(", "),
+                            key.iter().map(display).collect::<Vec<_>>().join(", ")
+                        )
+                    } else {
+                        format!("Key is not present in table \"{ref_table}\".")
+                    };
                     return Err(SqlError::new(
                         code::FOREIGN_KEY_VIOLATION,
                         format!("insert or update on table \"{}\" violates foreign key constraint \"{name}\"", def.name),
                     )
-                    .with_detail(format!(
-                        "Key ({})=({}) is not present in table \"{ref_table}\".",
-                        names.join(", "),
-                        key.iter().map(display).collect::<Vec<_>>().join(", ")
-                    )));
+                    .with_detail(detail));
                 }
             }
             Ok(())

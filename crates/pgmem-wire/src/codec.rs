@@ -310,7 +310,16 @@ impl Writer {
     }
 
     pub fn notice(&mut self, severity: &str, code: &str, message: &str) {
-        self.fields(b'N', severity, code, message, None, None);
+        // A notice's message may carry its DETAIL after the first line ("drop cascades to N
+        // other objects\nlist ..."); a message itself is a single line.
+        match message.split_once('\n') {
+            Some((head, detail)) => self.fields(b'N', severity, code, head, Some(detail), None),
+            None => self.fields(b'N', severity, code, message, None, None),
+        }
+    }
+
+    pub fn notice_detail(&mut self, severity: &str, code: &str, message: &str, detail: &str) {
+        self.fields(b'N', severity, code, message, Some(detail), None);
     }
 
     pub fn parse_complete(&mut self) {
