@@ -135,6 +135,9 @@ pub(crate) fn apply(
                     if def.indexes[pos].predicate.is_some() {
                         return Err(SqlError::feature_not_supported(format!("cannot cluster on partial index \"{name}\"")));
                     }
+                    if !def.indexes[pos].valid {
+                        return Err(SqlError::feature_not_supported(format!("cannot cluster on invalid index \"{name}\"")));
+                    }
                     Some(pos)
                 }
                 None => None,

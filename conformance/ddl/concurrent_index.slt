@@ -1,0 +1,335 @@
+# CONCURRENTLY commands: refused in a transaction block (explicit or implicit), DROP INDEX
+# CONCURRENTLY's restrictions, and the invalid index a failed CREATE INDEX CONCURRENTLY leaves.
+
+statement ok
+CREATE TABLE t (id int, a int); CREATE INDEX i1 ON t (id); CREATE INDEX i2 ON t (a)
+
+# Refused inside a transaction block
+statement ok
+BEGIN
+
+statement error 25001 DROP INDEX CONCURRENTLY cannot run inside a transaction block
+DROP INDEX CONCURRENTLY i1
+
+statement ok
+ROLLBACK
+
+statement error 25001 DROP INDEX CONCURRENTLY cannot run inside a transaction block
+BEGIN; DROP INDEX CONCURRENTLY i1; COMMIT
+
+statement ok
+ROLLBACK
+
+statement error 25001 DROP INDEX CONCURRENTLY cannot run inside a transaction block
+SELECT 1; DROP INDEX CONCURRENTLY i1
+
+statement error 25001 DROP INDEX CONCURRENTLY cannot run inside a transaction block
+DROP INDEX CONCURRENTLY i1; SELECT 1
+
+statement error 25001 CREATE INDEX CONCURRENTLY cannot run inside a transaction block
+SELECT 1; CREATE INDEX CONCURRENTLY i3 ON t (a)
+
+statement error 25001 REINDEX CONCURRENTLY cannot run inside a transaction block
+SELECT 1; REINDEX INDEX CONCURRENTLY i1
+
+statement ok
+BEGIN
+
+statement error 25001 REINDEX CONCURRENTLY cannot run inside a transaction block
+REINDEX TABLE CONCURRENTLY t
+
+statement ok
+ROLLBACK
+
+statement ok
+BEGIN
+
+statement error 25001 REINDEX CONCURRENTLY cannot run inside a transaction block
+REINDEX (CONCURRENTLY) INDEX i1
+
+statement ok
+ROLLBACK
+
+statement ok
+BEGIN
+
+statement error 25001 REINDEX SCHEMA cannot run inside a transaction block
+REINDEX SCHEMA public
+
+statement ok
+ROLLBACK
+
+# Allowed in a block
+statement ok
+BEGIN; REINDEX INDEX i1; REINDEX TABLE t; REINDEX (CONCURRENTLY false) INDEX i1; COMMIT
+
+statement ok
+CREATE MATERIALIZED VIEW mv AS SELECT 1 AS x; CREATE UNIQUE INDEX mv_x ON mv (x)
+
+statement ok
+BEGIN; REFRESH MATERIALIZED VIEW CONCURRENTLY mv; COMMIT
+
+query
+SELECT indexname FROM pg_indexes WHERE tablename = 't' ORDER BY 1
+----
+indexname:name
+i1
+i2
+
+# One index, no CASCADE
+statement error 0A000 DROP INDEX CONCURRENTLY does not support dropping multiple objects
+DROP INDEX CONCURRENTLY i1, i2
+
+statement error 0A000 DROP INDEX CONCURRENTLY does not support dropping multiple objects
+DROP INDEX CONCURRENTLY IF EXISTS nosuch, nosuch2
+
+statement error 0A000 DROP INDEX CONCURRENTLY does not support CASCADE
+DROP INDEX CONCURRENTLY i1 CASCADE
+
+statement error 0A000 DROP INDEX CONCURRENTLY does not support CASCADE
+DROP INDEX CONCURRENTLY nosuch CASCADE
+
+statement error 0A000 DROP INDEX CONCURRENTLY does not support dropping multiple objects
+DROP INDEX CONCURRENTLY i1, i2 CASCADE
+
+statement ok
+DROP INDEX CONCURRENTLY IF EXISTS nosuch
+
+statement error 42704 index "nosuch" does not exist
+DROP INDEX CONCURRENTLY nosuch
+
+statement ok
+DROP INDEX CONCURRENTLY i1 RESTRICT
+
+statement ok
+DROP INDEX CONCURRENTLY i2
+
+query
+SELECT indexname FROM pg_indexes WHERE tablename = 't' ORDER BY 1
+----
+indexname:name
+
+# REINDEX names the right kind of relation
+statement ok
+CREATE INDEX t_id_idx ON t (id)
+
+statement error 42809 "t" is not an index
+REINDEX INDEX t
+
+statement error 42809 "t_id_idx" is not a table or materialized view
+REINDEX TABLE t_id_idx
+
+statement error 42P01 relation "nosuch" does not exist
+REINDEX INDEX nosuch
+
+statement error 3F000 schema "nosuch" does not exist
+REINDEX SCHEMA nosuch
+
+statement ok
+CREATE TABLE e (a int)
+
+statement ok
+REINDEX TABLE e
+
+statement ok
+REINDEX TABLE CONCURRENTLY e
+
+# A failed unique build leaves an invalid index: neither valid nor ready
+statement ok
+CREATE TABLE d (a int); INSERT INTO d VALUES (1), (1)
+
+statement error 23505 could not create unique index "d_a_idx"
+CREATE UNIQUE INDEX CONCURRENTLY d_a_idx ON d (a)
+
+query
+SELECT indexrelid::regclass, indisvalid, indisready, indisunique FROM pg_index WHERE indrelid = 'd'::regclass
+----
+indexrelid:regclass | indisvalid:bool | indisready:bool | indisunique:bool
+d_a_idx | f | f | t
+
+query
+SELECT pg_get_indexdef('d_a_idx'::regclass)
+----
+pg_get_indexdef:text
+CREATE UNIQUE INDEX d_a_idx ON public.d USING btree (a)
+
+query
+SELECT relkind FROM pg_class WHERE relname = 'd_a_idx'
+----
+relkind:char
+i
+
+statement error 42P07 relation "d_a_idx" already exists
+CREATE INDEX CONCURRENTLY d_a_idx ON d (a)
+
+statement error 42P07 relation "d_a_idx" already exists
+CREATE INDEX d_a_idx ON d (a)
+
+statement ok
+CREATE INDEX CONCURRENTLY IF NOT EXISTS d_a_idx ON d (a)
+
+# It is not maintained, so not enforced and not an ON CONFLICT arbiter
+statement ok
+INSERT INTO d VALUES (1)
+
+statement error 42P10 there is no unique or exclusion constraint matching the ON CONFLICT specification
+INSERT INTO d VALUES (1) ON CONFLICT (a) DO NOTHING
+
+statement ok
+INSERT INTO d VALUES (1) ON CONFLICT DO NOTHING
+
+query
+SELECT count(*) FROM d
+----
+count:int8
+4
+
+statement ok
+CREATE TABLE r (x int)
+
+statement error 42830 there is no unique constraint matching given keys for referenced table "d"
+ALTER TABLE r ADD FOREIGN KEY (x) REFERENCES d (a)
+
+statement error 55000 index "d_a_idx" is not valid
+ALTER TABLE d ADD CONSTRAINT d_u UNIQUE USING INDEX d_a_idx
+
+statement error 0A000 cannot cluster on invalid index "d_a_idx"
+ALTER TABLE d CLUSTER ON d_a_idx
+
+# Rebuilding fails while the duplicates remain
+statement error 23505 could not create unique index "d_a_idx"
+REINDEX INDEX d_a_idx
+
+statement error 23505 could not create unique index "d_a_idx"
+REINDEX TABLE d
+
+statement error 23505 could not create unique index "d_a_idx_ccnew"
+REINDEX INDEX CONCURRENTLY d_a_idx
+
+query
+SELECT indexrelid::regclass, indisvalid, indisready FROM pg_index WHERE indrelid = 'd'::regclass ORDER BY 1
+----
+indexrelid:regclass | indisvalid:bool | indisready:bool
+d_a_idx | f | f
+d_a_idx_ccnew | f | f
+
+statement error 23505 could not create unique index "d_a_idx_ccnew1"
+REINDEX INDEX CONCURRENTLY d_a_idx
+
+query
+SELECT indexrelid::regclass, indisvalid, indisready FROM pg_index WHERE indrelid = 'd'::regclass ORDER BY 1
+----
+indexrelid:regclass | indisvalid:bool | indisready:bool
+d_a_idx | f | f
+d_a_idx_ccnew | f | f
+d_a_idx_ccnew1 | f | f
+
+statement ok
+REINDEX TABLE CONCURRENTLY d
+
+statement ok
+DROP INDEX CONCURRENTLY d_a_idx_ccnew
+
+statement ok
+DROP INDEX CONCURRENTLY d_a_idx_ccnew1
+
+# Fixing the data and rebuilding makes it valid, ready and enforced again
+statement ok
+TRUNCATE d; INSERT INTO d VALUES (1), (2)
+
+statement ok
+REINDEX INDEX d_a_idx
+
+query
+SELECT indexrelid::regclass, indisvalid, indisready FROM pg_index WHERE indrelid = 'd'::regclass ORDER BY 1
+----
+indexrelid:regclass | indisvalid:bool | indisready:bool
+d_a_idx | t | t
+
+statement error 23505 duplicate key value violates unique constraint "d_a_idx"
+INSERT INTO d VALUES (1)
+
+# DROP INDEX, either form, removes an invalid one
+statement ok
+DROP INDEX d_a_idx
+
+statement ok
+TRUNCATE d; INSERT INTO d VALUES (1), (1)
+
+statement error 23505 could not create unique index "d_a_idx"
+CREATE UNIQUE INDEX CONCURRENTLY d_a_idx ON d (a)
+
+statement ok
+DROP INDEX CONCURRENTLY d_a_idx
+
+statement error 23505 could not create unique index "d_a_idx"
+CREATE UNIQUE INDEX CONCURRENTLY d_a_idx ON d (a)
+
+statement ok
+DROP INDEX d_a_idx
+
+query
+SELECT indexrelid::regclass FROM pg_index WHERE indrelid = 'd'::regclass
+----
+indexrelid:regclass
+
+# An error while building leaves one too; errors before the build do not
+statement ok
+CREATE TABLE x (a int); INSERT INTO x VALUES (0), (1)
+
+statement error 22012 division by zero
+CREATE INDEX CONCURRENTLY x_expr ON x ((1 / a))
+
+statement error 22012 division by zero
+CREATE INDEX CONCURRENTLY x_pred ON x (a) WHERE 1 / a > 0
+
+statement error 22012 division by zero
+CREATE INDEX x_plain ON x ((1 / a))
+
+statement error 22012 division by zero
+CREATE INDEX x_plain_pred ON x (a) WHERE 1 / a > 0
+
+statement error 42703 column "nope" does not exist
+CREATE INDEX CONCURRENTLY x_missing ON x (nope)
+
+statement error 42883 function nofunc(integer) does not exist
+CREATE INDEX CONCURRENTLY x_func ON x (nofunc(a))
+
+statement error 42704 access method "nope" does not exist
+CREATE INDEX CONCURRENTLY x_am ON x USING nope (a)
+
+statement error 42703 column "nope" does not exist
+CREATE INDEX CONCURRENTLY x_where ON x (a) WHERE nope
+
+query
+SELECT indexrelid::regclass, indisvalid, indisready FROM pg_index WHERE indrelid = 'x'::regclass ORDER BY 1
+----
+indexrelid:regclass | indisvalid:bool | indisready:bool
+x_expr | f | f
+x_pred | f | f
+
+statement ok
+TRUNCATE x; INSERT INTO x VALUES (1)
+
+statement ok
+REINDEX TABLE x
+
+query
+SELECT indexrelid::regclass, indisvalid, indisready FROM pg_index WHERE indrelid = 'x'::regclass ORDER BY 1
+----
+indexrelid:regclass | indisvalid:bool | indisready:bool
+x_expr | t | t
+x_pred | t | t
+
+# Not on a partitioned table
+statement ok
+CREATE TABLE p (a int) PARTITION BY RANGE (a); CREATE TABLE p1 PARTITION OF p FOR VALUES FROM (0) TO (10)
+
+statement error 0A000 cannot create index on partitioned table "p" concurrently
+CREATE INDEX CONCURRENTLY p_a_idx ON p (a)
+
+statement error 0A000 cannot create index on partitioned table "p" concurrently
+CREATE INDEX CONCURRENTLY p_a_idx ON ONLY p (a)
+
+statement ok
+CREATE INDEX CONCURRENTLY p1_a_idx ON p1 (a)

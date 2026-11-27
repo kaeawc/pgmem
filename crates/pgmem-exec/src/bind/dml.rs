@@ -289,7 +289,8 @@ impl Binder<'_> {
             }
         }
         let mut uniques = Vec::new();
-        for idx in table.indexes.iter().filter(|i| i.unique) {
+        // An index that is not ready is not maintained, so it enforces nothing.
+        for idx in table.indexes.iter().filter(|i| i.unique && i.ready) {
             let exprs = idx.exprs.iter().map(|e| Ok(self.bind_expr(e, &row_ctx)?.0)).collect::<SqlResult<Vec<_>>>()?;
             let predicate = idx.predicate.as_ref().map(|p| self.bind_predicate(p, "WHERE", &row_ctx)).transpose()?;
             uniques.push(UniqueCheck {

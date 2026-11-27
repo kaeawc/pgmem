@@ -202,3 +202,46 @@ fn comment_on_domain_constraint() {
         Statement::Comment { target: CommentTarget::Constraint(name(&["t"])), name: name(&["c"]), text: None }
     );
 }
+
+#[test]
+fn drop_index_keeps_the_concurrently_flag() {
+    let flags = |sql: &str| -> Vec<bool> {
+        parse(sql)
+            .unwrap_or_else(|e| panic!("{sql}: {e}"))
+            .into_iter()
+            .map(|s| match s {
+                Statement::Drop(d) => d.concurrently,
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    };
+    assert_eq!(flags("DROP INDEX CONCURRENTLY i"), [true]);
+    assert_eq!(flags("DROP INDEX CONCURRENTLY IF EXISTS i"), [true]);
+    assert_eq!(flags("DROP INDEX i"), [false]);
+    // The flag belongs to its own statement, also when others need the rewrite.
+    assert_eq!(flags("DROP INDEX a; DROP INDEX CONCURRENTLY b; DROP INDEX c"), [false, true, false]);
+    assert_eq!(flags("DROP INDEX CONCURRENTLY a; DROP INDEX b"), [true, false]);
+    // Other objects are never concurrent.
+    assert_eq!(flags("DROP TABLE t; DROP INDEX CONCURRENTLY i; DROP VIEW v"), [false, true, false]);
+}
+
+#[test]
+fn reindex_lowers_its_kind_name_and_concurrently() {
+    use pgmem_ir::ReindexKind as K;
+    let reindex = |sql: &str| match one(sql) {
+        Statement::Reindex(r) => (r.kind, r.concurrently, r.name.map(|n| n.to_string())),
+        other => panic!("{sql}: {other:?}"),
+    };
+    assert_eq!(reindex("REINDEX INDEX i"), (K::Index, false, Some("i".into())));
+    assert_eq!(reindex("REINDEX INDEX CONCURRENTLY s.i"), (K::Index, true, Some("s.i".into())));
+    assert_eq!(reindex("REINDEX TABLE CONCURRENTLY t"), (K::Table, true, Some("t".into())));
+    assert_eq!(reindex("REINDEX (VERBOSE, CONCURRENTLY) TABLE t"), (K::Table, true, Some("t".into())));
+    assert_eq!(reindex("REINDEX (CONCURRENTLY true) INDEX i"), (K::Index, true, Some("i".into())));
+    assert_eq!(reindex("REINDEX (CONCURRENTLY false) INDEX i"), (K::Index, false, Some("i".into())));
+    assert_eq!(reindex("REINDEX (CONCURRENTLY off) INDEX i"), (K::Index, false, Some("i".into())));
+    assert_eq!(reindex("REINDEX SCHEMA CONCURRENTLY public"), (K::Schema, true, Some("public".into())));
+    assert_eq!(reindex("REINDEX DATABASE db"), (K::Database, false, Some("db".into())));
+    assert_eq!(reindex("REINDEX SYSTEM"), (K::System, false, None));
+    assert!(parse_one("REINDEX INDEX").is_err());
+    assert!(parse_one("REINDEX TABLE").is_err());
+}

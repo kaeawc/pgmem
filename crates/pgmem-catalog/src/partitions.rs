@@ -180,14 +180,22 @@ impl Catalog {
 
     /// `pg_index.indisvalid`.
     pub fn index_valid(&self, index: Oid) -> bool {
-        !self.invalid_indexes.contains(&index)
+        self.index_by_oid(index).is_none_or(|(_, i)| i.valid)
     }
 
+    /// Sets the index's validity (`indisvalid`); a valid index is ready too.
     pub fn set_index_valid(&mut self, index: Oid, valid: bool) {
-        if valid {
-            self.invalid_indexes.remove(&index);
-        } else {
-            self.invalid_indexes.insert(index);
+        self.update_index(index, |i| {
+            i.valid = valid;
+            i.ready |= valid;
+        });
+    }
+
+    /// Applies `f` to the index with this OID, wherever it lives.
+    pub fn update_index(&mut self, index: Oid, f: impl FnOnce(&mut crate::IndexDef)) {
+        let Some(table) = self.tables.values_mut().find(|t| t.indexes.iter().any(|i| i.oid == index)) else { return };
+        if let Some(i) = Arc::make_mut(table).indexes.iter_mut().find(|i| i.oid == index) {
+            f(i);
         }
     }
 
@@ -195,6 +203,5 @@ impl Catalog {
     pub fn forget_index(&mut self, index: Oid) {
         self.index_parents.remove(&index);
         self.index_parents.retain(|_, p| *p != index);
-        self.invalid_indexes.remove(&index);
     }
 }

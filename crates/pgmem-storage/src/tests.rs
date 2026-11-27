@@ -329,6 +329,8 @@ fn db_with_unique_id() -> (Arc<Database>, Oid) {
         primary: false,
         nulls_not_distinct: false,
         predicate: None,
+        valid: true,
+        ready: true,
     });
     let name = def.qualified();
     tx.catalog_mut().replace_table(&name, def);

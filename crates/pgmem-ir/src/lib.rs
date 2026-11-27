@@ -137,7 +137,9 @@ pub enum Statement {
     Discard(DiscardKind),
     /// `EXPLAIN [ANALYZE] [(options)] statement`.
     Explain(Box<Explain>),
-    /// `VACUUM` / `ANALYZE` / `CLUSTER` / `REINDEX TABLE` naming tables (checked to exist).
+    /// `REINDEX [(options)] {INDEX | TABLE | SCHEMA | DATABASE | SYSTEM} [CONCURRENTLY] [name]`.
+    Reindex(Box<Reindex>),
+    /// `VACUUM` / `ANALYZE` / `CLUSTER` naming tables (checked to exist).
     /// `in_block_ok` is false for the commands that refuse to run inside a transaction block.
     Maintenance {
         tag: String,
@@ -1911,6 +1913,27 @@ pub struct Drop {
     pub names: Vec<ObjectName>,
     pub if_exists: bool,
     pub cascade: bool,
+    /// `DROP INDEX CONCURRENTLY`.
+    pub concurrently: bool,
+}
+
+/// What a `REINDEX` names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReindexKind {
+    Index,
+    Table,
+    Schema,
+    Database,
+    System,
+}
+
+/// `REINDEX [(options)] {INDEX | TABLE | SCHEMA | DATABASE | SYSTEM} [CONCURRENTLY] [name]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reindex {
+    pub kind: ReindexKind,
+    /// `CONCURRENTLY`, or the `(CONCURRENTLY)` option.
+    pub concurrently: bool,
+    pub name: Option<ObjectName>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

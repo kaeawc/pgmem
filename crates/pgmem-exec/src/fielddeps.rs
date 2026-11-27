@@ -123,6 +123,7 @@ pub(crate) fn drop_user(txn: &mut Txn, user: FieldUser, env: &SessionEnv, state:
         }
         FieldUser::Index { table, name, .. } => {
             let d = ir::Drop {
+                concurrently: false,
                 object_type: ir::ObjectType::Index,
                 names: vec![ir::ObjectName(vec![table.schema, name])],
                 if_exists: true,

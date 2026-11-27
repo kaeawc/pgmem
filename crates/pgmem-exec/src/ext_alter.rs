@@ -372,6 +372,6 @@ fn drop_member(m: &ExtMember, cascade: bool, txn: &mut Txn, env: &SessionEnv, st
     };
     let snapshot = txn.catalog().clone();
     let binder = Binder::new(&snapshot, &[]);
-    let stmt = ir::Statement::Drop(Box::new(ir::Drop { object_type, names: vec![name], if_exists: true, cascade }));
+    let stmt = ir::Statement::Drop(Box::new(ir::Drop { object_type, names: vec![name], if_exists: true, cascade, concurrently: false }));
     crate::ddl::execute_ddl(&stmt, txn, &binder, env, state).map(|_| ())
 }

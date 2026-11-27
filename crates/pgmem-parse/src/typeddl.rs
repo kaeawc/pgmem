@@ -400,6 +400,7 @@ pub(crate) fn lower(stmt: TypeDdl) -> SqlResult<Statement> {
             names: names.iter().map(object_name).collect::<SqlResult<Vec<_>>>()?,
             if_exists,
             cascade,
+            concurrently: false,
         })),
         TypeDdl::AlterType { name, action } => {
             let action = match action {

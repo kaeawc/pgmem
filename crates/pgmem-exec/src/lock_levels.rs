@@ -145,7 +145,7 @@ pub fn ddl_locks(stmt: &Statement, catalog: &Catalog) -> Vec<(Oid, TableLockMode
                 }
             }
         }
-        Statement::Drop(d) => l.drop(&d.names),
+        Statement::Drop(d) => l.drop(&d.names, d.concurrently),
         // Parse analysis of a view's query locks the relations it reads.
         Statement::CreateView(cv) if !cv.materialized => {
             for n in crate::views::referenced_relations(&cv.query) {
@@ -213,13 +213,14 @@ impl Locks<'_> {
         }
     }
 
-    /// DROP: ACCESS EXCLUSIVE on each relation, and on an index's table.
-    fn drop(&mut self, names: &[ir::ObjectName]) {
+    /// DROP: ACCESS EXCLUSIVE on each relation, and on an index's table (SHARE UPDATE
+    /// EXCLUSIVE for DROP INDEX CONCURRENTLY).
+    fn drop(&mut self, names: &[ir::ObjectName], concurrently: bool) {
         for n in names {
             if let Some(Relation::Index { table, .. }) = self.catalog.find_relation(n).ok().flatten()
                 && let Some(t) = self.catalog.table_q(&table)
             {
-                self.out.push((t.oid, ACCESS_EXCLUSIVE));
+                self.out.push((t.oid, if concurrently { SHARE_UPDATE_EXCLUSIVE } else { ACCESS_EXCLUSIVE }));
             }
             self.on(n, ACCESS_EXCLUSIVE);
         }
