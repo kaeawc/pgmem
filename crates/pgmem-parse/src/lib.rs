@@ -51,6 +51,7 @@ pub fn parse_located(sql: &str) -> SqlResult<Vec<(Statement, SourceRefs)>> {
     relopts::clear();
     CONFLICT_EXPRS.with(|c| c.borrow_mut().clear());
     INDEX_ONLY.with(|c| c.borrow_mut().clear());
+    DROP_CONCURRENTLY.with(|c| c.borrow_mut().clear());
     if sql.trim().trim_matches(';').trim().is_empty() {
         return Ok(vec![(Statement::Empty, SourceRefs::default())]);
     }
@@ -195,6 +196,8 @@ thread_local! {
     static CONFLICT_EXPRS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
     /// Whether each CREATE INDEX had `ON ONLY` (stripped by the rewrite), in statement order.
     static INDEX_ONLY: std::cell::RefCell<std::collections::VecDeque<bool>> = const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+    /// Whether each DROP INDEX had `CONCURRENTLY` (stripped by the rewrite), in statement order.
+    static DROP_CONCURRENTLY: std::cell::RefCell<std::collections::VecDeque<bool>> = const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
     /// The text the statements being lowered were parsed from (spans point into it).
     static PARSED_TEXT: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
     /// The references noted while lowering one statement (`None`: not recording).
@@ -209,6 +212,11 @@ thread_local! {
 /// Whether the next CREATE INDEX being lowered had `ON ONLY` (see `rewrite_index_only`).
 pub(crate) fn take_index_only() -> bool {
     INDEX_ONLY.with(|c| c.borrow_mut().pop_front()).unwrap_or(false)
+}
+
+/// Whether the next DROP INDEX being lowered had `CONCURRENTLY` (see `rewrite_unsupported`).
+pub(crate) fn take_drop_concurrently() -> bool {
+    DROP_CONCURRENTLY.with(|c| c.borrow_mut().pop_front()).unwrap_or(false)
 }
 
 /// The options the rewrite stripped from CREATE VIEW `name`: (check option, with data).
@@ -1061,8 +1069,14 @@ fn rewrite_unsupported(sql: &str) -> Option<String> {
             replace[sig[k + 1]] = Some("INHERIT");
             replace[sig[k + 2]] = Some("NOT");
             replace[sig[k + 3]] = Some("VALID");
-        } else if word(&tokens[i], "DROP") && at(1, "INDEX") && at(2, "CONCURRENTLY") {
-            drop[sig[k + 2]] = true;
+        } else if word(&tokens[i], "DROP") && at(1, "INDEX") {
+            // `DROP INDEX CONCURRENTLY`: the flag is recorded (see `take_drop_concurrently`) and
+            // the keyword stripped, as sqlparser lacks it.
+            let concurrently = at(2, "CONCURRENTLY");
+            if concurrently {
+                drop[sig[k + 2]] = true;
+            }
+            DROP_CONCURRENTLY.with(|c| c.borrow_mut().push_back(concurrently));
         } else if word(&tokens[i], "AT") && at(1, "LOCAL") {
             replace[sig[k + 1]] = Some("TIME ZONE current_setting('TimeZone')");
         } else if word(&tokens[i], "TABLE") && (k == 0 || tokens[sig[k - 1]] == Token::SemiColon) {
@@ -1486,7 +1500,8 @@ pub(crate) fn lower_statement(stmt: sq::Statement) -> SqlResult<Statement> {
                 other => return Err(unsupported(&format!("DROP {other}"))),
             };
             let names = names.iter().map(object_name).collect::<SqlResult<Vec<_>>>()?;
-            Statement::Drop(Box::new(pgmem_ir::Drop { object_type, names, if_exists, cascade }))
+            let concurrently = object_type == ObjectType::Index && take_drop_concurrently();
+            Statement::Drop(Box::new(pgmem_ir::Drop { object_type, names, if_exists, cascade, concurrently }))
         }
         S::CreateType { name, representation } => {
             use pgmem_ir::CreateTypeKind as K;
@@ -1511,6 +1526,7 @@ pub(crate) fn lower_statement(stmt: sq::Statement) -> SqlResult<Statement> {
             names: vec![object_name(&d.name)?],
             if_exists: d.if_exists,
             cascade: matches!(d.drop_behavior, Some(sq::DropBehavior::Cascade)),
+            concurrently: false,
         })),
         S::Truncate(t) => Statement::Truncate(Box::new(pgmem_ir::Truncate {
             tables: t.table_names.iter().map(|tt| object_name(&tt.name)).collect::<SqlResult<Vec<_>>>()?,

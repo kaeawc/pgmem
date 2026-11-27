@@ -253,5 +253,7 @@ pub fn build_index(b: &Binder, table: &TableDef, li: &LikeIndex, taken: &mut Vec
         clustered: false,
         replica: false,
         reloptions: li.reloptions.clone(),
+        valid: true,
+        ready: true,
     })
 }

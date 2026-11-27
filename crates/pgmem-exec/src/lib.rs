@@ -34,6 +34,7 @@ pub mod plpgsql;
 pub mod portal;
 mod privilege_uses;
 pub mod reg;
+mod reindex;
 mod reloptions;
 pub mod rls;
 pub mod roles;

@@ -15,6 +15,11 @@ pub(crate) enum Utility {
         direction: FetchDirection,
         is_move: bool,
     },
+    Reindex {
+        kind: pgmem_ir::ReindexKind,
+        concurrently: bool,
+        name: Option<sqlparser::ast::ObjectName>,
+    },
     Maintenance {
         tag: &'static str,
         tables: Vec<sqlparser::ast::ObjectName>,
@@ -94,6 +99,9 @@ pub(crate) fn lower(u: Utility) -> SqlResult<Statement> {
     Ok(match u {
         Utility::Copy(c) => return crate::copy::lower(*c),
         Utility::Fetch { name, direction, is_move } => Statement::Fetch { name: crate::ident(&name), direction, is_move },
+        Utility::Reindex { kind, concurrently, name } => {
+            Statement::Reindex(Box::new(pgmem_ir::Reindex { kind, concurrently, name: name.as_ref().map(object_name).transpose()? }))
+        }
         Utility::Maintenance { tag, tables, in_block_ok } => Statement::Maintenance {
             tag: tag.to_owned(),
             tables: tables.iter().map(object_name).collect::<SqlResult<Vec<ObjectName>>>()?,
@@ -425,19 +433,48 @@ fn vacuum(p: &mut Parser, tag: &'static str) -> Result<Utility, ParserError> {
 
 /// `REINDEX [(options)] {INDEX | TABLE | SCHEMA | DATABASE | SYSTEM} [CONCURRENTLY] [name]`.
 fn reindex(p: &mut Parser) -> Result<Utility, ParserError> {
-    skip_parens(p)?;
+    use pgmem_ir::ReindexKind as K;
+    let mut concurrently = reindex_options(p)?;
     let kind = match p.next_token().token {
-        Token::Word(w) => w.value.to_ascii_uppercase(),
+        Token::Word(w) => match w.value.to_ascii_uppercase().as_str() {
+            "INDEX" => K::Index,
+            "TABLE" => K::Table,
+            "SCHEMA" => K::Schema,
+            "DATABASE" => K::Database,
+            "SYSTEM" => K::System,
+            _ => return p.expected("INDEX, TABLE, SCHEMA, DATABASE or SYSTEM", sqlparser::tokenizer::TokenWithSpan::wrap(Token::Word(w))),
+        },
         other => return p.expected("INDEX, TABLE, SCHEMA, DATABASE or SYSTEM", sqlparser::tokenizer::TokenWithSpan::wrap(other)),
     };
-    let concurrently = eat_word(p, "CONCURRENTLY");
+    concurrently |= eat_word(p, "CONCURRENTLY");
     let name = if matches!(p.peek_token().token, Token::Word(_)) { Some(p.parse_object_name(false)?) } else { None };
-    let (tables, in_block_ok) = match (kind.as_str(), name) {
-        ("INDEX" | "TABLE", Some(n)) => (vec![n], !concurrently),
-        ("SCHEMA" | "DATABASE" | "SYSTEM", _) => (Vec::new(), false),
-        _ => return p.expected("a name", p.peek_token()),
-    };
-    Ok(Utility::Maintenance { tag: "REINDEX", tables, in_block_ok })
+    if name.is_none() && matches!(kind, K::Index | K::Table) {
+        return p.expected("a name", p.peek_token());
+    }
+    Ok(Utility::Reindex { kind, concurrently, name })
+}
+
+/// The option list of REINDEX: whether it turns on `CONCURRENTLY` (`CONCURRENTLY [boolean]`).
+fn reindex_options(p: &mut Parser) -> Result<bool, ParserError> {
+    if p.peek_token().token != Token::LParen {
+        return Ok(false);
+    }
+    p.next_token();
+    let mut concurrently = false;
+    loop {
+        match p.next_token().token {
+            Token::Word(w) if w.value.eq_ignore_ascii_case("CONCURRENTLY") => {
+                concurrently = match p.peek_token().token {
+                    Token::Word(v) => !(v.value.eq_ignore_ascii_case("FALSE") || v.value.eq_ignore_ascii_case("OFF")),
+                    Token::Number(n, _) => n != "0",
+                    _ => true,
+                };
+            }
+            Token::RParen => return Ok(concurrently),
+            Token::EOF => return p.expected(")", p.peek_token()),
+            _ => {}
+        }
+    }
 }
 
 /// `CLUSTER [VERBOSE] [(options)] [table [USING index]]`.

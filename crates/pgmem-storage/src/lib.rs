@@ -1116,7 +1116,7 @@ fn empty_state() -> Arc<DbState> {
 /// insert and then raised the same error). `committed` is the latest committed data the
 /// transaction's changes apply to (None when it truncated or created the table).
 fn recheck_unique(def: &TableDef, committed: Option<&TableData>, ch: &TableChanges) -> SqlResult<()> {
-    for idx in def.indexes.iter().filter(|i| i.unique && i.exprs.is_empty() && i.predicate.is_none()) {
+    for idx in def.indexes.iter().filter(|i| i.unique && i.ready && i.exprs.is_empty() && i.predicate.is_none()) {
         let spec = IndexSpec::new(def, &idx.columns);
         let mut inserted: HashMap<IndexKey, RowId> = HashMap::new();
         for (id, row) in &ch.inserted {

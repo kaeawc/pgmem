@@ -683,7 +683,7 @@ fn clone_indexes(
             };
             part.constraints.push(c);
         }
-        part.indexes.push(IndexDef { oid: 0, name, columns, include, ..idx.clone() });
+        part.indexes.push(IndexDef { oid: 0, name, columns, include, valid: true, ready: true, ..idx.clone() });
     }
     links
 }

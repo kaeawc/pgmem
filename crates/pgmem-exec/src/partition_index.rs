@@ -81,6 +81,12 @@ pub(crate) fn create_index(
     env: &SessionEnv,
     state: &StatementState,
 ) -> SqlResult<QueryResult> {
+    if ci.concurrently
+        && let table = binder.catalog.lookup_table(&ci.table)?
+        && binder.catalog.is_partitioned(table.oid)
+    {
+        return Err(SqlError::feature_not_supported(format!("cannot create index on partitioned table \"{}\" concurrently", table.name)));
+    }
     let Some((tname, idx)) = bind::bind_create_index(binder, ci)? else {
         return Ok(crate::ddl::notice(
             "CREATE INDEX",
@@ -105,11 +111,21 @@ fn define(
     let mut def = (*table).clone();
     idx.oid = txn.catalog_mut().alloc_oid();
     let oid = idx.oid;
-    let unique = idx.unique;
     let name = idx.name.clone();
     def.indexes.push(idx.clone());
-    if unique {
-        crate::ddl::validate_unique(txn, &def, &name, env, state)?;
+    if let Err(e) = crate::ddl::validate_index_build(txn, &def, &name, env, state) {
+        if ci.concurrently {
+            // The build failed after the index was entered in the catalog: it stays, invalid
+            // and not maintained, until REINDEX or DROP INDEX.
+            let mut invalid = def.clone();
+            if let Some(i) = invalid.indexes.last_mut() {
+                i.valid = false;
+                i.ready = false;
+            }
+            txn.catalog_mut().replace_table(tname, invalid);
+            state.keep_on_error.set(true);
+        }
+        return Err(e);
     }
     let partitioned = txn.catalog().partition_key(def.oid).cloned();
     if let Some(key) = &partitioned {

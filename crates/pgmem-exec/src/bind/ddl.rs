@@ -432,6 +432,9 @@ pub fn add_constraint(
                 ));
             }
             let idx = &table.indexes[pos];
+            if !idx.valid {
+                return Err(SqlError::new(code::OBJECT_NOT_IN_PREREQUISITE_STATE, format!("index \"{index}\" is not valid")));
+            }
             let unusable = if !idx.unique {
                 Some(format!("\"{index}\" is not a unique index"))
             } else if idx.predicate.is_some() {
@@ -522,6 +525,8 @@ pub fn add_constraint(
                 clustered: false,
                 replica: false,
                 reloptions: crate::reloptions::create(crate::reloptions::Target::Index(Some("btree")), reloptions)?,
+                valid: true,
+                ready: true,
             });
             let ckind = if primary {
                 ConstraintKind::PrimaryKey { columns: idx_cols }
@@ -590,7 +595,7 @@ pub fn add_constraint(
             let has_unique = parent.indexes.iter().any(|i| {
                 let mut c = i.columns.clone();
                 c.sort_unstable();
-                i.unique && i.exprs.is_empty() && i.predicate.is_none() && c == sorted
+                i.unique && i.valid && i.exprs.is_empty() && i.predicate.is_none() && c == sorted
             });
             if !has_unique {
                 return Err(SqlError::new(
@@ -807,6 +812,8 @@ pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(
             clustered: false,
             replica: false,
             reloptions,
+            valid: true,
+            ready: true,
         },
     )))
 }
@@ -1329,6 +1336,8 @@ fn add_exclusion(
         clustered: false,
         replica: false,
         reloptions: index_reloptions,
+        valid: true,
+        ready: true,
     });
     table.constraints.push(Constraint {
         oid: 0,

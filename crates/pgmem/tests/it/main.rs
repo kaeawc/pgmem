@@ -30,6 +30,7 @@ mod coalesce_nullif;
 mod column_default;
 mod composite_type_ddl;
 mod concat;
+mod concurrent_index;
 mod connection_info;
 mod constraint_timing;
 mod copy;

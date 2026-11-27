@@ -275,6 +275,7 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
             Ok(tag("CREATE SEQUENCE"))
         }
         Statement::CreateIndex(ci) => crate::partition_index::create_index(ci, txn, binder, env, state),
+        Statement::Reindex(r) => crate::reindex::reindex(r, txn, env, state),
         Statement::AttachIndexPartition { index, partition } => crate::partition_index::attach_index(index, partition, txn),
         Statement::AlterTable(at) => {
             let name = at.name.base().to_owned();
@@ -581,7 +582,35 @@ pub(crate) fn padded_rows(txn: &Txn, def: &TableDef) -> Vec<(u64, Vec<Value>)> {
 
 /// `CREATE UNIQUE INDEX` / `ADD PRIMARY KEY` over existing rows.
 pub(crate) fn validate_unique(txn: &Txn, def: &TableDef, index: &str, env: &SessionEnv, state: &StatementState) -> SqlResult<()> {
+    scan_index_keys(txn, def, index, true, env, state)
+}
+
+/// What building `CREATE INDEX` does to the existing rows: computes every key, so an error in an
+/// expression or predicate fails the statement, and a unique index fails on duplicates.
+pub(crate) fn validate_index_build(txn: &Txn, def: &TableDef, index: &str, env: &SessionEnv, state: &StatementState) -> SqlResult<()> {
+    let Some(idx) = def.indexes.iter().find(|i| i.name == index) else { return Ok(()) };
+    if !idx.unique && idx.exprs.is_empty() && idx.predicate.is_none() {
+        return Ok(());
+    }
+    scan_index_keys(txn, def, index, idx.unique, env, state)
+}
+
+fn scan_index_keys(
+    txn: &Txn,
+    def: &TableDef,
+    index: &str,
+    enforce_unique: bool,
+    env: &SessionEnv,
+    state: &StatementState,
+) -> SqlResult<()> {
     let mut catalog = txn.catalog().clone();
+    let mut def = def.clone();
+    // The row rules hold a check for unique indexes only: evaluate this one as one.
+    if let Some(i) = def.indexes.iter_mut().find(|i| i.name == index) {
+        i.unique = true;
+        i.ready = true;
+    }
+    let def = &def;
     catalog.replace_table(&def.qualified(), def.clone());
     let b = Binder::new(&catalog, &[]);
     let rules = b.bind_row_rules(&Arc::new(def.clone()))?;
@@ -603,7 +632,7 @@ pub(crate) fn validate_unique(txn: &Txn, def: &TableDef, index: &str, env: &Sess
             continue;
         }
         let key: Vec<GroupKey> = vals.iter().map(Value::group_key).collect();
-        if !seen.insert(key) {
+        if enforce_unique && !seen.insert(key) {
             let cols: Vec<String> =
                 if u.exprs.is_empty() { u.columns.iter().map(|c| def.columns[*c].name.clone()).collect() } else { vec!["expr".into()] };
             let keys: Vec<Option<usize>> = if u.exprs.is_empty() { u.columns.iter().map(|c| Some(*c)).collect() } else { vec![None] };
@@ -849,6 +878,14 @@ pub(crate) fn dependents_error(what: &str, name: &str, detail: String) -> SqlErr
 }
 
 pub(crate) fn drop_objects(d: &ir::Drop, txn: &mut Txn, env: &SessionEnv, state: &StatementState) -> SqlResult<QueryResult> {
+    if d.concurrently {
+        if d.names.len() > 1 {
+            return Err(SqlError::feature_not_supported("DROP INDEX CONCURRENTLY does not support dropping multiple objects"));
+        }
+        if d.cascade {
+            return Err(SqlError::feature_not_supported("DROP INDEX CONCURRENTLY does not support CASCADE"));
+        }
+    }
     let kind = match d.object_type {
         ObjectType::Table => "TABLE",
         ObjectType::View => "VIEW",

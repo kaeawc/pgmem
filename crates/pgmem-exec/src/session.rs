@@ -295,6 +295,9 @@ pub struct Session {
     pending_notify: Vec<(String, String)>,
     /// Running an extended-protocol implicit transaction, which ends at Sync.
     pipeline: bool,
+    /// The statement that just failed left work that must be committed (see
+    /// `StatementState::keep_on_error`).
+    keep_on_error: bool,
     /// The current transaction is READ ONLY.
     txn_read_only: bool,
     /// SET CONSTRAINTS of the current transaction.
@@ -348,6 +351,7 @@ impl Session {
             pending_listen: Vec::new(),
             pending_notify: Vec::new(),
             pipeline: false,
+            keep_on_error: false,
             txn_read_only: false,
             constraint_modes: ConstraintModes::default(),
             pending_checks: Vec::new(),
@@ -416,13 +420,14 @@ impl Session {
 
     /// Sync: commits (or, after an error, rolls back) the implicit transaction.
     pub fn end_pipeline(&mut self, failed: bool) -> SqlResult<()> {
+        let keep = std::mem::take(&mut self.keep_on_error);
         if !std::mem::take(&mut self.pipeline) {
             return Ok(());
         }
         if let Some(txn) = self.txn.take() {
             self.status = TxStatus::Idle;
             self.end_transaction_settings(!failed);
-            self.finish_txn(txn, !failed)?;
+            self.finish_txn(txn, !failed || keep)?;
         }
         Ok(())
     }
@@ -608,8 +613,10 @@ impl Session {
             Statement::Unlisten { channel } => return Ok(self.listen(channel.clone().map(|c| (c, false)))),
             Statement::Notify { channel, payload } => return self.notify(channel, payload.as_deref()),
             Statement::Maintenance { tag, tables, in_block_ok } => return self.maintenance(tag, tables, *in_block_ok),
-            Statement::CreateIndex(ci) if ci.concurrently && self.in_block() => {
-                return Err(SqlError::new(code::ACTIVE_SQL_TRANSACTION, "CREATE INDEX CONCURRENTLY cannot run inside a transaction block"));
+            _ if self.in_block()
+                && let Some(command) = refused_in_block(stmt) =>
+            {
+                return Err(SqlError::new(code::ACTIVE_SQL_TRANSACTION, format!("{command} cannot run inside a transaction block")));
             }
             Statement::Lock { tables, mode, nowait } => return self.lock_tables(tables, *mode, *nowait),
             Statement::SetConstraints { names, deferred } => return self.set_constraints(names, *deferred),
@@ -631,13 +638,16 @@ impl Session {
                 Ok(r)
             }
             Err(e) => {
+                let keep = std::mem::take(&mut self.keep_on_error);
                 if (implicit && !self.implicit_block && !self.pipeline) || self.txn.is_none() {
                     if let Some(txn) = self.txn.take() {
-                        let _ = self.finish_txn(txn, false);
+                        let _ = self.finish_txn(txn, keep);
                     }
                     self.status = TxStatus::Idle;
                 } else if self.implicit_block || self.pipeline {
-                    // The simple-query batch is abandoned; end_implicit_block rolls it back.
+                    // The simple-query batch is abandoned; end_implicit_block rolls it back
+                    // (end_pipeline commits it when the failed statement asked to be kept).
+                    self.keep_on_error = keep && self.pipeline;
                 } else {
                     self.status = TxStatus::Failed;
                 }
@@ -717,7 +727,9 @@ impl Session {
         }
         let result = crate::detail_privileges::as_viewer(&catalog, &env, stmt, || {
             crate::statement::exec_statement(stmt, &binder, &ctx, txn, params, &env, &state)
-        })?;
+        });
+        self.keep_on_error = result.is_err() && state.keep_on_error.get();
+        let result = result?;
         for (oid, mode) in crate::lock_levels::created_locks(stmt, &catalog, txn.catalog()) {
             txn.lock_relation(oid, mode);
         }
@@ -1345,6 +1357,24 @@ fn returning(cols: Vec<OutCol>) -> Option<Vec<OutCol>> {
 
 #[allow(dead_code)]
 fn unused(_: ConstraintKind) {}
+
+/// The command a transaction block refuses (Postgres' `PreventInTransactionBlock`): the
+/// `CONCURRENTLY` forms, which commit as they go, and REINDEX of a schema or database.
+fn refused_in_block(stmt: &Statement) -> Option<&'static str> {
+    use ir::ReindexKind as K;
+    match stmt {
+        Statement::CreateIndex(ci) if ci.concurrently => Some("CREATE INDEX CONCURRENTLY"),
+        Statement::Drop(d) if d.concurrently => Some("DROP INDEX CONCURRENTLY"),
+        Statement::Reindex(r) if r.concurrently => Some("REINDEX CONCURRENTLY"),
+        Statement::Reindex(r) => match r.kind {
+            K::Schema => Some("REINDEX SCHEMA"),
+            K::Database => Some("REINDEX DATABASE"),
+            K::System => Some("REINDEX SYSTEM"),
+            K::Index | K::Table => None,
+        },
+        _ => None,
+    }
+}
 
 /// The command a READ ONLY transaction may not run: writes to the session's temporary
 /// tables (in `temp`) are allowed. Shared by top-level statements and the statements of

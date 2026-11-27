@@ -36,6 +36,10 @@ pub struct StatementState {
     /// The leaf partition the next INSERT / UPDATE / DELETE runs on for a statement on its
     /// partitioned table: its statement-level triggers do not fire (`triggers::routed`).
     pub routed_leaf: std::cell::Cell<Option<Oid>>,
+    /// Set by a statement that commits its own transaction work even when it then fails
+    /// (`CREATE INDEX CONCURRENTLY` leaves an invalid index behind): the implicit transaction
+    /// the statement ran in is committed instead of rolled back.
+    pub keep_on_error: std::cell::Cell<bool>,
 }
 
 /// A row an UPDATE of a partitioned table moves to another partition.

@@ -8,7 +8,7 @@
 use pgmem_ir::Expr;
 use pgmem_types::usertype::{EnumLabel, Field, UserKind, UserType};
 use pgmem_types::{SqlError, SqlResult, Type, Value, code};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 mod arraynames;
@@ -240,6 +240,13 @@ pub struct IndexDef {
     pub replica: bool,
     /// `pg_class.reloptions` (`name=value`, in Postgres' order); empty means NULL.
     pub reloptions: Vec<String>,
+    /// `pg_index.indisvalid`: false for a failed `CREATE INDEX CONCURRENTLY` (until REINDEX or
+    /// DROP) and for a partitioned index not yet attached to every partition. Queries and
+    /// foreign keys do not use an invalid index.
+    pub valid: bool,
+    /// `pg_index.indisready`: whether inserts maintain (and so enforce) the index. A build that
+    /// failed before finishing leaves it false.
+    pub ready: bool,
 }
 
 impl IndexDef {
@@ -326,7 +333,8 @@ impl TableDef {
                 && i.columns.len() == ref_columns.len()
                 && ref_columns.iter().all(|c| i.columns.contains(c))
         };
-        self.indexes.iter().find(|i| i.primary && same(i)).or_else(|| self.indexes.iter().find(|i| i.unique && same(i)))
+        let usable = |i: &&IndexDef| i.valid && same(i);
+        self.indexes.iter().filter(usable).find(|i| i.primary).or_else(|| self.indexes.iter().filter(usable).find(|i| i.unique))
     }
 
     pub fn qualified(&self) -> QualName {
@@ -772,8 +780,6 @@ pub struct Catalog {
     row_security: BTreeMap<Oid, (bool, bool)>,
     /// Partition indexes' parent indexes (`pg_inherits` of indexes), by child index OID.
     index_parents: BTreeMap<Oid, Oid>,
-    /// Partitioned indexes not yet valid (`CREATE INDEX ... ON ONLY` before every partition has one).
-    invalid_indexes: BTreeSet<Oid>,
     /// Array type names of tables, views and user types, by owner OID (see `arraynames`).
     array_names: BTreeMap<Oid, String>,
     next_oid: Oid,
@@ -827,7 +833,6 @@ impl Catalog {
             policies: BTreeMap::new(),
             row_security: BTreeMap::new(),
             index_parents: BTreeMap::new(),
-            invalid_indexes: BTreeSet::new(),
             array_names: BTreeMap::new(),
             next_oid: FIRST_USER_OID,
         }
