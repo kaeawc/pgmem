@@ -234,6 +234,7 @@ pub(crate) enum CommentOn {
     Function(Option<Vec<sq::DataType>>),
     Constraint(sq::ObjectName),
     Trigger(sq::ObjectName),
+    Policy(sq::ObjectName),
 }
 
 pub(crate) struct RawFunction {
@@ -363,12 +364,13 @@ pub(crate) fn try_parse(p: &mut Parser) -> Result<Option<FuncDdl>, ParserError> 
     }
     if word_at(p, 0, "COMMENT")
         && word_at(p, 1, "ON")
-        && ["FUNCTION", "PROCEDURE", "ROUTINE", "CONSTRAINT", "TRIGGER"].iter().any(|w| word_at(p, 2, w))
+        && ["FUNCTION", "PROCEDURE", "ROUTINE", "CONSTRAINT", "TRIGGER", "POLICY"].iter().any(|w| word_at(p, 2, w))
     {
         p.next_token();
         p.next_token();
-        let routine = !(word_at(p, 0, "CONSTRAINT") || word_at(p, 0, "TRIGGER"));
+        let routine = !(word_at(p, 0, "CONSTRAINT") || word_at(p, 0, "TRIGGER") || word_at(p, 0, "POLICY"));
         let trigger = word_at(p, 0, "TRIGGER");
+        let policy = word_at(p, 0, "POLICY");
         p.next_token();
         let name = p.parse_object_name(false)?;
         let target = if routine {
@@ -395,7 +397,13 @@ pub(crate) fn try_parse(p: &mut Parser) -> Result<Option<FuncDdl>, ParserError> 
             expect(p, "ON")?;
             let _ = eat(p, "DOMAIN");
             let table = p.parse_object_name(false)?;
-            if trigger { CommentOn::Trigger(table) } else { CommentOn::Constraint(table) }
+            if trigger {
+                CommentOn::Trigger(table)
+            } else if policy {
+                CommentOn::Policy(table)
+            } else {
+                CommentOn::Constraint(table)
+            }
         };
         expect(p, "IS")?;
         let text = if eat(p, "NULL") { None } else { Some(string(p)?) };
@@ -881,6 +889,7 @@ pub(crate) fn lower(d: FuncDdl) -> SqlResult<Statement> {
                 }
                 CommentOn::Constraint(t) => pgmem_ir::CommentTarget::Constraint(object_name(&t)?),
                 CommentOn::Trigger(t) => pgmem_ir::CommentTarget::Trigger(object_name(&t)?),
+                CommentOn::Policy(t) => pgmem_ir::CommentTarget::Policy(object_name(&t)?),
             };
             Statement::Comment { target, name: object_name(&name)?, text }
         }

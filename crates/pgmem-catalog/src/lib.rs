@@ -13,9 +13,11 @@ use std::sync::Arc;
 
 mod extmembers;
 mod partitions;
+mod policies;
 mod roles;
 pub use extmembers::{ExtMember, ExtMemberClass};
 pub use partitions::{PartitionBound, PartitionKey, PartitionKeyPart, PartitionOf, PartitionStrategy, RangeDatum};
+pub use policies::PolicyDef;
 pub use roles::{DefaultItem, DefaultPrivilege, ExtensionDef, Grant, GrantObject, RoleDef};
 
 pub type Oid = u32;
@@ -714,6 +716,10 @@ pub struct Catalog {
     partition_keys: BTreeMap<Oid, PartitionKey>,
     /// Partitions' parents and bounds, by partition OID.
     partition_bounds: BTreeMap<Oid, PartitionOf>,
+    /// Row-level security policies by OID.
+    policies: BTreeMap<Oid, Arc<PolicyDef>>,
+    /// (`relrowsecurity`, `relforcerowsecurity`) of tables with either set, by OID.
+    row_security: BTreeMap<Oid, (bool, bool)>,
     /// Partition indexes' parent indexes (`pg_inherits` of indexes), by child index OID.
     index_parents: BTreeMap<Oid, Oid>,
     /// Partitioned indexes not yet valid (`CREATE INDEX ... ON ONLY` before every partition has one).
@@ -759,6 +765,8 @@ impl Catalog {
             comments: BTreeMap::new(),
             partition_keys: BTreeMap::new(),
             partition_bounds: BTreeMap::new(),
+            policies: BTreeMap::new(),
+            row_security: BTreeMap::new(),
             index_parents: BTreeMap::new(),
             invalid_indexes: BTreeSet::new(),
             next_oid: FIRST_USER_OID,
@@ -1380,6 +1388,7 @@ impl Catalog {
             self.forget_index(idx.oid);
         }
         self.triggers.retain(|_, t| t.table != dropped.oid);
+        self.drop_table_policies(dropped.oid);
         let gone: Vec<Oid> = self.statistics.values().filter(|s| s.table == dropped.oid).map(|s| s.oid).collect();
         for oid in gone {
             self.drop_statistics(oid);

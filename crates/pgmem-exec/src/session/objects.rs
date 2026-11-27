@@ -222,8 +222,9 @@ impl Session {
         let txn = self.txn.as_ref().ok_or_else(|| SqlError::internal("no transaction"))?;
         let catalog = Arc::new(txn.catalog().clone());
         let binder = Binder::new(&catalog, &[]);
+        binder.set_rls(crate::rls::RlsUser::from_env(&env));
         let top = Level::new(Scope::default());
-        let ctx = Ctx::new(&top);
+        let ctx = Ctx::new(&top).with_clause(crate::bind::Clause::ExecuteParam);
         let ectx = EvalCtx::new(txn, &[], &env, &state);
         let mut values = Vec::with_capacity(args.len());
         for (i, (a, ty)) in args.iter().zip(types).enumerate() {

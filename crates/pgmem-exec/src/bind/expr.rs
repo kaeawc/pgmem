@@ -471,6 +471,8 @@ impl Binder<'_> {
             let place = match ctx.clause {
                 Clause::Check => Some("check constraint"),
                 Clause::Default => Some("DEFAULT expression"),
+                Clause::ExecuteParam => Some("EXECUTE parameter"),
+                Clause::CallArg => Some("CALL argument"),
                 _ => None,
             };
             if let Some(place) = place {

@@ -275,6 +275,16 @@ pub enum Statement {
         if_exists: bool,
         cascade: bool,
     },
+    /// `CREATE POLICY name ON table ...`.
+    CreatePolicy(Box<CreatePolicy>),
+    /// `ALTER POLICY name ON table {RENAME TO new | [TO roles] [USING (...)] [WITH CHECK (...)]}`.
+    AlterPolicy(Box<AlterPolicy>),
+    /// `DROP POLICY [IF EXISTS] name ON table [CASCADE | RESTRICT]`.
+    DropPolicy {
+        name: String,
+        table: ObjectName,
+        if_exists: bool,
+    },
     /// `ALTER TRIGGER name ON table RENAME TO new_name`.
     RenameTrigger {
         name: String,
@@ -410,6 +420,8 @@ pub enum CommentTarget {
     Constraint(ObjectName),
     /// `TRIGGER name ON table`.
     Trigger(ObjectName),
+    /// `POLICY name ON table`.
+    Policy(ObjectName),
     /// `STATISTICS name`.
     Statistics,
     /// `CAST (source AS target)`; the comment's name is empty.
@@ -1492,6 +1504,42 @@ pub struct CreateTrigger {
     pub args: Vec<String>,
 }
 
+/// A role a policy applies to: `PUBLIC`, `CURRENT_USER` / `CURRENT_ROLE`, `SESSION_USER` or a
+/// role name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PolicyRole {
+    Public,
+    CurrentUser,
+    SessionUser,
+    Name(String),
+}
+
+/// `CREATE POLICY name ON table [AS {PERMISSIVE | RESTRICTIVE}] [FOR command] [TO roles]
+/// [USING (qual)] [WITH CHECK (check)]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreatePolicy {
+    pub name: String,
+    pub table: ObjectName,
+    pub permissive: bool,
+    /// `pg_policy.polcmd`: `*` ALL, `r` SELECT, `a` INSERT, `w` UPDATE, `d` DELETE.
+    pub command: char,
+    /// Empty: `TO PUBLIC` (the default).
+    pub roles: Vec<PolicyRole>,
+    pub using: Option<Expr>,
+    pub with_check: Option<Expr>,
+}
+
+/// `ALTER POLICY name ON table ...`: a rename, or new roles / expressions (None: unchanged).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AlterPolicy {
+    pub name: String,
+    pub table: ObjectName,
+    pub rename_to: Option<String>,
+    pub roles: Option<Vec<PolicyRole>>,
+    pub using: Option<Expr>,
+    pub with_check: Option<Expr>,
+}
+
 /// One key of `CREATE STATISTICS`: a column or an expression.
 #[derive(Clone, Debug, PartialEq)]
 pub enum StatisticsKey {
@@ -1619,6 +1667,10 @@ pub enum AlterTableAction {
     },
     /// `OWNER TO role`.
     OwnerTo(String),
+    /// `{ENABLE | DISABLE} ROW LEVEL SECURITY` (`pg_class.relrowsecurity`).
+    RowSecurity(bool),
+    /// `[NO] FORCE ROW LEVEL SECURITY` (`pg_class.relforcerowsecurity`).
+    ForceRowSecurity(bool),
     /// `{ENABLE [REPLICA | ALWAYS] | DISABLE} TRIGGER {name | ALL | USER}` (None: all);
     /// `mode` is the `pg_trigger.tgenabled` letter: 'O' origin, 'D' disabled, 'R' replica,
     /// 'A' always.
@@ -1900,6 +1952,91 @@ impl Expr {
                         }
                         if let Some(u) = upper {
                             u.walk(f);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// [`Expr::walk`] with mutable access (pre-order: `f` may replace a node before its
+    /// children are visited).
+    pub fn walk_mut(&mut self, f: &mut dyn FnMut(&mut Expr)) {
+        f(self);
+        let each = |items: &mut [Expr], f: &mut dyn FnMut(&mut Expr)| items.iter_mut().for_each(|e| e.walk_mut(f));
+        match self {
+            Expr::Literal(_) | Expr::Column(_) | Expr::Param(_) | Expr::TypedString { .. } | Expr::Default => {}
+            Expr::Exists { .. } | Expr::Subquery(_) | Expr::ArraySubquery(_) => {}
+            Expr::Unary { expr, .. }
+            | Expr::Not(expr)
+            | Expr::IsNull { expr, .. }
+            | Expr::IsBool { expr, .. }
+            | Expr::Cast { expr, .. }
+            | Expr::Collate { expr, .. }
+            | Expr::InSubquery { expr, .. } => expr.walk_mut(f),
+            Expr::Binary { left, right, .. }
+            | Expr::And(left, right)
+            | Expr::Or(left, right)
+            | Expr::IsDistinctFrom { left, right, .. } => {
+                left.walk_mut(f);
+                right.walk_mut(f);
+            }
+            Expr::AtTimeZone { expr, zone } => {
+                expr.walk_mut(f);
+                zone.walk_mut(f);
+            }
+            Expr::FieldAccess { expr, .. } => expr.walk_mut(f),
+            Expr::Between { expr, low, high, .. } => {
+                expr.walk_mut(f);
+                low.walk_mut(f);
+                high.walk_mut(f);
+            }
+            Expr::InList { expr, list, .. } => {
+                expr.walk_mut(f);
+                each(list, f);
+            }
+            Expr::AnyAll { left, right, .. } => {
+                left.walk_mut(f);
+                if let AnyAllRight::Array(a) = right {
+                    a.walk_mut(f);
+                }
+            }
+            Expr::Like { expr, pattern, escape, .. } | Expr::SimilarTo { expr, pattern, escape, .. } => {
+                expr.walk_mut(f);
+                pattern.walk_mut(f);
+                if let Some(e) = escape {
+                    e.walk_mut(f);
+                }
+            }
+            Expr::Case { operand, whens, else_result } => {
+                if let Some(o) = operand {
+                    o.walk_mut(f);
+                }
+                for (w, t) in whens {
+                    w.walk_mut(f);
+                    t.walk_mut(f);
+                }
+                if let Some(e) = else_result {
+                    e.walk_mut(f);
+                }
+            }
+            Expr::Function(call) => {
+                each(&mut call.args, f);
+                if let Some(fl) = &mut call.filter {
+                    fl.walk_mut(f);
+                }
+            }
+            Expr::Array(items) | Expr::Row(items) => each(items, f),
+            Expr::Subscript { expr, index } => {
+                expr.walk_mut(f);
+                match index {
+                    Subscript::Index(i) => i.walk_mut(f),
+                    Subscript::Slice { lower, upper } => {
+                        if let Some(l) = lower {
+                            l.walk_mut(f);
+                        }
+                        if let Some(u) = upper {
+                            u.walk_mut(f);
                         }
                     }
                 }

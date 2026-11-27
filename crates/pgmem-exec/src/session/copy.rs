@@ -274,6 +274,7 @@ impl Session {
     }
 
     fn copy_into(&mut self, c: &ir::Copy, t: &TableDef, o: &Options) -> SqlResult<QueryResult> {
+        crate::rls::check_copy_from(&self.catalog_snapshot(), &self.env(), t)?;
         let cols = columns(t, &c.columns)?;
         let names: Vec<String> = cols.iter().map(|(n, _)| n.clone()).collect();
         check_force(o, Some(t), &names)?;

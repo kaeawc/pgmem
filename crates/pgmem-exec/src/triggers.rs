@@ -513,6 +513,9 @@ pub(crate) fn instead_of(
     let width = table.columns.len();
     let catalog = txn.catalog().clone();
     let binder = crate::bind::Binder::new(&catalog, &[]);
+    // The rows the trigger sees, and what INSERT ... SELECT and subqueries read, go through
+    // row-level security like the statement would (the view's owner's policies inside it).
+    binder.set_rls(crate::rls::RlsUser::from_env(env));
     let top = crate::bind::Level::new(crate::bind::Scope::default());
     let ctx = crate::bind::Ctx::new(&top);
     // The (old, new) row pairs the trigger runs for.

@@ -81,11 +81,7 @@ pub(super) const PG_PROC: &str = "oid:oid, proname:name, pronamespace:oid, proow
 const PG_ENUM: &str = "oid:oid, enumtypid:oid, enumsortorder:float4, enumlabel:name";
 pub(super) const PG_DEPEND: &str =
     "classid:oid, objid:oid, objsubid:int4, refclassid:oid, refobjid:oid, refobjsubid:int4, deptype:\"char\"";
-const PG_POLICY: &str = "oid:oid, polname:name, polrelid:oid, polcmd:\"char\", polpermissive:bool, polroles:oid[], \
-    polqual:pg_node_tree, polwithcheck:pg_node_tree";
 const PG_DEFAULT_ACL: &str = "oid:oid, defaclrole:oid, defaclnamespace:oid, defaclobjtype:\"char\", defaclacl:aclitem[]";
-const PG_POLICIES: &str = "schemaname:name, tablename:name, policyname:name, permissive:text, roles:name[], cmd:text, qual:text, \
-    with_check:text";
 const PG_PARTITIONED_TABLE: &str = "partrelid:oid, partstrat:\"char\", partnatts:int2, partdefid:oid, partattrs:int2vector, \
     partclass:oidvector, partcollation:oidvector, partexprs:pg_node_tree";
 const PG_STATISTIC_EXT: &str = "oid:oid, stxrelid:oid, stxname:name, stxnamespace:oid, stxowner:oid, stxkeys:int2vector, \
@@ -143,7 +139,7 @@ pub static DEFS: &[Def] = &[
     def!("pg_rewrite", 2618, 'r', super::depend::PG_REWRITE, super::depend::pg_rewrite),
     def!("pg_inherits", 2611, 'r', PG_INHERITS, pg_inherits),
     def!("pg_default_acl", 826, 'r', PG_DEFAULT_ACL, pg_default_acl),
-    def!("pg_policy", 3256, 'r', PG_POLICY, empty),
+    def!("pg_policy", 3256, 'r', super::policies::PG_POLICY, super::policies::pg_policy),
     def!("pg_statistic_ext", 3381, 'r', PG_STATISTIC_EXT, pg_statistic_ext),
     def!("pg_cast", 2605, 'r', PG_CAST, pg_cast),
     def!("pg_publication", 6104, 'r', PG_PUBLICATION, empty),
@@ -166,7 +162,7 @@ pub static DEFS: &[Def] = &[
     def!("pg_cursors", 12_011, 'v', PG_CURSORS, pg_cursors),
     def!("pg_locks", 12_012, 'v', PG_LOCKS, pg_locks),
     def!("pg_stat_activity", 12_013, 'v', PG_STAT_ACTIVITY, pg_stat_activity),
-    def!("pg_policies", 12_014, 'v', PG_POLICIES, empty),
+    def!("pg_policies", 12_014, 'v', super::policies::PG_POLICIES, super::policies::pg_policies),
 ];
 
 fn pg_inherits(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
@@ -410,6 +406,8 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("relhasrules", boolean(t.matview.is_some())),
                 ("relchecks", int2(checks)),
                 ("relhastriggers", boolean(triggers.contains(&t.oid) || !m.catalog.table_triggers(t.oid).is_empty())),
+                ("relrowsecurity", boolean(m.catalog.row_security(t.oid).0)),
+                ("relforcerowsecurity", boolean(m.catalog.row_security(t.oid).1)),
                 ("relreplident", ch(t.replident)),
                 (
                     "relpersistence",
@@ -1474,6 +1472,7 @@ fn pg_tables(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("tableowner", name(&crate::roles::owner_of(m.catalog, ctx.env, t.oid))),
                 ("hasindexes", boolean(!t.indexes.is_empty())),
                 ("hastriggers", boolean(triggers.contains(&t.oid))),
+                ("rowsecurity", boolean(m.catalog.row_security(t.oid).0)),
             ])
         })
         .collect())

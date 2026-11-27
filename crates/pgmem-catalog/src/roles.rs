@@ -253,6 +253,7 @@ impl Catalog {
                 new.clone_into(o);
             }
         }
+        self.rename_policy_role(old, new);
     }
 
     /// (role, member, admin option): `member` is a member of `role`.

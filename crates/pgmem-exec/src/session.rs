@@ -665,6 +665,7 @@ impl Session {
             Statement::CreateView(cv) if !cv.materialized => Binder::new(&catalog, param_types),
             _ => Binder::new(&catalog, param_types).with_locker(txn.locker()),
         };
+        binder.set_rls(crate::rls::RlsUser::from_env(&env));
         let top = Level::new(Scope::default());
         let ctx = Ctx::new(&top);
         crate::roles::check_statement(stmt, &catalog, &env, param_types)?;
@@ -1364,6 +1365,9 @@ fn write_command_name(stmt: &Statement) -> Option<&'static str> {
         Statement::DropFunction { .. } => "DROP FUNCTION",
         Statement::CreateTrigger(_) => "CREATE TRIGGER",
         Statement::DropTrigger { .. } => "DROP TRIGGER",
+        Statement::CreatePolicy(_) => "CREATE POLICY",
+        Statement::AlterPolicy(_) => "ALTER POLICY",
+        Statement::DropPolicy { .. } => "DROP POLICY",
         Statement::RenameTrigger { .. } => "ALTER TRIGGER",
         Statement::AlterExtension { .. } => "ALTER EXTENSION",
         Statement::AlterStatistics { .. } => "ALTER STATISTICS",

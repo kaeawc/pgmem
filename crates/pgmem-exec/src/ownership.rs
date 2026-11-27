@@ -455,7 +455,7 @@ fn check_comment(ck: &Checker, target: &ir::CommentTarget, name: &ir::ObjectName
             let table = ir::ObjectName(name.0[..name.0.len().saturating_sub(1)].to_vec());
             ck.relation_named(&table, Label::Relation, |_| true).map(drop)
         }
-        T::Constraint(table) | T::Trigger(table) => ck.relation_named(table, Label::Relation, |_| true).map(drop),
+        T::Constraint(table) | T::Trigger(table) | T::Policy(table) => ck.relation_named(table, Label::Relation, |_| true).map(drop),
         T::Schema => ck.require_schema(name.base()),
         T::Type | T::Domain => ck.require_type(name).map(drop),
         T::Function(types) => match ck.routine(name, types.as_deref())? {

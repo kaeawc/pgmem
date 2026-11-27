@@ -917,7 +917,9 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
         | ir::AlterTableAction::SetCompression { .. }
         | ir::AlterTableAction::ReplicaIdentity { .. }
         | ir::AlterTableAction::ClusterOn(_)
-        | ir::AlterTableAction::SetUnlogged(_) => {
+        | ir::AlterTableAction::SetUnlogged(_)
+        | ir::AlterTableAction::RowSecurity(_)
+        | ir::AlterTableAction::ForceRowSecurity(_) => {
             Err(SqlError::internal("identity, trigger, owner and attribute actions run in ddl::alter_table_action"))
         }
         ir::AlterTableAction::SetExpression { column, expr } => {

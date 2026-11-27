@@ -768,6 +768,7 @@ pub fn exec_insert(plan: &InsertPlan, txn: &mut Txn, params: &[Value], env: &Ses
                 }
             }
             apply_generated(&plan.rules, &mut row, &ctx)?;
+            crate::rls::check_new_row(&plan.rls_checks, &row, &ctx)?;
             // ON CONFLICT: look for a row (existing or inserted by this statement) clashing on
             // the arbiter index (or, for bare DO NOTHING, on any unique index).
             if let Some(oc) = &plan.on_conflict {
@@ -1014,6 +1015,8 @@ pub fn exec_update(plan: &UpdatePlan, txn: &mut Txn, params: &[Value], env: &Ses
             if is_partition && !crate::partition::satisfies_constraint(ctx.txn.catalog(), &table, &new_row, &ctx)? {
                 match state.moved_rows.borrow_mut().as_mut() {
                     Some(moved) => {
+                        // A moved row is checked like the UPDATE's other new rows.
+                        crate::rls::check_new_row(&plan.rls_checks, &new_row, &ctx)?;
                         let from = combined.iter().skip(width + system_values(table.oid, None, 0).len()).cloned().collect();
                         moved.push(crate::eval::MovedRow { leaf: table.oid, id, old, new: new_row, from });
                         continue;
@@ -1021,6 +1024,7 @@ pub fn exec_update(plan: &UpdatePlan, txn: &mut Txn, params: &[Value], env: &Ses
                     None => return Err(crate::partition::constraint_error(&table, &new_row)),
                 }
             }
+            crate::rls::check_new_row(&plan.rls_checks, &new_row, &ctx)?;
             check_not_null(&table, &new_row)?;
             check_checks(&plan.rules, &new_row, &ctx)?;
             check_view_options(&table, &plan.view_checks, &new_row, &ctx)?;

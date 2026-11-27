@@ -16,6 +16,7 @@ mod expr;
 mod extddl;
 mod funcddl;
 mod objddl;
+mod policy;
 mod query;
 mod relopts;
 mod roles;
@@ -1460,6 +1461,9 @@ pub(crate) fn lower_statement(stmt: sq::Statement) -> SqlResult<Statement> {
             Statement::AlterRelOptions { object: ObjectType::Table, name: object_name(&at.name)?, if_exists: at.if_exists, reset, options }
         }
         S::AlterTable(at) => Statement::AlterTable(Box::new(ddl::lower_alter_table(at)?)),
+        S::CreatePolicy(p) => policy::lower_create(p)?,
+        S::AlterPolicy(p) => policy::lower_alter(p)?,
+        S::DropPolicy(p) => policy::lower_drop(&p)?,
         S::CreateSequence { name, if_not_exists, sequence_options, .. } => {
             Statement::CreateSequence(Box::new(ddl::lower_create_sequence(&name, if_not_exists, &sequence_options)?))
         }

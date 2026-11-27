@@ -123,6 +123,7 @@ mod regrole_default_acl;
 mod reloptions;
 mod returning_star;
 mod roles_privileges;
+mod row_security;
 mod savepoint;
 mod schemas;
 mod select_star;

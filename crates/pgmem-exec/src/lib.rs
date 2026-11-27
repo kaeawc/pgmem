@@ -32,6 +32,7 @@ pub mod portal;
 mod privilege_uses;
 pub mod reg;
 mod reloptions;
+pub mod rls;
 pub mod roles;
 pub mod run;
 pub mod sequences;
