@@ -8,13 +8,15 @@
 use pgmem_ir::Expr;
 use pgmem_types::usertype::{EnumLabel, Field, UserKind, UserType};
 use pgmem_types::{SqlError, SqlResult, Type, Value, code};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+mod extmembers;
 mod partitions;
 mod roles;
+pub use extmembers::{ExtMember, ExtMemberClass};
 pub use partitions::{PartitionBound, PartitionKey, PartitionKeyPart, PartitionOf, PartitionStrategy, RangeDatum};
-pub use roles::{DefaultPrivilege, ExtensionDef, Grant, GrantObject, RoleDef};
+pub use roles::{DefaultItem, DefaultPrivilege, ExtensionDef, Grant, GrantObject, RoleDef};
 
 pub type Oid = u32;
 
@@ -209,6 +211,29 @@ pub struct IndexDef {
     pub replica: bool,
     /// `pg_class.reloptions` (`name=value`, in Postgres' order); empty means NULL.
     pub reloptions: Vec<String>,
+}
+
+impl IndexDef {
+    /// `pg_index.indkey`: per key, the attnum of a plain column and 0 for an expression.
+    /// A mixed index stores every key in `exprs`; its bare-column keys are plain columns.
+    pub fn key_attnums(&self, table: &TableDef) -> Vec<usize> {
+        if self.exprs.is_empty() {
+            return self.columns.iter().map(|c| c + 1).collect();
+        }
+        self.exprs.iter().map(|e| Self::plain_column(table, e).map_or(0, |c| c + 1)).collect()
+    }
+
+    /// The keys that are real expressions (`pg_index.indexprs`), leaving out bare columns.
+    pub fn true_exprs<'a>(&'a self, table: &'a TableDef) -> impl Iterator<Item = &'a Expr> {
+        self.exprs.iter().filter(move |e| Self::plain_column(table, e).is_none())
+    }
+
+    fn plain_column(table: &TableDef, e: &Expr) -> Option<usize> {
+        match e {
+            Expr::Column(parts) if parts.len() == 1 => table.column_index(&parts[0]),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -446,6 +471,41 @@ pub struct TriggerDef {
     pub parent: Oid,
 }
 
+/// An extended statistics object (`pg_statistic_ext`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StatisticsDef {
+    pub oid: Oid,
+    pub name: String,
+    pub schema: String,
+    /// The table the statistics are on.
+    pub table: Oid,
+    /// Plain column keys (physical positions, in the order Postgres stores them: columns
+    /// first, ascending), `stxkeys`.
+    pub columns: Vec<usize>,
+    /// Expression keys, unbound, in key order after the columns (`stxexprs`).
+    pub exprs: Vec<Expr>,
+    /// `stxkind`: `d` (ndistinct), `f` (dependencies), `m` (mcv), `e` (expressions).
+    pub kinds: Vec<char>,
+    /// `stxstattarget`; None is the default (NULL).
+    pub target: Option<i16>,
+}
+
+/// A user-defined cast (`pg_cast` rows with a user OID).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CastDef {
+    pub oid: Oid,
+    pub source: Type,
+    pub target: Type,
+    /// The conversion function, None for binary-coercible and I/O-conversion casts.
+    pub function: Option<Oid>,
+    /// `castcontext`: `i`, `a` or `e`.
+    pub context: char,
+    /// `castmethod`: `f` (function), `b` (binary) or `i` (I/O conversion).
+    pub method: char,
+    /// The number of arguments of the conversion function (1 to 3).
+    pub function_args: usize,
+}
+
 /// A named CHECK constraint of a domain; `expr` refers to the value as `VALUE`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DomainCheck {
@@ -629,6 +689,10 @@ pub struct Catalog {
     functions: BTreeMap<Oid, Arc<FunctionDef>>,
     /// Triggers by OID.
     triggers: BTreeMap<Oid, Arc<TriggerDef>>,
+    /// Extended statistics objects by OID.
+    statistics: BTreeMap<Oid, Arc<StatisticsDef>>,
+    /// User-defined casts by OID.
+    casts: BTreeMap<Oid, Arc<CastDef>>,
     /// Roles created with CREATE ROLE (the session user and predefined roles are implicit).
     roles: BTreeMap<String, Arc<RoleDef>>,
     /// (role, member, admin option).
@@ -639,12 +703,18 @@ pub struct Catalog {
     owners: BTreeMap<Oid, String>,
     /// Installed extensions (plpgsql is implicit).
     extensions: BTreeMap<String, ExtensionDef>,
+    /// Objects attached to an extension (`ALTER EXTENSION ... ADD`), by object OID.
+    ext_members: BTreeMap<Oid, ExtMember>,
     /// `COMMENT ON` text by (classoid, objoid, objsubid), as in `pg_description`.
     comments: BTreeMap<(Oid, Oid, i32), String>,
     /// Partition keys of partitioned tables, by table OID.
     partition_keys: BTreeMap<Oid, PartitionKey>,
     /// Partitions' parents and bounds, by partition OID.
     partition_bounds: BTreeMap<Oid, PartitionOf>,
+    /// Partition indexes' parent indexes (`pg_inherits` of indexes), by child index OID.
+    index_parents: BTreeMap<Oid, Oid>,
+    /// Partitioned indexes not yet valid (`CREATE INDEX ... ON ONLY` before every partition has one).
+    invalid_indexes: BTreeSet<Oid>,
     next_oid: Oid,
 }
 
@@ -674,15 +744,20 @@ impl Catalog {
             types: BTreeMap::new(),
             functions: BTreeMap::new(),
             triggers: BTreeMap::new(),
+            statistics: BTreeMap::new(),
+            casts: BTreeMap::new(),
             roles: BTreeMap::new(),
             members: Vec::new(),
             grants: Vec::new(),
             default_privileges: Vec::new(),
             owners: BTreeMap::new(),
             extensions: BTreeMap::new(),
+            ext_members: BTreeMap::new(),
             comments: BTreeMap::new(),
             partition_keys: BTreeMap::new(),
             partition_bounds: BTreeMap::new(),
+            index_parents: BTreeMap::new(),
+            invalid_indexes: BTreeSet::new(),
             next_oid: FIRST_USER_OID,
         }
     }
@@ -977,14 +1052,25 @@ impl Catalog {
     }
 
     /// ruleutils' `FunctionIsVisible` for a function `f`: the first schema on the search path
-    /// with a function of that name and argument types holds `f`.
-    pub fn function_visible(&self, f: &FunctionDef) -> bool {
+    /// with a function of that name and argument types holds `f`. Functions are never looked up
+    /// in the temporary schema, and pg_catalog (searched in its path position) holds the builtins:
+    /// `builtin(name, input_types)` says whether one with that signature exists.
+    pub fn function_visible(&self, f: &FunctionDef, builtin: &dyn Fn(&str, &[Type]) -> bool) -> bool {
         let types = f.input_types();
+        let temp = pgmem_types::context::search_path().temp_schema;
         for e in self.search_path() {
-            if let PathEntry::Schema(s) = e
-                && self.functions.values().any(|g| g.schema == s && g.name == f.name && g.input_types() == types)
-            {
-                return s == f.schema;
+            match e {
+                PathEntry::System => {
+                    if builtin(&f.name, &types) {
+                        return false;
+                    }
+                }
+                PathEntry::Schema(s) if temp.as_deref() == Some(s.as_str()) => {}
+                PathEntry::Schema(s) => {
+                    if self.functions.values().any(|g| g.schema == s && g.name == f.name && g.input_types() == types) {
+                        return s == f.schema;
+                    }
+                }
             }
         }
         false
@@ -1137,8 +1223,12 @@ impl Catalog {
         if name.0.len() > 1 {
             return in_schema(&self.resolve_schema_name(&name.0[name.0.len() - 2]));
         }
+        let temp = pgmem_types::context::search_path().temp_schema;
         for e in self.search_path() {
-            if let PathEntry::Schema(s) = e {
+            // Functions are never resolved through pg_temp implicitly.
+            if let PathEntry::Schema(s) = e
+                && temp.as_deref() != Some(s.as_str())
+            {
                 let found = in_schema(&s);
                 if !found.is_empty() {
                     return found;
@@ -1155,6 +1245,7 @@ impl Catalog {
 
     pub fn drop_function(&mut self, oid: Oid) -> Option<Arc<FunctionDef>> {
         self.triggers.retain(|_, t| t.function != oid);
+        self.casts.retain(|_, c| c.function != Some(oid));
         self.grants.retain(|g| g.object != GrantObject::Function(oid));
         self.owners.remove(&oid);
         self.functions.remove(&oid)
@@ -1177,6 +1268,48 @@ impl Catalog {
 
     pub fn drop_trigger(&mut self, oid: Oid) -> Option<Arc<TriggerDef>> {
         self.triggers.remove(&oid)
+    }
+
+    /// Extended statistics objects, by OID.
+    pub fn statistics(&self) -> impl Iterator<Item = &Arc<StatisticsDef>> {
+        self.statistics.values()
+    }
+
+    pub fn statistics_by_oid(&self, oid: Oid) -> Option<&Arc<StatisticsDef>> {
+        self.statistics.get(&oid)
+    }
+
+    pub fn find_statistics(&self, schema: &str, name: &str) -> Option<&Arc<StatisticsDef>> {
+        self.statistics.values().find(|s| s.schema == schema && s.name == name)
+    }
+
+    /// Adds or replaces (same OID) a statistics object.
+    pub fn put_statistics(&mut self, def: StatisticsDef) {
+        self.statistics.insert(def.oid, Arc::new(def));
+    }
+
+    pub fn drop_statistics(&mut self, oid: Oid) -> Option<Arc<StatisticsDef>> {
+        self.comments.retain(|(_, o, _), _| *o != oid);
+        self.owners.remove(&oid);
+        self.statistics.remove(&oid)
+    }
+
+    /// User-defined casts, by OID.
+    pub fn casts(&self) -> impl Iterator<Item = &Arc<CastDef>> {
+        self.casts.values()
+    }
+
+    pub fn find_cast(&self, source: &Type, target: &Type) -> Option<&Arc<CastDef>> {
+        self.casts.values().find(|c| c.source == *source && c.target == *target)
+    }
+
+    pub fn put_cast(&mut self, def: CastDef) {
+        self.casts.insert(def.oid, Arc::new(def));
+    }
+
+    pub fn drop_cast(&mut self, oid: Oid) -> Option<Arc<CastDef>> {
+        self.comments.retain(|(_, o, _), _| *o != oid);
+        self.casts.remove(&oid)
     }
 
     /// Types share `pg_type`'s namespace with the row types of tables and views.
@@ -1205,7 +1338,9 @@ impl Catalog {
     }
 
     pub fn drop_type(&mut self, name: &QualName) -> Option<Arc<TypeDef>> {
-        self.types.remove(name)
+        let dropped = self.types.remove(name)?;
+        self.casts.retain(|_, c| !type_mentions(&c.source, dropped.oid) && !type_mentions(&c.target, dropped.oid));
+        Some(dropped)
     }
 
     /// Fails like Postgres when a new relation's row type would collide with a type.
@@ -1238,7 +1373,14 @@ impl Catalog {
         let dropped = self.tables.remove(name)?;
         self.partition_keys.remove(&dropped.oid);
         self.partition_bounds.remove(&dropped.oid);
+        for idx in &dropped.indexes {
+            self.forget_index(idx.oid);
+        }
         self.triggers.retain(|_, t| t.table != dropped.oid);
+        let gone: Vec<Oid> = self.statistics.values().filter(|s| s.table == dropped.oid).map(|s| s.oid).collect();
+        for oid in gone {
+            self.drop_statistics(oid);
+        }
         self.grants.retain(|g| g.object.relation_oid() != Some(dropped.oid));
         self.owners.remove(&dropped.oid);
         // Sequences owned by the table's columns go with it.

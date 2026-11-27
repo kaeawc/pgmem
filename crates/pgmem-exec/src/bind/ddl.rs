@@ -67,6 +67,18 @@ fn check_expr_binds(b: &Binder, table: &TableDef, e: &ir::Expr, clause: Clause) 
     Ok(())
 }
 
+/// Binds `e` against the row of `table` (an expression stored in the catalog) and returns its
+/// type; `what` names aggregates in the error (`statistics expressions`).
+pub(crate) fn bind_catalog_expr(b: &Binder, table: &TableDef, e: &ir::Expr, what: &str) -> SqlResult<Type> {
+    let level = Level::new(physical_scope(table, &table.name));
+    let ctx = Ctx::new(&level).with_clause(Clause::Other);
+    let (bound, ty) = b.bind_expr(e, &ctx)?;
+    if super::expr::contains_agg(&bound) {
+        return Err(SqlError::new(code::GROUPING_ERROR, format!("aggregate functions are not allowed in {what}")));
+    }
+    Ok(ty)
+}
+
 fn check_default_binds(b: &Binder, col: &ColumnDef, e: &ir::Expr) -> SqlResult<()> {
     let empty = Level::new(Scope::default());
     let ctx = Ctx::new(&empty).with_clause(Clause::Default);

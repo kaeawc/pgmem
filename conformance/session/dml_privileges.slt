@@ -1,0 +1,167 @@
+# Privileges for what DML reads (UPDATE ... FROM, DELETE ... USING, subqueries, INSERT ...
+# SELECT, WITH queries), MERGE (each action's privilege, SELECT on columns read) and COPY.
+# Roles are cluster-wide on PostgreSQL, so names are unique and dropped at the end.
+
+statement ok
+DROP ROLE IF EXISTS conf_dmlp_user
+
+statement ok
+CREATE ROLE conf_dmlp_user
+
+statement ok
+CREATE TABLE dmlpt (id int PRIMARY KEY, v text, sec text)
+
+statement ok
+CREATE TABLE dmlps (id int, w text)
+
+statement ok
+CREATE TABLE dmlpc (id int, pub text, sec text)
+
+statement ok
+INSERT INTO dmlpt VALUES (1, 'a', 's'); INSERT INTO dmlps VALUES (1, 'b'); INSERT INTO dmlpc VALUES (1, 'p', 's')
+
+statement ok
+GRANT SELECT, INSERT, UPDATE, DELETE ON dmlpt TO conf_dmlp_user
+
+statement ok
+GRANT SELECT (id, pub) ON dmlpc TO conf_dmlp_user
+
+statement ok
+SET ROLE conf_dmlp_user
+
+statement error 42501 permission denied for table dmlps
+UPDATE dmlpt SET v = 'x' FROM dmlps WHERE dmlps.id = dmlpt.id
+
+statement error 42501 permission denied for table dmlps
+DELETE FROM dmlpt USING dmlps WHERE dmlps.id = dmlpt.id
+
+statement error 42501 permission denied for table dmlps
+UPDATE dmlpt SET v = 'x' WHERE id IN (SELECT id FROM dmlps)
+
+statement error 42501 permission denied for table dmlps
+UPDATE dmlpt SET v = (SELECT w FROM dmlps)
+
+statement error 42501 permission denied for table dmlps
+DELETE FROM dmlpt RETURNING (SELECT w FROM dmlps)
+
+statement error 42501 permission denied for table dmlps
+INSERT INTO dmlpt SELECT id, w, w FROM dmlps
+
+statement error 42501 permission denied for table dmlps
+INSERT INTO dmlpt VALUES (1, 'z') ON CONFLICT (id) DO UPDATE SET v = (SELECT w FROM dmlps)
+
+statement error 42501 permission denied for table dmlps
+WITH x AS (DELETE FROM dmlps RETURNING *) SELECT 1
+
+statement ok
+WITH x AS (SELECT * FROM dmlps) UPDATE dmlpt SET v = 'x'
+
+statement error 42501 permission denied for table dmlps
+WITH x AS (SELECT * FROM dmlps) SELECT * FROM x
+
+statement error 42501 permission denied for table dmlps
+UPDATE dmlpt SET v = 'x' WHERE id = ANY (SELECT id FROM dmlps)
+
+statement error 42501 permission denied for table dmlps
+DELETE FROM dmlpt WHERE id < ALL (SELECT id FROM dmlps)
+
+statement error 42501 permission denied for table dmlps
+SELECT string_agg(v, ',' ORDER BY (SELECT w FROM dmlps)) FROM dmlpt
+
+statement error 42501 permission denied for table dmlps
+SELECT count(*) OVER (PARTITION BY (SELECT w FROM dmlps)) FROM dmlpt
+
+statement error 42501 permission denied for table dmlps
+SELECT count(*) OVER w FROM dmlpt WINDOW w AS (ORDER BY (SELECT w FROM dmlps))
+
+statement error 42501 permission denied for table dmlps
+SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY (SELECT id FROM dmlps)) FROM dmlpt
+
+statement ok
+UPDATE dmlpt SET v = dmlpc.pub FROM dmlpc WHERE dmlpc.id = dmlpt.id
+
+statement error 42501 permission denied for table dmlpc
+UPDATE dmlpt SET v = dmlpc.sec FROM dmlpc WHERE dmlpc.id = dmlpt.id
+
+statement error 42501 permission denied for table dmlpc
+DELETE FROM dmlpt USING dmlpc WHERE dmlpc.sec = dmlpt.v
+
+statement ok
+MERGE INTO dmlpt USING dmlpc ON dmlpt.id = dmlpc.id WHEN MATCHED THEN UPDATE SET v = dmlpc.pub
+
+statement error 42501 permission denied for table dmlps
+MERGE INTO dmlpt USING dmlps ON dmlpt.id = dmlps.id WHEN MATCHED THEN DO NOTHING
+
+statement error 42501 permission denied for table dmlps
+COPY dmlps TO STDOUT
+
+statement error 42501 permission denied for table dmlps
+COPY (SELECT * FROM dmlps) TO STDOUT
+
+statement error 42501 permission denied for table dmlps
+COPY dmlps FROM STDIN
+
+statement ok
+RESET ROLE
+
+statement ok
+REVOKE ALL ON dmlpt FROM conf_dmlp_user
+
+statement ok
+GRANT UPDATE (v), SELECT (id) ON dmlpt TO conf_dmlp_user
+
+statement ok
+GRANT SELECT ON dmlps TO conf_dmlp_user
+
+statement ok
+SET ROLE conf_dmlp_user
+
+statement ok
+UPDATE dmlpt SET v = 'x' FROM dmlps
+
+statement ok
+MERGE INTO dmlpt USING dmlps ON dmlpt.id = dmlps.id WHEN MATCHED THEN UPDATE SET v = dmlps.w
+
+statement error 42501 permission denied for table dmlpt
+MERGE INTO dmlpt USING dmlps ON dmlpt.id = dmlps.id WHEN MATCHED THEN UPDATE SET sec = dmlps.w
+
+statement error 42501 permission denied for table dmlpt
+MERGE INTO dmlpt USING dmlps ON dmlpt.id = dmlps.id WHEN MATCHED AND dmlpt.sec = 'x' THEN UPDATE SET v = dmlps.w
+
+statement error 42501 permission denied for table dmlpt
+MERGE INTO dmlpt USING dmlps ON dmlpt.id = dmlps.id WHEN NOT MATCHED THEN INSERT VALUES (dmlps.id, dmlps.w)
+
+statement error 42501 permission denied for table dmlpt
+MERGE INTO dmlpt USING dmlps ON dmlpt.id = dmlps.id WHEN MATCHED THEN DELETE
+
+statement error 42501 permission denied for table dmlpt
+COPY dmlpt TO STDOUT
+
+statement error 42501 permission denied for table dmlpt
+COPY dmlpt (sec) TO STDOUT
+
+statement error 42501 permission denied for table dmlpt
+COPY dmlpt (v) FROM STDIN
+
+statement ok
+RESET ROLE
+
+statement ok
+SET ROLE conf_dmlp_user
+
+query
+SELECT grantee, table_name, privilege_type FROM information_schema.role_table_grants
+WHERE table_name IN ('dmlpt', 'dmlps') ORDER BY 1, 2, 3
+----
+grantee:name | table_name:name | privilege_type:varchar
+conf_dmlp_user | dmlps | SELECT
+
+statement ok
+RESET ROLE
+
+# cleanup
+statement ok
+DROP OWNED BY conf_dmlp_user
+
+statement ok
+DROP ROLE conf_dmlp_user

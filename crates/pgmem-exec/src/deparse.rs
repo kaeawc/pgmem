@@ -182,9 +182,10 @@ pub fn deparse_index(catalog: &Catalog, table: &TableDef, index: &IndexDef) -> S
         }
     }
     let mut s = format!(
-        "CREATE {}INDEX {} ON {}.{} USING {} ({})",
+        "CREATE {}INDEX {} ON {}{}.{} USING {} ({})",
         if index.unique { "UNIQUE " } else { "" },
         quote_ident(&index.name),
+        if catalog.is_partitioned(table.oid) { "ONLY " } else { "" },
         quote_ident(&table.schema),
         quote_ident(&table.name),
         index.method,

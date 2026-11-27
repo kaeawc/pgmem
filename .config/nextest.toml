@@ -10,3 +10,16 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 
 [profile.ci.junit]
 path = "junit.xml"
+
+# Tests that create cluster-wide objects (roles, default privileges) and read them back must not
+# overlap when run against a shared PostgreSQL server: nextest runs every test in its own process.
+[test-groups]
+cluster-roles = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(/^regrole_default_acl::/)'
+test-group = 'cluster-roles'
+
+[[profile.ci.overrides]]
+filter = 'test(/^regrole_default_acl::/)'
+test-group = 'cluster-roles'
