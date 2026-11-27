@@ -1,7 +1,7 @@
 //! The bridge between catalog type definitions and the I/O-level [`Registry`] that the
 //! session installs for each statement: user types plus the row types of tables.
 
-use crate::catalog_views::rowtype_oid_of;
+use crate::catalog_views::{rowtype_array_oid_of, rowtype_oid_of};
 use pgmem_catalog::{Catalog, TypeDef, TypeDefKind};
 use pgmem_types::usertype::{Field, Registry, UserKind, UserType};
 use pgmem_types::{SqlError, SqlResult, Type, code};
@@ -16,7 +16,7 @@ pub fn registry(catalog: &Catalog, uncommitted_enum_values: &HashSet<u32>) -> Ar
         let fields = t.live_columns().map(|(_, c)| Field { name: c.name.clone(), ty: c.ty.clone(), typmod: c.typmod }).collect();
         Arc::new(UserType {
             oid: rowtype_oid_of(t.oid),
-            array_oid: 0,
+            array_oid: rowtype_array_oid_of(t.oid),
             name: t.name.clone(),
             schema: t.schema.clone(),
             kind: UserKind::Composite { fields, relid: t.oid },
@@ -34,11 +34,16 @@ fn type_in(catalog: &Catalog, schema: &str, name: &str) -> Option<Type> {
     if let Some(t) = catalog.type_by_name(schema, name) {
         return Some(t.as_type());
     }
-    // `_name` is a user type's array type.
-    if let Some(elem) = name.strip_prefix('_').and_then(|n| catalog.type_by_name(schema, n)) {
-        return Some(Type::array_of(elem.as_type()));
+    if let Some(t) = catalog.table(schema, name) {
+        return Some(Type::Composite(rowtype_oid_of(t.oid)));
     }
-    catalog.table(schema, name).map(|t| Type::Composite(rowtype_oid_of(t.oid)))
+    // The array type of a user type or table row type, by its pg_type name (`_name`).
+    let owner = catalog.array_type_owner(schema, name)?;
+    let elem = match catalog.table_by_oid(owner) {
+        Some(t) => Type::Composite(rowtype_oid_of(t.oid)),
+        None => catalog.type_by_oid(owner)?.as_type(),
+    };
+    Some(Type::array_of(elem))
 }
 
 /// A user type definition by name, or 42704.

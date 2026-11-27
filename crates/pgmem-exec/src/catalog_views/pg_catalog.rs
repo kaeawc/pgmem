@@ -712,7 +712,7 @@ fn pg_type(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             ("typcategory", ch('C')),
             ("typdelim", ch(',')),
             ("typrelid", oid(relid)),
-            ("typarray", oid(super::depend::rowtype_array_oid(relid))),
+            ("typarray", oid(super::model::rowtype_array_oid(relid))),
             ("typinput", regproc("record_in")),
             ("typoutput", regproc("record_out")),
             ("typreceive", regproc("record_recv")),
@@ -726,8 +726,8 @@ fn pg_type(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         ]));
         // ... and its array type.
         rows.push(s.row(vec![
-            ("oid", oid(super::depend::rowtype_array_oid(relid))),
-            ("typname", name(&format!("_{relname}"))),
+            ("oid", oid(super::model::rowtype_array_oid(relid))),
+            ("typname", name(&m.catalog.array_type_name(relid, relname))),
             ("typnamespace", oid(m.namespace(schema))),
             ("typlen", Value::Int2(-1)),
             ("typbyval", boolean(false)),
@@ -947,7 +947,7 @@ fn user_type_rows(s: &Spec, catalog: &pgmem_catalog::Catalog, t: &pgmem_catalog:
     };
     let mut arr: Vec<(&'static str, Value)> = vec![
         ("oid", oid(t.array_oid)),
-        ("typname", name(&format!("_{}", t.name))),
+        ("typname", name(&catalog.array_type_name(t.oid, &t.name))),
         ("typlen", Value::Int2(-1)),
         ("typbyval", boolean(false)),
         ("typtype", ch('b')),

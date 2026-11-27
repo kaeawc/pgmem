@@ -11,6 +11,7 @@ use pgmem_types::{SqlError, SqlResult, Type, Value, code};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+mod arraynames;
 mod extmembers;
 mod inherit;
 mod partitions;
@@ -773,6 +774,8 @@ pub struct Catalog {
     index_parents: BTreeMap<Oid, Oid>,
     /// Partitioned indexes not yet valid (`CREATE INDEX ... ON ONLY` before every partition has one).
     invalid_indexes: BTreeSet<Oid>,
+    /// Array type names of tables, views and user types, by owner OID (see `arraynames`).
+    array_names: BTreeMap<Oid, String>,
     next_oid: Oid,
 }
 
@@ -825,6 +828,7 @@ impl Catalog {
             row_security: BTreeMap::new(),
             index_parents: BTreeMap::new(),
             invalid_indexes: BTreeSet::new(),
+            array_names: BTreeMap::new(),
             next_oid: FIRST_USER_OID,
         }
     }
@@ -1384,10 +1388,8 @@ impl Catalog {
     /// Types share `pg_type`'s namespace with the row types of tables and views.
     fn ensure_type_name_free(&self, schema: &str, name: &str) -> SqlResult<()> {
         let key = QualName::new(schema, name);
-        let taken = self.types.contains_key(&key)
-            || self.tables.contains_key(&key)
-            || self.views.contains_key(&key)
-            || self.types.values().any(|t| t.schema == schema && format!("_{}", t.name) == name);
+        // An array type of that name is renamed out of the way (by `create_type`).
+        let taken = self.types.contains_key(&key) || self.tables.contains_key(&key) || self.views.contains_key(&key);
         if taken {
             return Err(SqlError::new(code::DUPLICATE_OBJECT, format!("type \"{name}\" already exists")));
         }
@@ -1396,18 +1398,24 @@ impl Catalog {
 
     pub fn create_type(&mut self, def: TypeDef) -> SqlResult<()> {
         self.ensure_type_name_free(&def.schema, &def.name)?;
+        self.move_array_type_name(&def.schema, &def.name);
+        self.name_array_type(def.oid, &def.schema, &def.name);
         self.types.insert(QualName::new(&def.schema, &def.name), Arc::new(def));
         Ok(())
     }
 
     /// Replaces a type definition (ALTER TYPE / ALTER DOMAIN); the name may change.
     pub fn replace_type(&mut self, old: &QualName, def: TypeDef) {
+        if old.schema == def.schema && old.name != def.name {
+            self.rename_array_type(def.oid, &def.schema, &def.name);
+        }
         self.types.remove(old);
         self.types.insert(QualName::new(&def.schema, &def.name), Arc::new(def));
     }
 
     pub fn drop_type(&mut self, name: &QualName) -> Option<Arc<TypeDef>> {
         let dropped = self.types.remove(name)?;
+        self.array_names.remove(&dropped.oid);
         self.casts.retain(|_, c| !type_mentions(&c.source, dropped.oid) && !type_mentions(&c.target, dropped.oid));
         Some(dropped)
     }
@@ -1428,18 +1436,24 @@ impl Catalog {
         for idx in &def.indexes {
             self.ensure_free(&def.schema, &idx.name)?;
         }
+        self.move_array_type_name(&def.schema, &def.name);
+        self.name_array_type(def.oid, &def.schema, &def.name);
         self.tables.insert(def.qualified(), Arc::new(def));
         Ok(())
     }
 
     /// Replaces an existing table definition (ALTER TABLE). The name may change (RENAME).
     pub fn replace_table(&mut self, old: &QualName, def: TableDef) {
+        if old.schema == def.schema && old.name != def.name {
+            self.rename_array_type(def.oid, &def.schema, &def.name);
+        }
         self.tables.remove(old);
         self.tables.insert(def.qualified(), Arc::new(def));
     }
 
     pub fn drop_table(&mut self, name: &QualName) -> Option<Arc<TableDef>> {
         let dropped = self.tables.remove(name)?;
+        self.array_names.remove(&dropped.oid);
         self.partition_keys.remove(&dropped.oid);
         self.partition_bounds.remove(&dropped.oid);
         self.drop_inheritance(&dropped);
@@ -1467,12 +1481,25 @@ impl Catalog {
         }
         self.ensure_free(&def.schema, &def.name)?;
         self.ensure_rowtype_free(&def.schema, &def.name)?;
+        self.move_array_type_name(&def.schema, &def.name);
+        self.name_array_type(def.oid, &def.schema, &def.name);
         self.views.insert(key, Arc::new(def));
         Ok(())
     }
 
+    /// Replaces a view definition keeping its OID, grants and triggers (ALTER VIEW RENAME,
+    /// SET SCHEMA); the name and schema may change.
+    pub fn replace_view(&mut self, old: &QualName, def: ViewDef) {
+        if old.schema == def.schema && old.name != def.name {
+            self.rename_array_type(def.oid, &def.schema, &def.name);
+        }
+        self.views.remove(old);
+        self.views.insert(QualName::new(&def.schema, &def.name), Arc::new(def));
+    }
+
     pub fn drop_view(&mut self, name: &QualName) -> Option<Arc<ViewDef>> {
         let dropped = self.views.remove(name)?;
+        self.array_names.remove(&dropped.oid);
         self.triggers.retain(|_, t| t.table != dropped.oid);
         self.grants.retain(|g| g.object.relation_oid() != Some(dropped.oid));
         self.owners.remove(&dropped.oid);
@@ -1580,7 +1607,7 @@ pub fn choose_object_name(name1: &str, columns: &[&str], label: &str, mut free: 
 
 /// The longest prefix of `s` of at most `len` bytes that ends on a character boundary
 /// (`pg_mbcliplen`).
-fn clip(s: &str, len: usize) -> &str {
+pub(crate) fn clip(s: &str, len: usize) -> &str {
     let mut end = len.min(s.len());
     while !s.is_char_boundary(end) {
         end -= 1;

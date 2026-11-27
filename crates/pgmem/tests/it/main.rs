@@ -129,6 +129,7 @@ mod reloptions;
 mod returning_star;
 mod roles_privileges;
 mod row_security;
+mod row_types;
 mod savepoint;
 mod schemas;
 mod select_star;

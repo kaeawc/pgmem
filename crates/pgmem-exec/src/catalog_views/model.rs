@@ -27,6 +27,7 @@ pub const C_COLLATION_OID: Oid = 950;
 const NOT_NULL_OID_BASE: Oid = 0x4000_0000;
 const ATTRDEF_OID_BASE: Oid = 0x5000_0000;
 const ROWTYPE_OID_BASE: Oid = 0x6000_0000;
+const ROWTYPE_ARRAY_OID_BASE: Oid = 0x6800_0000;
 const PER_TABLE: Oid = 1700;
 
 pub fn not_null_oid(table: Oid, attnum: usize) -> Oid {
@@ -40,6 +41,24 @@ pub fn attrdef_oid(table: Oid, attnum: usize) -> Oid {
 /// The OID of a table's composite row type.
 pub fn rowtype_oid(table: Oid) -> Oid {
     ROWTYPE_OID_BASE.wrapping_add(table)
+}
+
+/// The OID of the array type of a relation's row type.
+pub fn rowtype_array_oid(relation: Oid) -> Oid {
+    ROWTYPE_ARRAY_OID_BASE.wrapping_add(relation)
+}
+
+/// The relation OID a row type OID ([`rowtype_oid`]) or row type array OID
+/// ([`rowtype_array_oid`]) was derived from, and whether it is the array: no check that the
+/// relation exists.
+pub fn rowtype_relid(type_oid: Oid) -> Option<(Oid, bool)> {
+    if type_oid >= ROWTYPE_ARRAY_OID_BASE {
+        Some((type_oid - ROWTYPE_ARRAY_OID_BASE, true))
+    } else if type_oid >= ROWTYPE_OID_BASE {
+        Some((type_oid - ROWTYPE_OID_BASE, false))
+    } else {
+        None
+    }
 }
 
 /// Postgres 18 names a column's NOT NULL constraint `<table>_<column>_not_null`.

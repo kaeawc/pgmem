@@ -260,13 +260,7 @@ pub(crate) fn rename_view(
             }
             let mut def = (*v).clone();
             def.name = new_name.to_owned();
-            let triggers: Vec<_> = txn.catalog().triggers().filter(|t| t.table == v.oid).cloned().collect();
-            let cat = txn.catalog_mut();
-            cat.drop_view(&QualName::new(&v.schema, &v.name));
-            cat.create_view(def, false)?;
-            for t in triggers {
-                cat.put_trigger((*t).clone());
-            }
+            txn.catalog_mut().replace_view(&QualName::new(&v.schema, &v.name), def);
             Ok(tag(what))
         }
         Some(Relation::Table(t)) if materialized && t.matview.is_some() => {

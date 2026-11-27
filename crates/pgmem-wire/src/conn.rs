@@ -529,7 +529,11 @@ impl Conn {
                 let stmt = self.session.prepared(&name).ok_or_else(|| {
                     SqlError::new(code::INVALID_SQL_STATEMENT_NAME, format!("prepared statement \"{name}\" does not exist"))
                 })?;
-                let oids: Vec<u32> = stmt.param_types.iter().map(Type::oid).collect();
+                // Array types of user types get their OIDs from the session's types.
+                let oids: Vec<u32> = {
+                    let _ctx = pgmem_types::context::enter(self.session.format_context());
+                    stmt.param_types.iter().map(Type::oid).collect()
+                };
                 self.out.parameter_description(&oids);
                 match &stmt.columns {
                     Some(cols) => self.row_description(cols, &[]),

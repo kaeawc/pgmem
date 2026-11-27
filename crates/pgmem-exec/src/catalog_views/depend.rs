@@ -7,7 +7,7 @@
 
 use super::model::{
     ATTRDEF_CLASS_OID, CLASS_CLASS_OID, CONSTRAINT_CLASS_OID, INFORMATION_SCHEMA_NAMESPACE_OID, Model, NAMESPACE_CLASS_OID, PROC_CLASS_OID,
-    TRIGGER_CLASS_OID, attrdef_oid, rowtype_oid,
+    TRIGGER_CLASS_OID, attrdef_oid, rowtype_array_oid, rowtype_oid, rowtype_relid,
 };
 use super::{Spec, ch, name, oid, snapshot, txt};
 use crate::eval::EvalCtx;
@@ -30,28 +30,15 @@ pub const PLPGSQL_EXTENSION_OID: Oid = 13_558;
 const PG_TOAST_NAMESPACE_OID: Oid = 99;
 
 const RULE_OID_BASE: Oid = 0x3000_0000;
-const ROWTYPE_OID_BASE: Oid = 0x6000_0000;
-const ROWTYPE_ARRAY_OID_BASE: Oid = 0x6800_0000;
 
 /// The OID of a view's (or materialized view's) `_RETURN` rule.
 pub fn rule_oid(relation: Oid) -> Oid {
     RULE_OID_BASE.wrapping_add(relation)
 }
 
-/// The OID of the array type of a relation's row type.
-pub fn rowtype_array_oid(relation: Oid) -> Oid {
-    ROWTYPE_ARRAY_OID_BASE.wrapping_add(relation)
-}
-
 /// The relation whose row type (or row type's array) has OID `type_oid`: (relation, is array).
 fn rowtype_relation(m: &Model, type_oid: Oid) -> Option<(Oid, bool)> {
-    let (rel, array) = if type_oid >= ROWTYPE_ARRAY_OID_BASE {
-        (type_oid - ROWTYPE_ARRAY_OID_BASE, true)
-    } else if type_oid >= ROWTYPE_OID_BASE {
-        (type_oid - ROWTYPE_OID_BASE, false)
-    } else {
-        return None;
-    };
+    let (rel, array) = rowtype_relid(type_oid)?;
     let exists = m.catalog.table_by_oid(rel).is_some() || m.catalog.views().any(|v| v.oid == rel);
     exists.then_some((rel, array))
 }
@@ -62,7 +49,7 @@ fn type_oid(catalog: &Catalog, ty: &Type) -> Oid {
         Type::Array(e) => match e.as_ref() {
             Type::Enum(o) | Type::Domain(o) | Type::Composite(o) => match catalog.type_by_oid(*o) {
                 Some(t) => t.array_oid,
-                None if (ROWTYPE_OID_BASE..ROWTYPE_ARRAY_OID_BASE).contains(o) => rowtype_array_oid(*o - ROWTYPE_OID_BASE),
+                None if let Some((rel, false)) = rowtype_relid(*o) => rowtype_array_oid(rel),
                 None => ty.oid(),
             },
             _ => ty.oid(),
@@ -912,7 +899,7 @@ fn type_info(m: &Model, o: Oid) -> Option<TypeInfo> {
         return Some(if t.oid == o {
             TypeInfo { schema, typname: t.name.clone(), short, full }
         } else {
-            TypeInfo { schema, typname: format!("_{}", t.name), short: format!("{short}[]"), full: format!("{full}[]") }
+            TypeInfo { schema, typname: catalog.array_type_name(t.oid, &t.name), short: format!("{short}[]"), full: format!("{full}[]") }
         });
     }
     if let Some((rel, array)) = rowtype_relation(m, o) {
@@ -920,7 +907,12 @@ fn type_info(m: &Model, o: Oid) -> Option<TypeInfo> {
         let short = if r.visible { quote_ident(&r.name) } else { r.identity() };
         let full = r.identity();
         return Some(if array {
-            TypeInfo { typname: format!("_{}", r.name), schema: r.schema, short: format!("{short}[]"), full: format!("{full}[]") }
+            TypeInfo {
+                typname: catalog.array_type_name(rel, &r.name),
+                schema: r.schema,
+                short: format!("{short}[]"),
+                full: format!("{full}[]"),
+            }
         } else {
             TypeInfo { schema: r.schema, typname: r.name, short, full }
         });
