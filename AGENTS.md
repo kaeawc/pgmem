@@ -45,6 +45,8 @@ cargo run -p pgmem-conformance -- --dsn "host=127.0.0.1 port=5432 user=postgres"
 (cd examples && go test ./...)       # pgx suites against target/release/pgmem
 clients/psql/compare.sh target/release/pgmem postgres://postgres@127.0.0.1:5432/postgres  # psql output vs PG
 cargo test --manifest-path clients/rust/Cargo.toml   # tokio-postgres + sqlx (PGMEM_CLIENT_DSN=<PG URL> for PG)
+(cd clients/node && npm ci && npm test)              # node-postgres (PGMEM_BIN or PGMEM_CLIENT_DSN as above)
+(cd clients/python && uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt && .venv/bin/pytest)  # psycopg 3
 PGMEM_TEST_DSN="host=127.0.0.1 port=5432 user=postgres" cargo nextest run -p pgmem --test it
 ```
 
@@ -82,4 +84,7 @@ workflow by hand for a dry run.
 - `examples/` — Go sqlc + pgx projects; `examples/internal/pgmemtest` starts the Rust binary.
 - `clients/` — client matrix (CI job `clients`): psql scripts whose output must equal PostgreSQL's,
   and tokio-postgres / sqlx suites in a crate outside the workspace (its own lockfile; the
-  workspace dependency policy does not apply).
+  workspace dependency policy does not apply), plus node-postgres (`clients/node`, node:test,
+  exact-pinned `package-lock.json`) and psycopg 3 (`clients/python`, pytest, pinned
+  `requirements.txt`). Every suite runs against the pgmem binary and against PostgreSQL
+  (`PGMEM_CLIENT_DSN`); pgjdbc is not covered yet.

@@ -539,6 +539,12 @@ impl Conn {
                 }
             }
             b'P' => {
+                if !self.portals.contains_key(&name)
+                    && let Some((cols, binary)) = self.session.cursor_description(&name)
+                {
+                    self.row_description(&cols, if binary { &[1] } else { &[] });
+                    return Ok(());
+                }
                 let portal = self
                     .portals
                     .get(&name)

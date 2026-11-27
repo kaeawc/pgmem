@@ -183,6 +183,10 @@ pub struct RawReply {
     pub notices: Vec<String>,
     /// DataRow first-column values (text format).
     pub values: Vec<Option<String>>,
+    /// RowDescription column names, one list per message.
+    pub row_descriptions: Vec<Vec<String>>,
+    /// CopyData message bodies, one per message.
+    pub copy_data: Vec<Vec<u8>>,
     /// The ReadyForQuery transaction status.
     pub status: u8,
 }
@@ -256,6 +260,18 @@ impl RawConn {
                 b'D' => {
                     let n = i32::from_be_bytes(body[2..6].try_into().expect("length"));
                     r.values.push((n >= 0).then(|| String::from_utf8_lossy(&body[6..6 + n as usize]).into_owned()));
+                }
+                b'd' => r.copy_data.push(body),
+                b'T' => {
+                    let n = usize::from(u16::from_be_bytes([body[0], body[1]]));
+                    let mut rest = &body[2..];
+                    let mut names = Vec::new();
+                    for _ in 0..n {
+                        let end = rest.iter().position(|b| *b == 0).expect("column name");
+                        names.push(String::from_utf8_lossy(&rest[..end]).into_owned());
+                        rest = &rest[end + 1 + 18..];
+                    }
+                    r.row_descriptions.push(names);
                 }
                 b'Z' => {
                     r.status = body[0];
