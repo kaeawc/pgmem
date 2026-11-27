@@ -100,6 +100,14 @@ fn column_list(table: &TableDef, columns: &[usize]) -> String {
     columns.iter().map(|&i| table.columns.get(i).map_or_else(String::new, |c| quote_ident(&c.name))).collect::<Vec<_>>().join(", ")
 }
 
+/// ` INCLUDE (b, c)` for the constraint named `name`: the covering columns of the index behind it.
+pub fn include_clause(table: &TableDef, name: &str) -> String {
+    match table.indexes.iter().find(|i| i.name == name) {
+        Some(i) if !i.include.is_empty() => format!(" INCLUDE ({})", column_list(table, &i.include)),
+        _ => String::new(),
+    }
+}
+
 fn fk_action(a: FkAction) -> &'static str {
     match a {
         FkAction::NoAction => "NO ACTION",
@@ -116,10 +124,15 @@ fn fk_action(a: FkAction) -> &'static str {
 pub fn deparse_constraint(catalog: &Catalog, table: &TableDef, constraint: &Constraint) -> SqlResult<String> {
     Ok(match &constraint.kind {
         ConstraintKind::Check { expr } => format!("CHECK ({})", deparse_predicate(catalog, table, expr)?),
-        ConstraintKind::PrimaryKey { columns } => format!("PRIMARY KEY ({})", column_list(table, columns)),
-        ConstraintKind::Unique { columns, nulls_not_distinct } => {
-            format!("UNIQUE {}({})", if *nulls_not_distinct { "NULLS NOT DISTINCT " } else { "" }, column_list(table, columns))
+        ConstraintKind::PrimaryKey { columns } => {
+            format!("PRIMARY KEY ({}){}", column_list(table, columns), include_clause(table, &constraint.name))
         }
+        ConstraintKind::Unique { columns, nulls_not_distinct } => format!(
+            "UNIQUE {}({}){}",
+            if *nulls_not_distinct { "NULLS NOT DISTINCT " } else { "" },
+            column_list(table, columns),
+            include_clause(table, &constraint.name)
+        ),
         ConstraintKind::Exclude { method, elements, predicate, temporal } => {
             let key = |e: &ir::Expr| -> SqlResult<String> {
                 let mut a = table_analyzer(catalog, table);
@@ -132,10 +145,11 @@ pub fn deparse_constraint(catalog: &Catalog, table: &TableDef, constraint: &Cons
                 let n = cols.len();
                 let list: Vec<String> =
                     cols.into_iter().enumerate().map(|(i, c)| if i + 1 == n { format!("{c} WITHOUT OVERLAPS") } else { c }).collect();
-                return Ok(format!("{} ({})", if *primary { "PRIMARY KEY" } else { "UNIQUE" }, list.join(", ")));
+                let include = include_clause(table, &constraint.name);
+                return Ok(format!("{} ({}){include}", if *primary { "PRIMARY KEY" } else { "UNIQUE" }, list.join(", ")));
             }
             let items = elements.iter().map(|(e, op)| Ok(format!("{} WITH {op}", key(e)?))).collect::<SqlResult<Vec<_>>>()?;
-            let mut s = format!("EXCLUDE USING {method} ({})", items.join(", "));
+            let mut s = format!("EXCLUDE USING {method} ({}){}", items.join(", "), include_clause(table, &constraint.name));
             if let Some(i) = table.indexes.iter().find(|i| i.name == constraint.name)
                 && !i.reloptions.is_empty()
             {
@@ -170,21 +184,55 @@ pub fn deparse_constraint(catalog: &Catalog, table: &TableDef, constraint: &Cons
     })
 }
 
+/// One index key as `pg_get_indexdef` prints it: a column by name, a function call as is, any
+/// other expression in parentheses.
+fn index_key_text(catalog: &Catalog, table: &TableDef, index: &IndexDef, k: usize) -> SqlResult<Option<String>> {
+    if index.exprs.is_empty() {
+        return Ok(index.columns.get(k).map(|&c| column_list(table, &[c])));
+    }
+    let Some(e) = index.exprs.get(k) else { return Ok(None) };
+    let mut a = table_analyzer(catalog, table);
+    let n = a.expr(e);
+    let text = expr_text(&n);
+    Ok(Some(if looks_like_function(&n) || matches!(n, Node::Var { .. }) { text } else { format!("({text})") }))
+}
+
+/// `pg_get_indexdef(oid, column, pretty)` for `column > 0`: just that key (or `INCLUDE` column),
+/// without its collation, operator class or order; empty when the index has no such column.
+pub fn deparse_index_column(catalog: &Catalog, table: &TableDef, index: &IndexDef, column: usize) -> SqlResult<String> {
+    let k = column - 1;
+    let key = match index_key_text(catalog, table, index, k)? {
+        Some(key) => key,
+        None => index.include.get(k - index.key_count()).map(|&c| column_list(table, &[c])).unwrap_or_default(),
+    };
+    Ok(key)
+}
+
 /// An index as `pg_get_indexdef(oid)` prints it:
 /// `CREATE UNIQUE INDEX users_email_key ON public.users USING btree (lower((email)::text)) WHERE (deleted_at IS NULL)`.
 pub fn deparse_index(catalog: &Catalog, table: &TableDef, index: &IndexDef) -> SqlResult<String> {
-    let mut keys: Vec<String> = index.columns.iter().map(|&i| column_list(table, &[i])).collect();
-    for e in &index.exprs {
-        let mut a = table_analyzer(catalog, table);
-        let n = a.expr(e);
-        let text = expr_text(&n);
-        keys.push(if looks_like_function(&n) || matches!(n, Node::Var { .. }) { text } else { format!("({text})") });
-    }
-    for (key, oc) in keys.iter_mut().zip(&index.opclasses) {
-        if let Some(name) = &oc.shown {
+    let mut keys = Vec::new();
+    for k in 0..index.key_count() {
+        let mut key = index_key_text(catalog, table, index, k)?.unwrap_or_default();
+        let options = index.key_options.get(k);
+        if let Some(name) = options.and_then(|o| o.shown_collation.as_ref()) {
+            key.push_str(&format!(" COLLATE {}", quote_ident(name)));
+        }
+        if let Some(name) = index.opclasses.get(k).and_then(|o| o.shown.as_ref()) {
             key.push(' ');
             key.push_str(&quote_ident(name));
         }
+        // Only a non-default NULLS order is printed: FIRST for an ascending key, LAST for a
+        // descending one.
+        if let Some(o) = options {
+            if o.desc {
+                key.push_str(" DESC");
+            }
+            if o.nulls_first != o.desc {
+                key.push_str(if o.nulls_first { " NULLS FIRST" } else { " NULLS LAST" });
+            }
+        }
+        keys.push(key);
     }
     let mut s = format!(
         "CREATE {}INDEX {} ON {}{}.{} USING {} ({})",

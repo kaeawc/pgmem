@@ -1244,6 +1244,8 @@ pub struct TableConstraint {
     pub timing: ConstraintTiming,
     /// `WITH (storage_parameter, ...)` of the constraint's index (PRIMARY KEY, UNIQUE, EXCLUDE).
     pub reloptions: Vec<RelOption>,
+    /// `INCLUDE (column, ...)` of the constraint's index (PRIMARY KEY, UNIQUE, EXCLUDE).
+    pub include: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

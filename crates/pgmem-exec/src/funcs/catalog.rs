@@ -450,24 +450,14 @@ fn indexdef_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
     let Some(o) = oid_arg(&a[0]) else { return Ok(Value::Null) };
     let Some((t, idx)) = m.indexes().into_iter().find(|(_, i)| i.oid == o) else { return Ok(Value::Null) };
     let column = a.get(1).and_then(Value::as_i64).unwrap_or(0);
-    if column > 0 {
-        // Just the key expression of one column.
-        let k = usize::try_from(column - 1).unwrap_or(usize::MAX);
-        let key = if let Some(c) = idx.columns.get(k) {
-            t.columns.get(*c).map(|c| quote_ident(&c.name))
-        } else {
-            match idx.exprs.get(k - idx.columns.len()) {
-                Some(e) => Some(crate::deparse::deparse_expr(m.catalog, t, e).unwrap_or_default()),
-                None => {
-                    idx.include.get(k - idx.columns.len() - idx.exprs.len()).and_then(|c| t.columns.get(*c)).map(|c| quote_ident(&c.name))
-                }
-            }
-        };
-        return Ok(key.map_or(Value::Null, Value::Text));
-    }
-    let def = index_def(&m, t, idx);
-    // Pretty mode leaves out the schema of relations on the search path.
     let pretty = a.get(2).and_then(Value::as_bool) == Some(true);
+    if column != 0 {
+        // Just the key expression of one column.
+        let column = usize::try_from(column).unwrap_or(usize::MAX);
+        let key = crate::deparse::with_pretty(pretty, || crate::deparse::deparse_index_column(m.catalog, t, idx, column));
+        return Ok(Value::Text(key.unwrap_or_default()));
+    }
+    let def = crate::deparse::with_pretty(pretty, || index_def(&m, t, idx));
     // Pretty mode prints the table name alone when it is visible.
     let pretty_def = || -> Option<String> {
         let start = def.find(" ON ")? + 4;

@@ -1,0 +1,129 @@
+# pg_get_indexdef: operator class, sort order, NULLS order and COLLATE of each key; pg_index
+# indoption / indcollation / indclass; the per-column form.
+
+statement ok
+CREATE TABLE t (a text, b int)
+
+statement ok
+CREATE INDEX t_k ON t (a text_pattern_ops DESC NULLS LAST, b NULLS FIRST)
+
+statement ok
+CREATE INDEX t_c ON t (a COLLATE "C")
+
+# Defaults are not printed: ASC NULLS LAST, DESC NULLS FIRST.
+statement ok
+CREATE INDEX t_defaults ON t (a ASC NULLS LAST, b DESC NULLS FIRST)
+
+statement ok
+CREATE INDEX t_desc ON t (b DESC, b DESC NULLS LAST, b ASC NULLS FIRST)
+
+# Expression keys carry the same options and a COLLATE.
+statement ok
+CREATE INDEX t_expr ON t ((b + 1) DESC, lower(a) COLLATE "C" NULLS FIRST, (a || 'x') text_pattern_ops) INCLUDE (a)
+
+query
+SELECT indexrelid::regclass::text, pg_get_indexdef(indexrelid) FROM pg_index WHERE indrelid = 't'::regclass ORDER BY 1
+----
+indexrelid:text | pg_get_indexdef:text
+t_c | CREATE INDEX t_c ON public.t USING btree (a COLLATE "C")
+t_defaults | CREATE INDEX t_defaults ON public.t USING btree (a, b DESC)
+t_desc | CREATE INDEX t_desc ON public.t USING btree (b DESC, b DESC NULLS LAST, b NULLS FIRST)
+t_expr | CREATE INDEX t_expr ON public.t USING btree (((b + 1)) DESC, lower(a) COLLATE "C" NULLS FIRST, ((a || 'x'::text)) text_pattern_ops) INCLUDE (a)
+t_k | CREATE INDEX t_k ON public.t USING btree (a text_pattern_ops DESC NULLS LAST, b NULLS FIRST)
+
+query
+SELECT indexrelid::regclass::text, indoption::text, indcollation::text, indclass::text FROM pg_index WHERE indrelid = 't'::regclass ORDER BY 1
+----
+indexrelid:text | indoption:text | indcollation:text | indclass:text
+t_c | 0 | 950 | 3126
+t_defaults | 0 3 | 100 0 | 3126 1978
+t_desc | 3 1 2 | 0 0 0 | 1978 1978 1978
+t_expr | 3 2 0 | 0 950 100 | 1978 3126 4217
+t_k | 1 2 | 100 0 | 4217 1978
+
+# A column's own collation is not repeated; a different one is printed, "default" included.
+statement ok
+CREATE TABLE v (a text COLLATE "C", b text COLLATE "POSIX", c int, d varchar(5), e text)
+
+statement ok
+CREATE INDEX v1 ON v (a)
+
+statement ok
+CREATE INDEX v2 ON v (a COLLATE "C")
+
+statement ok
+CREATE INDEX v3 ON v (a COLLATE "POSIX")
+
+statement ok
+CREATE INDEX v4 ON v (b)
+
+statement ok
+CREATE INDEX v5 ON v (a COLLATE "default")
+
+statement ok
+CREATE INDEX v6 ON v (d COLLATE "C" varchar_pattern_ops, (a || 'x') COLLATE "C")
+
+statement ok
+CREATE INDEX v7 ON v ((a || 'x'))
+
+query
+SELECT indexrelid::regclass::text, pg_get_indexdef(indexrelid), indcollation::text FROM pg_index WHERE indrelid = 'v'::regclass ORDER BY 1
+----
+indexrelid:text | pg_get_indexdef:text | indcollation:text
+v1 | CREATE INDEX v1 ON public.v USING btree (a) | 950
+v2 | CREATE INDEX v2 ON public.v USING btree (a) | 950
+v3 | CREATE INDEX v3 ON public.v USING btree (a COLLATE "POSIX") | 951
+v4 | CREATE INDEX v4 ON public.v USING btree (b) | 951
+v5 | CREATE INDEX v5 ON public.v USING btree (a COLLATE "default") | 100
+v6 | CREATE INDEX v6 ON public.v USING btree (d COLLATE "C" varchar_pattern_ops, ((a || 'x'::text))) | 950 950
+v7 | CREATE INDEX v7 ON public.v USING btree (((a || 'x'::text))) | 950
+
+# The per-column form prints the key alone, without collation, class or order.
+query
+SELECT pg_get_indexdef('t_k'::regclass, 1, false), pg_get_indexdef('t_k'::regclass, 2, true), pg_get_indexdef('t_expr'::regclass, 1, false), pg_get_indexdef('t_expr'::regclass, 1, true), pg_get_indexdef('t_expr'::regclass, 2, false), pg_get_indexdef('t_expr'::regclass, 4, false), pg_get_indexdef('t_expr'::regclass, 5, false), pg_get_indexdef('t_k'::regclass, 0, false)
+----
+pg_get_indexdef:text | pg_get_indexdef:text | pg_get_indexdef:text | pg_get_indexdef:text | pg_get_indexdef:text | pg_get_indexdef:text | pg_get_indexdef:text | pg_get_indexdef:text
+a | b | ((b + 1)) | (b + 1) | lower(a) | a | (empty) | CREATE INDEX t_k ON public.t USING btree (a text_pattern_ops DESC NULLS LAST, b NULLS FIRST)
+
+# Pretty printing drops the redundant parentheses and the visible schema.
+statement ok
+CREATE INDEX t_part ON t (b, (b * 2), lower(a)) WHERE b > 0 AND b < 5
+
+query
+SELECT pg_get_indexdef('t_part'::regclass, 0, false), pg_get_indexdef('t_part'::regclass, 0, true), pg_get_indexdef('t_part'::regclass, 2, false), pg_get_indexdef('t_part'::regclass, 2, true)
+----
+pg_get_indexdef:text | pg_get_indexdef:text | pg_get_indexdef:text | pg_get_indexdef:text
+CREATE INDEX t_part ON public.t USING btree (b, ((b * 2)), lower(a)) WHERE ((b > 0) AND (b < 5)) | CREATE INDEX t_part ON t USING btree (b, (b * 2), lower(a)) WHERE b > 0 AND b < 5 | ((b * 2)) | (b * 2)
+
+# Constraint indexes have default options.
+statement ok
+CREATE TABLE k (id int PRIMARY KEY, email text UNIQUE)
+
+query
+SELECT indexrelid::regclass::text, indoption::text, indcollation::text, indclass::text FROM pg_index WHERE indrelid = 'k'::regclass ORDER BY 1
+----
+indexrelid:text | indoption:text | indcollation:text | indclass:text
+k_email_key | 0 | 100 | 3126
+k_pkey | 0 | 0 | 1978
+
+statement error 0A000 access method "hash" does not support ASC/DESC options
+CREATE INDEX x ON t USING hash (b DESC)
+
+statement error 42704 data type text has no default operator class for access method "gist"
+CREATE INDEX x ON t USING gist (a NULLS FIRST)
+
+statement error 42804 collations are not supported by type integer
+CREATE INDEX x ON t (b COLLATE "C")
+
+statement error 42704 collation "nosuch" for encoding "UTF8" does not exist
+CREATE INDEX x ON t (a COLLATE "nosuch")
+
+# The default name lists the INCLUDE columns and numbers repeated names.
+statement ok
+CREATE INDEX ON t (b, b) INCLUDE (b)
+
+query
+SELECT indexrelid::regclass::text FROM pg_index WHERE indrelid = 't'::regclass AND indexrelid::regclass::text LIKE 't\_b%' ORDER BY 1
+----
+indexrelid:text
+t_b_b1_b2_idx

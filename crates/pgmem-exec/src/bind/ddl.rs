@@ -5,8 +5,8 @@
 use super::dml::physical_scope;
 use super::{Binder, Clause, Ctx, Level, Scope, resolve_type_name};
 use pgmem_catalog::{
-    Catalog, ColumnDef, Constraint, ConstraintKind, FkAction, Identity, IndexDef, QualName, SequenceDef, TableDef, ViewDef,
-    default_constraint_name, truncate_identifier,
+    Catalog, ColumnDef, Constraint, ConstraintKind, FkAction, Identity, IndexDef, IndexKeyOptions, QualName, SequenceDef, TableDef,
+    ViewDef, default_constraint_name, truncate_identifier,
 };
 use pgmem_ir as ir;
 use pgmem_types::{SqlError, SqlResult, Type, code};
@@ -201,7 +201,7 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
         }
     }
     // Constraints, column-level first (in column order), then table-level.
-    type Pending<'a> = (Option<String>, ir::TableConstraintKind, bool, ir::ConstraintTiming, &'a [ir::RelOption]);
+    type Pending<'a> = (Option<String>, ir::TableConstraintKind, bool, ir::ConstraintTiming, &'a [ir::RelOption], &'a [String]);
     let mut pending: Vec<Pending> = Vec::new();
     for c in &ct.columns {
         for con in &c.constraints {
@@ -216,21 +216,21 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
                 }
                 _ => continue,
             };
-            pending.push((con.name.clone(), kind, true, con.timing, &con.reloptions));
+            pending.push((con.name.clone(), kind, true, con.timing, &con.reloptions, &[]));
         }
     }
     for con in &ct.constraints {
-        pending.push((con.name.clone(), con.kind.clone(), false, con.timing, &con.reloptions));
+        pending.push((con.name.clone(), con.kind.clone(), false, con.timing, &con.reloptions, &con.include));
     }
     for (name, kind, timing) in likes.constraints {
-        pending.push((name, kind, false, timing, &[]));
+        pending.push((name, kind, false, timing, &[], &[]));
     }
-    for (cname, kind, column_level, timing, reloptions) in pending {
+    for (cname, kind, column_level, timing, reloptions, include) in pending {
         if crate::inherit::merge_local_check(&table, &mut inherit, cname.as_deref(), &kind, timing.no_inherit)? {
             continue;
         }
         let n = table.constraints.len();
-        add_constraint(b, &mut table, cname, &kind, column_level, &mut taken, (timing, reloptions))?;
+        add_constraint(b, &mut table, cname, &kind, column_level, &mut taken, (timing, reloptions, include))?;
         if timing.no_inherit && table.constraints.len() > n {
             if ct.options.partition_by.is_some() {
                 return Err(crate::inherit::no_inherit_on_partitioned(&table.name));
@@ -320,14 +320,12 @@ pub fn add_constraint(
     kind: &ir::TableConstraintKind,
     column_level: bool,
     taken: &mut Vec<String>,
-    (timing, reloptions): (ir::ConstraintTiming, &[ir::RelOption]),
+    (timing, reloptions, include): (ir::ConstraintTiming, &[ir::RelOption], &[String]),
 ) -> SqlResult<()> {
     let catalog = b.catalog;
     let tname = table.name.clone();
     let schema = table.schema.clone();
-    let col_index = |t: &TableDef, n: &str| -> SqlResult<usize> {
-        t.column_index(n).ok_or_else(|| SqlError::undefined_column(&format!("\"{n}\" named in key does not exist")))
-    };
+    let col_index = |t: &TableDef, n: &str| -> SqlResult<usize> { t.column_index(n).ok_or_else(|| key_column_missing(n)) };
     let mut used: Vec<String> = taken.clone();
     used.extend(table.constraints.iter().map(|c| c.name.clone()));
     used.extend(table.indexes.iter().map(|i| i.name.clone()));
@@ -346,7 +344,18 @@ pub fn add_constraint(
     match kind {
         ir::TableConstraintKind::Exclude { method, elements, predicate } => {
             let method = method.clone().unwrap_or_else(|| "btree".into());
-            add_exclusion(b, table, cname, &method, elements.clone(), predicate.clone(), None, taken, &used, (timing, reloptions))?;
+            add_exclusion(
+                b,
+                table,
+                cname,
+                &method,
+                elements.clone(),
+                predicate.clone(),
+                None,
+                taken,
+                &used,
+                (timing, reloptions, include),
+            )?;
         }
         ir::TableConstraintKind::Temporal { primary, columns } => {
             let n = columns.len();
@@ -370,7 +379,7 @@ pub fn add_constraint(
                     table.columns[slot].not_null = true;
                 }
             }
-            add_exclusion(b, table, cname, "gist", elements, None, Some(*primary), taken, &used, (timing, reloptions))?;
+            add_exclusion(b, table, cname, "gist", elements, None, Some(*primary), taken, &used, (timing, reloptions, include))?;
         }
         ir::TableConstraintKind::UsingIndex { primary, index } => {
             let pos = table
@@ -435,10 +444,14 @@ pub fn add_constraint(
                 ));
             }
             let idx_cols = cols.iter().map(|c| col_index(table, c)).collect::<SqlResult<Vec<_>>>()?;
+            let include_cols = include.iter().map(|c| col_index(table, c)).collect::<SqlResult<Vec<_>>>()?;
             let nulls_not_distinct = matches!(kind, ir::TableConstraintKind::Unique { nulls_not_distinct: true, .. });
             // Identical unique constraints are merged, as Postgres does.
             if !primary
-                && table.indexes.iter().any(|i| i.unique && i.exprs.is_empty() && i.columns == idx_cols && i.predicate.is_none())
+                && table
+                    .indexes
+                    .iter()
+                    .any(|i| i.unique && i.exprs.is_empty() && i.columns == idx_cols && i.include == include_cols && i.predicate.is_none())
                 && cname.is_none()
             {
                 return Ok(());
@@ -448,7 +461,9 @@ pub fn add_constraint(
                     table.columns[i].not_null = true;
                 }
             }
-            let names: Vec<&str> = cols.iter().map(String::as_str).collect();
+            // The default name lists the INCLUDE columns after the key columns.
+            let names = index_name_columns(cols.iter().cloned(), include);
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
             let name = cname.unwrap_or_else(|| {
                 choose_name(
                     catalog,
@@ -461,11 +476,12 @@ pub fn add_constraint(
             table.indexes.push(IndexDef {
                 method: "btree".into(),
                 opclasses: Vec::new(),
+                key_options: Vec::new(),
                 oid: 0,
                 name: name.clone(),
                 columns: idx_cols.clone(),
                 exprs: Vec::new(),
-                include: Vec::new(),
+                include: include_cols,
                 unique: true,
                 primary,
                 nulls_not_distinct,
@@ -657,13 +673,18 @@ pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(
     let mut exprs = Vec::new();
     let mut names = Vec::new();
     let mut key_types = Vec::new();
+    let mut key_options = Vec::new();
+    let mut keys = Vec::new();
     for key in &ci.columns {
-        match &key.expr {
+        // `key COLLATE name` is not part of the key: it sets the index's collation for it.
+        let (inner, explicit) = split_collate(&key.expr);
+        keys.push(inner.clone());
+        let ty = match inner {
             ir::Expr::Column(parts) if parts.len() == 1 => {
                 let idx = table.column_index(&parts[0]).ok_or_else(|| SqlError::undefined_column(&format!("\"{}\"", parts[0])))?;
                 columns.push(idx);
                 names.push(parts[0].clone());
-                key_types.push(table.columns[idx].ty.clone());
+                table.columns[idx].ty.clone()
             }
             e => {
                 let level = Level::new(physical_scope(&table, &table.name));
@@ -673,9 +694,20 @@ pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(
                 }
                 exprs.push(e.clone());
                 names.push(super::like::index_key_name(e));
-                key_types.push(ty);
+                ty
             }
-        }
+        };
+        let inherent = key_collation(&table, &ty, inner);
+        let (collation, shown_collation) = match explicit {
+            Some(name) => {
+                column_collation(&ty, name)?;
+                let oid = collation_oid(Some(name));
+                (oid, (oid != inherent).then(|| name.to_owned()))
+            }
+            None => (inherent, None),
+        };
+        key_options.push(IndexKeyOptions { desc: key.desc, nulls_first: key.nulls_first.unwrap_or(key.desc), collation, shown_collation });
+        key_types.push(ty);
     }
     let include = ci
         .include
@@ -684,7 +716,7 @@ pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(
         .collect::<SqlResult<Vec<_>>>()?;
     if !exprs.is_empty() {
         // Mixed column/expression keys: treat all keys as expressions.
-        exprs = ci.columns.iter().map(|k| k.expr.clone()).collect();
+        exprs = keys;
         columns.clear();
     }
     if let Some(p) = &ci.predicate {
@@ -698,6 +730,15 @@ pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(
         .zip(&ci.opclasses)
         .map(|(ty, oc)| crate::opclass::resolve(method, ty, oc.as_deref(), lenient))
         .collect::<SqlResult<Vec<_>>>()?;
+    // Like Postgres, the sort options are checked once the operator classes are known.
+    for key in &ci.columns {
+        if key.desc && method != "btree" {
+            return Err(SqlError::feature_not_supported(format!("access method \"{method}\" does not support ASC/DESC options")));
+        }
+        if key.nulls_first.is_some() && method != "btree" {
+            return Err(SqlError::feature_not_supported(format!("access method \"{method}\" does not support NULLS FIRST/LAST options")));
+        }
+    }
     let reloptions = crate::reloptions::create(crate::reloptions::Target::Index(Some(method)), &ci.reloptions)?;
     let name = match &ci.name {
         Some(n) => {
@@ -710,6 +751,7 @@ pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(
             n.clone()
         }
         None => {
+            let names = index_name_columns(names, &ci.include);
             let refs: Vec<&str> = names.iter().map(String::as_str).collect();
             catalog.choose_name(&table.schema, &default_constraint_name(&tname, &refs, "idx"), &[])
         }
@@ -719,6 +761,7 @@ pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(
         IndexDef {
             method: method.to_owned(),
             opclasses,
+            key_options,
             oid: 0,
             name,
             columns,
@@ -897,7 +940,7 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
                     }
                     _ => continue,
                 };
-                add_constraint(b, &mut def, con.name.clone(), &kind, true, &mut taken, (con.timing, &con.reloptions))?;
+                add_constraint(b, &mut def, con.name.clone(), &kind, true, &mut taken, (con.timing, &con.reloptions, &[]))?;
             }
             let validate = if needs_rewrite { Validation::ConvertColumn { slot, using: generated } } else { Validation::None };
             Ok(AlterOutcome::Replace { def: Box::new(def), rename_from: None, sequences, validate })
@@ -1069,7 +1112,7 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
             }
             let mut taken = Vec::new();
             let before = def.constraints.len();
-            add_constraint(b, &mut def, con.name.clone(), &con.kind, false, &mut taken, (con.timing, &con.reloptions))?;
+            add_constraint(b, &mut def, con.name.clone(), &con.kind, false, &mut taken, (con.timing, &con.reloptions, &con.include))?;
             // NOT VALID skips the existing rows (new ones are checked).
             let validate = match def.constraints.get(before) {
                 Some(c) if !con.timing.not_valid => Validation::Constraint(c.name.clone()),
@@ -1174,10 +1217,13 @@ fn add_exclusion(
     temporal: Option<bool>,
     taken: &mut Vec<String>,
     used: &[String],
-    (timing, reloptions): (ir::ConstraintTiming, &[ir::RelOption]),
+    (timing, reloptions, include): (ir::ConstraintTiming, &[ir::RelOption], &[String]),
 ) -> SqlResult<()> {
     if !["btree", "hash", "gist", "spgist", "gin", "brin"].contains(&method) {
         return Err(SqlError::new(code::UNDEFINED_OBJECT, format!("access method \"{method}\" does not exist")));
+    }
+    if !include.is_empty() && !crate::opclass::capabilities(method).2 {
+        return Err(SqlError::feature_not_supported(format!("access method \"{method}\" does not support included columns")));
     }
     let level = Level::new(physical_scope(table, &table.name));
     let ctx = Ctx::new(&level).with_clause(Clause::Check);
@@ -1204,7 +1250,7 @@ fn add_exclusion(
         check_expr_binds(b, table, p, Clause::Where)?;
     }
     let tname = table.name.clone();
-    let key_names: Vec<String> = elements.iter().map(|(e, _)| super::like::index_key_name(e)).collect();
+    let key_names = index_name_columns(elements.iter().map(|(e, _)| super::like::index_key_name(e)), include);
     let refs: Vec<&str> = key_names.iter().map(String::as_str).collect();
     let suffix = match temporal {
         Some(true) => "pkey",
@@ -1220,6 +1266,7 @@ fn add_exclusion(
         return Err(SqlError::new(code::DUPLICATE_TABLE, format!("relation \"{name}\" already exists")));
     }
     let index_reloptions = crate::reloptions::create(crate::reloptions::Target::Index(Some(method)), reloptions)?;
+    let include_cols = include.iter().map(|n| table.column_index(n).ok_or_else(|| key_column_missing(n))).collect::<SqlResult<Vec<_>>>()?;
     taken.push(name.clone());
     let plain: Option<Vec<usize>> = elements
         .iter()
@@ -1231,11 +1278,12 @@ fn add_exclusion(
     table.indexes.push(IndexDef {
         method: method.to_owned(),
         opclasses: Vec::new(),
+        key_options: Vec::new(),
         oid: 0,
         name: name.clone(),
         columns: plain.clone().unwrap_or_default(),
         exprs: if plain.is_some() { Vec::new() } else { elements.iter().map(|(e, _)| e.clone()).collect() },
-        include: Vec::new(),
+        include: include_cols,
         unique: false,
         primary: false,
         nulls_not_distinct: false,
@@ -1267,13 +1315,68 @@ fn is_constant_expr(e: &ir::Expr) -> bool {
 }
 
 /// The collations pgmem knows (Postgres' builtin ones): name and OID.
+const DEFAULT_COLLATION: u32 = 100;
 pub const COLLATIONS: &[(&str, u32)] = &[("default", 100), ("C", 950), ("POSIX", 951), ("ucs_basic", 962), ("pg_c_utf8", 811)];
+
+fn key_column_missing(name: &str) -> SqlError {
+    SqlError::new(code::UNDEFINED_COLUMN, format!("column \"{name}\" named in key does not exist"))
+}
+
+/// The column names of an index's default name (`ChooseIndexColumnNames`): the key columns,
+/// then the `INCLUDE` ones, each repeat of a name getting a number (`a`, `a1`).
+pub fn index_name_columns(keys: impl IntoIterator<Item = String>, include: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for base in keys.into_iter().chain(include.iter().cloned()) {
+        let mut name = base.clone();
+        let mut n = 0;
+        while out.contains(&name) {
+            n += 1;
+            name = format!("{base}{n}");
+        }
+        out.push(name);
+    }
+    out
+}
+
+/// Whether values of `ty` have a collation (strings, `citext`, and arrays of them).
+fn collatable(ty: &Type) -> bool {
+    let base = ty.base();
+    let elem = base.element().cloned().unwrap_or(base);
+    elem.is_string() || elem == Type::CiText || elem == Type::Name
+}
+
+/// `pg_collation.oid` of a collation name; None is the default collation.
+pub fn collation_oid(name: Option<&str>) -> u32 {
+    let name = name.unwrap_or("default");
+    COLLATIONS.iter().find(|(n, _)| *n == name).map_or(DEFAULT_COLLATION, |(_, oid)| *oid)
+}
+
+/// The collation an index key sorts with when it has no `COLLATE` of its own
+/// (`exprCollation`): that of the column it is, or of the first column with a collation that an
+/// expression reads; 0 for a type without collations.
+fn key_collation(table: &TableDef, ty: &Type, key: &ir::Expr) -> u32 {
+    if !collatable(ty) {
+        return 0;
+    }
+    let column = key.referenced_columns().into_iter().find_map(|n| table.column_index(&n).and_then(|i| table.columns[i].collation.clone()));
+    collation_oid(column.as_deref())
+}
+
+/// The key and collation of `expr COLLATE name` (the outermost `COLLATE` wins); `expr` itself
+/// when there is none.
+fn split_collate(expr: &ir::Expr) -> (&ir::Expr, Option<&str>) {
+    match expr {
+        ir::Expr::Collate { expr: inner, collation } => {
+            let (inner, _) = split_collate(inner);
+            (inner, Some(collation))
+        }
+        e => (e, None),
+    }
+}
 
 /// Validates `COLLATE name` on a column of type `ty`: None for the type's default collation.
 pub fn column_collation(ty: &Type, collation: &str) -> SqlResult<Option<String>> {
-    let base = ty.base();
-    let elem = base.element().cloned().unwrap_or(base);
-    if !(elem.is_string() || elem == Type::CiText || elem == Type::Name) {
+    if !collatable(ty) {
         return Err(SqlError::datatype_mismatch(format!("collations are not supported by type {}", ty.name())));
     }
     if !COLLATIONS.iter().any(|(n, _)| *n == collation) {

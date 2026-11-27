@@ -1,4 +1,4 @@
-use crate::support::{expect_code, message, setup};
+use crate::support::{expect_code, message, setup, texts};
 
 #[test]
 fn named_constraint_column_level_pk() {
@@ -61,4 +61,53 @@ fn named_constraint_name_round_trips_in_error() {
     let e = expect_code(c.execute("INSERT INTO t (id, qty) VALUES (1, 0)", &[]), "23514");
     assert!(message(&e).contains("qty_positive"), "error {:?} does not mention constraint name", message(&e));
     assert_eq!(e.as_db_error().and_then(|d| d.constraint()), Some("qty_positive"));
+}
+
+#[test]
+fn key_constraints_print_include() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE u (a int, b int, UNIQUE (a) INCLUDE (b));
+         CREATE TABLE p (a int, b int, c int, CONSTRAINT p_pk PRIMARY KEY (a, b) INCLUDE (c));
+         CREATE TABLE n (a int, b int, c int, CONSTRAINT n_uq UNIQUE NULLS NOT DISTINCT (a) INCLUDE (b, c) DEFERRABLE);
+         CREATE TABLE x (a int, r int4range, b int, CONSTRAINT x_ex EXCLUDE USING gist (r WITH &&) INCLUDE (a, b) WHERE (a > 0));
+         CREATE TABLE z (a int, b int, UNIQUE (a), UNIQUE (a) INCLUDE (b), UNIQUE (a));
+         ALTER TABLE z ADD CONSTRAINT z_late UNIQUE (b) INCLUDE (a)",
+    )
+    .expect("tables");
+    let defs = texts(
+        &mut c,
+        "SELECT conname, pg_get_constraintdef(oid), conkey::text FROM pg_constraint \
+         WHERE conrelid IN ('u'::regclass, 'p'::regclass, 'n'::regclass, 'x'::regclass, 'z'::regclass) AND contype <> 'n' ORDER BY 1",
+    );
+    let got: Vec<Vec<String>> = defs.into_iter().map(|r| r.into_iter().map(Option::unwrap_or_default).collect()).collect();
+    assert_eq!(
+        got,
+        [
+            ["n_uq", "UNIQUE NULLS NOT DISTINCT (a) INCLUDE (b, c) DEFERRABLE", "{1}"],
+            ["p_pk", "PRIMARY KEY (a, b) INCLUDE (c)", "{1,2}"],
+            ["u_a_b_key", "UNIQUE (a) INCLUDE (b)", "{1}"],
+            ["x_ex", "EXCLUDE USING gist (r WITH &&) INCLUDE (a, b) WHERE ((a > 0))", "{2}"],
+            ["z_a_b_key", "UNIQUE (a) INCLUDE (b)", "{1}"],
+            ["z_a_key", "UNIQUE (a)", "{1}"],
+            ["z_late", "UNIQUE (b) INCLUDE (a)", "{2}"],
+        ]
+    );
+    // The constraint's index covers the INCLUDE columns too.
+    assert_eq!(
+        texts(
+            &mut c,
+            "SELECT pg_get_indexdef('u_a_b_key'::regclass), indnatts, indnkeyatts FROM pg_index WHERE indexrelid = 'u_a_b_key'::regclass"
+        ),
+        [[Some("CREATE UNIQUE INDEX u_a_b_key ON public.u USING btree (a) INCLUDE (b)".into()), Some("2".into()), Some("1".into())]]
+    );
+}
+
+#[test]
+fn key_constraint_include_errors_match_postgres() {
+    let (_db, mut c) = setup();
+    let e = expect_code(c.batch_execute("CREATE TABLE bad (a int, UNIQUE (a) INCLUDE (nope))"), "42703");
+    assert_eq!(message(&e), "column \"nope\" named in key does not exist");
+    let e = expect_code(c.batch_execute("CREATE TABLE bad (a int, b int, EXCLUDE USING hash (a WITH =) INCLUDE (b))"), "0A000");
+    assert_eq!(message(&e), "access method \"hash\" does not support included columns");
 }
