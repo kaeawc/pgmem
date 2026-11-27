@@ -183,7 +183,9 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
             vec![],
             Type::Void,
         ),
-        "pg_sleep" if n == 1 => resolved(strict("pg_sleep", |_, _| Ok(Value::Text(String::new()))), vec![Type::Float8], Type::Void),
+        "pg_sleep" if n == 1 => resolved(strict("pg_sleep", pg_sleep), vec![Type::Float8], Type::Void),
+        "pg_sleep_for" if n == 1 => resolved(strict("pg_sleep_for", pg_sleep_for), vec![Type::Interval], Type::Void),
+        "pg_sleep_until" if n == 1 => resolved(strict("pg_sleep_until", pg_sleep_until), vec![Type::Timestamptz], Type::Void),
         "txid_current" | "pg_current_xact_id" if n == 0 => {
             resolved(lenient("txid_current", |_, c| Ok(Value::Int8(c.env.txid))), vec![], Type::Int8)
         }
@@ -643,4 +645,46 @@ pub fn enum_range(a: &[Value], _: &EvalCtx) -> SqlResult<Value> {
     };
     let items = if lo < hi { labels[lo..hi].iter().map(|l| Value::Enum(oid, l.oid)).collect() } else { Vec::new() };
     Ok(Value::Array(items))
+}
+
+fn pg_sleep(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
+    let Value::Float8(secs) = a[0] else { return Err(SqlError::internal("pg_sleep() of non-float8")) };
+    sleep_for(secs, ctx)
+}
+
+/// `pg_sleep(extract(epoch FROM interval))`: a year is 365.25 days and a month 30 days.
+fn pg_sleep_for(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
+    let Value::Interval(i) = &a[0] else { return Err(SqlError::internal("pg_sleep_for() of non-interval")) };
+    const DAY: f64 = 86_400.0;
+    let months = f64::from(i.months / 12) * 365.25 * DAY + f64::from(i.months % 12) * 30.0 * DAY;
+    sleep_for(months + f64::from(i.days) * DAY + i.micros as f64 / 1e6, ctx)
+}
+
+/// Sleeps until `ts`, measured against the server clock (`Server::set_now`).
+fn pg_sleep_until(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
+    let Value::Timestamptz(ts) = a[0] else { return Err(SqlError::internal("pg_sleep_until() of non-timestamptz")) };
+    sleep_for((ts as f64 - ctx.env.clock.now_micros() as f64) / 1e6, ctx)
+}
+
+/// Blocks the calling session for `secs` of wall time; zero, negative and NaN return at once.
+/// Query cancellation is not implemented, but `statement_timeout` is honoured (`57014`).
+fn sleep_for(secs: f64, ctx: &EvalCtx) -> SqlResult<Value> {
+    use std::time::Duration;
+    if secs.is_nan() || secs <= 0.0 {
+        return Ok(Value::Text(String::new()));
+    }
+    // Longer than any test could wait: also keeps `Duration` conversion in range.
+    let want = Duration::from_secs_f64(secs.min(1e9));
+    let ms: u64 = ctx.state.setting(ctx.env, "statement_timeout").and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+    let timeout = (ms > 0).then(|| Duration::from_millis(ms));
+    match timeout {
+        Some(t) if t < want => {
+            std::thread::sleep(t);
+            Err(SqlError::new(code::QUERY_CANCELED, "canceling statement due to statement timeout"))
+        }
+        _ => {
+            std::thread::sleep(want);
+            Ok(Value::Text(String::new()))
+        }
+    }
 }
