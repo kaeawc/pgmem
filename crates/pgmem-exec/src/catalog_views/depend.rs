@@ -964,7 +964,7 @@ fn proc_info(m: &Model, o: Oid) -> Option<ProcInfo> {
         return Some(ProcInfo {
             schema: f.schema.clone(),
             name: f.name.clone(),
-            visible: m.catalog.function_visible(f),
+            visible: m.catalog.function_visible(f, &super::builtin_function_exists),
             args,
             procedure: f.procedure,
         });

@@ -20,6 +20,9 @@ CREATE SEQUENCE invoice_seq START 1000;
 CREATE SCHEMA reporting;
 CREATE TABLE reporting.daily (day date PRIMARY KEY, n int);
 COMMENT ON TABLE customers IS 'People who buy things';
+CREATE STATISTICS customers_stat (ndistinct) ON name, email FROM customers;
+CREATE STATISTICS customers_expr_stat ON email, lower(name) FROM customers;
+ALTER STATISTICS customers_expr_stat SET STATISTICS 50;
 \d customers
 \d orders
 \d big_orders
