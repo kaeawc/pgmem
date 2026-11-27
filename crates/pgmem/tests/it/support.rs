@@ -30,6 +30,11 @@ impl TestDb {
         }
     }
 
+    /// The connection string of the test database.
+    pub fn conninfo(&self) -> &str {
+        &self.conninfo
+    }
+
     pub fn connect(&self) -> Client {
         Client::connect(&self.conninfo, NoTls).expect("connect")
     }
@@ -174,10 +179,14 @@ pub struct RawReply {
     pub errors: Vec<String>,
     /// NotificationResponse (channel, payload) pairs.
     pub notifications: Vec<(String, String)>,
-    /// NoticeResponse messages (the `M` field).
+    /// NoticeResponse messages, each followed by its DETAIL lines (after a newline) if any.
     pub notices: Vec<String>,
     /// DataRow first-column values (text format).
     pub values: Vec<Option<String>>,
+    /// RowDescription column names, one list per message.
+    pub row_descriptions: Vec<Vec<String>>,
+    /// CopyData message bodies, one per message.
+    pub copy_data: Vec<Vec<u8>>,
     /// The ReadyForQuery transaction status.
     pub status: u8,
 }
@@ -233,9 +242,17 @@ impl RawConn {
                 b'E' => r
                     .errors
                     .extend(body.split(|b| *b == 0).filter_map(|f| f.strip_prefix(b"C")).map(|c| String::from_utf8_lossy(c).into_owned())),
-                b'N' => r
-                    .notices
-                    .extend(body.split(|b| *b == 0).filter_map(|f| f.strip_prefix(b"M")).map(|m| String::from_utf8_lossy(m).into_owned())),
+                b'N' => {
+                    let field = |k: u8| {
+                        body.split(|b| *b == 0).find_map(|f| f.strip_prefix(&[k][..])).map(|f| String::from_utf8_lossy(f).into_owned())
+                    };
+                    let mut n = field(b'M').unwrap_or_default();
+                    if let Some(d) = field(b'D') {
+                        n.push('\n');
+                        n.push_str(&d);
+                    }
+                    r.notices.push(n);
+                }
                 b'A' => {
                     let s = cstrs(&body[4..]);
                     r.notifications.push((s[0].clone(), s[1].clone()));
@@ -243,6 +260,18 @@ impl RawConn {
                 b'D' => {
                     let n = i32::from_be_bytes(body[2..6].try_into().expect("length"));
                     r.values.push((n >= 0).then(|| String::from_utf8_lossy(&body[6..6 + n as usize]).into_owned()));
+                }
+                b'd' => r.copy_data.push(body),
+                b'T' => {
+                    let n = usize::from(u16::from_be_bytes([body[0], body[1]]));
+                    let mut rest = &body[2..];
+                    let mut names = Vec::new();
+                    for _ in 0..n {
+                        let end = rest.iter().position(|b| *b == 0).expect("column name");
+                        names.push(String::from_utf8_lossy(&rest[..end]).into_owned());
+                        rest = &rest[end + 1 + 18..];
+                    }
+                    r.row_descriptions.push(names);
                 }
                 b'Z' => {
                     r.status = body[0];

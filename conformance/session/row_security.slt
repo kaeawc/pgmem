@@ -1,0 +1,755 @@
+# Row-level security: ALTER TABLE ... ROW LEVEL SECURITY, CREATE / ALTER / DROP POLICY, the
+# pg_policy / pg_policies catalogs, and enforcement under SET ROLE. Roles are cluster-wide on
+# PostgreSQL, so names are unique and dropped at the end.
+
+statement ok
+DROP ROLE IF EXISTS conf_rls_alice
+
+statement ok
+DROP ROLE IF EXISTS conf_rls_bob
+
+statement ok
+CREATE ROLE conf_rls_alice
+
+statement ok
+CREATE ROLE conf_rls_bob
+
+statement ok
+CREATE TABLE notes (id int PRIMARY KEY, author name NOT NULL, body text, private bool DEFAULT false)
+
+statement ok
+GRANT SELECT, INSERT, UPDATE, DELETE ON notes TO PUBLIC
+
+statement ok
+INSERT INTO notes VALUES (1, 'conf_rls_alice', 'a1', false), (2, 'conf_rls_alice', 'a2', true), (3, 'conf_rls_bob', 'b1', true)
+
+statement ok
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY
+
+query
+SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'notes'
+----
+relrowsecurity:bool | relforcerowsecurity:bool
+t | f
+
+query
+SELECT tablename, rowsecurity FROM pg_tables WHERE tablename = 'notes'
+----
+tablename:name | rowsecurity:bool
+notes | t
+
+statement ok
+SET ROLE conf_rls_alice
+
+query
+SELECT count(*) FROM notes
+----
+count:int8
+0
+
+statement error 42501 new row violates row-level security policy for table "notes"
+INSERT INTO notes VALUES (4, 'conf_rls_alice', 'a3')
+
+statement ok
+RESET ROLE
+
+statement ok
+CREATE POLICY own ON notes USING (author = current_user)
+
+statement ok
+CREATE POLICY public_read ON notes FOR SELECT USING (NOT private)
+
+statement ok
+CREATE POLICY no_shouting ON notes AS RESTRICTIVE FOR INSERT TO conf_rls_alice, conf_rls_bob WITH CHECK (body = lower(body))
+
+statement ok
+CREATE POLICY edit_window ON notes AS RESTRICTIVE FOR UPDATE USING (id < 100) WITH CHECK (id < 100)
+
+query
+SELECT schemaname, tablename, policyname, permissive, roles, cmd, qual, with_check FROM pg_policies ORDER BY policyname
+----
+schemaname:name | tablename:name | policyname:name | permissive:text | roles:_name | cmd:text | qual:text | with_check:text
+public | notes | edit_window | RESTRICTIVE | {public} | UPDATE | (id < 100) | (id < 100)
+public | notes | no_shouting | RESTRICTIVE | {conf_rls_alice,conf_rls_bob} | INSERT | NULL | (body = lower(body))
+public | notes | own | PERMISSIVE | {public} | ALL | (author = CURRENT_USER) | NULL
+public | notes | public_read | PERMISSIVE | {public} | SELECT | (NOT private) | NULL
+
+query
+SELECT polname, polcmd, polpermissive, polroles = '{0}' AS public, pg_get_expr(polqual, polrelid) AS qual, pg_get_expr(polwithcheck, polrelid) AS with_check
+FROM pg_policy ORDER BY polname
+----
+polname:name | polcmd:char | polpermissive:bool | public:bool | qual:text | with_check:text
+edit_window | w | f | t | (id < 100) | (id < 100)
+no_shouting | a | f | f | NULL | (body = lower(body))
+own | * | t | t | (author = CURRENT_USER) | NULL
+public_read | r | t | t | (NOT private) | NULL
+
+statement ok
+SET ROLE conf_rls_alice
+
+query rowsort
+SELECT id, author, body FROM notes
+----
+id:int4 | author:name | body:text
+1 | conf_rls_alice | a1
+2 | conf_rls_alice | a2
+
+query
+SELECT row_security_active('notes')
+----
+row_security_active:bool
+t
+
+statement ok
+INSERT INTO notes VALUES (4, 'conf_rls_alice', 'a3')
+
+statement error 42501 new row violates row-level security policy "no_shouting" for table "notes"
+INSERT INTO notes VALUES (5, 'conf_rls_alice', 'LOUD')
+
+statement error 42501 new row violates row-level security policy for table "notes"
+INSERT INTO notes VALUES (6, 'conf_rls_bob', 'forged')
+
+statement error 42501 new row violates row-level security policy "edit_window" for table "notes"
+UPDATE notes SET id = 200 WHERE id = 4
+
+query
+UPDATE notes SET body = body || '!' RETURNING id, body
+----
+id:int4 | body:text
+1 | a1!
+2 | a2!
+4 | a3!
+
+query
+DELETE FROM notes WHERE private RETURNING id
+----
+id:int4
+2
+
+statement ok
+SET ROLE conf_rls_bob
+
+query rowsort
+SELECT id, author, body FROM notes
+----
+id:int4 | author:name | body:text
+3 | conf_rls_bob | b1
+1 | conf_rls_alice | a1!
+4 | conf_rls_alice | a3!
+
+statement ok
+SET row_security = off
+
+statement error 42501 query would be affected by row-level security policy for table "notes"
+SELECT * FROM notes
+
+statement ok
+RESET row_security
+
+statement ok
+RESET ROLE
+
+query
+SELECT count(*), row_security_active('notes') FROM notes
+----
+count:int8 | row_security_active:bool
+3 | f
+
+statement ok
+ALTER POLICY own ON notes RENAME TO mine
+
+statement ok
+ALTER POLICY public_read ON notes TO conf_rls_bob USING (NOT private AND id > 0)
+
+query
+SELECT policyname, roles, qual FROM pg_policies WHERE tablename = 'notes' AND cmd IN ('ALL', 'SELECT') ORDER BY 1
+----
+policyname:name | roles:_name | qual:text
+mine | {public} | (author = CURRENT_USER)
+public_read | {conf_rls_bob} | ((NOT private) AND (id > 0))
+
+statement error 42710 policy "mine" for table "notes" already exists
+CREATE POLICY mine ON notes USING (true)
+
+statement error 42601 only WITH CHECK expression allowed for INSERT
+CREATE POLICY bad ON notes FOR INSERT USING (true)
+
+statement error 42601 WITH CHECK cannot be applied to SELECT or DELETE
+CREATE POLICY bad ON notes FOR SELECT WITH CHECK (true)
+
+statement error 42704 policy "nope" for table "notes" does not exist
+DROP POLICY nope ON notes
+
+statement ok
+DROP POLICY IF EXISTS nope ON notes
+
+statement error 2BP01 role "conf_rls_bob" cannot be dropped because some objects depend on it
+DROP ROLE conf_rls_bob
+
+statement ok
+ALTER TABLE notes FORCE ROW LEVEL SECURITY
+
+query
+SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'notes'
+----
+relrowsecurity:bool | relforcerowsecurity:bool
+t | t
+
+statement ok
+DROP POLICY mine ON notes
+
+statement ok
+DROP TABLE notes
+
+query
+SELECT count(*) FROM pg_policy
+----
+count:int8
+0
+
+statement ok
+DROP ROLE conf_rls_alice
+
+statement ok
+DROP ROLE conf_rls_bob
+
+# Prepared statements, functions, joins and partitioned tables under policies.
+
+statement ok
+DROP ROLE IF EXISTS conf_rlsp_a
+
+statement ok
+CREATE ROLE conf_rlsp_a
+
+statement ok
+CREATE TABLE t (id int, who name)
+
+statement ok
+GRANT ALL ON t TO PUBLIC
+
+statement ok
+INSERT INTO t VALUES (1, 'conf_rlsp_a'), (2, 'x')
+
+statement ok
+ALTER TABLE t ENABLE ROW LEVEL SECURITY
+
+statement ok
+CREATE POLICY p ON t USING (who = current_user)
+
+statement ok
+PREPARE q AS SELECT count(*) FROM t
+
+query
+EXECUTE q
+----
+count:int8
+2
+
+statement ok
+SET ROLE conf_rlsp_a
+
+query
+EXECUTE q
+----
+count:int8
+1
+
+query
+SELECT count(*) FROM t a JOIN t b ON a.id = b.id
+----
+count:int8
+1
+
+query
+SELECT (SELECT count(*) FROM t), EXISTS (SELECT 1 FROM t WHERE id = 2)
+----
+count:int8 | exists:bool
+1 | f
+
+statement ok
+RESET ROLE
+
+statement ok
+CREATE FUNCTION cnt() RETURNS bigint LANGUAGE sql AS 'SELECT count(*) FROM t'
+
+statement ok
+CREATE FUNCTION pcnt() RETURNS bigint LANGUAGE plpgsql AS $$ BEGIN RETURN (SELECT count(*) FROM t); END $$
+
+statement ok
+CREATE TABLE log (n bigint)
+
+statement ok
+GRANT ALL ON log TO PUBLIC
+
+statement ok
+SET ROLE conf_rlsp_a
+
+query
+SELECT cnt(), pcnt()
+----
+cnt:int8 | pcnt:int8
+1 | 1
+
+statement ok
+INSERT INTO log SELECT count(*) FROM t
+
+query
+SELECT * FROM log
+----
+n:int8
+1
+
+statement ok
+RESET ROLE
+
+statement ok
+CREATE TABLE pt (id int, who name) PARTITION BY RANGE (id)
+
+statement ok
+CREATE TABLE pt1 PARTITION OF pt FOR VALUES FROM (0) TO (10)
+
+statement ok
+CREATE TABLE pt2 PARTITION OF pt FOR VALUES FROM (10) TO (20)
+
+statement ok
+GRANT ALL ON pt, pt1, pt2 TO PUBLIC
+
+statement ok
+INSERT INTO pt VALUES (1, 'conf_rlsp_a'), (2, 'x'), (11, 'conf_rlsp_a'), (12, 'x')
+
+statement ok
+ALTER TABLE pt ENABLE ROW LEVEL SECURITY
+
+statement ok
+CREATE POLICY p ON pt USING (who = current_user)
+
+statement ok
+SET ROLE conf_rlsp_a
+
+query rowsort
+SELECT * FROM pt
+----
+id:int4 | who:name
+1 | conf_rlsp_a
+11 | conf_rlsp_a
+
+query rowsort
+SELECT * FROM pt1
+----
+id:int4 | who:name
+1 | conf_rlsp_a
+2 | x
+
+query
+UPDATE pt SET id = id + 1 RETURNING id
+----
+id:int4
+2
+12
+
+statement error 42501 new row violates row-level security policy for table "pt"
+INSERT INTO pt VALUES (3, 'x')
+
+query
+DELETE FROM pt RETURNING id
+----
+id:int4
+2
+12
+
+statement ok
+RESET ROLE
+
+query
+SELECT count(*) FROM pt
+----
+count:int8
+2
+
+statement ok
+DROP TABLE pt, t, log
+
+statement ok
+DROP FUNCTION cnt()
+
+statement ok
+DROP FUNCTION pcnt()
+
+statement ok
+DEALLOCATE q
+
+statement ok
+DROP ROLE conf_rlsp_a
+
+# Moved partition rows, UPDATE ... FROM, DELETE ... USING, ON CONFLICT DO NOTHING, and a view
+# owned by the superuser (no policies through it).
+
+statement ok
+DROP ROLE IF EXISTS conf_rlsq_a
+
+statement ok
+CREATE ROLE conf_rlsq_a
+
+statement ok
+CREATE TABLE pt (id int, who name, v int) PARTITION BY RANGE (id)
+
+statement ok
+CREATE TABLE pt1 PARTITION OF pt FOR VALUES FROM (0) TO (10)
+
+statement ok
+CREATE TABLE pt2 PARTITION OF pt FOR VALUES FROM (10) TO (20)
+
+statement ok
+GRANT ALL ON pt, pt1, pt2 TO PUBLIC
+
+statement ok
+INSERT INTO pt VALUES (1, 'conf_rlsq_a', 1), (2, 'x', 2)
+
+statement ok
+ALTER TABLE pt ENABLE ROW LEVEL SECURITY
+
+statement ok
+CREATE POLICY p ON pt USING (who = current_user) WITH CHECK (v < 50)
+
+statement ok
+SET ROLE conf_rlsq_a
+
+statement error 42501 new row violates row-level security policy for table "pt"
+UPDATE pt SET id = 15, v = 60 WHERE id = 1
+
+query
+UPDATE pt SET id = 15 WHERE id = 1 RETURNING *
+----
+id:int4 | who:name | v:int4
+15 | conf_rlsq_a | 1
+
+statement error 42501 new row violates row-level security policy for table "pt"
+INSERT INTO pt VALUES (3, 'conf_rlsq_a', 99)
+
+statement ok
+RESET ROLE
+
+statement ok
+CREATE TABLE u (id int PRIMARY KEY, who name, v int)
+
+statement ok
+CREATE TABLE src (id int, v int)
+
+statement ok
+GRANT ALL ON u, src TO PUBLIC
+
+statement ok
+INSERT INTO u VALUES (1, 'conf_rlsq_a', 1), (2, 'x', 2)
+
+statement ok
+INSERT INTO src VALUES (1, 10), (2, 20)
+
+statement ok
+ALTER TABLE u ENABLE ROW LEVEL SECURITY
+
+statement ok
+CREATE POLICY p ON u USING (who = current_user)
+
+statement ok
+CREATE POLICY ins ON u FOR INSERT WITH CHECK (true)
+
+statement ok
+CREATE VIEW uv AS SELECT * FROM u WHERE v < 100 WITH CHECK OPTION
+
+statement ok
+GRANT ALL ON uv TO PUBLIC
+
+statement ok
+SET ROLE conf_rlsq_a
+
+query
+UPDATE u SET v = src.v FROM src WHERE u.id = src.id RETURNING u.id, u.v
+----
+id:int4 | v:int4
+1 | 10
+
+query
+DELETE FROM u USING src WHERE u.id = src.id AND src.v = 20 RETURNING u.id
+----
+id:int4
+
+statement ok
+INSERT INTO u VALUES (2, 'x', 5) ON CONFLICT DO NOTHING
+
+statement error 42501 new row violates row-level security policy for table "u"
+INSERT INTO u VALUES (3, 'x', 5) ON CONFLICT DO NOTHING RETURNING id
+
+query
+SELECT id FROM u FOR UPDATE
+----
+id:int4
+1
+
+statement ok
+INSERT INTO uv VALUES (4, 'x', 1)
+
+statement error 44000 new row violates check option for view "uv"
+UPDATE uv SET v = 500
+
+query
+UPDATE uv SET v = 7 RETURNING id, v
+----
+id:int4 | v:int4
+2 | 7
+1 | 7
+4 | 7
+
+statement ok
+RESET ROLE
+
+query rowsort
+SELECT * FROM u
+----
+id:int4 | who:name | v:int4
+2 | x | 7
+1 | conf_rlsq_a | 7
+4 | x | 7
+
+statement ok
+DROP VIEW uv
+
+statement ok
+DROP TABLE pt, u, src
+
+statement ok
+DROP ROLE conf_rlsq_a
+
+# SELECT ... FOR UPDATE / SHARE adds the UPDATE policies of the tables it locks; policy
+# expressions keep the search_path they were created with and pin the relations they read;
+# INSTEAD OF triggers see rows through the view owner's policies; EXECUTE / CALL refuse
+# subqueries.
+
+statement ok
+DROP ROLE IF EXISTS conf_rlsx_a
+
+statement ok
+CREATE ROLE conf_rlsx_a
+
+statement ok
+CREATE TABLE lk (id int, who name)
+
+statement ok
+INSERT INTO lk VALUES (1, 'conf_rlsx_a'), (2, 'x')
+
+statement ok
+CREATE TABLE lk2 (id int)
+
+statement ok
+INSERT INTO lk2 VALUES (1), (2)
+
+statement ok
+GRANT ALL ON lk, lk2 TO PUBLIC
+
+statement ok
+ALTER TABLE lk ENABLE ROW LEVEL SECURITY
+
+statement ok
+CREATE POLICY lk_sel ON lk FOR SELECT USING (true)
+
+statement ok
+CREATE POLICY lk_upd ON lk FOR UPDATE USING (who = current_user)
+
+statement ok
+SET ROLE conf_rlsx_a
+
+query
+SELECT id FROM lk ORDER BY id
+----
+id:int4
+1
+2
+
+query
+SELECT id FROM lk ORDER BY id FOR UPDATE
+----
+id:int4
+1
+
+query
+SELECT id FROM lk ORDER BY id FOR KEY SHARE
+----
+id:int4
+1
+
+query
+SELECT lk.id FROM lk, lk2 WHERE lk.id = lk2.id ORDER BY 1 FOR UPDATE OF lk2
+----
+id:int4
+1
+2
+
+query
+SELECT x.id FROM lk x JOIN lk2 USING (id) ORDER BY 1 FOR NO KEY UPDATE OF x
+----
+id:int4
+1
+
+query
+SELECT id FROM (SELECT * FROM lk) s ORDER BY 1 FOR SHARE
+----
+id:int4
+1
+
+query
+SELECT (SELECT count(*) FROM lk) AS n FROM lk2 FOR UPDATE
+----
+n:int8
+2
+2
+
+statement ok
+RESET ROLE
+
+statement ok
+CREATE SCHEMA conf_rlsx_app
+
+statement ok
+CREATE FUNCTION conf_rlsx_app.lim() RETURNS int LANGUAGE sql AS 'SELECT 1'
+
+statement ok
+GRANT USAGE ON SCHEMA conf_rlsx_app TO PUBLIC
+
+statement ok
+CREATE TABLE pin (id int)
+
+statement ok
+INSERT INTO pin VALUES (2)
+
+statement ok
+GRANT ALL ON pin TO PUBLIC
+
+statement ok
+SET search_path = conf_rlsx_app, public
+
+statement ok
+CREATE POLICY lk_pin ON lk FOR SELECT TO conf_rlsx_a USING (lk.id = lim() OR id IN (SELECT id FROM pin))
+
+statement ok
+RESET search_path
+
+statement ok
+DROP POLICY lk_sel ON lk
+
+statement ok
+CREATE FUNCTION public.lim() RETURNS int LANGUAGE sql AS 'SELECT 0'
+
+statement ok
+SET ROLE conf_rlsx_a
+
+query
+SELECT id FROM lk ORDER BY id
+----
+id:int4
+1
+2
+
+statement ok
+RESET ROLE
+
+statement ok
+ALTER TABLE pin RENAME TO pin2
+
+statement ok
+ALTER TABLE lk RENAME TO lk3
+
+statement ok
+SET ROLE conf_rlsx_a
+
+query
+SELECT id FROM lk3 ORDER BY id
+----
+id:int4
+1
+2
+
+statement ok
+RESET ROLE
+
+statement error 2BP01 cannot drop table pin2 because other objects depend on it
+DROP TABLE pin2
+
+statement ok
+DROP TABLE pin2 CASCADE
+
+query
+SELECT count(*) FROM pg_policy WHERE polname = 'lk_pin'
+----
+count:int8
+0
+
+statement ok
+CREATE VIEW lkv AS SELECT * FROM lk3
+
+statement ok
+ALTER VIEW lkv OWNER TO conf_rlsx_a
+
+statement ok
+CREATE TABLE lklog (id int)
+
+statement ok
+GRANT ALL ON lklog TO PUBLIC
+
+statement ok
+CREATE FUNCTION lklog_f() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO lklog VALUES (OLD.id); RETURN OLD; END $$
+
+statement ok
+CREATE TRIGGER lkv_del INSTEAD OF DELETE ON lkv FOR EACH ROW EXECUTE FUNCTION lklog_f()
+
+statement ok
+CREATE POLICY lk_del ON lk3 FOR SELECT TO conf_rlsx_a USING (id = 2)
+
+statement ok
+DELETE FROM lkv
+
+query
+SELECT id FROM lklog
+----
+id:int4
+2
+
+statement ok
+PREPARE lk_p(text) AS SELECT $1
+
+statement error 0A000 cannot use subquery in EXECUTE parameter
+EXECUTE lk_p((SELECT 'x'))
+
+statement error 42803 aggregate functions are not allowed in EXECUTE parameters
+EXECUTE lk_p(count(*)::text)
+
+statement ok
+CREATE PROCEDURE lk_proc(INOUT x text) LANGUAGE sql AS $$ SELECT x $$
+
+statement error 0A000 cannot use subquery in CALL argument
+CALL lk_proc((SELECT 'x'))
+
+statement error 0A000 cannot use subquery in CALL argument
+CALL lk_proc(EXISTS (SELECT 1)::text)
+
+statement ok
+DEALLOCATE lk_p
+
+statement ok
+DROP VIEW lkv
+
+statement ok
+DROP TABLE lk3, lk2, lklog
+
+statement ok
+DROP FUNCTION lklog_f()
+
+statement ok
+DROP PROCEDURE lk_proc(text)
+
+statement ok
+DROP FUNCTION public.lim()
+
+statement ok
+DROP SCHEMA conf_rlsx_app CASCADE
+
+statement ok
+DROP ROLE conf_rlsx_a

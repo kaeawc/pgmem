@@ -1,0 +1,572 @@
+# Builtin range and multirange types: I/O, constructors, operators, functions, catalogs,
+# columns, indexes, grouping and ordering.
+
+query
+SELECT int4range(1, 5), int4range(1, 5, '[]'), int4range(1, 5, '()'), int4range(1, 5, '(]'), int4range(5, 5), int4range(NULL, 5), int4range(1, NULL, '[]')
+----
+int4range:int4range | int4range:int4range | int4range:int4range | int4range:int4range | int4range:int4range | int4range:int4range | int4range:int4range
+[1,5) | [1,6) | [2,5) | [2,6) | empty | (,5) | [1,)
+
+query
+SELECT int8range(10, 20, '(]'), numrange(1.5, 2.5), numrange(1.5, 2.5, '[]'), daterange('2024-01-01', '2024-01-31', '[]')
+----
+int8range:int8range | numrange:numrange | numrange:numrange | daterange:daterange
+[11,21) | [1.5,2.5) | [1.5,2.5] | [2024-01-01,2024-02-01)
+
+query
+SELECT tsrange('2024-01-01 10:00', '2024-01-01 11:00'), tstzrange('2024-01-01 10:00+00', NULL)
+----
+tsrange:tsrange | tstzrange:tstzrange
+["2024-01-01 10:00:00","2024-01-01 11:00:00") | ["2024-01-01 10:00:00+00",)
+
+statement error 22000 range lower bound must be less than or equal to range upper bound
+SELECT int4range(5, 1)
+
+statement error 42601 invalid range bound flags
+SELECT int4range(1, 2, 'xx')
+
+query
+SELECT '[1,5]'::int4range, '(1,5)'::int4range, 'empty'::int4range, '(,)'::int4range, '[,5)'::int4range, '  [ 1 , 5 ]  '::int4range
+----
+int4range:int4range | int4range:int4range | int4range:int4range | int4range:int4range | int4range:int4range | int4range:int4range
+[1,6) | [2,5) | empty | (,) | (,5) | [1,6)
+
+query
+SELECT 'EMPTY'::int4range, '[1,1)'::int4range, '(1,2)'::int4range, '[3,3]'::int4range
+----
+int4range:int4range | int4range:int4range | int4range:int4range | int4range:int4range
+empty | empty | empty | [3,4)
+
+statement error 22P02 invalid input syntax for type integer: "a"
+SELECT '[a,b)'::int4range
+
+statement error 22P02 malformed range literal: "[1,2"
+SELECT '[1,2'::int4range
+
+statement error 22000 range lower bound must be less than or equal to range upper bound
+SELECT '[2,1]'::int4range
+
+statement error 22007 invalid input syntax for type timestamp: "a b"
+SELECT '["a b","c d")'::tsrange
+
+query
+SELECT '[1.0, 2.50]'::numrange, '("1","2")'::numrange, '[-infinity,infinity]'::daterange, '[-infinity,infinity]'::tsrange
+----
+numrange:numrange | numrange:numrange | daterange:daterange | tsrange:tsrange
+[1.0,2.50] | (1,2) | [-infinity,infinity] | [-infinity,infinity]
+
+query
+SELECT '[2024-01-01,infinity]'::daterange, '[2024-01-01,2024-01-05]'::daterange
+----
+daterange:daterange | daterange:daterange
+[2024-01-01,infinity] | [2024-01-01,2024-01-06)
+
+query
+SELECT '[ "2024-01-01 10:00" , "2024-01-01 11:00" )'::tsrange, '["2024-01-01 10:00+02",)'::tstzrange
+----
+tsrange:tsrange | tstzrange:tstzrange
+["2024-01-01 10:00:00","2024-01-01 11:00:00") | ["2024-01-01 08:00:00+00",)
+
+query
+SELECT int4range(1, 5) = int4range(1, 4, '[]'), int4range(1, 5) < int4range(1, 6), int4range(1, 5) < int4range(2, 3), 'empty'::int4range < int4range(1, 2), int4range(NULL, 2) < int4range(1, 2), int4range(1, NULL) > int4range(1, 100)
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t | t | t
+
+query
+SELECT int4range(1, 5) && int4range(4, 8), int4range(1, 5) && int4range(5, 8), int4range(1, 10) @> int4range(2, 3), int4range(1, 10) @> 5, 5 <@ int4range(1, 10), int4range(2, 3) <@ int4range(1, 10)
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | f | t | t | t | t
+
+query
+SELECT int4range(1, 5) << int4range(5, 8), int4range(1, 5) >> int4range(5, 8), int4range(1, 5) &< int4range(3, 8), int4range(1, 5) &> int4range(3, 8), int4range(1, 5) -|- int4range(5, 8), numrange(1, 2) -|- numrange(2, 3, '()')
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | f | t | f | t | f
+
+query
+SELECT int4range(1, 5) + int4range(3, 8), int4range(1, 5) * int4range(3, 8), int4range(1, 5) - int4range(3, 8), int4range(1, 10) * int4range(20, 30), int4range(1, 10) - int4range(1, 10)
+----
+?column?:int4range | ?column?:int4range | ?column?:int4range | ?column?:int4range | ?column?:int4range
+[1,8) | [3,5) | [1,3) | empty | empty
+
+statement error 22000 result of range union would not be contiguous
+SELECT int4range(1, 5) + int4range(7, 8)
+
+statement error 22000 result of range difference would not be contiguous
+SELECT int4range(1, 10) - int4range(3, 5)
+
+query
+SELECT lower(int4range(1, 5)), upper(int4range(1, 5)), lower(int4range(1, 5, '(]')), upper(int4range(1, 5, '(]')), lower('empty'::int4range), upper(int4range(1, NULL))
+----
+lower:int4 | upper:int4 | lower:int4 | upper:int4 | lower:int4 | upper:int4
+1 | 5 | 2 | 6 | NULL | NULL
+
+query
+SELECT isempty('empty'::int4range), isempty(int4range(1, 2)), lower_inc(int4range(1, 5)), upper_inc(int4range(1, 5)), lower_inf(int4range(NULL, 5)), upper_inf(int4range(1, NULL)), lower_inc('empty'::int4range), upper_inf('empty'::int4range)
+----
+isempty:bool | isempty:bool | lower_inc:bool | upper_inc:bool | lower_inf:bool | upper_inf:bool | lower_inc:bool | upper_inf:bool
+t | f | t | f | t | t | f | f
+
+query
+SELECT lower_inc(numrange(1, 2, '(]')), upper_inc(numrange(1, 2, '(]')), lower_inf('(,)'::numrange)
+----
+lower_inc:bool | upper_inc:bool | lower_inf:bool
+f | t | t
+
+query
+SELECT range_merge(int4range(1, 3), int4range(7, 9)), range_merge('empty'::int4range, int4range(1, 2)), range_merge(numrange(1, 2), numrange(1.5, 3))
+----
+range_merge:int4range | range_merge:int4range | range_merge:numrange
+[1,9) | [1,2) | [1,3)
+
+query
+SELECT pg_typeof(int4range(1, 2)), pg_typeof(lower(daterange('2024-01-01', '2024-02-01'))), pg_typeof(numrange(1, 2)), pg_typeof(int4range(1, 2) * int4range(1, 3))
+----
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+int4range | date | numrange | int4range
+
+query
+SELECT '[1,5)'::int4range::text, '[1,5)'::text::int4range, CAST('[1,3]' AS int8range)
+----
+text:text | int4range:int4range | int8range:int8range
+[1,5) | [1,5) | [1,4)
+
+statement error 42846 cannot cast type int4range to int8range
+SELECT '[1,5)'::int4range::int8range
+
+query
+SELECT int4range(1, 5) @> NULL::int4, upper(NULL::int4range), int4range(1, 5) && NULL
+----
+?column?:bool | upper:int4 | ?column?:bool
+NULL | NULL | NULL
+
+query
+SELECT typname, typtype, typcategory, typlen, typbyval, typalign, typstorage, typarray::regtype, typelem, typinput, typoutput, typreceive, typsend, typanalyze FROM pg_type WHERE typtype IN ('r', 'm') ORDER BY oid
+----
+typname:name | typtype:char | typcategory:char | typlen:int2 | typbyval:bool | typalign:char | typstorage:char | typarray:regtype | typelem:oid | typinput:regproc | typoutput:regproc | typreceive:regproc | typsend:regproc | typanalyze:regproc
+int4range | r | R | -1 | f | i | x | int4range[] | 0 | range_in | range_out | range_recv | range_send | range_typanalyze
+numrange | r | R | -1 | f | i | x | numrange[] | 0 | range_in | range_out | range_recv | range_send | range_typanalyze
+tsrange | r | R | -1 | f | d | x | tsrange[] | 0 | range_in | range_out | range_recv | range_send | range_typanalyze
+tstzrange | r | R | -1 | f | d | x | tstzrange[] | 0 | range_in | range_out | range_recv | range_send | range_typanalyze
+daterange | r | R | -1 | f | i | x | daterange[] | 0 | range_in | range_out | range_recv | range_send | range_typanalyze
+int8range | r | R | -1 | f | d | x | int8range[] | 0 | range_in | range_out | range_recv | range_send | range_typanalyze
+int4multirange | m | R | -1 | f | i | x | int4multirange[] | 0 | multirange_in | multirange_out | multirange_recv | multirange_send | multirange_typanalyze
+nummultirange | m | R | -1 | f | i | x | nummultirange[] | 0 | multirange_in | multirange_out | multirange_recv | multirange_send | multirange_typanalyze
+tsmultirange | m | R | -1 | f | d | x | tsmultirange[] | 0 | multirange_in | multirange_out | multirange_recv | multirange_send | multirange_typanalyze
+tstzmultirange | m | R | -1 | f | d | x | tstzmultirange[] | 0 | multirange_in | multirange_out | multirange_recv | multirange_send | multirange_typanalyze
+datemultirange | m | R | -1 | f | i | x | datemultirange[] | 0 | multirange_in | multirange_out | multirange_recv | multirange_send | multirange_typanalyze
+int8multirange | m | R | -1 | f | d | x | int8multirange[] | 0 | multirange_in | multirange_out | multirange_recv | multirange_send | multirange_typanalyze
+
+query
+SELECT typname, typtype, typcategory, typelem::regtype, typinput, typoutput FROM pg_type WHERE typname IN ('_int4range', '_daterange', '_int4multirange', '_tstzrange') ORDER BY oid
+----
+typname:name | typtype:char | typcategory:char | typelem:regtype | typinput:regproc | typoutput:regproc
+_int4range | b | A | int4range | array_in | array_out
+_tstzrange | b | A | tstzrange | array_in | array_out
+_daterange | b | A | daterange | array_in | array_out
+_int4multirange | b | A | int4multirange | array_in | array_out
+
+query
+SELECT rngtypid::regtype, rngsubtype::regtype, rngmultitypid::regtype, rngcollation, rngsubopc, rngcanonical, rngsubdiff FROM pg_range ORDER BY rngtypid
+----
+rngtypid:regtype | rngsubtype:regtype | rngmultitypid:regtype | rngcollation:oid | rngsubopc:oid | rngcanonical:regproc | rngsubdiff:regproc
+int4range | integer | int4multirange | 0 | 1978 | int4range_canonical | int4range_subdiff
+numrange | numeric | nummultirange | 0 | 3125 | - | numrange_subdiff
+tsrange | timestamp without time zone | tsmultirange | 0 | 3128 | - | tsrange_subdiff
+tstzrange | timestamp with time zone | tstzmultirange | 0 | 3127 | - | tstzrange_subdiff
+daterange | date | datemultirange | 0 | 3122 | daterange_canonical | daterange_subdiff
+int8range | bigint | int8multirange | 0 | 3124 | int8range_canonical | int8range_subdiff
+
+query
+SELECT format_type('int4range'::regtype, NULL), format_type(3913, NULL), 'int4range[]'::regtype::oid, '{"[1,2)","[3,4)"}'::int4range[]
+----
+format_type:text | format_type:text | oid:oid | int4range:_int4range
+int4range | daterange[] | 3905 | {"[1,2)","[3,4)"}
+
+query
+SELECT ARRAY[int4range(1, 2), int4range(5, 9)], (ARRAY[int4range(1, 2)])[1]
+----
+array:_int4range | array:int4range
+{"[1,2)","[5,9)"} | [1,2)
+
+query
+SELECT int4multirange(int4range(1, 3), int4range(2, 5), int4range(8, 9)), '{[1,3), [5,7)}'::int4multirange, '{}'::int4multirange, int4multirange()
+----
+int4multirange:int4multirange | int4multirange:int4multirange | int4multirange:int4multirange | int4multirange:int4multirange
+{[1,5),[8,9)} | {[1,3),[5,7)} | {} | {}
+
+query
+SELECT '{[1,3), [3,7)}'::int4multirange, '{[1,3), empty}'::int4multirange, nummultirange(numrange(1, 2), numrange(1.5, 4))
+----
+int4multirange:int4multirange | int4multirange:int4multirange | nummultirange:nummultirange
+{[1,7)} | {[1,3)} | {[1,4)}
+
+statement error 22P02 malformed multirange literal: "{[1,3)"
+SELECT '{[1,3)'::int4multirange
+
+query
+SELECT int4multirange(int4range(1, 3)) @> 2, '{[1,3),[5,8)}'::int4multirange && int4range(3, 5), '{[1,3),[5,8)}'::int4multirange + '{[3,5)}'::int4multirange, '{[1,10)}'::int4multirange - '{[3,5)}'::int4multirange, '{[1,10)}'::int4multirange * '{[3,5),[8,12)}'::int4multirange
+----
+?column?:bool | ?column?:bool | ?column?:int4multirange | ?column?:int4multirange | ?column?:int4multirange
+t | f | {[1,8)} | {[1,3),[5,10)} | {[3,5),[8,10)}
+
+query
+SELECT lower('{[1,3),[5,8)}'::int4multirange), upper('{[1,3),[5,8)}'::int4multirange), isempty('{}'::int4multirange), range_merge('{[1,3),[5,8)}'::int4multirange), multirange(int4range(1, 2))
+----
+lower:int4 | upper:int4 | isempty:bool | range_merge:int4range | multirange:int4multirange
+1 | 8 | t | [1,8) | {[1,2)}
+
+query
+SELECT unnest('{[1,3),[5,8)}'::int4multirange)
+----
+unnest:int4range
+[1,3)
+[5,8)
+
+query
+SELECT range_agg(r), range_intersect_agg(r) FROM (VALUES (int4range(1, 5)), (int4range(3, 8)), (int4range(4, 10))) v(r)
+----
+range_agg:int4multirange | range_intersect_agg:int4range
+{[1,10)} | [4,5)
+
+query
+SELECT range_agg(r) FROM (VALUES (int4range(1, 3)), (int4range(5, 8)), (NULL)) v(r)
+----
+range_agg:int4multirange
+{[1,3),[5,8)}
+
+query
+SELECT range_agg(r), range_intersect_agg(r) FROM (VALUES (NULL::int4range)) v(r)
+----
+range_agg:int4multirange | range_intersect_agg:int4range
+NULL | NULL
+
+query
+SELECT range_agg(m) FROM (VALUES ('{[1,3)}'::int4multirange), ('{[2,6),[9,10)}'::int4multirange)) v(m)
+----
+range_agg:int4multirange
+{[1,6),[9,10)}
+
+query
+SELECT r FROM (VALUES (int4range(3, 5)), ('empty'::int4range), (int4range(NULL, 2)), (int4range(1, 2)), (int4range(1, NULL)), (int4range(1, 9))) v(r) ORDER BY r
+----
+r:int4range
+empty
+(,2)
+[1,2)
+[1,9)
+[1,)
+[3,5)
+
+query
+SELECT DISTINCT r FROM (VALUES (int4range(1, 3)), (int4range(1, 2, '[]')), ('[1,3)'::int4range)) v(r)
+----
+r:int4range
+[1,3)
+
+query
+SELECT r, count(*) FROM (VALUES (numrange(1, 2)), (numrange(1.0, 2.00)), (numrange(1, 2, '[]'))) v(r) GROUP BY r ORDER BY r
+----
+r:numrange | count:int8
+[1,2) | 2
+[1,2] | 1
+
+query
+SELECT pg_typeof(range_agg(r)) FROM (VALUES (daterange('2024-01-01', '2024-01-05'))) v(r)
+----
+pg_typeof:regtype
+datemultirange
+
+query
+SELECT daterange('2024-01-01', '2024-01-05') @> '2024-01-03'::date, tstzrange('2024-01-01', '2024-01-02') @> '2024-01-01 12:00+00'::timestamptz
+----
+?column?:bool | ?column?:bool
+t | t
+
+query
+SELECT upper(daterange('2024-01-01', '2024-01-05', '[]')) - lower(daterange('2024-01-01', '2024-01-05', '[]'))
+----
+?column?:int4
+5
+
+statement error 22003 integer out of range
+SELECT int4range(2147483647, NULL, '(]')
+
+statement error 22003 integer out of range
+SELECT int4range(1, 2147483647, '[]')
+
+query
+SELECT '[1,2)'::int4range = '[1,2)'::int4range, int4range(1, 2) <> int4range(1, 3), int4range(1, 2) >= int4range(1, 2), 'empty'::int4range = 'empty'::int4range
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t
+
+query
+SELECT int4range(1, 5) @> int4range(NULL, NULL), 'empty'::int4range <@ int4range(1, 2), 'empty'::int4range && int4range(1, 2), 'empty'::int4range << int4range(1, 2), 'empty'::int4range -|- int4range(1, 2)
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | t | f | f | f
+
+query
+SELECT numrange(1, 2) + 'empty'::numrange, 'empty'::numrange - numrange(1, 2), numrange(NULL, 5) - numrange(3, NULL)
+----
+?column?:numrange | ?column?:numrange | ?column?:numrange
+[1,2) | empty | (,3)
+
+query
+SELECT range_cmp(int4range(1, 2), int4range(1, 3)) IS NOT NULL
+----
+?column?:bool
+t
+
+query
+SELECT '[infinity,infinity]'::daterange, '(-infinity,2024-01-01]'::daterange, daterange('-infinity', 'infinity', '()'), '[2024-01-01,2024-01-01)'::daterange
+----
+daterange:daterange | daterange:daterange | daterange:daterange | daterange:daterange
+[infinity,infinity] | (-infinity,2024-01-02) | (-infinity,infinity) | empty
+
+query
+SELECT '{[1,3),[5,8)}'::int4multirange @> '{[1,2),[6,7)}', '{[1,3),[5,8)}'::int4multirange @> '{[1,6)}'::int4multirange, '{[1,3)}'::int4multirange <@ int4range(0, 4), int4range(1, 9) @> '{[2,3),[5,6)}'::int4multirange, int4range(2, 3) <@ '{[1,3),[5,8)}'::int4multirange, 4 <@ '{[1,3),[5,8)}'::int4multirange
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | f | t | t | t | f
+
+query
+SELECT '{[1,3),[5,8)}'::int4multirange << int4range(8, 9), int4range(8, 9) >> '{[1,3),[5,8)}'::int4multirange, '{[1,3)}'::int4multirange &< '{[2,5)}'::int4multirange, '{[1,3)}'::int4multirange &> int4range(0, 1), '{[1,3)}'::int4multirange -|- int4range(3, 4), int4range(-1, 1) -|- '{[1,3),[7,9)}'::int4multirange
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t | t | t
+
+query
+SELECT '{}'::int4multirange && int4range(1, 2), '{}'::int4multirange << '{[1,2)}', '{}'::int4multirange <@ int4range(1, 2), 'empty'::int4range <@ '{}'::int4multirange, '{[1,2)}'::int4multirange -|- '{}'
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | f | t | t | f
+
+query
+SELECT '{[1,3),[5,8)}'::int4multirange = '{[1,3),[5,8)}', '{[1,3)}'::int4multirange < '{[1,3),[5,8)}', '{[1,3)}'::int4multirange < '{[2,3)}', '{}'::int4multirange < '{[1,2)}', multirange_cmp('{[1,3)}'::int4multirange, '{[1,4)}')
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | multirange_cmp:int4
+t | t | t | t | -1
+
+query
+SELECT '{[1,10)}'::int4multirange - '{[2,3),[5,6),[9,12)}', '{[1,10),[20,30)}'::int4multirange * '{[5,25)}', '{[1,3)}'::nummultirange + '{(3,4]}', '{[1,3)}'::nummultirange - '{[1,3)}', '{(,)}'::int4multirange - '{[1,2)}'
+----
+?column?:int4multirange | ?column?:int4multirange | ?column?:nummultirange | ?column?:nummultirange | ?column?:int4multirange
+{[1,2),[3,5),[6,9)} | {[5,10),[20,25)} | {[1,3),(3,4]} | {} | {(,1),[2,)}
+
+statement error 42883 operator does not exist: int4multirange + int4range
+SELECT '{[1,3)}'::int4multirange + int4range(3, 4)
+
+query
+SELECT range_merge(int4range(1, 2), int4range(1, 2) * int4range(5, 6)), int4range(1, 2) + 'empty', range_cmp(int4range(1, 2), 'empty')
+----
+range_merge:int4range | ?column?:int4range | range_cmp:int4
+[1,2) | [1,2) | 1
+
+query
+SELECT x FROM unnest('{[1,3),[5,8)}'::int4multirange) AS x
+----
+x:int4range
+[1,3)
+[5,8)
+
+query
+SELECT * FROM unnest('{}'::datemultirange)
+----
+unnest:daterange
+
+statement ok
+CREATE TABLE rt (id int PRIMARY KEY, r int4range, d daterange, n numrange, m int4multirange)
+
+statement ok
+INSERT INTO rt VALUES (1, '[1,5)', '[2024-01-01,2024-02-01)', '[1.5,2.5]', '{[1,3),[5,7)}'), (2, '(0,4]', '[2024-03-01,)', NULL, '{}'), (3, 'empty', NULL, '(,0)', NULL), (4, '[10,20)', '(,2024-01-01]', '[0,0]', '{[10,20)}')
+
+query
+SELECT id, r, d, n, m FROM rt ORDER BY r, id
+----
+id:int4 | r:int4range | d:daterange | n:numrange | m:int4multirange
+3 | empty | NULL | (,0) | NULL
+1 | [1,5) | [2024-01-01,2024-02-01) | [1.5,2.5] | {[1,3),[5,7)}
+2 | [1,5) | [2024-03-01,) | NULL | {}
+4 | [10,20) | (,2024-01-02) | [0,0] | {[10,20)}
+
+query
+SELECT id FROM rt WHERE r && '[3,12)' ORDER BY id
+----
+id:int4
+1
+2
+4
+
+query
+SELECT id FROM rt WHERE r @> 3 ORDER BY id
+----
+id:int4
+1
+2
+
+query
+SELECT id FROM rt WHERE d @> '2024-01-15'::date ORDER BY id
+----
+id:int4
+1
+
+query
+SELECT r, count(*) FROM rt GROUP BY r ORDER BY r
+----
+r:int4range | count:int8
+empty | 1
+[1,5) | 2
+[10,20) | 1
+
+query
+SELECT DISTINCT lower(r) FROM rt ORDER BY 1
+----
+lower:int4
+1
+10
+NULL
+
+statement error 42883 function max(int4range) does not exist
+SELECT max(r) FROM rt
+
+statement error 42883 function min(int4multirange) does not exist
+SELECT min(m) FROM rt
+
+query
+SELECT id, r FROM rt ORDER BY r DESC NULLS LAST, id
+----
+id:int4 | r:int4range
+4 | [10,20)
+1 | [1,5)
+2 | [1,5)
+3 | empty
+
+statement error 23505 could not create unique index "rt_r"
+CREATE UNIQUE INDEX rt_r ON rt (r)
+
+query
+INSERT INTO rt VALUES (5, '[1,4]', NULL, NULL, NULL)
+----
+
+
+statement ok
+INSERT INTO rt VALUES (6, '[1,6)', NULL, NULL, NULL)
+
+query
+UPDATE rt SET r = r + '[20,30)' WHERE id = 4 RETURNING id, r
+----
+id:int4 | r:int4range
+4 | [10,30)
+
+query
+SELECT attname, atttypid::regtype, format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'rt'::regclass AND attnum > 0 ORDER BY attnum
+----
+attname:name | atttypid:regtype | format_type:text
+id | integer | integer
+r | int4range | int4range
+d | daterange | daterange
+n | numrange | numrange
+m | int4multirange | int4multirange
+
+query
+SELECT column_name, data_type, udt_name FROM information_schema.columns WHERE table_name = 'rt' ORDER BY ordinal_position
+----
+column_name:name | data_type:varchar | udt_name:name
+id | integer | int4
+r | int4range | int4range
+d | daterange | daterange
+n | numrange | numrange
+m | int4multirange | int4multirange
+
+query
+SELECT id, r, upper(r) - lower(r) AS len FROM rt WHERE NOT isempty(r) ORDER BY id
+----
+id:int4 | r:int4range | len:int4
+1 | [1,5) | 4
+2 | [1,5) | 4
+4 | [10,30) | 20
+5 | [1,5) | 4
+6 | [1,6) | 5
+
+query
+SELECT range_agg(r ORDER BY id), range_agg(d) FROM rt WHERE id <> 3
+----
+range_agg:int4multirange | range_agg:datemultirange
+{[1,6),[10,30)} | {(,2024-02-01),[2024-03-01,)}
+
+query
+SELECT id, r FROM rt WHERE r < '[2,3)' ORDER BY id
+----
+id:int4 | r:int4range
+1 | [1,5)
+2 | [1,5)
+3 | empty
+5 | [1,5)
+6 | [1,6)
+
+query
+SELECT count(*) FROM rt a JOIN rt b ON a.r && b.r AND a.id < b.id
+----
+count:int8
+6
+
+statement ok
+DROP TABLE rt
+
+query
+SELECT int4range(1, 5)::text, '[1,5)'::int4range::varchar, int4range(1, 5) || 'x'
+----
+int4range:text | varchar:varchar | ?column?:text
+[1,5) | [1,5) | [1,5)x
+
+query
+SELECT '[1,5)'::int4range::int4multirange
+----
+int4multirange:int4multirange
+{[1,5)}
+
+statement error 42846 cannot cast type int4multirange to int4range
+SELECT int4multirange(int4range(1, 2))::text, '{[1,2)}'::int4multirange::int4range
+
+query
+SELECT tstzrange('2024-01-01 00:00+00', '2024-01-02 00:00+00') * tstzrange('2024-01-01 12:00+00', NULL)
+----
+?column?:tstzrange
+["2024-01-01 12:00:00+00","2024-01-02 00:00:00+00")
+
+statement error 42883 operator does not exist: numrange @> integer
+SELECT numrange(1, 2) @> 1.5, numrange(1, 2) @> 2, numrange(NULL, NULL) @> 1e100, int8range(1, 3) @> 2, daterange('2024-01-01', '2024-01-05') @> '2024-01-05'::date
+
+statement error 42883 operator does not exist: int4range @> bigint
+SELECT int4range(1, 5) @> 2::int8
+
+statement error 42883 function int4range(numeric, integer) does not exist
+SELECT int4range(1.5, 3)
+
+query
+SELECT numrange(1, 2) = numrange(1.0, 2.0), numrange(1, 2)::text = numrange(1.0, 2.0)::text
+----
+?column?:bool | ?column?:bool
+t | f
+
+query
+SELECT '[1,2)'::int4range < '[1,2]', int4range(1, 2) IS DISTINCT FROM int4range(1, 2)
+----
+?column?:bool | ?column?:bool
+t | f
+
+query
+SELECT lower(r), upper(r) FROM (VALUES ('(,)'::int4range)) v(r)
+----
+lower:int4 | upper:int4
+NULL | NULL
+
+query
+SELECT 'empty'::int4range = int4range(3, 3), int4range(3, 3, '[]'), int4range(3, 4, '()')
+----
+?column?:bool | int4range:int4range | int4range:int4range
+t | [3,4) | empty

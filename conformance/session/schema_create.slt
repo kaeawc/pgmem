@@ -1,0 +1,86 @@
+# CREATE privilege on schemas (and the database): creating, renaming and moving objects.
+# Roles are cluster-wide on PostgreSQL, so names are unique and dropped at the end.
+
+statement ok
+DROP ROLE IF EXISTS conf_cr_a
+
+statement ok
+CREATE ROLE conf_cr_a; CREATE SCHEMA cr_s; GRANT USAGE ON SCHEMA cr_s TO conf_cr_a
+
+statement ok
+CREATE TABLE cr_s.owned (id int); ALTER TABLE cr_s.owned OWNER TO conf_cr_a; CREATE FUNCTION cr_s.fo() RETURNS int LANGUAGE sql AS 'select 1'; ALTER FUNCTION cr_s.fo() OWNER TO conf_cr_a
+
+statement ok
+CREATE TYPE cr_s.ty AS ENUM ('a'); CREATE SCHEMA cr_h; CREATE TYPE cr_h.ty AS ENUM ('a')
+
+statement ok
+SET ROLE conf_cr_a
+
+statement error 42501 permission denied for schema cr_s
+CREATE TABLE cr_s.t1 (id int)
+
+statement error 42501 permission denied for schema public
+CREATE TABLE cr_t1 (id int)
+
+statement error 42501 permission denied for schema cr_s
+CREATE TABLE cr_s.t2 AS SELECT 1
+
+statement error 42501 permission denied for schema cr_s
+CREATE VIEW cr_s.v AS SELECT 1
+
+statement error 42501 permission denied for schema cr_s
+CREATE MATERIALIZED VIEW cr_s.mv AS SELECT 1
+
+statement error 42501 permission denied for schema cr_s
+CREATE SEQUENCE cr_s.sq
+
+statement error 42501 permission denied for schema cr_s
+CREATE FUNCTION cr_s.f() RETURNS int LANGUAGE sql AS 'select 1'
+
+statement error 42501 permission denied for schema cr_s
+CREATE PROCEDURE cr_s.p() LANGUAGE sql AS 'select 1'
+
+statement error 42501 permission denied for schema cr_s
+CREATE TYPE cr_s.ty2 AS ENUM ('a')
+
+statement error 42501 permission denied for schema cr_s
+CREATE DOMAIN cr_s.d AS int
+
+statement error 42501 permission denied for schema cr_s
+CREATE INDEX ON cr_s.owned (id)
+
+statement error 42501 permission denied for schema cr_s
+ALTER TABLE cr_s.owned RENAME TO owned2
+
+statement error 42501 permission denied for schema cr_s
+ALTER FUNCTION cr_s.fo() RENAME TO fo2
+
+statement error 42501 permission denied for schema public
+ALTER TABLE cr_s.owned SET SCHEMA public
+
+statement error 42501 permission denied for schema cr_h
+CREATE TEMP TABLE cr_x (a cr_h.ty)
+
+statement error 42501 permission denied for schema cr_h
+SELECT 'a'::cr_h.ty
+
+statement ok
+CREATE TEMP TABLE cr_tmp (id int)
+
+statement ok
+RESET ROLE; GRANT CREATE ON SCHEMA cr_s TO conf_cr_a; SET ROLE conf_cr_a
+
+statement ok
+CREATE TABLE cr_s.t1 (id int); CREATE VIEW cr_s.v AS SELECT 1; CREATE SEQUENCE cr_s.sq; CREATE INDEX ON cr_s.owned (id); ALTER TABLE cr_s.owned RENAME TO owned2; ALTER FUNCTION cr_s.fo() RENAME TO fo2
+
+statement ok
+RESET ROLE
+
+statement ok
+DROP SCHEMA cr_s CASCADE; DROP SCHEMA cr_h CASCADE
+
+statement ok
+DROP OWNED BY conf_cr_a
+
+statement ok
+DROP ROLE conf_cr_a

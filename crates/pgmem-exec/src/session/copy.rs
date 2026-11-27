@@ -146,6 +146,12 @@ impl Session {
             let opts = copy::options(&c.options, false)?;
             return self.copy_to(c, None, &opts);
         };
+        {
+            let catalog = self.catalog_snapshot();
+            if let Ok(Some(rel)) = catalog.find_relation(name) {
+                crate::roles::check_copy(&catalog, &self.env(), &rel, &c.columns, c.from)?;
+            }
+        }
         let table = self.copy_table(name, c.from)?;
         if !c.from {
             let t = table?;
@@ -268,6 +274,7 @@ impl Session {
     }
 
     fn copy_into(&mut self, c: &ir::Copy, t: &TableDef, o: &Options) -> SqlResult<QueryResult> {
+        crate::rls::check_copy_from(&self.catalog_snapshot(), &self.env(), t)?;
         let cols = columns(t, &c.columns)?;
         let names: Vec<String> = cols.iter().map(|(n, _)| n.clone()).collect();
         check_force(o, Some(t), &names)?;
@@ -445,7 +452,6 @@ fn values_list(rows: &[Vec<Cell>], cols: &[(String, Type)], defaults: bool) -> (
 fn format_rows(o: &Options, r: &QueryResult, names: &[String]) -> SqlResult<Vec<Vec<u8>>> {
     let mut data = Vec::with_capacity(r.rows.len() + 2);
     if o.kind == Kind::Binary {
-        data.push(copy::binary_header());
         for row in &r.rows {
             let mut fields = Vec::with_capacity(row.len());
             for (v, col) in row.iter().zip(&r.columns) {
@@ -454,6 +460,12 @@ fn format_rows(o: &Options, r: &QueryResult, names: &[String]) -> SqlResult<Vec<
             data.push(copy::binary_row(&fields));
         }
         data.push(copy::binary_trailer());
+        // PostgreSQL sends the file header in the same CopyData message as the first row (or as
+        // the trailer when there are none); clients such as psycopg parse the first message as
+        // header plus row.
+        let mut first = copy::binary_header();
+        first.extend_from_slice(&data.remove(0));
+        data.insert(0, first);
         return Ok(data);
     }
     if o.header != copy::Header::No {

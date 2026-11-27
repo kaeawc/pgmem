@@ -243,7 +243,10 @@ pub(crate) fn merge_columns(b: &Binder, ct: &ir::CreateTable, table: &mut TableD
         plan.notices.push(if pos == i {
             format!("merging column \"{}\" with inherited definition", local.name)
         } else {
-            format!("moving and merging column \"{}\" with inherited definition", local.name)
+            format!(
+                "moving and merging column \"{}\" with inherited definition\nUser-specified column moved to the position of the inherited column.",
+                local.name
+            )
         });
         merge_local_column(catalog, &mut inh[pos], local)?;
     }
@@ -394,7 +397,10 @@ pub(crate) fn exec_update(
         tu.only = true;
         tu.returning = returning_for(&u.returning, root, &alias);
         let stmt = Statement::Update(Box::new(tu));
-        results.push(routed(state, t.oid, || crate::statement::exec_statement(&stmt, binder, ctx, txn, params, env, state))?);
+        // The rows of every table below the parent take the parent's policies.
+        results.push(binder.with_policy_root(root, || {
+            routed(state, t.oid, || crate::statement::exec_statement(&stmt, binder, ctx, txn, params, env, state))
+        })?);
     }
     crate::triggers::root_statement(txn, root, Event::Update, TriggerTiming::After, Some(&set_columns), env, state)?;
     Ok(crate::partition::combine(results, "UPDATE", columns))
@@ -423,7 +429,10 @@ pub(crate) fn exec_delete(
         td.only = true;
         td.returning = returning_for(&d.returning, root, &alias);
         let stmt = Statement::Delete(Box::new(td));
-        results.push(routed(state, t.oid, || crate::statement::exec_statement(&stmt, binder, ctx, txn, params, env, state))?);
+        // The rows of every table below the parent take the parent's policies.
+        results.push(binder.with_policy_root(root, || {
+            routed(state, t.oid, || crate::statement::exec_statement(&stmt, binder, ctx, txn, params, env, state))
+        })?);
     }
     crate::triggers::root_statement(txn, root, Event::Delete, TriggerTiming::After, None, env, state)?;
     Ok(crate::partition::combine(results, "DELETE", columns))
@@ -638,9 +647,14 @@ fn child_column(column: &ir::ColumnDef, added: &ColumnDef) -> ir::ColumnDef {
     if let Some(base) = serial {
         c.ty.name = base.to_owned();
         let timing = ir::ConstraintTiming::default();
-        c.constraints.push(ir::ColumnConstraint { name: None, kind: ir::ColumnConstraintKind::NotNull, timing });
+        c.constraints.push(ir::ColumnConstraint { name: None, kind: ir::ColumnConstraintKind::NotNull, timing, reloptions: Vec::new() });
         if let Some(d) = &added.default {
-            c.constraints.push(ir::ColumnConstraint { name: None, kind: ir::ColumnConstraintKind::Default(d.clone()), timing });
+            c.constraints.push(ir::ColumnConstraint {
+                name: None,
+                kind: ir::ColumnConstraintKind::Default(d.clone()),
+                timing,
+                reloptions: Vec::new(),
+            });
         }
     }
     c

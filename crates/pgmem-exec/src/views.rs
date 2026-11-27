@@ -4,7 +4,7 @@
 
 use pgmem_catalog::{Catalog, Relation, ViewDef};
 use pgmem_ir as ir;
-use pgmem_types::SqlResult;
+use pgmem_types::{SqlError, SqlResult};
 
 const AGGREGATES: &[&str] = &[
     "count",
@@ -78,6 +78,9 @@ fn contains_call(e: &ir::Expr, window: bool) -> bool {
 pub fn not_updatable_reason(v: &ViewDef) -> Option<&'static str> {
     let q = &v.query;
     let ir::SetExpr::Select(sel) = &q.body else {
+        if matches!(q.body, ir::SetExpr::Values(_)) {
+            return Some("Views that do not select from a single table or view are not automatically updatable.");
+        }
         return Some("Views containing UNION, INTERSECT, or EXCEPT are not automatically updatable.");
     };
     if q.with.is_some() {
@@ -113,8 +116,70 @@ pub fn not_updatable_reason(v: &ViewDef) -> Option<&'static str> {
     None
 }
 
+/// The view's check option: `Some(true)` CASCADED, `Some(false)` LOCAL, None without one.
+pub fn check_mode(v: &ViewDef) -> Option<bool> {
+    v.reloptions.iter().find_map(|o| match o.strip_prefix("check_option=") {
+        Some("cascaded") => Some(true),
+        Some(_) => Some(false),
+        None => None,
+    })
+}
+
+/// Whether the view runs with its caller's privileges (`security_invoker`) rather than its owner's.
+pub fn security_invoker(v: &ViewDef) -> bool {
+    v.reloptions.iter().any(|o| o.strip_prefix("security_invoker=").and_then(crate::reloptions::parse_bool) == Some(true))
+}
+
+/// `names` plus, for each view among them that is `security_invoker`, the relations its query
+/// reads (schema-qualified, recursively): what the caller needs privileges on.
+pub fn with_invoker_reads(catalog: &Catalog, names: Vec<ir::ObjectName>) -> Vec<ir::ObjectName> {
+    let mut out = Vec::new();
+    for name in names {
+        out.push(name.clone());
+        let Ok(Some(Relation::View(v))) = catalog.find_relation(&name) else { continue };
+        if !security_invoker(&v) {
+            continue;
+        }
+        let inner = pgmem_types::context::with_search_path(&v.search_path, || {
+            let reads = referenced_relations(&v.query);
+            let qualified: Vec<ir::ObjectName> = reads
+                .iter()
+                .filter_map(|n| match catalog.find_relation(n) {
+                    Ok(Some(r)) => Some(ir::ObjectName(vec![r.schema().to_owned(), r.name().to_owned()])),
+                    _ => None,
+                })
+                .collect();
+            qualified
+        });
+        out.extend(with_invoker_reads(catalog, inner));
+    }
+    out
+}
+
+/// Postgres' error for WITH CHECK OPTION on a view that is not automatically updatable.
+pub fn check_option_allowed(catalog: &Catalog, v: &ViewDef) -> SqlResult<()> {
+    let reason = match resolve(catalog, v)? {
+        Err(reason) => reason,
+        Ok(u) if u.columns.iter().all(|(_, base)| base.is_none()) => {
+            "Views that have no updatable columns are not automatically updatable."
+        }
+        Ok(_) => return Ok(()),
+    };
+    Err(SqlError::feature_not_supported("WITH CHECK OPTION is supported only on automatically updatable views").with_hint(reason))
+}
+
 /// Resolves `v` to its base table, or the reason it cannot be written.
 pub fn resolve(catalog: &Catalog, v: &ViewDef) -> SqlResult<Result<Updatable, &'static str>> {
+    resolve_below(catalog, v, false)
+}
+
+/// [`resolve`] for a view below one whose CASCADED check option (`cascaded`) applies to it too.
+fn resolve_below(catalog: &Catalog, v: &ViewDef, cascaded: bool) -> SqlResult<Result<Updatable, &'static str>> {
+    // A view's check option reaches the views below it when CASCADED; a view below with one of
+    // its own checks its condition either way.
+    let mode = check_mode(v);
+    let cascaded_here = cascaded || mode == Some(true);
+    let checked = mode.is_some() || cascaded;
     if let Some(reason) = not_updatable_reason(v) {
         return Ok(Err(reason));
     }
@@ -128,7 +193,7 @@ pub fn resolve(catalog: &Catalog, v: &ViewDef) -> SqlResult<Result<Updatable, &'
             let cols = t.live_columns().map(|(_, c)| (c.name.clone(), Some(c.name.clone()))).collect();
             (ir::ObjectName(vec![t.schema.clone(), t.name.clone()]), cols, Vec::new(), Vec::new())
         }
-        Some(Relation::View(inner)) => match resolve(catalog, &inner)? {
+        Some(Relation::View(inner)) => match resolve_below(catalog, &inner, cascaded_here)? {
             Ok(u) => (u.base, u.columns, u.filters, u.checks),
             Err(reason) => return Ok(Err(reason)),
         },
@@ -154,14 +219,9 @@ pub fn resolve(catalog: &Catalog, v: &ViewDef) -> SqlResult<Result<Updatable, &'
     }
     if let Some(w) = &sel.selection {
         filters.push((w.clone(), qualifier.clone()));
-        if v.check_option {
-            checks.push((v.name.clone(), w.clone(), qualifier.clone()));
-        }
-    }
-    // WITH CASCADED CHECK OPTION checks the views below too.
-    if v.check_option {
-        for (w, q) in filters.iter().take(filters.len().saturating_sub(usize::from(sel.selection.is_some()))) {
-            checks.push((v.name.clone(), w.clone(), q.clone()));
+        if checked {
+            // The view's own condition is checked before those of the views below it.
+            checks.insert(0, (v.name.clone(), w.clone(), qualifier.clone()));
         }
     }
     Ok(Ok(Updatable { base, filters, checks, columns }))

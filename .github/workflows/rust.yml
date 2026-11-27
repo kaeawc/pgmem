@@ -93,7 +93,8 @@ jobs:
 
   # Client compatibility: psql's output (describe commands, \copy, variables) must match
   # PostgreSQL's for the same scripts, and the tokio-postgres and sqlx suites (clients/rust, a
-  # crate outside the workspace) pass against both pgmem and PostgreSQL.
+  # crate outside the workspace), node-postgres (clients/node) and psycopg 3 (clients/python)
+  # suites pass against both pgmem and PostgreSQL.
   clients:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -138,6 +139,33 @@ jobs:
           PGMEM_BIN: ${{ github.workspace }}/target/release/pgmem
       - name: tokio-postgres and sqlx against PostgreSQL
         run: cargo test --locked --manifest-path clients/rust/Cargo.toml
+        env:
+          PGMEM_CLIENT_DSN: postgres://postgres@127.0.0.1:5432/postgres
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: clients/node/package-lock.json
+      - run: npm ci --prefix clients/node
+      - name: node-postgres against pgmem
+        run: npm test --prefix clients/node
+        env:
+          PGMEM_BIN: ${{ github.workspace }}/target/release/pgmem
+      - name: node-postgres against PostgreSQL
+        run: npm test --prefix clients/node
+        env:
+          PGMEM_CLIENT_DSN: postgres://postgres@127.0.0.1:5432/postgres
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+      - run: uv venv clients/python/.venv && uv pip install --python clients/python/.venv/bin/python -r clients/python/requirements.txt
+      - name: psycopg against pgmem
+        run: clients/python/.venv/bin/pytest clients/python
+        env:
+          PGMEM_BIN: ${{ github.workspace }}/target/release/pgmem
+      - name: psycopg against PostgreSQL
+        run: clients/python/.venv/bin/pytest clients/python
         env:
           PGMEM_CLIENT_DSN: postgres://postgres@127.0.0.1:5432/postgres
 

@@ -27,6 +27,9 @@ pub struct LikeIndex {
     pub unique: bool,
     pub nulls_not_distinct: bool,
     pub predicate: Option<ir::Expr>,
+    pub method: String,
+    pub opclasses: Vec<pgmem_catalog::IndexOpclass>,
+    pub include: Vec<String>,
     pub reloptions: Vec<String>,
 }
 
@@ -160,6 +163,9 @@ fn copy_columns(
                     unique: idx.unique,
                     nulls_not_distinct: idx.nulls_not_distinct,
                     predicate: idx.predicate.clone(),
+                    method: idx.method.clone(),
+                    opclasses: idx.opclasses.clone(),
+                    include: idx.include.iter().map(name_of).collect(),
                     reloptions: idx.reloptions.clone(),
                 }),
             }
@@ -227,12 +233,19 @@ pub fn build_index(b: &Binder, table: &TableDef, li: &LikeIndex, taken: &mut Vec
         &used,
     );
     taken.push(name.clone());
+    let include = li
+        .include
+        .iter()
+        .map(|n| table.column_index(n).ok_or_else(|| SqlError::undefined_column(&format!("\"{n}\""))))
+        .collect::<SqlResult<Vec<_>>>()?;
     Ok(IndexDef {
+        method: li.method.clone(),
+        opclasses: li.opclasses.clone(),
         oid: 0,
         name,
         columns,
         exprs: li.exprs.clone(),
-        include: Vec::new(),
+        include,
         unique: li.unique,
         primary: false,
         nulls_not_distinct: li.nulls_not_distinct,

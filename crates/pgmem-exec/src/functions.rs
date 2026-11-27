@@ -138,6 +138,7 @@ pub(crate) fn create_function(cf: &ir::CreateFunction, txn: &mut Txn, env: &Sess
         cost: cf.cost.unwrap_or(100.0),
         rows: 0.0,
         config: Vec::new(),
+        extensions: Vec::new(),
     };
     if cf.procedure
         && (cf.volatility.is_some() || cf.strict || cf.leakproof || cf.parallel.is_some() || cf.cost.is_some() || cf.rows.is_some())
@@ -153,6 +154,7 @@ pub(crate) fn create_function(cf: &ir::CreateFunction, txn: &mut Txn, env: &Sess
     }
     let inputs = def.input_types();
     let existing = catalog.functions().find(|f| f.schema == schema && f.name == name && f.input_types() == inputs).cloned();
+    let new = existing.is_none();
     match existing {
         Some(old) if !cf.or_replace => {
             return Err(SqlError::new(
@@ -161,6 +163,7 @@ pub(crate) fn create_function(cf: &ir::CreateFunction, txn: &mut Txn, env: &Sess
             ));
         }
         Some(old) => {
+            crate::ownership::check_replace_function(&catalog, env, &old)?;
             if old.procedure != def.procedure {
                 return Err(SqlError::new(code::WRONG_OBJECT_TYPE, "cannot change routine kind")
                     .with_detail(format!("\"{name}\" is a {}.", kind_word(old.procedure))));
@@ -178,6 +181,7 @@ pub(crate) fn create_function(cf: &ir::CreateFunction, txn: &mut Txn, env: &Sess
                 .with_hint(format!("Use DROP FUNCTION {} first.", signature(&name, &inputs))));
             }
             def.oid = old.oid;
+            def.extensions.clone_from(&old.extensions);
         }
         None => def.oid = txn.catalog_mut().alloc_oid(),
     }
@@ -188,7 +192,13 @@ pub(crate) fn create_function(cf: &ir::CreateFunction, txn: &mut Txn, env: &Sess
     } else {
         crate::plpgsql::parse(&def.body).map_err(SqlError::without_position)?;
     }
+    let oid = def.oid;
     txn.catalog_mut().put_function(def);
+    // A new function is owned by the role that creates it.
+    let role = crate::roles::current_role(env);
+    if new && role != env.user {
+        txn.catalog_mut().set_owner(oid, Some(&role));
+    }
     Ok(tag(if cf.procedure { "CREATE PROCEDURE" } else { "CREATE FUNCTION" }))
 }
 
@@ -210,7 +220,8 @@ fn config_name(name: &str) -> SqlResult<String> {
     let lower = name.to_ascii_lowercase();
     match crate::settings::lookup(&lower) {
         Some(def) => Ok(def.name.to_owned()),
-        None if crate::settings::is_custom(&lower) => Ok(lower),
+        // `role` is not listed in pg_settings, but a function may set it.
+        None if crate::settings::is_custom(&lower) || lower == "role" => Ok(lower),
         None => Err(crate::settings::unrecognized(&lower)),
     }
 }
@@ -343,6 +354,7 @@ pub(crate) fn alter_function(
         return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("{sig} is not a procedure")));
     }
     let mut def = (*f).clone();
+    let mut owner = None;
     for a in actions {
         match a {
             A::RenameTo(new) | A::SetSchema(new) => {
@@ -365,6 +377,16 @@ pub(crate) fn alter_function(
             }
             A::Config(c) => apply_config(&mut def.config, c, &catalog, env)?,
             A::SecurityDefiner(v) => def.security_definer = *v,
+            A::OwnerTo(role) => owner = Some(role),
+            A::DependsOnExtension { extension, remove } => {
+                if extension != "plpgsql" && catalog.extension(extension).is_none() {
+                    return Err(SqlError::new(code::UNDEFINED_OBJECT, format!("extension \"{extension}\" does not exist")));
+                }
+                def.extensions.retain(|e| e != extension);
+                if !remove {
+                    def.extensions.push(extension.clone());
+                }
+            }
             _ if def.procedure => return Err(procedure_attribute()),
             A::Volatility(v) => def.volatility = *v,
             A::Strict(v) => def.strict = *v,
@@ -379,7 +401,11 @@ pub(crate) fn alter_function(
             }
         }
     }
+    let oid = def.oid;
     txn.catalog_mut().put_function(def);
+    if let Some(role) = owner {
+        crate::roles::set_owner(txn, env, oid, role)?;
+    }
     Ok(tag(match kind {
         ir::RoutineKind::Procedure => "ALTER PROCEDURE",
         ir::RoutineKind::Routine => "ALTER ROUTINE",
@@ -427,6 +453,82 @@ fn find_for_drop(
     Ok(cands.into_iter().find(|f| f.input_types() == want))
 }
 
+/// What depends on a function: column defaults that call it and triggers that run it.
+#[derive(Default)]
+pub(crate) struct FunctionDependents {
+    /// DETAIL lines (`default value for column c of table t depends on function f()`).
+    lines: Vec<String>,
+    defaults: Vec<(pgmem_catalog::QualName, usize)>,
+    triggers: Vec<Arc<pgmem_catalog::TriggerDef>>,
+    /// Casts using the function (`cast from a to b`); `drop_function` removes them.
+    casts: Vec<String>,
+}
+
+impl FunctionDependents {
+    pub(crate) fn of(catalog: &Catalog, f: &FunctionDef) -> FunctionDependents {
+        let defaults = crate::deps::defaults_using_function(catalog, f);
+        let triggers: Vec<_> = catalog.triggers().filter(|t| t.function == f.oid).cloned().collect();
+        let sig = signature(&f.name, &f.input_types());
+        let mut lines: Vec<String> = defaults
+            .iter()
+            .map(|(t, slot)| {
+                let column = catalog.table_q(t).map(|d| d.columns[*slot].name.clone()).unwrap_or_default();
+                format!("default value for column {column} of table {} depends on function {sig}", t.name)
+            })
+            .collect();
+        for t in &triggers {
+            let table = catalog.relation_by_oid(t.table).map(|r| r.name().to_owned()).unwrap_or_default();
+            lines.push(format!("trigger {} on table {table} depends on function {sig}", t.name));
+        }
+        let casts: Vec<String> = catalog.casts().filter(|c| c.function == Some(f.oid)).map(|c| crate::usercast::describe(c)).collect();
+        lines.extend(casts.iter().map(|c| format!("{c} depends on function {sig}")));
+        FunctionDependents { lines, defaults, triggers, casts }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    /// Appends another function's dependents.
+    pub(crate) fn extend(&mut self, other: FunctionDependents) {
+        self.lines.extend(other.lines);
+        self.defaults.extend(other.defaults);
+        self.triggers.extend(other.triggers);
+        self.casts.extend(other.casts);
+    }
+
+    /// 2BP01 `cannot drop <what> because other objects depend on it`, the dependents as DETAIL.
+    pub(crate) fn error(&self, what: &str) -> SqlError {
+        SqlError::new(code::DEPENDENT_OBJECTS_STILL_EXIST, format!("cannot drop {what} because other objects depend on it"))
+            .with_detail(self.lines.join("\n"))
+            .with_hint("Use DROP ... CASCADE to drop the dependent objects too.")
+    }
+
+    /// DROP ... CASCADE: the defaults are removed and the triggers dropped, each reported; casts
+    /// are reported here and removed with the function.
+    pub(crate) fn drop(self, txn: &mut Txn, notices: &mut Vec<crate::session::Notice>) {
+        let notice = |message: String| crate::session::Notice { severity: "NOTICE", code: "00000", message };
+        for (t, slot) in self.defaults {
+            if let Some(def) = txn.catalog().table_q(&t).cloned() {
+                let mut def = (*def).clone();
+                notices.push(notice(format!("drop cascades to default value for column {} of table {}", def.columns[slot].name, t.name)));
+                def.columns[slot].default = None;
+                txn.catalog_mut().replace_table(&t, def);
+            }
+        }
+        for t in self.triggers {
+            let table = txn.catalog().relation_by_oid(t.table).map(|r| r.name().to_owned()).unwrap_or_default();
+            notices.push(notice(format!("drop cascades to trigger {} on table {table}", t.name)));
+            let cat = txn.catalog_mut();
+            cat.drop_comments(t.oid);
+            cat.drop_trigger(t.oid);
+        }
+        for c in self.casts {
+            notices.push(notice(format!("drop cascades to {c}")));
+        }
+    }
+}
+
 /// DROP {FUNCTION | PROCEDURE | ROUTINE} [IF EXISTS] name [(types)], ... [CASCADE].
 pub(crate) fn drop_function(
     items: &[(ir::ObjectName, Option<Vec<ir::TypeName>>)],
@@ -467,40 +569,12 @@ pub(crate) fn drop_function(
         if kind == ir::RoutineKind::Procedure && !f.procedure {
             return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("{} is not a procedure", signature(&f.name, &f.input_types()))));
         }
-        let users = crate::deps::defaults_using_function(&catalog, &f);
-        let triggers: Vec<_> = catalog.triggers().filter(|t| t.function == f.oid).cloned().collect();
-        let sig = signature(&f.name, &f.input_types());
-        if (!users.is_empty() || !triggers.is_empty()) && !cascade {
-            let mut lines: Vec<String> = users
-                .iter()
-                .map(|(t, slot)| {
-                    let table = catalog.table_q(t).map(|d| d.columns[*slot].name.clone()).unwrap_or_default();
-                    format!("default value for column {table} of table {} depends on function {sig}", t.name)
-                })
-                .collect();
-            for t in &triggers {
-                let table = catalog.relation_by_oid(t.table).map(|r| r.name().to_owned()).unwrap_or_default();
-                lines.push(format!("trigger {} on table {table} depends on function {sig}", t.name));
-            }
-            return Err(SqlError::new(
-                code::DEPENDENT_OBJECTS_STILL_EXIST,
-                format!("cannot drop function {sig} because other objects depend on it"),
-            )
-            .with_detail(lines.join("\n"))
-            .with_hint("Use DROP ... CASCADE to drop the dependent objects too."));
+        let deps = FunctionDependents::of(&catalog, &f);
+        if !deps.is_empty() && !cascade {
+            let sig = signature(&f.name, &f.input_types());
+            return Err(deps.error(&format!("function {sig}")));
         }
-        for (t, slot) in users {
-            if let Some(def) = txn.catalog().table_q(&t).cloned() {
-                let mut def = (*def).clone();
-                notices.push(crate::session::Notice {
-                    severity: "NOTICE",
-                    code: "00000",
-                    message: format!("drop cascades to default value for column {} of table {}", def.columns[slot].name, t.name),
-                });
-                def.columns[slot].default = None;
-                txn.catalog_mut().replace_table(&t, def);
-            }
-        }
+        deps.drop(txn, &mut notices);
         let cat = txn.catalog_mut();
         cat.drop_comments(f.oid);
         cat.drop_function(f.oid);
@@ -673,9 +747,13 @@ impl Exec<'_, '_> {
                         format!("cannot execute {what} in a read-only transaction"),
                     ));
                 }
-                txn.begin_statement();
                 let catalog = txn.catalog().clone();
+                // Statements in a function body are checked for the current user: the
+                // caller, or the owner of a SECURITY DEFINER function.
+                crate::roles::check_statement(stmt, &catalog, env, types)?;
+                txn.begin_statement();
                 let binder = Binder::new(&catalog, types);
+                binder.set_rls(crate::rls::RlsUser::from_env(env));
                 let top = Level::new(Scope::default());
                 crate::statement::exec_statement(stmt, &binder, &Ctx::new(&top), txn, params, env, state)
             }
@@ -687,7 +765,9 @@ impl Exec<'_, '_> {
 fn read_query(stmt: &ir::Statement, types: &[Type], params: &[Value], c: &EvalCtx) -> SqlResult<QueryResult> {
     let ir::Statement::Query(q) = stmt else { return Err(SqlError::internal("not a query")) };
     let catalog = c.txn.catalog().clone();
+    crate::roles::check_statement(stmt, &catalog, c.env, types)?;
     let binder = Binder::new(&catalog, types);
+    binder.set_rls(crate::rls::RlsUser::from_env(c.env));
     let top = Level::new(Scope::default());
     let bound = binder.bind_query(q, &Ctx::new(&top))?;
     let ectx = EvalCtx::new(c.txn, params, c.env, c.state);
@@ -723,29 +803,49 @@ fn run_sql(def: &FunctionDef, args: &[Value], exec: &mut Exec) -> SqlResult<Vec<
 
 /// Runs function `def` on `args`: its result rows (one row for a scalar function).
 pub fn run_function(def: &FunctionDef, args: &[Value], exec: &mut Exec) -> SqlResult<Vec<Row>> {
-    if def.config.is_empty() {
-        return run_function_in(def, args, exec);
+    in_function_env(def, exec, |exec| run_function_in(def, args, exec))
+}
+
+/// Runs `f` (the body of `def`) in the function's environment (`fmgr_security_definer`):
+/// a SECURITY DEFINER function runs as its owner, and its `SET` options apply to the call
+/// (`search_path` to the names its statements resolve). All of it ends with the call,
+/// whether it returns or fails.
+pub fn in_function_env<R>(def: &FunctionDef, exec: &mut Exec, f: impl FnOnce(&mut Exec) -> SqlResult<R>) -> SqlResult<R> {
+    if def.config.is_empty() && !def.security_definer {
+        return f(exec);
     }
-    // The function's `SET` options apply to the call and are gone after it: the body runs
-    // against a copy of the session environment.
     let mut env = exec.env().clone();
+    let mut path = pgmem_types::context::search_path();
+    if def.security_definer {
+        let owner = crate::roles::owner_of(exec.txn().catalog(), &env, def.oid);
+        path.no_usage = crate::roles::schemas_without_usage(exec.txn().catalog(), &env, &owner);
+        path.user.clone_from(&owner);
+        env.security_definer = Some(owner);
+    }
     for entry in &def.config {
         let (name, value) = entry.split_once('=').unwrap_or((entry, ""));
         let lower = name.to_ascii_lowercase();
+        if lower == "role" && env.security_definer.is_some() {
+            return Err(SqlError::new(code::INSUFFICIENT_PRIVILEGE, "cannot set parameter \"role\" within security-definer function"));
+        }
+        if lower == "search_path" {
+            path.entries = pgmem_types::context::SearchPath::parse(value);
+        }
         // Stored in the form the session keeps it (units resolved), as `SET` would.
         let stored = crate::session::validate_setting(&lower, value, env.setting(&lower).as_deref()).unwrap_or_else(|_| value.to_owned());
         env.settings.insert(lower, stored);
     }
+    let _path = pgmem_types::context::enter(pgmem_types::context::Context { search_path: path, ..pgmem_types::context::current() });
     match exec {
         Exec::Read(c) => {
             let ctx = EvalCtx { txn: c.txn, params: c.params, env: &env, state: c.state, outer: c.outer.clone() };
-            run_function_in(def, args, &mut Exec::Read(&ctx))
+            f(&mut Exec::Read(&ctx))
         }
         Exec::Volatile(c) => {
             let ctx = EvalCtx { txn: c.txn, params: c.params, env: &env, state: c.state, outer: c.outer.clone() };
-            run_function_in(def, args, &mut Exec::Volatile(&ctx))
+            f(&mut Exec::Volatile(&ctx))
         }
-        Exec::Write { txn, state, .. } => run_function_in(def, args, &mut Exec::Write { txn, env: &env, state }),
+        Exec::Write { txn, state, .. } => f(&mut Exec::Write { txn, env: &env, state }),
     }
 }
 
@@ -821,15 +921,18 @@ pub(crate) fn call(
 ) -> SqlResult<QueryResult> {
     let catalog = txn.catalog().clone();
     let binder = Binder::new(&catalog, &[]);
+    binder.set_rls(crate::rls::RlsUser::from_env(env));
     let top = Level::new(Scope::default());
     let ctx = Ctx::new(&top);
-    let bound = args.iter().map(|a| binder.bind_expr(a, &ctx)).collect::<SqlResult<Vec<_>>>()?;
+    let arg_ctx = ctx.with_clause(crate::bind::Clause::CallArg);
+    let bound = args.iter().map(|a| binder.bind_expr(a, &arg_ctx)).collect::<SqlResult<Vec<_>>>()?;
     let types: Vec<Type> = bound.iter().map(|(_, t)| t.clone()).collect();
     let cands = catalog.find_functions(name);
     let Some(call) = resolve(name.base(), &cands, &types, true)? else {
         return Err(SqlError::undefined_function(format!("procedure {} does not exist", signature(&name.to_string(), &types)))
             .with_hint("No procedure matches the given name and argument types. You might need to add explicit type casts."));
     };
+    crate::roles::check_execute(&catalog, env, &call.def)?;
     let mut values = Vec::with_capacity(call.targets.len());
     {
         let ectx = EvalCtx::new(txn, &[], env, state);

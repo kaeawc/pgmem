@@ -254,7 +254,11 @@ impl Conn {
 
     fn send_result_preamble(&mut self, r: &QueryResult) {
         for n in &r.notices {
-            self.out.notice(n.severity, n.code, &n.message);
+            // "drop cascades to N other objects" carries the list as DETAIL.
+            match n.message.split_once('\n') {
+                Some((head, detail)) if head.starts_with("drop cascades to ") => self.out.notice_detail(n.severity, n.code, head, detail),
+                _ => self.out.notice(n.severity, n.code, &n.message),
+            }
         }
         for (k, v) in &r.changed_settings {
             self.out.parameter_status(k, v);
@@ -535,6 +539,12 @@ impl Conn {
                 }
             }
             b'P' => {
+                if !self.portals.contains_key(&name)
+                    && let Some((cols, binary)) = self.session.cursor_description(&name)
+                {
+                    self.row_description(&cols, if binary { &[1] } else { &[] });
+                    return Ok(());
+                }
                 let portal = self
                     .portals
                     .get(&name)

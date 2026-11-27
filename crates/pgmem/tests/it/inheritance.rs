@@ -35,7 +35,10 @@ fn create_inherits_merges_columns() {
     .expect("parents");
     assert_eq!(
         notices(&db, &mut c, "CREATE TABLE c (b text, c int, a int) INHERITS (p)"),
-        ["moving and merging column \"b\" with inherited definition", "moving and merging column \"a\" with inherited definition"]
+        [
+            "moving and merging column \"b\" with inherited definition\nUser-specified column moved to the position of the inherited column.",
+            "moving and merging column \"a\" with inherited definition\nUser-specified column moved to the position of the inherited column."
+        ]
     );
     assert_eq!(notices(&db, &mut c, "CREATE TABLE m (e int) INHERITS (p, q)"), ["merging multiple inherited definitions of column \"a\""]);
     assert_eq!(
@@ -401,4 +404,65 @@ fn view_over_only_parent() {
     assert_eq!(rows(&mut c, "SELECT pg_get_viewdef('vo')"), [[" SELECT a\n   FROM ONLY p;"]]);
     assert_eq!(rows(&mut c, "SELECT count(*)::text FROM vo"), [["1"]]);
     assert_eq!(rows(&mut c, "SELECT count(*)::text FROM va"), [["2"]]);
+}
+
+/// This backend's relation locks after `sql` in a fresh transaction, as "relation mode".
+fn locks_of(c: &mut postgres::Client, sql: &str) -> Vec<String> {
+    c.batch_execute("BEGIN").expect("BEGIN");
+    c.batch_execute(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+    let out = texts(
+        c,
+        "SELECT l FROM (SELECT relation::regclass::text || ' ' || mode AS l FROM pg_locks \
+         WHERE pid = pg_backend_pid() AND locktype = 'relation' AND relation <> 'pg_locks'::regclass) x ORDER BY l COLLATE \"C\"",
+    )
+    .into_iter()
+    .map(|r| r[0].clone().unwrap_or_default())
+    .collect();
+    c.batch_execute("ROLLBACK").expect("ROLLBACK");
+    out
+}
+
+#[test]
+fn statements_on_a_parent_lock_its_children() {
+    let (_db, mut c) = setup();
+    c.batch_execute("CREATE TABLE lp (a int PRIMARY KEY); CREATE TABLE lc (b int) INHERITS (lp); CREATE INDEX lc_b ON lc (b)")
+        .expect("tables");
+    assert_eq!(
+        locks_of(&mut c, "SELECT * FROM lp"),
+        ["lc AccessShareLock", "lc_b AccessShareLock", "lp AccessShareLock", "lp_pkey AccessShareLock"]
+    );
+    assert_eq!(locks_of(&mut c, "SELECT * FROM ONLY lp"), ["lp AccessShareLock", "lp_pkey AccessShareLock"]);
+    assert_eq!(
+        locks_of(&mut c, "UPDATE lp SET a = a"),
+        ["lc RowExclusiveLock", "lc_b RowExclusiveLock", "lp RowExclusiveLock", "lp_pkey RowExclusiveLock"]
+    );
+    assert_eq!(locks_of(&mut c, "DELETE FROM ONLY lp"), ["lp RowExclusiveLock", "lp_pkey RowExclusiveLock"]);
+    assert_eq!(locks_of(&mut c, "LOCK TABLE lp IN SHARE MODE"), ["lc ShareLock", "lp ShareLock"]);
+    assert_eq!(locks_of(&mut c, "LOCK TABLE ONLY lp IN SHARE MODE"), ["lp ShareLock"]);
+}
+
+#[test]
+fn parent_policies_and_privileges_cover_children() {
+    let (_db, mut c) = setup();
+    let role = "inh_rls_user";
+    let _ = c.batch_execute(&format!("DROP OWNED BY {role}; DROP ROLE IF EXISTS {role}"));
+    c.batch_execute(&format!(
+        "CREATE ROLE {role};
+         CREATE TABLE rp (id int, owner text); CREATE TABLE rc (x int) INHERITS (rp);
+         INSERT INTO rp VALUES (1, '{role}'), (2, 'other'); INSERT INTO rc VALUES (3, '{role}', 0), (4, 'other', 0);
+         ALTER TABLE rp ENABLE ROW LEVEL SECURITY; CREATE POLICY own ON rp USING (owner = current_user);
+         ALTER TABLE rc ENABLE ROW LEVEL SECURITY;
+         GRANT SELECT, UPDATE, DELETE ON rp TO {role}"
+    ))
+    .expect("setup");
+    c.batch_execute(&format!("SET ROLE {role}")).expect("set role");
+    // The parent's policies apply to the children's rows; no privilege on rc is needed.
+    assert_eq!(rows(&mut c, "SELECT id FROM rp ORDER BY id"), [["1"], ["3"]]);
+    assert_eq!(c.execute("UPDATE rp SET id = id + 10", &[]).expect("update"), 2);
+    assert_eq!(c.execute("DELETE FROM rp WHERE id > 12", &[]).expect("delete"), 1);
+    let e = expect_code(c.query("SELECT * FROM rc", &[]), "42501");
+    assert_eq!(message(&e), "permission denied for table rc");
+    c.batch_execute("RESET ROLE").expect("reset");
+    assert_eq!(rows(&mut c, "SELECT id, owner FROM rp ORDER BY id"), [["2", "other"], ["4", "other"], ["11", role]]);
+    c.batch_execute(&format!("DROP TABLE rp CASCADE; DROP ROLE {role}")).expect("cleanup");
 }

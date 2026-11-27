@@ -127,8 +127,13 @@ fn parse_int(text: &str) -> Option<i64> {
     (i64::from(i32::MIN)..=I32_MAX).contains(&v).then_some(v)
 }
 
+/// Whether boolean option `name` is set to true in `reloptions` (`name=value` entries).
+pub(crate) fn bool_option(reloptions: &[String], name: &str) -> bool {
+    reloptions.iter().any(|o| o.split_once('=').is_some_and(|(n, v)| n == name && parse_bool(v) == Some(true)))
+}
+
 /// `parse_bool`: `true`/`false`/`yes`/`no`/`on`/`off`/`1`/`0`, the words by unique prefix.
-fn parse_bool(text: &str) -> Option<bool> {
+pub(crate) fn parse_bool(text: &str) -> Option<bool> {
     let t = text.trim().to_ascii_lowercase();
     let prefix = |full: &str, min: usize| t.len() >= min && full.starts_with(&t);
     if prefix("true", 1) || prefix("yes", 1) || t == "on" || t == "1" {
@@ -210,6 +215,9 @@ fn key_of(entry: &str) -> &str {
 /// mentioned, then appends the new ones.
 pub fn alter(target: Target, old: &[String], opts: &[RelOption], reset: bool) -> SqlResult<Vec<String>> {
     if reset {
+        if opts.iter().any(|o| o.value.is_some()) {
+            return Err(SqlError::syntax("RESET must not include values for parameters"));
+        }
         return Ok(old.iter().filter(|e| !opts.iter().any(|o| o.namespace.is_none() && o.name == key_of(e))).cloned().collect());
     }
     let new = validate(target, opts)?;
@@ -278,6 +286,18 @@ pub(crate) fn alter_tag(object: pgmem_ir::ObjectType) -> &'static str {
     }
 }
 
+/// `SET (options)` / `RESET (options)` on a table or materialized view.
+pub(crate) fn alter_table(txn: &mut pgmem_storage::Txn, t: &pgmem_catalog::TableDef, reset: bool, options: &[RelOption]) -> SqlResult<()> {
+    if !reset && txn.catalog().is_partitioned(t.oid) {
+        return Err(SqlError::new(code::WRONG_OBJECT_TYPE, "cannot specify storage parameters for a partitioned table")
+            .with_hint("Specify storage parameters for its leaf partitions instead."));
+    }
+    let mut def = t.clone();
+    def.reloptions = alter(Target::Heap, &t.reloptions, options, reset)?;
+    txn.catalog_mut().replace_table(&t.qualified(), def);
+    Ok(())
+}
+
 /// `ALTER {TABLE | INDEX | VIEW | MATERIALIZED VIEW} name {SET | RESET} (options)`.
 pub(crate) fn alter_relation(
     object: pgmem_ir::ObjectType,
@@ -307,26 +327,17 @@ pub(crate) fn alter_relation(
     };
     match rel {
         Relation::Table(t) if matches!(object, O::Table) || (object == O::MaterializedView && t.matview.is_some()) => {
-            if !reset && txn.catalog().is_partitioned(t.oid) {
-                return Err(SqlError::new(code::WRONG_OBJECT_TYPE, "cannot specify storage parameters for a partitioned table")
-                    .with_hint("Specify storage parameters for its leaf partitions instead."));
-            }
-            let mut def = (*t).clone();
-            def.reloptions = alter(Target::Heap, &t.reloptions, options, reset)?;
-            txn.catalog_mut().replace_table(&t.qualified(), def);
+            alter_table(txn, &t, reset, options)?;
         }
         Relation::View(v) if matches!(object, O::Table | O::View) => {
             let mut def = (*v).clone();
             def.reloptions = alter(Target::View, &v.reloptions, options, reset)?;
             def.check_option = def.reloptions.iter().any(|o| o.starts_with("check_option="));
-            let key = pgmem_catalog::QualName::new(&v.schema, &v.name);
-            let triggers: Vec<_> = txn.catalog().triggers().filter(|t| t.table == v.oid).cloned().collect();
-            let cat = txn.catalog_mut();
-            cat.drop_view(&key);
-            cat.create_view(def, false)?;
-            for t in triggers {
-                cat.put_trigger((*t).clone());
+            if !reset && def.check_option && options.iter().any(|o| o.name == "check_option") {
+                crate::views::check_option_allowed(txn.catalog(), &def)?;
             }
+            // Replaced in place: the view keeps its OID, grants, owner and triggers.
+            txn.catalog_mut().create_view(def, true)?;
         }
         Relation::Index { table, index } if matches!(object, O::Table | O::Index) => {
             let Some(t) = txn.catalog().table_q(&table).cloned() else { return Err(SqlError::undefined_table(&table.name)) };

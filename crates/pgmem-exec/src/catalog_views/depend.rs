@@ -25,7 +25,8 @@ pub const REWRITE_CLASS_OID: Oid = 2618;
 pub const LANGUAGE_CLASS_OID: Oid = 2612;
 pub const EXTENSION_CLASS_OID: Oid = 3079;
 const PLPGSQL_LANGUAGE_OID: Oid = 13_562;
-const PLPGSQL_EXTENSION_OID: Oid = 13_558;
+/// The built-in plpgsql extension's `pg_extension` OID.
+pub const PLPGSQL_EXTENSION_OID: Oid = 13_558;
 const PG_TOAST_NAMESPACE_OID: Oid = 99;
 
 const RULE_OID_BASE: Oid = 0x3000_0000;
@@ -715,6 +716,13 @@ fn routine_deps(m: &Model, d: &mut Deps) {
             }
         }
         d.add_refs(me, &refs, None, 'n', 'n');
+        // ALTER FUNCTION ... DEPENDS ON EXTENSION: 'x'.
+        for e in &f.extensions {
+            let ext = if e == "plpgsql" { Some(PLPGSQL_EXTENSION_OID) } else { catalog.extension(e).map(|x| x.oid) };
+            if let Some(ext) = ext {
+                d.add(me, Addr(EXTENSION_CLASS_OID, ext, 0), 'x');
+            }
+        }
     }
     for tr in catalog.triggers() {
         let me = Addr(TRIGGER_CLASS_OID, tr.oid, 0);
@@ -959,7 +967,7 @@ fn proc_info(m: &Model, o: Oid) -> Option<ProcInfo> {
         return Some(ProcInfo {
             schema: f.schema.clone(),
             name: f.name.clone(),
-            visible: m.catalog.function_visible(f),
+            visible: m.catalog.function_visible(f, &super::builtin_function_exists),
             args,
             procedure: f.procedure,
         });

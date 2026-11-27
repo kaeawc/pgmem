@@ -28,6 +28,14 @@ pub fn table_with_indexes(catalog: &Catalog, table: &TableDef, mode: TableLockMo
     }
 }
 
+/// `table`'s regular-inheritance descendants and their indexes, in `mode`.
+pub fn inherit_children(catalog: &Catalog, table: Oid, mode: TableLockMode, out: &mut Vec<(Oid, TableLockMode)>) {
+    for child in catalog.inherit_descendants(table) {
+        out.push((child.oid, mode));
+        out.extend(child.indexes.iter().map(|i| (i.oid, mode)));
+    }
+}
+
 /// The relations `LOCK TABLE name` locks: the table and (without ONLY) its partitions; a
 /// view and, recursively, the relations its query reads.
 pub fn lock_statement_targets(catalog: &Catalog, name: &ir::ObjectName, only: bool) -> SqlResult<Vec<(Oid, String)>> {
@@ -45,6 +53,7 @@ fn lock_target(catalog: &Catalog, name: &ir::ObjectName, only: bool, out: &mut V
             out.push((t.oid, t.name.clone()));
             if !only {
                 out.extend(catalog.partition_descendants(t.oid).iter().map(|p| (p.oid, p.name.clone())));
+                out.extend(catalog.inherit_descendants(t.oid).iter().map(|c| (c.oid, c.name.clone())));
             }
         }
         Relation::View(v) => {
@@ -127,9 +136,12 @@ pub fn ddl_locks(stmt: &Statement, catalog: &Catalog) -> Vec<(Oid, TableLockMode
         }
         Statement::RefreshMatview { name, concurrently, .. } => l.on(name, if *concurrently { EXCLUSIVE } else { ACCESS_EXCLUSIVE }),
         Statement::Truncate(t) => {
-            for n in &t.tables {
+            for (i, n) in t.tables.iter().enumerate() {
                 if let Some(def) = table_of(catalog, n) {
                     table_with_indexes(catalog, &def, ACCESS_EXCLUSIVE, &mut l.out);
+                    if !t.only.get(i).copied().unwrap_or(false) {
+                        inherit_children(catalog, def.oid, ACCESS_EXCLUSIVE, &mut l.out);
+                    }
                 }
             }
         }
