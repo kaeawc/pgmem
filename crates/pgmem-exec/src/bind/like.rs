@@ -4,7 +4,7 @@
 
 use super::{Binder, Ctx, Level, Scope};
 use crate::catalog_views::{CLASS_CLASS_OID, not_null_constraint_name};
-use pgmem_catalog::{ColumnDef, ConstraintKind, IndexDef, Relation, SequenceDef, TableDef, default_constraint_name, truncate_identifier};
+use pgmem_catalog::{ColumnDef, ConstraintKind, IndexDef, Relation, SequenceDef, TableDef};
 use pgmem_ir as ir;
 use pgmem_types::{SqlError, SqlResult, Value, code};
 
@@ -196,7 +196,7 @@ fn identity_sequence(b: &Binder, src: &TableDef, column: &str, table: &TableDef,
         .sequences()
         .find(|s| s.schema == src.schema && s.owned_by == owner)
         .ok_or_else(|| SqlError::internal("identity column without a sequence"))?;
-    let name = b.catalog.choose_name(&table.schema, &truncate_identifier(default_constraint_name(&table.name, &[column], "seq")), taken);
+    let name = b.catalog.choose_relation_name(&table.schema, &table.name, &[column], "seq", taken);
     taken.push(name.clone());
     Ok(SequenceDef {
         oid: 0,
@@ -230,11 +230,7 @@ pub fn build_index(b: &Binder, table: &TableDef, li: &LikeIndex, taken: &mut Vec
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
     let mut used = taken.clone();
     used.extend(table.indexes.iter().map(|i| i.name.clone()));
-    let name = b.catalog.choose_name(
-        &table.schema,
-        &truncate_identifier(default_constraint_name(&table.name, &refs, if li.unique { "key" } else { "idx" })),
-        &used,
-    );
+    let name = b.catalog.choose_relation_name(&table.schema, &table.name, &refs, if li.unique { "key" } else { "idx" }, &used);
     taken.push(name.clone());
     let include = li
         .include

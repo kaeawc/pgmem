@@ -309,3 +309,33 @@ fn pg_get_keywords() {
         rows(&mut c, "SELECT count(*) FROM pg_get_keywords() WHERE catcode <> 'U'")
     );
 }
+
+/// initdb comments the public schema 'standard public schema' (PostgreSQL 15+); the comment is
+/// in pg_description, shows in psql's `\dn+`, and can be changed or removed like any other.
+#[test]
+fn public_schema_has_the_standard_comment() {
+    let (_db, mut c) = setup();
+    assert_eq!(
+        rows(&mut c, "SELECT obj_description('public'::regnamespace, 'pg_namespace'), obj_description('public'::regnamespace)"),
+        [["standard public schema", "standard public schema"]]
+    );
+    assert_eq!(
+        rows(&mut c, "SELECT classoid::regclass::text, objsubid, description FROM pg_description WHERE objoid = 'public'::regnamespace"),
+        [["pg_namespace", "0", "standard public schema"]]
+    );
+    // The query behind psql's \dn+.
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT n.nspname AS \"Name\", pg_catalog.obj_description(n.oid, 'pg_namespace') AS \"Description\"
+             FROM pg_catalog.pg_namespace n WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' ORDER BY 1"
+        ),
+        [["public", "standard public schema"]]
+    );
+    c.batch_execute("COMMENT ON SCHEMA public IS NULL").expect("uncomment");
+    assert_eq!(text_value(&mut c, "SELECT obj_description('public'::regnamespace, 'pg_namespace')"), None);
+    assert_eq!(rows(&mut c, "SELECT count(*) FROM pg_description WHERE objoid = 'public'::regnamespace"), [["0"]]);
+    // A re-created public schema has no comment.
+    c.batch_execute("COMMENT ON SCHEMA public IS 'mine'; DROP SCHEMA public; CREATE SCHEMA public").expect("recreate");
+    assert_eq!(text_value(&mut c, "SELECT obj_description('public'::regnamespace, 'pg_namespace')"), None);
+}

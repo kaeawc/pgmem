@@ -1099,7 +1099,7 @@ pub fn domain_constraints(catalog: &pgmem_catalog::Catalog, t: &pgmem_catalog::T
     if *not_null {
         out.push(DomainCon {
             oid: domain_not_null_oid(t.oid),
-            name: format!("{}_not_null", t.name),
+            name: pgmem_catalog::default_constraint_name(&t.name, &[], "not_null"),
             contype: 'n',
             validated: true,
             check: None,

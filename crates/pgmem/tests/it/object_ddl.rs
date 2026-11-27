@@ -324,3 +324,26 @@ fn drop_cast_and_dependencies() {
     c.batch_execute("DROP TYPE pt CASCADE").expect("cascade type");
     assert_eq!(rows(&mut c, "SELECT count(*) FROM pg_cast WHERE oid >= 16384"), [["0"]]);
 }
+
+/// Default statistics names are shortened like makeObjectName: the `stat` label is kept.
+#[test]
+fn long_statistics_names() {
+    let (_db, mut c) = setup();
+    let s = "s".repeat(60);
+    let (a, b) = ("a".repeat(36), "b".repeat(45));
+    c.batch_execute(&format!(
+        "CREATE TABLE {s} (x int, y int); CREATE STATISTICS ON x, y FROM {s}; CREATE STATISTICS ON x, y FROM {s};
+         CREATE TABLE t ({a} int, {b} int); CREATE STATISTICS ON {a}, {b} FROM t; CREATE STATISTICS ON {a}, {b} FROM t"
+    ))
+    .expect("create");
+    let mut got: Vec<String> = rows(&mut c, "SELECT stxname FROM pg_statistic_ext").into_iter().map(|mut r| r.remove(0)).collect();
+    got.sort();
+    let mut want = vec![
+        format!("{}_x_y_stat", &s[..54]),
+        format!("{}_x_y_stat1", &s[..53]),
+        format!("t_{a}_{}_stat", &b[..19]),
+        format!("t_{a}_{}_stat1", &b[..18]),
+    ];
+    want.sort();
+    assert_eq!(got, want);
+}

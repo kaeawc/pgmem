@@ -40,28 +40,8 @@ pub(crate) fn missing(name: &ir::ObjectName) -> SqlError {
 
 /// `ChooseExtendedStatisticName`: `<table>_<keys>_stat`, numbered when taken.
 fn choose_name(cat: &Catalog, schema: &str, table: &str, keys: &[String]) -> String {
-    let mut addition = String::new();
-    for k in keys {
-        if addition.len() + k.len() + 1 > 2 * 64 {
-            break;
-        }
-        if !addition.is_empty() {
-            addition.push('_');
-        }
-        addition.push_str(k);
-    }
-    let make = |label: &str| {
-        let mut parts = vec![table.to_owned(), addition.clone(), label.to_owned()];
-        parts.retain(|p| !p.is_empty());
-        pgmem_catalog::truncate_identifier(parts.join("_"))
-    };
-    let mut name = make("stat");
-    let mut n = 0;
-    while cat.find_statistics(schema, &name).is_some() {
-        n += 1;
-        name = make(&format!("stat{n}"));
-    }
-    name
+    let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+    pgmem_catalog::choose_object_name(table, &keys, "stat", |n| cat.find_statistics(schema, n).is_none())
 }
 
 /// CREATE STATISTICS.

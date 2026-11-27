@@ -636,14 +636,14 @@ fn partitioned_parent(catalog: &Catalog, name: &ir::ObjectName) -> SqlResult<(Ar
 fn partition_index_name(catalog: &Catalog, table: &TableDef, idx: &IndexDef, taken: &[String]) -> String {
     let cols: Vec<&str> =
         if idx.columns.is_empty() { vec!["expr"] } else { idx.columns.iter().map(|c| table.columns[*c].name.as_str()).collect() };
-    let base = if idx.primary {
-        format!("{}_pkey", table.name)
+    let (cols, label): (&[&str], _) = if idx.primary {
+        (&[], "pkey")
     } else if idx.unique {
-        pgmem_catalog::default_constraint_name(&table.name, &cols, "key")
+        (&cols, "key")
     } else {
-        pgmem_catalog::default_constraint_name(&table.name, &cols, "idx")
+        (&cols, "idx")
     };
-    catalog.choose_name(&table.schema, &pgmem_catalog::truncate_identifier(base), taken)
+    catalog.choose_relation_name(&table.schema, &table.name, cols, label, taken)
 }
 
 /// Copies the parent's indexes (and their key constraints) to a partition whose slots map
@@ -1358,7 +1358,7 @@ pub(crate) fn fk_clone_name(catalog: &Catalog, root: &TableDef, leaf: &TableDef,
     for part in catalog.partition_descendants(root.oid) {
         let name = loop {
             n += 1;
-            let name = format!("{con}_{n}");
+            let name = pgmem_catalog::make_object_name(con, None, &n.to_string());
             if taken.insert(name.clone()) {
                 break name;
             }

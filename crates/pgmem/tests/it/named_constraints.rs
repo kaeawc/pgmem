@@ -111,3 +111,70 @@ fn key_constraint_include_errors_match_postgres() {
     let e = expect_code(c.batch_execute("CREATE TABLE bad (a int, b int, EXCLUDE USING hash (a WITH =) INCLUDE (b))"), "0A000");
     assert_eq!(message(&e), "access method \"hash\" does not support included columns");
 }
+
+/// The sorted first column of a query's rows.
+fn sorted_names(c: &mut postgres::Client, sql: &str) -> Vec<String> {
+    let mut v: Vec<String> = texts(c, sql).into_iter().map(|mut r| r.remove(0).unwrap_or_default()).collect();
+    v.sort();
+    v
+}
+
+/// Implicit names over 63 bytes are shortened like Postgres' makeObjectName: the label is
+/// kept, the table part is cut, and a collision number joins the label (`_n_idx1`).
+#[test]
+fn long_implicit_names_keep_their_label() {
+    let (_db, mut c) = setup();
+    let t = "abcdefghij".repeat(6);
+    c.batch_execute(&format!(
+        "CREATE TABLE {t} (id serial PRIMARY KEY, v int UNIQUE CHECK (v > 0), w int GENERATED ALWAYS AS IDENTITY,
+                           n int NOT NULL, r int REFERENCES {t});
+         CREATE INDEX ON {t} (n); CREATE INDEX ON {t} (n)"
+    ))
+    .expect("create");
+    let p = |n: usize, rest: &str| format!("{}{rest}", &t[..n]);
+    assert_eq!(
+        sorted_names(&mut c, &format!("SELECT relname FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname <> '{t}'")),
+        [p(56, "_id_seq"), p(56, "_n_idx1"), p(57, "_n_idx"), p(57, "_v_key"), p(57, "_w_seq"), p(58, "_pkey")]
+    );
+    assert_eq!(
+        sorted_names(&mut c, &format!("SELECT conname FROM pg_constraint WHERE conrelid = '{t}'::regclass")),
+        [
+            p(51, "_id_not_null"),
+            p(52, "_n_not_null"),
+            p(52, "_w_not_null"),
+            p(55, "_v_check"),
+            p(56, "_r_fkey"),
+            p(57, "_v_key"),
+            p(58, "_pkey")
+        ]
+    );
+    // Both parts long: the longer one gives way first, so they end up about even.
+    let (tt, cc) = ("t".repeat(40), "c".repeat(40));
+    c.batch_execute(&format!("CREATE TABLE {tt} ({cc} serial)")).expect("create");
+    assert_eq!(
+        sorted_names(&mut c, &format!("SELECT pg_get_serial_sequence('{tt}', '{cc}')")),
+        [format!("public.{}_{}_seq", &tt[..29], &cc[..29])]
+    );
+    assert_eq!(
+        sorted_names(&mut c, &format!("SELECT conname FROM pg_constraint WHERE conrelid = '{tt}'::regclass")),
+        [format!("{}_{}_not_null", &tt[..27], &cc[..26])]
+    );
+}
+
+/// Names are cut by bytes but never inside a character.
+#[test]
+fn long_implicit_names_cut_on_character_boundaries() {
+    let (_db, mut c) = setup();
+    let e = |n: usize| "\u{e9}".repeat(n);
+    let t = format!("x{}", e(30));
+    c.batch_execute(&format!("CREATE TABLE \"{t}\" (id serial, \"{}\" int UNIQUE)", e(5))).expect("create");
+    assert_eq!(
+        sorted_names(&mut c, &format!("SELECT relname FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname <> '{t}'")),
+        // Sorted by bytes: '_' sorts before 'é'.
+        [format!("x{}_{}_key", e(23), e(5)), format!("x{}_id_seq", e(27))]
+    );
+    assert_eq!(
+        sorted_names(&mut c, &format!("SELECT conname FROM pg_constraint WHERE conrelid = '\"{t}\"'::regclass")),
+        [format!("x{}_{}_key", e(23), e(5)), format!("x{}_id_not_null", e(25))]
+    );
+}
