@@ -18,6 +18,7 @@ pub mod dml;
 pub mod eval;
 mod ext_alter;
 mod extensions;
+mod fk_deps;
 pub mod funcs;
 pub mod functions;
 mod hashorder;

@@ -286,6 +286,19 @@ impl TableDef {
         self.constraints.iter().any(|c| c.name == name)
     }
 
+    /// The unique index a foreign key referencing `ref_columns` of this table uses
+    /// (`pg_constraint.conindid`): the primary key when it has exactly those columns, else the
+    /// first plain, non-partial unique index on that set of columns.
+    pub fn fk_index(&self, ref_columns: &[usize]) -> Option<&IndexDef> {
+        let same = |i: &IndexDef| {
+            i.exprs.is_empty()
+                && i.predicate.is_none()
+                && i.columns.len() == ref_columns.len()
+                && ref_columns.iter().all(|c| i.columns.contains(c))
+        };
+        self.indexes.iter().find(|i| i.primary && same(i)).or_else(|| self.indexes.iter().find(|i| i.unique && same(i)))
+    }
+
     pub fn qualified(&self) -> QualName {
         QualName::new(&self.schema, &self.name)
     }
