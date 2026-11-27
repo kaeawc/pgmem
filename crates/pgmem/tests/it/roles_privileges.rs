@@ -447,11 +447,217 @@ fn column_privilege_edges() {
     c.batch_execute("DROP TABLE cve").expect("drop table");
 }
 
-fn drop_role_list(c: &mut postgres::Client, roles: &[&str]) {
+fn drop_test_roles(c: &mut postgres::Client, roles: &[&str]) {
+    let _ = c.batch_execute("RESET ROLE");
     for r in roles {
         let _ = c.batch_execute(&format!("DROP OWNED BY {r}"));
         let _ = c.batch_execute(&format!("DROP ROLE IF EXISTS {r}"));
     }
+}
+
+#[track_caller]
+fn denied_with(c: &mut postgres::Client, sql: &str, msg: &str) {
+    let e = expect_code(c.batch_execute(sql), "42501");
+    assert_eq!(message(&e), msg, "{sql}");
+}
+
+const FN_OWNER_ROLES: &[&str] = &["itof_a", "itof_b", "itof_m"];
+
+/// Only the owner of a function (a member of the owning role, or a superuser) may replace,
+/// alter, comment on or drop it; OWNER TO also needs membership in the new owner (#234).
+#[test]
+fn function_ownership_is_enforced() {
+    let (_db, mut c) = setup();
+    drop_test_roles(&mut c, FN_OWNER_ROLES);
+    c.batch_execute(
+        "CREATE ROLE itof_a; CREATE ROLE itof_b; CREATE ROLE itof_m IN ROLE itof_a;
+         GRANT CREATE ON SCHEMA public TO itof_a, itof_b;
+         SET ROLE itof_a;
+         CREATE FUNCTION oaf() RETURNS int LANGUAGE sql AS 'select 1';
+         CREATE PROCEDURE oap() LANGUAGE sql AS 'select 1';
+         RESET ROLE",
+    )
+    .expect("setup");
+    c.batch_execute("SET ROLE itof_b").expect("SET ROLE");
+    for (sql, msg) in [
+        ("CREATE OR REPLACE FUNCTION oaf() RETURNS int LANGUAGE sql AS 'select 2'", "must be owner of function oaf"),
+        ("ALTER FUNCTION oaf() SECURITY DEFINER", "must be owner of function oaf"),
+        ("ALTER FUNCTION oaf() OWNER TO itof_b", "must be owner of function oaf"),
+        ("ALTER FUNCTION oaf() RENAME TO oag", "must be owner of function oaf"),
+        ("ALTER FUNCTION oaf() SET search_path = public", "must be owner of function oaf"),
+        ("COMMENT ON FUNCTION oaf() IS 'x'", "must be owner of function oaf"),
+        ("DROP FUNCTION oaf()", "must be owner of function oaf"),
+        ("DROP FUNCTION IF EXISTS oaf()", "must be owner of function oaf"),
+        ("DROP PROCEDURE oap()", "must be owner of procedure oap"),
+        ("ALTER PROCEDURE oap() OWNER TO itof_b", "must be owner of function oap"),
+    ] {
+        denied_with(&mut c, sql, msg);
+    }
+    // A missing object is reported before ownership.
+    let e = expect_code(c.batch_execute("DROP FUNCTION oazz()"), "42883");
+    assert_eq!(message(&e), "function oazz() does not exist");
+    // A member of the owning role acts as the owner; OWNER TO needs membership in the new owner.
+    c.batch_execute("RESET ROLE; SET ROLE itof_m").expect("SET ROLE");
+    c.batch_execute("ALTER FUNCTION oaf() SECURITY DEFINER; COMMENT ON FUNCTION oaf() IS 'mine'").expect("member alters");
+    denied_with(&mut c, "ALTER FUNCTION oaf() OWNER TO itof_b", "must be able to SET ROLE \"itof_b\"");
+    c.batch_execute("CREATE OR REPLACE FUNCTION oaf() RETURNS int LANGUAGE sql AS 'select 3'").expect("member replaces");
+    // Superusers bypass the checks.
+    c.batch_execute("RESET ROLE; ALTER FUNCTION oaf() OWNER TO itof_b").expect("superuser OWNER TO");
+    c.batch_execute("SET ROLE itof_b; ALTER FUNCTION oaf() RENAME TO oag; DROP FUNCTION oag(); RESET ROLE").expect("new owner");
+    c.batch_execute("SET ROLE itof_a; DROP PROCEDURE oap(); RESET ROLE").expect("owner drops");
+    drop_test_roles(&mut c, FN_OWNER_ROLES);
+}
+
+const REL_OWNER_ROLES: &[&str] = &["itor_a", "itor_b", "itor_m"];
+
+/// ALTER / DROP / COMMENT ON relations, indexes, triggers, types, domains and schemas need
+/// ownership; the error names the object kind as PostgreSQL does (#234).
+#[test]
+fn relation_type_schema_ownership_is_enforced() {
+    let (_db, mut c) = setup();
+    drop_test_roles(&mut c, REL_OWNER_ROLES);
+    c.batch_execute(
+        "CREATE ROLE itor_a; CREATE ROLE itor_b; CREATE ROLE itor_m IN ROLE itor_a;
+         GRANT CREATE ON SCHEMA public TO itor_a, itor_b;
+         CREATE SCHEMA ora AUTHORIZATION itor_a;
+         SET ROLE itor_a;
+         CREATE TABLE ort (id int); CREATE INDEX ort_i ON ort (id);
+         CREATE VIEW orv AS SELECT 1 AS x; CREATE MATERIALIZED VIEW ormv AS SELECT 1 AS x;
+         CREATE SEQUENCE ors; CREATE TYPE orty AS ENUM ('a'); CREATE DOMAIN ord AS int;
+         CREATE FUNCTION ortf() RETURNS trigger LANGUAGE plpgsql AS 'begin return new; end';
+         CREATE TRIGGER ortr BEFORE INSERT ON ort FOR EACH ROW EXECUTE FUNCTION ortf();
+         RESET ROLE",
+    )
+    .expect("setup");
+    c.batch_execute("SET ROLE itor_b").expect("SET ROLE");
+    for (sql, what) in [
+        ("DROP TABLE ort", "table ort"),
+        ("DROP TABLE IF EXISTS ort", "table ort"),
+        ("ALTER TABLE ort ADD COLUMN y int", "table ort"),
+        ("ALTER TABLE ort RENAME TO ort2", "table ort"),
+        ("ALTER TABLE ort OWNER TO itor_b", "table ort"),
+        ("ALTER TABLE ort SET SCHEMA ora", "table ort"),
+        ("COMMENT ON TABLE ort IS 'x'", "table ort"),
+        ("COMMENT ON COLUMN ort.id IS 'x'", "relation ort"),
+        ("CREATE INDEX ON ort (id)", "table ort"),
+        ("DROP INDEX ort_i", "index ort_i"),
+        ("ALTER INDEX ort_i RENAME TO ort_j", "index ort_i"),
+        ("COMMENT ON INDEX ort_i IS 'x'", "index ort_i"),
+        ("DROP VIEW orv", "view orv"),
+        ("CREATE OR REPLACE VIEW orv AS SELECT 1 AS x", "view orv"),
+        ("ALTER VIEW orv RENAME TO orw", "view orv"),
+        ("ALTER VIEW orv OWNER TO itor_b", "view orv"),
+        ("COMMENT ON VIEW orv IS 'x'", "view orv"),
+        ("DROP MATERIALIZED VIEW ormv", "materialized view ormv"),
+        ("DROP SEQUENCE ors", "sequence ors"),
+        ("ALTER SEQUENCE ors RESTART", "sequence ors"),
+        ("ALTER SEQUENCE ors RENAME TO ors2", "sequence ors"),
+        ("ALTER SEQUENCE ors OWNER TO itor_b", "sequence ors"),
+        ("COMMENT ON SEQUENCE ors IS 'x'", "sequence ors"),
+        ("DROP TYPE orty", "type orty"),
+        ("ALTER TYPE orty ADD VALUE 'b'", "type orty"),
+        ("ALTER TYPE orty RENAME TO orty2", "type orty"),
+        ("ALTER TYPE orty OWNER TO itor_b", "type orty"),
+        ("COMMENT ON TYPE orty IS 'x'", "type orty"),
+        ("DROP DOMAIN ord", "type ord"),
+        ("ALTER DOMAIN ord SET NOT NULL", "type ord"),
+        ("ALTER DOMAIN ord OWNER TO itor_b", "type ord"),
+        ("COMMENT ON DOMAIN ord IS 'x'", "type ord"),
+        ("DROP SCHEMA ora", "schema ora"),
+        ("ALTER SCHEMA ora RENAME TO orb", "schema ora"),
+        ("ALTER SCHEMA ora OWNER TO itor_b", "schema ora"),
+        ("COMMENT ON SCHEMA ora IS 'x'", "schema ora"),
+        ("DROP TRIGGER ortr ON ort", "relation ort"),
+        ("ALTER TRIGGER ortr ON ort RENAME TO ortr2", "table ort"),
+        ("COMMENT ON TRIGGER ortr ON ort IS 'x'", "relation ort"),
+    ] {
+        denied_with(&mut c, sql, &format!("must be owner of {what}"));
+    }
+    // CREATE TRIGGER needs the TRIGGER privilege, REFRESH needs MAINTAIN.
+    denied_with(
+        &mut c,
+        "CREATE TRIGGER ortr3 BEFORE INSERT ON ort FOR EACH ROW EXECUTE FUNCTION ortf()",
+        "permission denied for table ort",
+    );
+    denied_with(&mut c, "REFRESH MATERIALIZED VIEW ormv", "permission denied for materialized view ormv");
+    let e = expect_code(c.batch_execute("DROP TABLE IF EXISTS ort_missing, ort"), "42501");
+    assert_eq!(message(&e), "must be owner of table ort");
+    // A member of the owning role acts as the owner.
+    c.batch_execute("RESET ROLE; SET ROLE itor_m").expect("SET ROLE");
+    c.batch_execute(
+        "COMMENT ON TABLE ort IS 'm'; DROP INDEX ort_i; ALTER TRIGGER ortr ON ort RENAME TO ortr2; REFRESH MATERIALIZED VIEW ormv;
+         ALTER TYPE orty RENAME TO orty2; ALTER DOMAIN ord SET NOT NULL; COMMENT ON SCHEMA ora IS 'm'",
+    )
+    .expect("member alters");
+    c.batch_execute("RESET ROLE").expect("RESET ROLE");
+    c.batch_execute("DROP SCHEMA ora").expect("superuser drops");
+    drop_test_roles(&mut c, REL_OWNER_ROLES);
+}
+
+const OWNER_TO_ROLES: &[&str] = &["itoo_a", "itoo_b", "itoo_m", "itoo_n"];
+
+/// ALTER ... OWNER TO: the current owner (or a member), membership in the new owner, and
+/// CREATE on the object's schema; superusers skip all three (#234).
+#[test]
+fn owner_to_requires_membership_and_create() {
+    let (_db, mut c) = setup();
+    drop_test_roles(&mut c, OWNER_TO_ROLES);
+    c.batch_execute(
+        "CREATE ROLE itoo_a; CREATE ROLE itoo_b; CREATE ROLE itoo_m IN ROLE itoo_a, itoo_b; CREATE ROLE itoo_n;
+         GRANT CREATE ON SCHEMA public TO itoo_a;
+         SET ROLE itoo_a; CREATE TABLE oot (id int); CREATE SEQUENCE oos;
+         CREATE FUNCTION oof() RETURNS int LANGUAGE sql AS 'select 1'; RESET ROLE",
+    )
+    .expect("setup");
+    c.batch_execute("SET ROLE itoo_m").expect("SET ROLE");
+    denied_with(&mut c, "ALTER TABLE oot OWNER TO itoo_b", "permission denied for schema public");
+    denied_with(&mut c, "ALTER FUNCTION oof() OWNER TO itoo_b", "permission denied for schema public");
+    denied_with(&mut c, "ALTER SEQUENCE oos OWNER TO itoo_n", "must be able to SET ROLE \"itoo_n\"");
+    c.batch_execute("RESET ROLE; GRANT CREATE ON SCHEMA public TO itoo_b; SET ROLE itoo_m").expect("grant create");
+    c.batch_execute("ALTER TABLE oot OWNER TO itoo_b; ALTER FUNCTION oof() OWNER TO itoo_b").expect("OWNER TO");
+    c.batch_execute("RESET ROLE; ALTER TABLE oot OWNER TO itoo_n").expect("superuser OWNER TO");
+    assert_eq!(rows(&mut c, "SELECT tableowner FROM pg_tables WHERE tablename = 'oot'"), [["itoo_n"]]);
+    drop_test_roles(&mut c, OWNER_TO_ROLES);
+}
+
+const USAGE_ROLES: &[&str] = &["itou_a"];
+
+/// CREATE TRIGGER needs EXECUTE on the trigger function; `$user` in search_path is the
+/// current role; schemas without USAGE drop out of the search path and qualified names in
+/// them are refused (#234).
+#[test]
+fn trigger_execute_user_schema_and_usage() {
+    let (_db, mut c) = setup();
+    drop_test_roles(&mut c, USAGE_ROLES);
+    c.batch_execute(
+        "CREATE ROLE itou_a; GRANT CREATE ON SCHEMA public TO itou_a;
+         CREATE FUNCTION outf() RETURNS trigger LANGUAGE plpgsql AS 'begin return new; end';
+         REVOKE EXECUTE ON FUNCTION outf() FROM PUBLIC;
+         CREATE SCHEMA itou_a AUTHORIZATION itou_a;
+         CREATE SCHEMA ouhidden; CREATE TABLE ouhidden.ouh (id int); CREATE TABLE public.ouh (id int, v int);
+         GRANT SELECT ON ouhidden.ouh, public.ouh TO itou_a;
+         CREATE FUNCTION ouhidden.ouhf() RETURNS int LANGUAGE sql AS 'select 1';
+         SET ROLE itou_a; CREATE TABLE outt (id int)",
+    )
+    .expect("setup");
+    denied_with(
+        &mut c,
+        "CREATE TRIGGER outr BEFORE INSERT ON outt FOR EACH ROW EXECUTE FUNCTION outf()",
+        "permission denied for function outf",
+    );
+    assert_eq!(rows(&mut c, "SELECT current_schema(), current_schemas(false)::text"), [["itou_a", "{itou_a,public}"]]);
+    c.batch_execute("CREATE TABLE oumine (id int)").expect("create in $user");
+    assert_eq!(rows(&mut c, "SELECT schemaname FROM pg_tables WHERE tablename = 'oumine'"), [["itou_a"]]);
+    c.batch_execute("SET search_path = ouhidden, public").expect("search_path");
+    assert_eq!(rows(&mut c, "SELECT current_schema(), current_schemas(false)::text"), [["public", "{public}"]]);
+    assert_eq!(rows(&mut c, "SELECT count(v) FROM ouh"), [["0"]]);
+    for sql in ["SELECT * FROM ouhidden.ouh", "SELECT ouhidden.ouhf()", "DROP TABLE ouhidden.ouh"] {
+        denied_with(&mut c, sql, "permission denied for schema ouhidden");
+    }
+    c.batch_execute("RESET ROLE; RESET search_path").expect("reset");
+    assert_eq!(rows(&mut c, "SELECT current_schemas(false)::text"), [["{public}"]]);
+    c.batch_execute("DROP SCHEMA ouhidden CASCADE; DROP TABLE public.ouh; DROP FUNCTION outf()").expect("cleanup");
+    drop_test_roles(&mut c, USAGE_ROLES);
 }
 
 #[track_caller]
@@ -471,7 +677,7 @@ fn assert_ok(c: &mut postgres::Client, sql: &str) {
 #[test]
 fn dml_reads_need_select() {
     let (_db, mut c) = setup();
-    drop_role_list(&mut c, &["itdr_user"]);
+    drop_test_roles(&mut c, &["itdr_user"]);
     c.batch_execute(
         "CREATE ROLE itdr_user;
          CREATE TABLE drt (id int PRIMARY KEY, v text); CREATE TABLE drs (id int, w text);
@@ -560,7 +766,7 @@ fn dml_reads_need_select() {
         assert_denied(&mut c, sql, "table drt");
     }
     c.batch_execute("RESET ROLE").expect("RESET ROLE");
-    drop_role_list(&mut c, &["itdr_user"]);
+    drop_test_roles(&mut c, &["itdr_user"]);
 }
 
 /// MERGE needs the privilege of each action it lists on the target (column privileges for
@@ -569,7 +775,7 @@ fn dml_reads_need_select() {
 #[test]
 fn merge_privileges() {
     let (_db, mut c) = setup();
-    drop_role_list(&mut c, &["itmg_user"]);
+    drop_test_roles(&mut c, &["itmg_user"]);
     c.batch_execute(
         "CREATE ROLE itmg_user;
          CREATE TABLE mgt (id int PRIMARY KEY, v text, sec text); CREATE TABLE mgs (id int, w text);
@@ -644,7 +850,7 @@ fn merge_privileges() {
     assert_ok(&mut c, "MERGE INTO mgt USING mgs ON true WHEN MATCHED THEN DO NOTHING");
     assert_denied(&mut c, "MERGE INTO mgt USING mgs ON mgt.id = mgs.id WHEN MATCHED THEN DO NOTHING", "table mgt");
     c.batch_execute("RESET ROLE").expect("RESET ROLE");
-    drop_role_list(&mut c, &["itmg_user"]);
+    drop_test_roles(&mut c, &["itmg_user"]);
 }
 
 /// COPY table TO needs SELECT on the copied columns, COPY table FROM INSERT on them (checked
@@ -653,7 +859,7 @@ fn merge_privileges() {
 #[test]
 fn copy_privileges() {
     let (_db, mut c) = setup();
-    drop_role_list(&mut c, &["itcp_user"]);
+    drop_test_roles(&mut c, &["itcp_user"]);
     c.batch_execute(
         "CREATE ROLE itcp_user;
          CREATE TABLE cpt (id int PRIMARY KEY, v text, sec text); CREATE TABLE cps (id int);
@@ -705,7 +911,7 @@ fn copy_privileges() {
     let e = expect_code(c.batch_execute("COPY cpv TO STDOUT"), "42809");
     assert_eq!(message(&e), "cannot copy from view \"cpv\"");
     c.batch_execute("RESET ROLE; DROP VIEW cpv").expect("cleanup");
-    drop_role_list(&mut c, &["itcp_user"]);
+    drop_test_roles(&mut c, &["itcp_user"]);
 }
 
 /// UPDATE / DELETE on a view with INSTEAD OF triggers need SELECT on the view columns that
@@ -713,7 +919,7 @@ fn copy_privileges() {
 #[test]
 fn instead_of_view_reads_need_select() {
     let (_db, mut c) = setup();
-    drop_role_list(&mut c, &["itiv_user"]);
+    drop_test_roles(&mut c, &["itiv_user"]);
     c.batch_execute(
         "CREATE ROLE itiv_user;
          CREATE TABLE ivb (id int, v text, sec text); INSERT INTO ivb VALUES (1, 'a', 's');
@@ -750,7 +956,7 @@ fn instead_of_view_reads_need_select() {
         assert_denied(&mut c, sql, "view ivv");
     }
     c.batch_execute("RESET ROLE; DROP VIEW ivv; DROP FUNCTION ivf()").expect("cleanup");
-    drop_role_list(&mut c, &["itiv_user"]);
+    drop_test_roles(&mut c, &["itiv_user"]);
 }
 
 fn detail(e: &postgres::Error) -> Option<String> {
@@ -763,7 +969,7 @@ fn detail(e: &postgres::Error) -> Option<String> {
 #[test]
 fn constraint_detail_hides_unreadable_columns() {
     let (_db, mut c) = setup();
-    drop_role_list(&mut c, &["itcd_user"]);
+    drop_test_roles(&mut c, &["itcd_user"]);
     c.batch_execute(
         "CREATE ROLE itcd_user;
          CREATE TABLE cdt (id int PRIMARY KEY, v text NOT NULL, sec text CHECK (sec <> 'bad'), u int UNIQUE, a int, b int, UNIQUE (a, b));
@@ -813,7 +1019,7 @@ fn constraint_detail_hides_unreadable_columns() {
     );
     assert_eq!(fails(&mut c, "INSERT INTO cdt VALUES (2, 'a', 's', 1, 2, 2)", "23505").as_deref(), Some("Key (u)=(1) already exists."));
     c.batch_execute("RESET ROLE").expect("RESET ROLE");
-    drop_role_list(&mut c, &["itcd_user"]);
+    drop_test_roles(&mut c, &["itcd_user"]);
 }
 
 /// information_schema.table_privileges shows grants whose grantor or grantee is a role the
@@ -821,7 +1027,7 @@ fn constraint_detail_hides_unreadable_columns() {
 #[test]
 fn table_privileges_filtered_by_enabled_roles() {
     let (_db, mut c) = setup();
-    drop_role_list(&mut c, &["ittp_user", "ittp_other"]);
+    drop_test_roles(&mut c, &["ittp_user", "ittp_other"]);
     c.batch_execute(
         "CREATE ROLE ittp_user; CREATE ROLE ittp_other;
          CREATE TABLE tpa (id int); CREATE TABLE tpb (id int);
@@ -841,7 +1047,7 @@ fn table_privileges_filtered_by_enabled_roles() {
     );
     assert_eq!(rows(&mut c, &q("role_table_grants")), [["ittp_user", "tpa", "INSERT"], ["ittp_user", "tpb", "UPDATE"]]);
     c.batch_execute("RESET ROLE").expect("RESET ROLE");
-    drop_role_list(&mut c, &["ittp_user", "ittp_other"]);
+    drop_test_roles(&mut c, &["ittp_user", "ittp_other"]);
 }
 
 /// Deferred constraint checks (at COMMIT and SET CONSTRAINTS ... IMMEDIATE) hide key values
@@ -852,7 +1058,7 @@ fn table_privileges_filtered_by_enabled_roles() {
 #[test]
 fn constraint_detail_deferred_views_partitions() {
     let (_db, mut c) = setup();
-    drop_role_list(&mut c, &["itcv_user"]);
+    drop_test_roles(&mut c, &["itcv_user"]);
     c.batch_execute(
         "CREATE ROLE itcv_user;
          CREATE TABLE cvp (id int PRIMARY KEY);
@@ -895,5 +1101,5 @@ fn constraint_detail_deferred_views_partitions() {
     assert_eq!(fails(&mut c, "INSERT INTO cvt VALUES (1, NULL, 's')", "23502").as_deref(), Some("Failing row contains (1, null, s)."));
     assert_eq!(fails(&mut c, "INSERT INTO cvt1 VALUES ('s', NULL, 1)", "23502").as_deref(), Some("Failing row contains (s, null, 1)."));
     c.batch_execute("DROP VIEW cvv; DROP VIEW cvo").expect("cleanup");
-    drop_role_list(&mut c, &["itcv_user"]);
+    drop_test_roles(&mut c, &["itcv_user"]);
 }

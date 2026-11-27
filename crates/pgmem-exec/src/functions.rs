@@ -163,6 +163,7 @@ pub(crate) fn create_function(cf: &ir::CreateFunction, txn: &mut Txn, env: &Sess
             ));
         }
         Some(old) => {
+            crate::ownership::check_replace_function(&catalog, env, &old)?;
             if old.procedure != def.procedure {
                 return Err(SqlError::new(code::WRONG_OBJECT_TYPE, "cannot change routine kind")
                     .with_detail(format!("\"{name}\" is a {}.", kind_word(old.procedure))));
@@ -452,6 +453,82 @@ fn find_for_drop(
     Ok(cands.into_iter().find(|f| f.input_types() == want))
 }
 
+/// What depends on a function: column defaults that call it and triggers that run it.
+#[derive(Default)]
+pub(crate) struct FunctionDependents {
+    /// DETAIL lines (`default value for column c of table t depends on function f()`).
+    lines: Vec<String>,
+    defaults: Vec<(pgmem_catalog::QualName, usize)>,
+    triggers: Vec<Arc<pgmem_catalog::TriggerDef>>,
+    /// Casts using the function (`cast from a to b`); `drop_function` removes them.
+    casts: Vec<String>,
+}
+
+impl FunctionDependents {
+    pub(crate) fn of(catalog: &Catalog, f: &FunctionDef) -> FunctionDependents {
+        let defaults = crate::deps::defaults_using_function(catalog, f);
+        let triggers: Vec<_> = catalog.triggers().filter(|t| t.function == f.oid).cloned().collect();
+        let sig = signature(&f.name, &f.input_types());
+        let mut lines: Vec<String> = defaults
+            .iter()
+            .map(|(t, slot)| {
+                let column = catalog.table_q(t).map(|d| d.columns[*slot].name.clone()).unwrap_or_default();
+                format!("default value for column {column} of table {} depends on function {sig}", t.name)
+            })
+            .collect();
+        for t in &triggers {
+            let table = catalog.relation_by_oid(t.table).map(|r| r.name().to_owned()).unwrap_or_default();
+            lines.push(format!("trigger {} on table {table} depends on function {sig}", t.name));
+        }
+        let casts: Vec<String> = catalog.casts().filter(|c| c.function == Some(f.oid)).map(|c| crate::usercast::describe(c)).collect();
+        lines.extend(casts.iter().map(|c| format!("{c} depends on function {sig}")));
+        FunctionDependents { lines, defaults, triggers, casts }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    /// Appends another function's dependents.
+    pub(crate) fn extend(&mut self, other: FunctionDependents) {
+        self.lines.extend(other.lines);
+        self.defaults.extend(other.defaults);
+        self.triggers.extend(other.triggers);
+        self.casts.extend(other.casts);
+    }
+
+    /// 2BP01 `cannot drop <what> because other objects depend on it`, the dependents as DETAIL.
+    pub(crate) fn error(&self, what: &str) -> SqlError {
+        SqlError::new(code::DEPENDENT_OBJECTS_STILL_EXIST, format!("cannot drop {what} because other objects depend on it"))
+            .with_detail(self.lines.join("\n"))
+            .with_hint("Use DROP ... CASCADE to drop the dependent objects too.")
+    }
+
+    /// DROP ... CASCADE: the defaults are removed and the triggers dropped, each reported; casts
+    /// are reported here and removed with the function.
+    pub(crate) fn drop(self, txn: &mut Txn, notices: &mut Vec<crate::session::Notice>) {
+        let notice = |message: String| crate::session::Notice { severity: "NOTICE", code: "00000", message };
+        for (t, slot) in self.defaults {
+            if let Some(def) = txn.catalog().table_q(&t).cloned() {
+                let mut def = (*def).clone();
+                notices.push(notice(format!("drop cascades to default value for column {} of table {}", def.columns[slot].name, t.name)));
+                def.columns[slot].default = None;
+                txn.catalog_mut().replace_table(&t, def);
+            }
+        }
+        for t in self.triggers {
+            let table = txn.catalog().relation_by_oid(t.table).map(|r| r.name().to_owned()).unwrap_or_default();
+            notices.push(notice(format!("drop cascades to trigger {} on table {table}", t.name)));
+            let cat = txn.catalog_mut();
+            cat.drop_comments(t.oid);
+            cat.drop_trigger(t.oid);
+        }
+        for c in self.casts {
+            notices.push(notice(format!("drop cascades to {c}")));
+        }
+    }
+}
+
 /// DROP {FUNCTION | PROCEDURE | ROUTINE} [IF EXISTS] name [(types)], ... [CASCADE].
 pub(crate) fn drop_function(
     items: &[(ir::ObjectName, Option<Vec<ir::TypeName>>)],
@@ -492,45 +569,12 @@ pub(crate) fn drop_function(
         if kind == ir::RoutineKind::Procedure && !f.procedure {
             return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("{} is not a procedure", signature(&f.name, &f.input_types()))));
         }
-        let users = crate::deps::defaults_using_function(&catalog, &f);
-        let triggers: Vec<_> = catalog.triggers().filter(|t| t.function == f.oid).cloned().collect();
-        let sig = signature(&f.name, &f.input_types());
-        let casts: Vec<String> = catalog.casts().filter(|c| c.function == Some(f.oid)).map(|c| crate::usercast::describe(c)).collect();
-        if (!users.is_empty() || !triggers.is_empty() || !casts.is_empty()) && !cascade {
-            let mut lines: Vec<String> = users
-                .iter()
-                .map(|(t, slot)| {
-                    let table = catalog.table_q(t).map(|d| d.columns[*slot].name.clone()).unwrap_or_default();
-                    format!("default value for column {table} of table {} depends on function {sig}", t.name)
-                })
-                .collect();
-            for t in &triggers {
-                let table = catalog.relation_by_oid(t.table).map(|r| r.name().to_owned()).unwrap_or_default();
-                lines.push(format!("trigger {} on table {table} depends on function {sig}", t.name));
-            }
-            lines.extend(casts.iter().map(|c| format!("{c} depends on function {sig}")));
-            return Err(SqlError::new(
-                code::DEPENDENT_OBJECTS_STILL_EXIST,
-                format!("cannot drop function {sig} because other objects depend on it"),
-            )
-            .with_detail(lines.join("\n"))
-            .with_hint("Use DROP ... CASCADE to drop the dependent objects too."));
+        let deps = FunctionDependents::of(&catalog, &f);
+        if !deps.is_empty() && !cascade {
+            let sig = signature(&f.name, &f.input_types());
+            return Err(deps.error(&format!("function {sig}")));
         }
-        for (t, slot) in users {
-            if let Some(def) = txn.catalog().table_q(&t).cloned() {
-                let mut def = (*def).clone();
-                notices.push(crate::session::Notice {
-                    severity: "NOTICE",
-                    code: "00000",
-                    message: format!("drop cascades to default value for column {} of table {}", def.columns[slot].name, t.name),
-                });
-                def.columns[slot].default = None;
-                txn.catalog_mut().replace_table(&t, def);
-            }
-        }
-        for c in &casts {
-            notices.push(crate::session::Notice { severity: "NOTICE", code: "00000", message: format!("drop cascades to {c}") });
-        }
+        deps.drop(txn, &mut notices);
         let cat = txn.catalog_mut();
         cat.drop_comments(f.oid);
         cat.drop_function(f.oid);

@@ -116,12 +116,22 @@ pub(crate) fn drop_extension(
         if let Some(oid) = txn.catalog().extension(name).map(|e| e.oid) {
             crate::ext_alter::drop_members(oid, cascade, txn, env, state)?;
         }
-        // Functions marked DEPENDS ON EXTENSION go with it (no CASCADE needed); members were
+        // Functions marked DEPENDS ON EXTENSION go with it (no CASCADE needed), but what
+        // depends on them (column defaults, triggers, casts) needs CASCADE. Members were
         // dropped above, so each is dropped once.
-        let marked: Vec<u32> = txn.catalog().functions().filter(|f| f.extensions.contains(name)).map(|f| f.oid).collect();
-        for oid in marked {
-            txn.catalog_mut().drop_comments(oid);
-            txn.catalog_mut().drop_function(oid);
+        let marked: Vec<_> = txn.catalog().functions().filter(|f| f.extensions.contains(name)).cloned().collect();
+        let mut deps = crate::functions::FunctionDependents::default();
+        for f in &marked {
+            deps.extend(crate::functions::FunctionDependents::of(txn.catalog(), f));
+        }
+        if !deps.is_empty() && !cascade {
+            return Err(deps.error(&format!("extension {name}")));
+        }
+        deps.drop(txn, &mut notices);
+        for f in marked {
+            let cat = txn.catalog_mut();
+            cat.drop_comments(f.oid);
+            cat.drop_function(f.oid);
         }
         txn.catalog_mut().drop_extension(name);
     }
