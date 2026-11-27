@@ -780,7 +780,8 @@ pub(crate) fn create_partition(
     let qualified = created.qualified();
     for con in &ct.constraints {
         let action = ir::AlterTableAction::AddConstraint(con.clone());
-        crate::ddl::alter_table_action(txn, &qualified, &action, env, state)?;
+        // Through the inheritance path, which records NO INHERIT (a new partition has no children).
+        crate::inherit::alter(txn, &qualified, &action, false, env, state)?;
     }
     let _ = binder;
     Ok(QueryResult { tag: "CREATE TABLE".into(), ..Default::default() })

@@ -226,12 +226,15 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
         pending.push((name, kind, false, timing, &[]));
     }
     for (cname, kind, column_level, timing, reloptions) in pending {
-        if crate::inherit::merge_local_check(&table, &mut inherit, cname.as_deref(), &kind)? {
+        if crate::inherit::merge_local_check(&table, &mut inherit, cname.as_deref(), &kind, timing.no_inherit)? {
             continue;
         }
         let n = table.constraints.len();
         add_constraint(b, &mut table, cname, &kind, column_level, &mut taken, (timing, reloptions))?;
         if timing.no_inherit && table.constraints.len() > n {
+            if ct.options.partition_by.is_some() {
+                return Err(crate::inherit::no_inherit_on_partitioned(&table.name));
+            }
             inherit.no_inherit.extend(table.constraints.last().map(|c| c.name.clone()));
         }
     }

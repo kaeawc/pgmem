@@ -37,6 +37,27 @@ fn mismatch(msg: impl Into<String>) -> SqlError {
     SqlError::new(code::DATATYPE_MISMATCH, msg)
 }
 
+/// A NO INHERIT CHECK merging with an inherited one of the same name (`MergeWithExistingConstraint`).
+fn conflicts_with_inherited(name: &str, table: &str) -> SqlError {
+    SqlError::new(
+        code::INVALID_OBJECT_DEFINITION,
+        format!("constraint \"{name}\" conflicts with inherited constraint on relation \"{table}\""),
+    )
+}
+
+/// An inherited CHECK merging with a NO INHERIT one of the same name.
+fn conflicts_with_non_inherited(name: &str, what: &str, table: &str) -> SqlError {
+    SqlError::new(
+        code::INVALID_OBJECT_DEFINITION,
+        format!("constraint \"{name}\" conflicts with non-inherited constraint on {what} \"{table}\""),
+    )
+}
+
+/// `StoreRelCheck`: partitioned tables take no NO INHERIT CHECK constraints.
+pub(crate) fn no_inherit_on_partitioned(table: &str) -> SqlError {
+    SqlError::new(code::INVALID_TABLE_DEFINITION, format!("cannot add NO INHERIT constraint to partitioned table \"{table}\""))
+}
+
 fn type_text(catalog: &Catalog, c: &ColumnDef) -> String {
     crate::funcs::catalog::format_type(c.ty.oid(), c.typmod, catalog).unwrap_or_else(|| c.ty.to_string())
 }
@@ -270,17 +291,21 @@ pub(crate) fn merge_columns(b: &Binder, ct: &ir::CreateTable, table: &mut TableD
 }
 
 /// A local CHECK constraint named like an inherited one: merged when the expressions match
-/// (returns true), an error otherwise.
+/// (returns true), an error otherwise (also when the local one is NO INHERIT).
 pub(crate) fn merge_local_check(
     table: &TableDef,
     plan: &mut InheritPlan,
     name: Option<&str>,
     kind: &ir::TableConstraintKind,
+    no_inherit: bool,
 ) -> SqlResult<bool> {
     let (Some(name), ir::TableConstraintKind::Check(expr)) = (name, kind) else { return Ok(false) };
     let Some((_, inh)) = plan.constraints.iter_mut().find(|(n, _)| n == name) else { return Ok(false) };
     if table.constraints.iter().find(|c| c.name == name).and_then(check_expr) != Some(expr) {
         return Err(SqlError::new(code::DUPLICATE_OBJECT, format!("constraint \"{name}\" for relation \"{}\" already exists", table.name)));
+    }
+    if no_inherit {
+        return Err(conflicts_with_inherited(name, &table.name));
     }
     inh.local = true;
     plan.notices.push(format!("merging constraint \"{name}\" with inherited definition"));
@@ -490,11 +515,47 @@ pub(crate) fn alter(
         }
         _ => {}
     }
+    if let A::AddConstraint(c) = action
+        && let ir::TableConstraintKind::Check(expr) = &c.kind
+    {
+        if c.timing.no_inherit && txn.catalog().is_partitioned(table.oid) {
+            return Err(no_inherit_on_partitioned(&table.name));
+        }
+        if merge_added_check(txn, &table, c.name.as_deref(), expr, c.timing.no_inherit, state)? {
+            return Ok(current.clone());
+        }
+    }
     check_inherited(txn.catalog(), &table, action)?;
     if only && !txn.catalog().inherit_children(table.oid).is_empty() {
         check_only(action)?;
     }
     alter_tree(txn, current, action, !only, env, state)
+}
+
+/// ADD CONSTRAINT of a CHECK named like a purely inherited one (`MergeWithExistingConstraint`):
+/// the same expression merges into it (returns true; the children already have it), unless the
+/// new one is NO INHERIT. A different expression is left to the duplicate-name error.
+fn merge_added_check(
+    txn: &mut Txn,
+    table: &TableDef,
+    name: Option<&str>,
+    expr: &ir::Expr,
+    no_inherit: bool,
+    state: &StatementState,
+) -> SqlResult<bool> {
+    let catalog = txn.catalog();
+    let Some(existing) = name.and_then(|n| table.constraints.iter().find(|c| c.name == n)) else { return Ok(false) };
+    let mut inh = catalog.constraint_inheritance(existing.oid);
+    if inh.local || inh.count == 0 || catalog.partition_of(table.oid).is_some() || check_expr(existing) != Some(expr) {
+        return Ok(false);
+    }
+    if no_inherit {
+        return Err(conflicts_with_inherited(&existing.name, &table.name));
+    }
+    inh.local = true;
+    txn.catalog_mut().set_constraint_inheritance(existing.oid, inh);
+    state.notices.borrow_mut().push(notice(format!("merging constraint \"{}\" with inherited definition", existing.name)));
+    Ok(true)
 }
 
 /// Actions a child may not apply to what it inherits.
@@ -713,6 +774,9 @@ fn add_check(txn: &mut Txn, s: &Step, c: &ir::TableConstraint, env: &SessionEnv,
                 format!("constraint \"{}\" for relation \"{}\" already exists", added.name, s.child.name),
             ));
         }
+        if txn.catalog().is_no_inherit(existing.oid) {
+            return Err(conflicts_with_non_inherited(&added.name, "relation", &s.child.name));
+        }
         let mut inh = txn.catalog().constraint_inheritance(existing.oid);
         inh.count += 1;
         txn.catalog_mut().set_constraint_inheritance(existing.oid, inh);
@@ -831,6 +895,9 @@ fn check_compatible(catalog: &Catalog, child: &TableDef, parent: &TableDef) -> S
                     "child table \"{}\" has different definition for check constraint \"{}\"",
                     child.name, pc.name
                 )));
+            }
+            Some(c) if catalog.is_no_inherit(c.oid) => {
+                return Err(conflicts_with_non_inherited(&pc.name, "child table", &child.name));
             }
             Some(_) => {}
         }
