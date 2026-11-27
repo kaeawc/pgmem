@@ -195,3 +195,136 @@ fn uncorrelated_subquery_runs_once() {
         assert_eq!(lines(&mut c, sql), *want, "{sql}");
     }
 }
+
+fn grouped_setup(c: &mut postgres::Client) {
+    c.batch_execute(
+        "CREATE TABLE t (v int, w int);
+         INSERT INTO t VALUES (1, 10), (2, 20), (2, 5), (3, 30);
+         CREATE TABLE u (k int, z int);
+         INSERT INTO u VALUES (1, 100), (2, 200), (2, 201), (25, 7), (30, 9);",
+    )
+    .expect("grouped setup");
+}
+
+/// A subquery of a grouped query reads the grouped row: its references to the outer query are
+/// group keys (#294), in the select list, HAVING, ORDER BY, DISTINCT and window clauses, at
+/// any nesting depth and under grouping sets.
+#[test]
+fn grouped_query_subqueries_read_group_keys() {
+    let (_db, mut c) = setup();
+    grouped_setup(&mut c);
+    let cases: &[(&str, &[&str])] = &[
+        ("SELECT v, (SELECT x FROM generate_series(v, v) x) FROM t GROUP BY v ORDER BY v", &["1|1", "2|2", "3|3"]),
+        ("SELECT v FROM t GROUP BY v HAVING EXISTS (SELECT 1 FROM generate_series(v, 2)) ORDER BY v", &["1", "2"]),
+        ("SELECT v, (SELECT count(*) FROM u WHERE u.k = t.v) FROM t GROUP BY v ORDER BY v", &["1|1", "2|2", "3|0"]),
+        ("SELECT v FROM t GROUP BY v ORDER BY (SELECT max(z) FROM u WHERE u.k = t.v) NULLS FIRST, v", &["3", "1", "2"]),
+        ("SELECT DISTINCT (SELECT count(*) FROM u WHERE u.k = t.v) FROM t GROUP BY v ORDER BY 1", &["0", "1", "2"]),
+        ("SELECT v, rank() OVER (ORDER BY (SELECT count(*) FROM u WHERE u.k = t.v)) FROM t GROUP BY v ORDER BY v", &["1|2", "2|3", "3|1"]),
+        (
+            "SELECT v, (SELECT (SELECT t.v + count(*) FROM u u2 WHERE u2.k = u.k) FROM u WHERE u.k = t.v LIMIT 1) FROM t GROUP BY v ORDER BY v",
+            &["1|2", "2|4", "3|"],
+        ),
+        (
+            "SELECT v, (SELECT y FROM u, LATERAL (SELECT u.z + t.v AS y) l WHERE u.k = t.v ORDER BY y LIMIT 1) FROM t GROUP BY v ORDER BY v",
+            &["1|101", "2|202", "3|"],
+        ),
+        (
+            "SELECT v, (WITH c AS (SELECT z FROM u WHERE u.k = t.v) SELECT sum(z) FROM c) FROM t GROUP BY v ORDER BY v",
+            &["1|100", "2|401", "3|"],
+        ),
+        (
+            "SELECT v, w, (SELECT t.v + t.w) FROM t GROUP BY ROLLUP (v, w) ORDER BY 1, 2",
+            &["1|10|11", "1||", "2|5|7", "2|20|22", "2||", "3|30|33", "3||", "||"],
+        ),
+        ("SELECT v, (SELECT GROUPING(t.v)) FROM t GROUP BY ROLLUP (v) ORDER BY 1", &["1|0", "2|0", "3|0", "|1"]),
+    ];
+    for (sql, want) in cases {
+        assert_eq!(lines(&mut c, sql), *want, "{sql}");
+    }
+}
+
+/// An aggregate whose arguments reference only an enclosing query is that query's aggregate:
+/// `(SELECT sum(t.w))` groups the outer query, and the subquery reads its result.
+#[test]
+fn outer_aggregate_inside_subquery() {
+    let (_db, mut c) = setup();
+    grouped_setup(&mut c);
+    c.batch_execute("CREATE TABLE p (id int PRIMARY KEY, name text, x int); INSERT INTO p VALUES (1, 'a', 5), (2, 'b', 7);").expect("p");
+    let cases: &[(&str, &[&str])] = &[
+        ("SELECT v, sum(w), (SELECT max(z) FROM u WHERE u.k = sum(t.w)) FROM t GROUP BY v ORDER BY v", &["1|10|", "2|25|7", "3|30|9"]),
+        ("SELECT v, (SELECT sum(t.w)) FROM t GROUP BY v ORDER BY 1", &["1|10", "2|25", "3|30"]),
+        ("SELECT (SELECT sum(w)) FROM t", &["65"]),
+        ("SELECT (SELECT sum(w + z) FROM u) FROM t ORDER BY 1", &["542", "567", "617", "667"]),
+        ("SELECT (SELECT count(*)) FROM t", &["1", "1", "1", "1"]),
+        ("SELECT (SELECT (SELECT sum(t.w)) FROM u LIMIT 1) FROM t", &["65"]),
+        ("SELECT (SELECT x FROM (SELECT sum(t.w) x) s) FROM t", &["65"]),
+        (
+            "SELECT v, (SELECT count(*) + sum(t.w) FROM u GROUP BY u.k ORDER BY 1 LIMIT 1) FROM t GROUP BY v ORDER BY 1",
+            &["1|11", "2|26", "3|31"],
+        ),
+        ("SELECT v, (SELECT string_agg(t.w::text, ',' ORDER BY t.w)) FROM t GROUP BY v ORDER BY 1", &["1|10", "2|5,20", "3|30"]),
+        ("SELECT v, (SELECT count(*) FILTER (WHERE t.w > 6)) FROM t GROUP BY v ORDER BY 1", &["1|1", "2|1", "3|1"]),
+        ("SELECT v, sum(w), rank() OVER (ORDER BY (SELECT sum(t.w))) FROM t GROUP BY v ORDER BY 1", &["1|10|1", "2|25|2", "3|30|3"]),
+        // A column functionally dependent on the grouped primary key, next to an aggregate.
+        ("SELECT sum(x), p.name, (SELECT p.name || sum(p.x)) FROM p GROUP BY p.id ORDER BY 2", &["5|a|a5", "7|b|b7"]),
+    ];
+    for (sql, want) in cases {
+        assert_eq!(lines(&mut c, sql), *want, "{sql}");
+    }
+}
+
+/// Postgres' check_ungrouped_columns for sublinks, and aggregates placed in clauses of their
+/// own level that do not allow them.
+#[test]
+fn grouped_subquery_errors() {
+    let (_db, mut c) = setup();
+    grouped_setup(&mut c);
+    let cases: &[(&str, &str, &str)] = &[
+        ("SELECT v, (SELECT w) FROM t GROUP BY v", "42803", "subquery uses ungrouped column \"t.w\" from outer query"),
+        (
+            "SELECT v, (SELECT (SELECT t.w) FROM u LIMIT 1) FROM t GROUP BY v",
+            "42803",
+            "subquery uses ungrouped column \"t.w\" from outer query",
+        ),
+        ("SELECT v FROM t GROUP BY v HAVING EXISTS (SELECT t.w)", "42803", "subquery uses ungrouped column \"t.w\" from outer query"),
+        ("SELECT v + 1, (SELECT t.v + 1) FROM t GROUP BY v + 1", "42803", "subquery uses ungrouped column \"t.v\" from outer query"),
+        ("SELECT v, (SELECT sum(t.w + u.z) FROM u) FROM t GROUP BY v", "42803", "subquery uses ungrouped column \"t.w\" from outer query"),
+        (
+            "SELECT (SELECT sum(t.w)), w FROM t",
+            "42803",
+            "column \"t.w\" must appear in the GROUP BY clause or be used in an aggregate function",
+        ),
+        ("SELECT count(*), (SELECT max(z) FROM u WHERE z > count(*)) FROM t", "42803", "aggregate functions are not allowed in WHERE"),
+        ("SELECT v, (SELECT max(sum(t.w)) FROM u) FROM t GROUP BY v", "42803", "aggregate function calls cannot be nested"),
+        (
+            "SELECT * FROM t, LATERAL (SELECT sum(t.w)) s",
+            "42803",
+            "aggregate functions are not allowed in FROM clause of their own query level",
+        ),
+        ("SELECT * FROM t WHERE (SELECT sum(t.w)) > 0", "42803", "aggregate functions are not allowed in WHERE"),
+        ("SELECT v FROM t GROUP BY (SELECT sum(t.w)), v", "42803", "aggregate functions are not allowed in GROUP BY"),
+    ];
+    for (sql, code, msg) in cases {
+        let e = expect_code(c.execute(*sql, &[]), code);
+        assert_eq!(crate::support::message(&e), *msg, "{sql}");
+    }
+}
+
+/// EXISTS does not evaluate its subquery's select list, ORDER BY or DISTINCT (Postgres'
+/// simplify_EXISTS_query), unless the subquery aggregates.
+#[test]
+fn exists_skips_its_select_list() {
+    let (_db, mut c) = setup();
+    c.batch_execute("CREATE SEQUENCE s3").expect("sequence");
+    for (sql, want) in [
+        ("SELECT 1 WHERE EXISTS (SELECT nextval('s3'))", "1"),
+        ("SELECT EXISTS (SELECT nextval('s3') FROM generate_series(1, 3) ORDER BY 1)", "t"),
+        ("SELECT EXISTS (SELECT DISTINCT nextval('s3') FROM generate_series(1, 3))", "t"),
+        ("SELECT EXISTS (SELECT nextval('s3') FROM generate_series(1, 3) LIMIT 1)", "t"),
+    ] {
+        assert_eq!(lines(&mut c, sql), [want], "{sql}");
+    }
+    expect_code(c.execute("SELECT currval('s3')", &[]), "55000");
+    assert_eq!(lines(&mut c, "SELECT EXISTS (SELECT max(nextval('s3')) FROM generate_series(1, 3))"), ["t"]);
+    assert_eq!(lines(&mut c, "SELECT currval('s3')"), ["3"]);
+}

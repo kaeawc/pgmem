@@ -13,13 +13,14 @@ pub(crate) fn like_key_name(e: &pgmem_ir::Expr) -> String {
 pub mod merge;
 mod rls;
 mod select;
+mod sublink;
 
 pub use ddl::{bind_alter_table, bind_create_index, bind_create_sequence, bind_create_table, bind_create_view};
 pub use dml::{DeletePlan, InsertPlan, InsertRows, OnConflictPlan, UpdatePlan, bind_delete, bind_insert, bind_update};
 pub use select::BoundQuery;
 pub(crate) use select::{dml_not_top_level, rename_columns, select_contains_window};
 
-use crate::plan::{AggCall, Expr, WinCall};
+use crate::plan::{Expr, WinCall};
 use pgmem_catalog::{Catalog, Oid};
 use pgmem_types::{SqlError, SqlResult, Type, code};
 use std::cell::{Cell, RefCell};
@@ -198,19 +199,36 @@ pub struct Level {
     /// Set when an expression at this level (or deeper) referenced an enclosing level.
     /// Shared between a query's placeholder level and its real FROM-scope level.
     pub correlated: Rc<Cell<bool>>,
-    /// Aggregate calls collected while binding this level's grouped clauses.
-    pub aggs: RefCell<Vec<AggCall>>,
+    /// Set when a subquery of this level holds one of its aggregates (`(SELECT sum(t.x))`),
+    /// which makes the level a grouped query.
+    pub sublink_aggs: Cell<bool>,
+    /// The clause of this level the subquery being bound sits in (set by [`Ctx::nested`]): it
+    /// decides whether an aggregate of this level is allowed there. None for a level that
+    /// stands for a FROM item's left side.
+    pub sublink_clause: Cell<Option<Clause>>,
     pub windows: RefCell<Vec<WinCall>>,
 }
 
 impl Level {
     pub fn new(scope: Scope) -> Level {
-        Level { scope, correlated: Rc::new(Cell::new(false)), aggs: RefCell::new(Vec::new()), windows: RefCell::new(Vec::new()) }
+        Level {
+            scope,
+            correlated: Rc::new(Cell::new(false)),
+            sublink_aggs: Cell::new(false),
+            sublink_clause: Cell::new(None),
+            windows: RefCell::new(Vec::new()),
+        }
     }
 
     /// A level for the same query as `other` (sharing its correlation flag).
     pub fn sharing(scope: Scope, other: &Level) -> Level {
-        Level { scope, correlated: Rc::clone(&other.correlated), aggs: RefCell::new(Vec::new()), windows: RefCell::new(Vec::new()) }
+        Level {
+            scope,
+            correlated: Rc::clone(&other.correlated),
+            sublink_aggs: Cell::new(false),
+            sublink_clause: Cell::new(None),
+            windows: RefCell::new(Vec::new()),
+        }
     }
 }
 
@@ -268,6 +286,9 @@ impl<'l> Ctx<'l> {
     where
         'l: 'm,
     {
+        if let Some(parent) = self.levels.last() {
+            parent.sublink_clause.set(Some(self.clause));
+        }
         let mut levels: Vec<&'m Level> = self.levels.clone();
         levels.push(level);
         Ctx { levels, ctes: self.ctes.clone(), clause: Clause::Other, windows: Vec::new(), hidden: self.hidden.clone() }

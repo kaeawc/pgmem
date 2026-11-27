@@ -85,6 +85,20 @@ impl<'a> EvalCtx<'a> {
     }
 }
 
+/// GROUPING(): its value for the grouping set the row belongs to (the set index is column
+/// `col`, or the value of the one argument for a subquery's GROUPING() of an outer query).
+fn grouping(col: usize, values: &[i32], args: &[Expr], row: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
+    let v = match args.first() {
+        Some(a) if col == crate::plan::GROUPING_SET_ARG => Some(eval(a, row, ctx)?),
+        _ => row.get(col).cloned(),
+    };
+    let set = match v {
+        Some(Value::Int4(i)) => usize::try_from(i).unwrap_or(0),
+        _ => 0,
+    };
+    Ok(Value::Int4(values.get(set).copied().unwrap_or(0)))
+}
+
 pub fn eval(expr: &Expr, row: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
     Ok(match expr {
         Expr::Const(v) => v.clone(),
@@ -330,13 +344,7 @@ pub fn eval(expr: &Expr, row: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
         Expr::Row { fields, type_oid, .. } => {
             Value::Record(*type_oid, fields.iter().map(|e| eval(e, row, ctx)).collect::<SqlResult<Vec<_>>>()?)
         }
-        Expr::Grouping { col, values, .. } => {
-            let set = match row.get(*col) {
-                Some(Value::Int4(i)) => usize::try_from(*i).unwrap_or(0),
-                _ => 0,
-            };
-            Value::Int4(values.get(set).copied().unwrap_or(0))
-        }
+        Expr::Grouping { col, values, args } => grouping(*col, values, args, row, ctx)?,
         Expr::Field { expr, idx } => match eval(expr, row, ctx)? {
             Value::Record(_, mut fields) if *idx < fields.len() => fields.swap_remove(*idx),
             Value::Null => Value::Null,

@@ -590,6 +590,7 @@ impl Binder<'_> {
             }
             ir::Expr::Exists { query, negated } => {
                 let (plan, correlated) = self.bind_subquery_plan(query, ctx)?;
+                let plan = super::sublink::simplify_exists(plan);
                 let sub = Expr::Subquery { id: self.fresh_id(), plan: Box::new(plan), kind: SubqueryKind::Exists, correlated };
                 Ok((if *negated { Expr::Not(Box::new(sub)) } else { sub }, Type::Bool))
             }
@@ -1335,6 +1336,7 @@ impl Binder<'_> {
             order_by,
             arg_ty: targets.first().cloned().unwrap_or(Type::Unknown),
             ty: ret,
+            levels_up: 0,
         })
     }
 
@@ -1387,14 +1389,11 @@ impl Binder<'_> {
         let filter = f.filter.as_ref().map(|fl| self.bind_predicate(fl, "FILTER", &ctx.with_clause(Clause::Filter))).transpose()?;
         let o = &f.within_group[0];
         let order_by = vec![SortKey { expr: args[0].clone(), desc: o.desc, nulls_first: o.nulls_first.unwrap_or(o.desc) }];
-        Ok(AggCall { kind, args, distinct: false, filter, order_by, arg_ty: sort_target, ty })
+        Ok(AggCall { kind, args, distinct: false, filter, order_by, arg_ty: sort_target, ty, levels_up: 0 })
     }
 
     /// `rank(args) WITHIN GROUP (ORDER BY cols)` and the other hypothetical-set aggregates.
     fn bind_hypothetical(&self, name: &str, kind: AggKind, f: &ir::FunctionCall, ctx: &Ctx) -> SqlResult<Bound> {
-        if !ctx.clause.agg_allowed() {
-            return Err(agg_misuse(ctx.clause, "aggregate functions"));
-        }
         let inner = ctx.with_clause(Clause::Other);
         let direct = f.args.iter().map(|a| self.bind_expr(a, &inner)).collect::<SqlResult<Vec<_>>>()?;
         let sorted = f.within_group.iter().map(|o| self.bind_expr(&o.expr, &inner)).collect::<SqlResult<Vec<_>>>()?;
@@ -1417,22 +1416,13 @@ impl Binder<'_> {
         }
         let filter = f.filter.as_ref().map(|fl| self.bind_predicate(fl, "FILTER", &ctx.with_clause(Clause::Filter))).transpose()?;
         let ty = if matches!(kind, AggKind::HypRank | AggKind::HypDenseRank) { Type::Int8 } else { Type::Float8 };
-        let call = AggCall { kind, args, distinct: false, filter, order_by, arg_ty: Type::Unknown, ty: ty.clone() };
-        ctx.current().aggs.borrow_mut().push(call.clone());
-        Ok((Expr::AggCall(Box::new(call)), ty))
+        let call = AggCall { kind, args, distinct: false, filter, order_by, arg_ty: Type::Unknown, ty: ty.clone(), levels_up: 0 };
+        place_agg(call, ctx, false)
     }
 
     fn bind_aggregate(&self, name: &str, kind: AggKind, f: &ir::FunctionCall, ctx: &Ctx) -> SqlResult<Bound> {
-        if !ctx.clause.agg_allowed() {
-            if matches!(ctx.clause, Clause::Other | Clause::AggArg) {
-                return Err(SqlError::new(code::GROUPING_ERROR, "aggregate function calls cannot be nested"));
-            }
-            return Err(agg_misuse(ctx.clause, "aggregate functions"));
-        }
         let call = self.make_agg(name, kind, f, ctx)?;
-        let ty = call.ty.clone();
-        ctx.current().aggs.borrow_mut().push(call.clone());
-        Ok((Expr::AggCall(Box::new(call)), ty))
+        place_agg(call, ctx, true)
     }
 
     fn bind_window_call(&self, name: &str, kind: WinKind, agg: Option<AggKind>, f: &ir::FunctionCall, ctx: &Ctx) -> SqlResult<Bound> {
@@ -1862,6 +1852,43 @@ fn resolve_window_spec(spec: &ir::WindowSpec, named: &[ir::NamedWindow]) -> SqlR
         order_by: if spec.order_by.is_empty() { parent.order_by } else { spec.order_by.clone() },
         frame: spec.frame.clone().or(parent.frame),
     })
+}
+
+/// Assigns a bound aggregate call to its query level (Postgres' `check_agglevels_and_constraints`):
+/// the current one, or the enclosing level its arguments all reference, where the clause the
+/// subquery sits in must allow aggregates. `nested_message`: an aggregate inside another (or in
+/// an unnamed context) reports nesting.
+fn place_agg(call: AggCall, ctx: &Ctx, nested_message: bool) -> SqlResult<Bound> {
+    let ty = call.ty.clone();
+    let n = ctx.levels.len();
+    let up = super::sublink::agg_level(&call);
+    let misuse = |clause: Clause| {
+        if nested_message && matches!(clause, Clause::Other | Clause::AggArg) {
+            SqlError::new(code::GROUPING_ERROR, "aggregate function calls cannot be nested")
+        } else {
+            agg_misuse(clause, "aggregate functions")
+        }
+    };
+    if up == 0 || up >= n {
+        if !ctx.clause.agg_allowed() {
+            return Err(misuse(ctx.clause));
+        }
+        return Ok((Expr::AggCall(Box::new(call)), ty));
+    }
+    let target = ctx.levels[n - 1 - up];
+    match target.sublink_clause.get() {
+        Some(c) if c.agg_allowed() => {}
+        Some(c) => return Err(misuse(c)),
+        // A function in FROM referencing an earlier FROM item: that query level's own clause.
+        None if up == 1 && ctx.clause == Clause::FromFunction => return Err(misuse(ctx.clause)),
+        None => {
+            return Err(SqlError::new(code::GROUPING_ERROR, "aggregate functions are not allowed in FROM clause of their own query level"));
+        }
+    }
+    let mut call = super::sublink::rebase_agg(call, up)?;
+    call.levels_up = up;
+    target.sublink_aggs.set(true);
+    Ok((Expr::AggCall(Box::new(call)), ty))
 }
 
 pub fn contains_agg(e: &Expr) -> bool {
