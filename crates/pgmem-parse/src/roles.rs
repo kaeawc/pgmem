@@ -4,7 +4,7 @@
 
 use crate::expr::lower_type;
 use crate::object_name;
-use pgmem_ir::{AlterRoleAction, GrantStmt, GrantTarget, OwnedObject, RoleOptions, Statement, TypeName};
+use pgmem_ir::{AlterRoleAction, ConfigAction, GrantStmt, GrantTarget, OwnedObject, RoleOptions, Statement, TypeName};
 use pgmem_types::SqlResult;
 use sqlparser::ast as sq;
 use sqlparser::parser::{Parser, ParserError};
@@ -343,6 +343,29 @@ fn grant_or_revoke(p: &mut Parser, revoke: bool) -> Result<RoleStmt, ParserError
     })
 }
 
+/// The `SET name {TO | =} value` / `RESET {name | ALL}` clause of ALTER ROLE / ALTER DATABASE
+/// (gram.y `SetResetClause`); SET is parsed as the SET statement it mirrors.
+fn config_action(p: &mut Parser) -> Result<ConfigAction, ParserError> {
+    if eat(p, "RESET") {
+        if eat(p, "ALL") {
+            return Ok(ConfigAction::Reset(None));
+        }
+        let name = p.parse_object_name(false)?;
+        let name = crate::object_name(&name).map_err(|e| ParserError::ParserError(e.message))?;
+        return Ok(ConfigAction::Reset(Some(name.0.join("."))));
+    }
+    if !word_at(p, 0, "SET") {
+        return p.expected("SET or RESET", p.peek_token());
+    }
+    match p.parse_statement()? {
+        sqlparser::ast::Statement::Set(set) => match crate::lower_set(set).map_err(|e| ParserError::ParserError(e.message))? {
+            Statement::Set { name, value, local: false } => Ok(ConfigAction::Set { name, value }),
+            _ => Err(ParserError::ParserError("syntax error at or near \"SET\"".into())),
+        },
+        _ => Err(ParserError::ParserError("syntax error at or near \"SET\"".into())),
+    }
+}
+
 pub(crate) fn try_parse(p: &mut Parser) -> Result<Option<RoleStmt>, ParserError> {
     let role_word = |p: &Parser, n: usize| word_at(p, n, "ROLE") || word_at(p, n, "USER") || word_at(p, n, "GROUP");
     if word_at(p, 0, "CREATE") && role_word(p, 1) {
@@ -368,38 +391,34 @@ pub(crate) fn try_parse(p: &mut Parser) -> Result<Option<RoleStmt>, ParserError>
     if word_at(p, 0, "ALTER") && role_word(p, 1) {
         p.next_token();
         p.next_token();
-        let name = role_name(p)?;
+        // ALTER ROLE ALL (unquoted: ALL is reserved) applies to every role.
+        let name = if eat(p, "ALL") { None } else { Some(role_name(p)?) };
+        if word_at(p, 0, "IN") && word_at(p, 1, "DATABASE") || word_at(p, 0, "SET") || word_at(p, 0, "RESET") || name.is_none() {
+            let database = if eat(p, "IN") {
+                p.next_token();
+                Some(crate::ident(&p.parse_identifier()?))
+            } else {
+                None
+            };
+            let action = config_action(p)?;
+            return Ok(Some(RoleStmt::Lowered(Statement::AlterRoleConfig { role: name, database, action, is_database: false })));
+        }
+        let name = name.unwrap_or_default();
         let action = if eat(p, "RENAME") {
             expect(p, "TO")?;
             AlterRoleAction::Rename(role_name(p)?)
-        } else if word_at(p, 0, "IN") && word_at(p, 1, "DATABASE") || word_at(p, 0, "SET") || word_at(p, 0, "RESET") {
-            if eat(p, "IN") {
-                p.next_token();
-                p.parse_identifier()?;
-            }
-            if eat(p, "RESET") {
-                AlterRoleAction::Reset(if eat(p, "ALL") { None } else { Some(crate::ident(&p.parse_identifier()?)) })
-            } else {
-                expect(p, "SET")?;
-                let param = crate::ident(&p.parse_identifier()?);
-                if !(eat(p, "TO") || p.consume_token(&Token::Eq)) {
-                    return p.expected("TO or =", p.peek_token());
-                }
-                let mut parts = Vec::new();
-                while !matches!(p.peek_token().token, Token::EOF | Token::SemiColon) {
-                    parts.push(match p.next_token().token {
-                        Token::SingleQuotedString(s) => s,
-                        Token::Comma => ",".to_owned(),
-                        t => t.to_string(),
-                    });
-                }
-                let value = parts.join(" ").replace(" , ", ", ");
-                AlterRoleAction::Set(param, (!value.eq_ignore_ascii_case("default")).then_some(value))
-            }
         } else {
             AlterRoleAction::Options(role_options(p)?)
         };
         return Ok(Some(RoleStmt::Lowered(Statement::AlterRole { name, action })));
+    }
+    // ALTER DATABASE name {SET ... | RESET ...}
+    if word_at(p, 0, "ALTER") && word_at(p, 1, "DATABASE") && (word_at(p, 3, "SET") || word_at(p, 3, "RESET")) {
+        p.next_token();
+        p.next_token();
+        let database = crate::ident(&p.parse_identifier()?);
+        let action = config_action(p)?;
+        return Ok(Some(RoleStmt::Lowered(Statement::AlterRoleConfig { role: None, database: Some(database), action, is_database: true })));
     }
     if word_at(p, 0, "DROP") && role_word(p, 1) {
         p.next_token();

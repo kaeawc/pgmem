@@ -83,19 +83,14 @@ pub async fn handle(stream: TcpStream, shared: Arc<Shared>) -> io::Result<()> {
     if minor > 0 || !unrecognized.is_empty() {
         out.negotiate_protocol_version(0, &unrecognized);
     }
-    for (k, v) in &params {
-        let key = k.to_ascii_lowercase();
-        match key.as_str() {
-            "user" | "database" | "replication" | "options" => {}
-            // pgmem's session time zone is fixed at UTC; other zones are accepted at startup
-            // (drivers like pgjdbc send the JVM's zone) but not applied.
-            "timezone" => {}
-            "client_encoding" => {}
-            _ if key.starts_with("_pq_.") => {}
-            _ => {
-                session.settings.insert(key, v.clone());
-            }
-        }
+    // Settings from pg_db_role_setting and the startup packet; an invalid one ends the
+    // connection (FATAL).
+    if let Err(e) = session.apply_startup(&params) {
+        let mut w = Writer::default();
+        w.fatal_error(&e);
+        wr.write_all(&w.buf).await?;
+        wr.flush().await?;
+        return Ok(());
     }
     out.auth_ok();
     for (k, v) in session.settings.clone() {

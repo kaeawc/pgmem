@@ -81,6 +81,7 @@ pub(super) const PG_PROC: &str = "oid:oid, proname:name, pronamespace:oid, proow
 const PG_ENUM: &str = "oid:oid, enumtypid:oid, enumsortorder:float4, enumlabel:name";
 pub(super) const PG_DEPEND: &str =
     "classid:oid, objid:oid, objsubid:int4, refclassid:oid, refobjid:oid, refobjsubid:int4, deptype:\"char\"";
+const PG_DB_ROLE_SETTING: &str = "setdatabase:oid, setrole:oid, setconfig:text[]";
 const PG_DEFAULT_ACL: &str = "oid:oid, defaclrole:oid, defaclnamespace:oid, defaclobjtype:\"char\", defaclacl:aclitem[]";
 const PG_PARTITIONED_TABLE: &str = "partrelid:oid, partstrat:\"char\", partnatts:int2, partdefid:oid, partattrs:int2vector, \
     partclass:oidvector, partcollation:oidvector, partexprs:pg_node_tree";
@@ -139,6 +140,7 @@ pub static DEFS: &[Def] = &[
     def!("pg_rewrite", 2618, 'r', super::depend::PG_REWRITE, super::depend::pg_rewrite),
     def!("pg_inherits", 2611, 'r', PG_INHERITS, pg_inherits),
     def!("pg_default_acl", 826, 'r', PG_DEFAULT_ACL, pg_default_acl),
+    def!("pg_db_role_setting", 2964, 'r', PG_DB_ROLE_SETTING, pg_db_role_setting),
     def!("pg_policy", 3256, 'r', super::policies::PG_POLICY, super::policies::pg_policy),
     def!("pg_statistic_ext", 3381, 'r', PG_STATISTIC_EXT, pg_statistic_ext),
     def!("pg_cast", 2605, 'r', PG_CAST, pg_cast),
@@ -239,6 +241,42 @@ fn pg_partitioned_table(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         }
         rows
     }))
+}
+
+/// The `pg_database.oid` of a database name: the current database is 5, the templates 1
+/// and 4; None for a name that is not a database here (other connections' names).
+fn database_oid(ctx: &EvalCtx, name: &str) -> Option<u32> {
+    match name {
+        "" => Some(0),
+        n if n == ctx.env.database => Some(5),
+        "template1" => Some(1),
+        "template0" => Some(4),
+        _ => None,
+    }
+}
+
+/// `ALTER ROLE / DATABASE ... SET` entries.
+fn pg_db_role_setting(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    let m = snapshot(ctx);
+    Ok(rows_of(PG_DB_ROLE_SETTING, |s| {
+        m.catalog
+            .db_role_settings()
+            .iter()
+            .filter_map(|((db, role), config)| {
+                Some(s.row(vec![
+                    ("setdatabase", oid(database_oid(ctx, db)?)),
+                    ("setrole", oid(*role)),
+                    ("setconfig", Value::Array(config.iter().cloned().map(Value::Text).collect())),
+                ]))
+            })
+            .collect()
+    }))
+}
+
+/// A role's `ALTER ROLE ... SET` entries (`rolconfig`, `useconfig`): NULL when none.
+fn role_config(ctx: &EvalCtx, role: u32) -> Value {
+    let config = ctx.txn.catalog().db_role_setting("", role);
+    if config.is_empty() { Value::Null } else { Value::Array(config.iter().cloned().map(Value::Text).collect()) }
 }
 
 /// `ALTER DEFAULT PRIVILEGES` entries; each ACL lists PUBLIC first, then grantees by role OID.
@@ -1343,6 +1381,7 @@ fn pg_roles(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                     ("rolreplication", boolean(f[5])),
                     ("rolbypassrls", boolean(f[6])),
                     ("rolpassword", txt("********")),
+                    ("rolconfig", role_config(ctx, *o)),
                     ("oid", oid(*o)),
                 ])
             })
@@ -1382,6 +1421,7 @@ fn pg_user(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             ("userepl", boolean(true)),
             ("usebypassrls", boolean(true)),
             ("passwd", txt("********")),
+            ("useconfig", role_config(ctx, SUPERUSER_OID)),
         ])]
     }))
 }
@@ -1587,14 +1627,17 @@ fn pg_sequences(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
 
 fn pg_settings(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let s = Spec::parse(PG_SETTINGS);
-    let defaults = crate::session::default_settings();
     let opt = |v: Option<&str>| v.map_or(Value::Null, txt);
     let mut rows = Vec::new();
     for d in crate::settings::defs() {
         let key = d.name.to_ascii_lowercase();
-        let reset = defaults.get(&key).cloned().or_else(|| d.boot.map(str::to_owned));
+        let reset = ctx.env.reset_value(&key);
         let value = ctx.state.setting(ctx.env, &key).or_else(|| reset.clone());
-        let source = if ctx.env.settings.get(&key).is_some_and(|v| defaults.get(&key) != Some(v)) { "session" } else { "default" };
+        let source = if ctx.env.settings.get(&key).is_some_and(|v| reset.as_ref() != Some(v)) {
+            "session"
+        } else {
+            ctx.env.session_defaults.get(&key).map_or("default", |(_, source)| source)
+        };
         let enumvals = if d.enumvals.is_empty() {
             Value::Null
         } else {

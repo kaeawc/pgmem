@@ -309,6 +309,11 @@ impl Writer {
         self.fields(b'E', "FATAL", code, message, None, None);
     }
 
+    /// An error that ends the connection, with its DETAIL and HINT.
+    pub fn fatal_error(&mut self, e: &SqlError) {
+        self.fields(b'E', "FATAL", e.code, &e.message, e.detail(), e.hint());
+    }
+
     pub fn notice(&mut self, severity: &str, code: &str, message: &str) {
         // A notice's message may carry its DETAIL after the first line ("drop cascades to N
         // other objects\nlist ..."); a message itself is a single line.

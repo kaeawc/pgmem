@@ -233,6 +233,7 @@ pub mod code {
     pub const NO_ACTIVE_SQL_TRANSACTION: &str = "25P01";
     pub const IN_FAILED_SQL_TRANSACTION: &str = "25P02";
     pub const INVALID_SQL_STATEMENT_NAME: &str = "26000";
+    pub const INVALID_CATALOG_NAME: &str = "3D000";
     pub const INVALID_CURSOR_NAME: &str = "34000";
     pub const INVALID_SAVEPOINT_SPECIFICATION: &str = "3B001";
     pub const SERIALIZATION_FAILURE: &str = "40001";

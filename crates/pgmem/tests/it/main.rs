@@ -140,6 +140,7 @@ mod session_statements;
 mod setnow;
 mod settings_fidelity;
 mod smoke;
+mod startup_settings;
 mod string_agg;
 mod string_and_oid_types;
 mod string_funcs_more;

@@ -198,6 +198,13 @@ pub struct RawConn(std::net::TcpStream);
 
 impl RawConn {
     pub fn connect(db: &TestDb, c: &mut Client) -> RawConn {
+        Self::connect_with(db, c, &[]).unwrap_or_else(|e| panic!("raw connect: {e:?}"))
+    }
+
+    /// A raw connection whose startup packet carries `params` after user and database; the
+    /// (SQLSTATE, message) of the FATAL error when the server refuses it.
+    pub fn connect_with(db: &TestDb, c: &mut Client, params: &[(&str, &str)]) -> Result<RawConn, (String, String)> {
+        use std::io::Read;
         let base = match db.server() {
             Some(server) => server.conninfo(),
             None => std::env::var("PGMEM_TEST_DSN").expect("PGMEM_TEST_DSN"),
@@ -208,13 +215,34 @@ impl RawConn {
         let user = conninfo_value(&base, "user").unwrap_or_else(|| "postgres".to_owned());
         let mut raw = RawConn(std::net::TcpStream::connect(format!("{host}:{port}")).expect("raw connect"));
         let mut body = 196_608i32.to_be_bytes().to_vec();
-        for s in ["user", &user, "database", &dbname, ""] {
+        let mut fields = vec!["user", &user, "database", &dbname];
+        for (k, v) in params {
+            fields.extend([*k, *v]);
+        }
+        fields.push("");
+        for s in fields {
             body.extend_from_slice(s.as_bytes());
             body.push(0);
         }
         raw.send(None, &body);
-        raw.reply();
-        raw
+        // Up to ReadyForQuery, or the ErrorResponse that ends the connection.
+        loop {
+            let mut header = [0u8; 5];
+            raw.0.read_exact(&mut header).expect("raw read header");
+            let len = i32::from_be_bytes(header[1..5].try_into().expect("length")) as usize;
+            let mut body = vec![0u8; len - 4];
+            raw.0.read_exact(&mut body).expect("raw read body");
+            match header[0] {
+                b'E' => {
+                    let field = |k: u8| {
+                        body.split(|b| *b == 0).find_map(|f| f.strip_prefix(&[k][..])).map(|f| String::from_utf8_lossy(f).into_owned())
+                    };
+                    return Err((field(b'C').unwrap_or_default(), field(b'M').unwrap_or_default()));
+                }
+                b'Z' => return Ok(raw),
+                _ => {}
+            }
+        }
     }
 
     pub fn send(&mut self, tag: Option<u8>, body: &[u8]) {

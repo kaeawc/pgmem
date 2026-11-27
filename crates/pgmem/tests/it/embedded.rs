@@ -177,6 +177,24 @@ fn sessions_are_independent_and_share_committed_data() {
     assert_ne!(pids.0, pids.1);
 }
 
+/// Embedded sessions start like connections: `ALTER ROLE` / `ALTER DATABASE ... SET`, then the
+/// startup parameters given to `session_with_params`, are their session defaults.
+#[test]
+fn embedded_sessions_take_startup_parameters_and_stored_settings() {
+    let e = Embedded::new();
+    e.session().query("ALTER DATABASE pgmem SET search_path = db_s, public; ALTER ROLE pgmem SET work_mem = '3MB'").expect("alter");
+    let show = |s: &mut pgmem::EmbeddedSession| {
+        s.query("SELECT current_setting('search_path') || ' ' || current_setting('work_mem')").expect("show").rows
+    };
+    assert_eq!(show(&mut e.session()), vec![vec![Some("db_s, public 3MB".into())]]);
+    let mut s = e.session_with_params(&[("options", "-c work_mem=2MB"), ("search_path", "opt")]).expect("params");
+    assert_eq!(show(&mut s), vec![vec![Some("opt 2MB".into())]]);
+    s.query("SET search_path = public; RESET search_path").expect("reset");
+    assert_eq!(show(&mut s), vec![vec![Some("opt 2MB".into())]]);
+    let err = e.session_with_params(&[("options", "-c nosuch=1")]).expect_err("unknown parameter");
+    assert_eq!((err.code(), err.message()), ("42704", "unrecognized configuration parameter \"nosuch\""));
+}
+
 #[test]
 fn server_and_embedded_share_one_database() {
     let db = TestDb::new();

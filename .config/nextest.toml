@@ -17,9 +17,9 @@ path = "junit.xml"
 cluster-roles = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'test(/^regrole_default_acl::/)'
+filter = 'test(/^(regrole_default_acl|startup_settings)::/)'
 test-group = 'cluster-roles'
 
 [[profile.ci.overrides]]
-filter = 'test(/^regrole_default_acl::/)'
+filter = 'test(/^(regrole_default_acl|startup_settings)::/)'
 test-group = 'cluster-roles'

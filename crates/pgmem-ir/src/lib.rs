@@ -169,6 +169,15 @@ pub enum Statement {
         name: String,
         action: AlterRoleAction,
     },
+    /// `ALTER ROLE {name | ALL} [IN DATABASE db] {SET ... | RESET ...}` and
+    /// `ALTER DATABASE db {SET ... | RESET ...}` (`pg_db_role_setting`): `role` None is ALL,
+    /// `database` None is every database. `is_database` picks the command tag.
+    AlterRoleConfig {
+        role: Option<String>,
+        database: Option<String>,
+        action: ConfigAction,
+        is_database: bool,
+    },
     DropRole {
         names: Vec<String>,
         if_exists: bool,
@@ -1350,8 +1359,14 @@ pub struct RoleOptions {
 pub enum AlterRoleAction {
     Options(RoleOptions),
     Rename(String),
-    /// `SET name {TO | =} value` (None value: `SET name TO DEFAULT`).
-    Set(String, Option<String>),
+}
+
+/// A `SET` / `RESET` clause of ALTER ROLE / ALTER DATABASE.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConfigAction {
+    /// `SET name {TO | =} value [, ...]`, the values as a SET statement holds them
+    /// (`["default"]` for `TO DEFAULT`).
+    Set { name: String, value: Vec<String> },
     /// `RESET name` / `RESET ALL` (None).
     Reset(Option<String>),
 }

@@ -12,6 +12,8 @@ use std::sync::{Arc, RwLock};
 
 mod copy;
 mod objects;
+mod startup;
+pub use startup::parse_options;
 
 pub use copy::{CopyIn, CopyOut};
 pub use objects::SessionObjects;
@@ -64,6 +66,9 @@ pub struct SessionEnv {
     pub user: String,
     pub database: String,
     pub settings: BTreeMap<String, String>,
+    /// What RESET restores, where it differs from the built-in default: see
+    /// [`Session::session_defaults`].
+    pub session_defaults: Arc<SessionDefaults>,
     pub backend_pid: i32,
     pub txid: i64,
     pub currval: HashMap<Oid, i64>,
@@ -111,6 +116,7 @@ impl SessionEnv {
             user: "pgmem".into(),
             database: "pgmem".into(),
             settings: default_settings(),
+            session_defaults: Arc::default(),
             backend_pid: 0,
             txid: 0,
             currval: HashMap::new(),
@@ -122,6 +128,25 @@ impl SessionEnv {
             client_addr: None,
         }
     }
+}
+
+/// Session defaults of settings by (lower-case) name: the stored value and its
+/// `pg_settings.source` (`client`, `database user`, `user`, `database`, `global`).
+pub type SessionDefaults = BTreeMap<String, (String, &'static str)>;
+
+impl SessionEnv {
+    /// The value RESET restores: the session default, else the built-in one.
+    pub fn reset_value(&self, name: &str) -> Option<String> {
+        reset_value(&self.session_defaults, name)
+    }
+}
+
+fn reset_value(session: &SessionDefaults, name: &str) -> Option<String> {
+    session
+        .get(name)
+        .map(|(v, _)| v.clone())
+        .or_else(|| default_settings().get(name).cloned())
+        .or_else(|| crate::settings::lookup(name).and_then(|d| d.boot).map(str::to_owned))
 }
 
 /// Settings and their defaults (the subset clients read or set).
@@ -235,6 +260,9 @@ pub struct Session {
     pub user: String,
     pub database: String,
     pub settings: BTreeMap<String, String>,
+    /// Settings' session defaults from the startup packet and `pg_db_role_setting`
+    /// ([`Session::apply_startup`]): what RESET and `SET ... TO DEFAULT` restore.
+    session_defaults: Arc<SessionDefaults>,
     /// Settings changed inside the transaction block (undone at ROLLBACK; SET LOCAL ones at
     /// any transaction end), with savepoint marks into it.
     setting_undo: Vec<SettingUndo>,
@@ -298,6 +326,7 @@ impl Session {
             user: user.to_owned(),
             database: database.to_owned(),
             settings,
+            session_defaults: Arc::default(),
             setting_undo: Vec::new(),
             setting_marks: Vec::new(),
             txn: None,
@@ -343,6 +372,7 @@ impl Session {
             user: self.user.clone(),
             database: self.database.clone(),
             settings: self.settings.clone(),
+            session_defaults: Arc::clone(&self.session_defaults),
             backend_pid: self.backend_pid,
             txid: self.txid_counter,
             currval: self.currval.clone(),
@@ -1007,6 +1037,20 @@ impl Session {
     }
 }
 
+/// A SET statement's values as one setting string (`flatten_set_variable_args`): joined with
+/// ", ", search_path entries that need it double-quoted.
+pub fn flatten_set_value(name: &str, value: &[String]) -> String {
+    if name == "search_path" {
+        value
+            .iter()
+            .map(|v| if v.contains('$') || v.chars().any(|c| c.is_ascii_uppercase()) { format!("\"{v}\"") } else { v.clone() })
+            .collect::<Vec<_>>()
+            .join(", ")
+    } else {
+        value.join(", ")
+    }
+}
+
 /// Validates `raw` for setting `name` (lower case) given its current value: the stored form.
 pub fn validate_setting(name: &str, raw: &str, current: Option<&str>) -> SqlResult<String> {
     if crate::settings::is_custom(name) && crate::settings::lookup(name).is_none() {
@@ -1092,22 +1136,9 @@ impl Session {
             if let Some(def) = crate::settings::lookup(&name) {
                 crate::settings::check_settable(def)?;
             }
-            default_settings()
-                .get(&name)
-                .cloned()
-                .or_else(|| crate::settings::lookup(&name).and_then(|d| d.boot).map(str::to_owned))
-                .unwrap_or_default()
+            reset_value(&self.session_defaults, &name).unwrap_or_default()
         } else {
-            let joined = if name == "search_path" {
-                value
-                    .iter()
-                    .map(|v| if v.contains('$') || v.chars().any(|c| c.is_ascii_uppercase()) { format!("\"{v}\"") } else { v.clone() })
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            } else {
-                value.join(", ")
-            };
-            self.validate_setting(&name, &joined)?
+            self.validate_setting(&name, &flatten_set_value(&name, value))?
         };
         if name == "default_transaction_isolation" {
             self.default_isolation = isolation_of(&stored);
@@ -1127,7 +1158,8 @@ impl Session {
     }
 
     fn reset(&mut self, name: Option<&str>) -> SqlResult<QueryResult> {
-        let defaults = default_settings();
+        let mut defaults = default_settings();
+        defaults.extend(self.session_defaults.iter().map(|(k, (v, _))| (k.clone(), v.clone())));
         match name {
             None => {
                 let keys: Vec<String> = self.settings.keys().cloned().collect();
@@ -1149,7 +1181,8 @@ impl Session {
                         }
                     }
                 }
-                self.default_isolation = Isolation::ReadCommitted;
+                self.default_isolation =
+                    isolation_of(defaults.get("default_transaction_isolation").map_or("read committed", String::as_str));
             }
             Some(n) => {
                 let n = n.to_ascii_lowercase();
@@ -1180,7 +1213,7 @@ impl Session {
                     }
                 }
                 if n == "default_transaction_isolation" {
-                    self.default_isolation = Isolation::ReadCommitted;
+                    self.default_isolation = isolation_of(defaults.get(&n).map_or("read committed", String::as_str));
                 }
             }
         }
@@ -1349,7 +1382,8 @@ pub(crate) fn command_name(stmt: &Statement) -> Option<&'static str> {
         Statement::SetConstraints { .. } => "SET CONSTRAINTS",
         Statement::CreateExtension { .. } => "CREATE EXTENSION",
         Statement::CreateRole { .. } => "CREATE ROLE",
-        Statement::AlterRole { .. } => "ALTER ROLE",
+        Statement::AlterRole { .. } | Statement::AlterRoleConfig { is_database: false, .. } => "ALTER ROLE",
+        Statement::AlterRoleConfig { is_database: true, .. } => "ALTER DATABASE",
         Statement::DropRole { .. } => "DROP ROLE",
         _ => return write_command_name(stmt),
     })
