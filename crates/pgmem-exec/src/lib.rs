@@ -36,6 +36,7 @@ pub mod reg;
 mod reloptions;
 pub mod rls;
 pub mod roles;
+mod rowtype_deps;
 pub mod run;
 pub mod sequences;
 pub mod session;

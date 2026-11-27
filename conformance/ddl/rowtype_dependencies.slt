@@ -1,0 +1,135 @@
+# A table's row type used by other objects (#173): DROP TABLE refuses, CASCADE drops the
+# columns, domains and attributes; ALTER TABLE refuses actions that would rewrite the table
+statement ok
+CREATE TABLE a (x int, y text)
+
+statement ok
+CREATE TABLE b (v a, w a[], k int)
+
+statement ok
+CREATE DOMAIN da AS a
+
+statement ok
+CREATE TYPE ca AS (f a, g a[])
+
+statement ok
+CREATE TABLE c (z da, q ca)
+
+statement ok
+INSERT INTO b VALUES (ROW(1, 'p'), ARRAY[ROW(2, 'q')::a, NULL], 1)
+
+statement ok
+INSERT INTO c VALUES (ROW(3, 'r'), ROW(ROW(4, 's'), ARRAY[ROW(5, 't')::a]))
+
+statement error 2BP01 cannot drop table a because other objects depend on it
+DROP TABLE a
+
+statement error 2BP01 cannot drop desired object(s) because other objects depend on them
+DROP TABLE b, a
+
+statement error 2BP01 cannot drop type a because table a requires it
+DROP TYPE a
+
+statement error 2BP01 cannot drop type a[] because type a requires it
+DROP TYPE _a
+
+statement error 0A000 cannot alter table "a" because column "b.w" uses its row type
+ALTER TABLE a ALTER COLUMN x TYPE bigint
+
+statement error 0A000 cannot alter table "a" because column "b.w" uses its row type
+ALTER TABLE a ADD COLUMN d int DEFAULT 5
+
+statement error 0A000 cannot alter table "a" because column "b.w" uses its row type
+ALTER TABLE a ADD COLUMN d serial
+
+# ADD / DROP COLUMN without a rewrite change the stored values
+statement ok
+ALTER TABLE a ADD COLUMN z int
+
+query
+SELECT v, w FROM b
+----
+v:a | w:_a
+(1,p,) | {"(2,q,)",NULL}
+
+query
+SELECT z, q FROM c
+----
+z:a | q:ca
+(3,r,) | ("(4,s,)","{""(5,t,)""}")
+
+statement ok
+ALTER TABLE a DROP COLUMN x
+
+query
+SELECT v, w, (v).y, w[1].z FROM b
+----
+v:a | w:_a | y:text | z:int4
+(p,) | {"(q,)",NULL} | p | NULL
+
+query
+SELECT z, q FROM c
+----
+z:a | q:ca
+(r,) | ("(s,)","{""(t,)""}")
+
+statement ok
+DROP TABLE a CASCADE
+
+query
+SELECT * FROM b
+----
+k:int4
+1
+
+query
+SELECT q FROM c
+----
+q:ca
+()
+
+query
+SELECT typname FROM pg_type WHERE typname IN ('a', '_a', 'da', 'ca') ORDER BY 1
+----
+typname:name
+ca
+
+# Domains over a type list their own dependents
+statement ok
+CREATE TYPE x AS (a int)
+
+statement ok
+CREATE DOMAIN dx AS x
+
+statement ok
+CREATE TABLE tx (c dx, e x)
+
+statement error 2BP01 cannot drop type x because other objects depend on it
+DROP TYPE x
+
+statement ok
+DROP TYPE x CASCADE
+
+query
+SELECT attname FROM pg_attribute WHERE attrelid = 'tx'::regclass AND attnum > 0 AND NOT attisdropped
+----
+attname:name
+
+# Materialized views have row types too
+statement ok
+CREATE MATERIALIZED VIEW mv AS SELECT 1 AS m
+
+statement ok
+CREATE TABLE g (s mv, t int)
+
+statement error 2BP01 cannot drop materialized view mv because other objects depend on it
+DROP MATERIALIZED VIEW mv
+
+statement ok
+DROP MATERIALIZED VIEW mv CASCADE
+
+query
+SELECT attname FROM pg_attribute WHERE attrelid = 'g'::regclass AND attnum > 0 AND NOT attisdropped
+----
+attname:name
+t

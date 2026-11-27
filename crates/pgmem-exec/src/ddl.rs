@@ -4,6 +4,7 @@ use crate::bind::ddl::{AlterOutcome, CreateTablePlan, Validation};
 use crate::bind::{self, Binder, Ctx, Level, Scope};
 use crate::cast::cast_value_ctx;
 use crate::eval::{EvalCtx, StatementState, eval, eval_pred};
+use crate::rowtype_deps::FieldChange;
 use crate::session::{Notice, QueryResult, SessionEnv};
 use pgmem_catalog::{Catalog, ConstraintKind, QualName, Relation, TableDef};
 use pgmem_ir::{self as ir, ObjectType, Statement};
@@ -271,7 +272,7 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
         Statement::Drop(d) if matches!(d.object_type, ObjectType::Type | ObjectType::Domain) => {
             crate::typeddl::drop_types(d, txn, env, state)
         }
-        Statement::Drop(d) => drop(d, txn, binder),
+        Statement::Drop(d) => drop(d, txn, env, state),
         Statement::Truncate(t) => truncate(t, txn, binder),
         Statement::SetSchema { object_type, name, if_exists, schema } => set_schema(*object_type, name, *if_exists, schema, txn),
         other => Err(SqlError::feature_not_supported(format!("statement {other:?} is not supported by pgmem"))),
@@ -351,6 +352,7 @@ pub(crate) fn alter_table_action(
         crate::fk_deps::drop_key_constraint(txn, &table, name, *cascade, &mut state.notices.borrow_mut())?;
     }
     let table = txn.catalog().table_q(current).cloned().ok_or_else(|| SqlError::undefined_table(&current.name))?;
+    crate::rowtype_deps::check_alter(txn.catalog(), &table, action)?;
     column_view_dependencies(txn, &table, action)?;
     match action {
         ir::AlterTableAction::DropColumn { name, .. } => {
@@ -399,9 +401,22 @@ pub(crate) fn alter_table_action(
             } else {
                 Vec::new()
             };
+            let change = match action {
+                ir::AlterTableAction::AddColumn { .. } => {
+                    def.live_columns().count().checked_sub(table.live_columns().count()).filter(|n| *n > 0).map(|_| FieldChange::Append)
+                }
+                ir::AlterTableAction::DropColumn { name, .. } => {
+                    table.live_columns().position(|(_, c)| c.name == *name).map(FieldChange::Remove)
+                }
+                _ => None,
+            };
             txn.catalog_mut().replace_table(rename_from.as_ref().unwrap_or(current), def);
             for index in gone {
                 txn.catalog_mut().forget_index(index);
+            }
+            // Values of the table's row type stored elsewhere gain or lose the field.
+            if let Some(change) = change {
+                crate::rowtype_deps::rewrite_stored(txn, crate::catalog_views::rowtype_oid_of(oid), change);
             }
             // Most actions on a partitioned table apply to its partitions too.
             if let Some(child_action) = crate::partition::recurses(action) {
@@ -793,7 +808,7 @@ pub(crate) fn dependents_error(what: &str, name: &str, detail: String) -> SqlErr
         .with_hint("Use DROP ... CASCADE to drop the dependent objects too.")
 }
 
-fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> {
+fn drop(d: &ir::Drop, txn: &mut Txn, env: &SessionEnv, state: &StatementState) -> SqlResult<QueryResult> {
     let kind = match d.object_type {
         ObjectType::Table => "TABLE",
         ObjectType::View => "VIEW",
@@ -805,8 +820,17 @@ fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> 
         ObjectType::Type | ObjectType::Domain => return Err(SqlError::internal("DROP TYPE is handled by typeddl")),
         ObjectType::Function => return Err(SqlError::feature_not_supported("DROP FUNCTION is not supported by pgmem")),
     };
-    let _ = binder;
     let mut notices = Vec::new();
+    // Tables (and materialized views) dropped by this statement: their columns using another
+    // dropped table's row type are no dependents.
+    let named: Vec<QualName> = d
+        .names
+        .iter()
+        .filter_map(|n| match txn.catalog().lookup_relation(n) {
+            Ok(Some(Relation::Table(x))) => Some(x.qualified()),
+            _ => None,
+        })
+        .collect();
     for name in &d.names {
         let base = name.base().to_owned();
         let rel = match txn.catalog().lookup_relation(name) {
@@ -821,6 +845,7 @@ fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> 
         };
         match (d.object_type, rel) {
             (ObjectType::MaterializedView, Some(Relation::Table(t))) if t.matview.is_some() => {
+                drop_rowtype_users(txn, &t, "materialized view", &named, d.cascade, env, state, &mut notices)?;
                 txn.catalog_mut().drop_table(&t.qualified());
             }
             (ObjectType::MaterializedView, Some(_)) => {
@@ -833,56 +858,7 @@ fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> 
                 )
                 .with_hint("Use DROP MATERIALIZED VIEW to remove a materialized view."));
             }
-            (ObjectType::Table, Some(Relation::Table(t))) => {
-                let referencing = referencing_fks(txn.catalog(), &t);
-                let views = crate::deps::dependent_views_transitive(txn.catalog(), t.oid);
-                // Inheritance children go with their parent (CASCADE), unless dropped here too.
-                let named: Vec<QualName> = d
-                    .names
-                    .iter()
-                    .filter_map(|n| match txn.catalog().lookup_relation(n) {
-                        Ok(Some(Relation::Table(x))) => Some(x.qualified()),
-                        _ => None,
-                    })
-                    .collect();
-                let children = crate::inherit::dependents(txn.catalog(), &t);
-                let blocking: Vec<&(Arc<pgmem_catalog::TableDef>, String)> =
-                    children.iter().filter(|(c, _)| !named.contains(&c.qualified())).collect();
-                if !d.cascade && (!referencing.is_empty() || !views.is_empty() || !blocking.is_empty()) {
-                    let mut lines: Vec<String> = blocking
-                        .iter()
-                        .map(|(c, parent)| format!("table {} depends on table {parent}", display_name(txn.catalog(), &c.qualified())))
-                        .collect();
-                    lines.extend(views.iter().map(|v| format!("view {} depends on table {base}", v.name)));
-                    for (child, con) in &referencing {
-                        lines.push(format!("constraint {con} on table {} depends on table {base}", display_name(txn.catalog(), child)));
-                    }
-                    return Err(dependents_error("table", &base, lines.join("\n")));
-                }
-                crate::rls::drop_dependents(txn, t.oid, "table", &base, d.cascade, &mut notices)?;
-                for (c, _) in blocking.iter().rev() {
-                    let shown = display_name(txn.catalog(), &c.qualified());
-                    notices.push(Notice { severity: "NOTICE", code: "00000", message: format!("drop cascades to table {shown}") });
-                    txn.catalog_mut().drop_table(&c.qualified());
-                }
-                drop_views_cascade(txn, &views, &mut notices);
-                if !referencing.is_empty() {
-                    for (child, con) in &referencing {
-                        drop_fk(txn, child, con);
-                        let child = display_name(txn.catalog(), child);
-                        notices.push(Notice {
-                            severity: "NOTICE",
-                            code: "00000",
-                            message: format!("drop cascades to constraint {con} on table {child}"),
-                        });
-                    }
-                }
-                // A partitioned table's partitions go with it.
-                for p in txn.catalog().partition_descendants(t.oid).into_iter().rev() {
-                    txn.catalog_mut().drop_table(&p.qualified());
-                }
-                txn.catalog_mut().drop_table(&t.qualified());
-            }
+            (ObjectType::Table, Some(Relation::Table(t))) => drop_table(txn, &t, &named, d.cascade, env, state, &mut notices)?,
             (ObjectType::Table, Some(other)) => {
                 return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{base}\" is not a table")).with_hint(format!(
                     "Use DROP {} to remove a {}.",
@@ -970,6 +946,94 @@ fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> 
         }
     }
     Ok(QueryResult { tag: format!("DROP {kind}"), notices, ..Default::default() })
+}
+
+/// DROP TABLE of one table: refused while other objects depend on it (its row type's users,
+/// inheritance children not dropped too, views, foreign keys), else those go with CASCADE.
+fn drop_table(
+    txn: &mut Txn,
+    t: &Arc<TableDef>,
+    named: &[QualName],
+    cascade: bool,
+    env: &SessionEnv,
+    state: &StatementState,
+    notices: &mut Vec<Notice>,
+) -> SqlResult<()> {
+    let base = t.name.clone();
+    let referencing = referencing_fks(txn.catalog(), t);
+    let views = crate::deps::dependent_views_transitive(txn.catalog(), t.oid);
+    // Inheritance children go with their parent (CASCADE), unless dropped here too.
+    let children = crate::inherit::dependents(txn.catalog(), t);
+    let blocking: Vec<&(Arc<TableDef>, String)> = children.iter().filter(|(c, _)| !named.contains(&c.qualified())).collect();
+    let type_lines = crate::rowtype_deps::drop_lines(txn.catalog(), t, named);
+    if !cascade && (!type_lines.is_empty() || !referencing.is_empty() || !views.is_empty() || !blocking.is_empty()) {
+        let mut lines = type_lines;
+        lines.extend(
+            blocking.iter().map(|(c, parent)| format!("table {} depends on table {parent}", display_name(txn.catalog(), &c.qualified()))),
+        );
+        lines.extend(views.iter().map(|v| format!("view {} depends on table {base}", v.name)));
+        for (child, con) in &referencing {
+            lines.push(format!("constraint {con} on table {} depends on table {base}", display_name(txn.catalog(), child)));
+        }
+        if named.len() > 1 {
+            return Err(SqlError::new(
+                code::DEPENDENT_OBJECTS_STILL_EXIST,
+                "cannot drop desired object(s) because other objects depend on them",
+            )
+            .with_detail(lines.join("\n"))
+            .with_hint("Use DROP ... CASCADE to drop the dependent objects too."));
+        }
+        return Err(dependents_error("table", &base, lines.join("\n")));
+    }
+    crate::rls::drop_dependents(txn, t.oid, "table", &base, cascade, notices)?;
+    let mut members = Vec::new();
+    crate::typeddl::drop_dependents(txn, crate::catalog_views::rowtype_oid_of(t.oid), named, &mut members, env, state)?;
+    for (c, _) in blocking.iter().rev() {
+        members.push(format!("table {}", display_name(txn.catalog(), &c.qualified())));
+        txn.catalog_mut().drop_table(&c.qualified());
+    }
+    for v in &views {
+        members.push(format!("view {}", v.name));
+        txn.catalog_mut().drop_view(&QualName::new(&v.schema, &v.name));
+    }
+    for (child, con) in &referencing {
+        drop_fk(txn, child, con);
+        members.push(format!("constraint {con} on table {}", display_name(txn.catalog(), child)));
+    }
+    if !members.is_empty() {
+        notices.push(cascade_notice(&members));
+    }
+    // A partitioned table's partitions go with it.
+    for p in txn.catalog().partition_descendants(t.oid).into_iter().rev() {
+        txn.catalog_mut().drop_table(&p.qualified());
+    }
+    txn.catalog_mut().drop_table(&t.qualified());
+    Ok(())
+}
+
+/// DROP of a relation whose row type other objects use: refused, or they go with CASCADE.
+#[allow(clippy::too_many_arguments)]
+fn drop_rowtype_users(
+    txn: &mut Txn,
+    rel: &TableDef,
+    what: &str,
+    named: &[QualName],
+    cascade: bool,
+    env: &SessionEnv,
+    state: &StatementState,
+    notices: &mut Vec<Notice>,
+) -> SqlResult<()> {
+    let lines = crate::rowtype_deps::drop_lines(txn.catalog(), rel, named);
+    if lines.is_empty() {
+        return Ok(());
+    }
+    if !cascade {
+        return Err(dependents_error(what, &rel.name, lines.join("\n")));
+    }
+    let mut members = Vec::new();
+    crate::typeddl::drop_dependents(txn, crate::catalog_views::rowtype_oid_of(rel.oid), named, &mut members, env, state)?;
+    notices.push(cascade_notice(&members));
+    Ok(())
 }
 
 /// DROP ... CASCADE of the views depending on the dropped object.
@@ -1301,12 +1365,7 @@ pub(crate) fn set_schema(kind: ObjectType, name: &ir::ObjectName, if_exists: boo
         Relation::View(v) => {
             let mut def = (*v).clone();
             def.schema = target;
-            let triggers: Vec<_> = txn.catalog().triggers().filter(|t| t.table == v.oid).cloned().collect();
-            txn.catalog_mut().drop_view(&old);
-            txn.catalog_mut().create_view(def, false)?;
-            for t in triggers {
-                txn.catalog_mut().put_trigger((*t).clone());
-            }
+            txn.catalog_mut().replace_view(&old, def);
         }
         Relation::Sequence(s) => {
             if s.owned_by.is_some() {

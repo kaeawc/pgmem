@@ -915,19 +915,44 @@ impl Binder<'_> {
             .map(|((e, et), t)| super::coerce(self, e, &et, t, CoercionContext::Implicit))
             .collect::<SqlResult<Vec<_>>>()?;
         let alias_name = alias.map_or_else(|| name.to_owned(), |a| a.name.clone());
-        let mut cols: Vec<ScopeCol> = out_cols.into_iter().map(|(n, t)| ScopeCol::new(Some(alias_name.clone()), n, t)).collect();
+        // A function returning one composite column (unnest of a row type array) yields the
+        // type's fields as columns.
+        let fields = match out_cols.as_slice() {
+            [(_, Type::Composite(oid))] if !pgmem_types::usertype::is_blessed(*oid) => crate::usertypes::composite_fields(*oid),
+            _ => Vec::new(),
+        };
+        let mut cols: Vec<ScopeCol> = if fields.is_empty() {
+            out_cols.into_iter().map(|(n, t)| ScopeCol::new(Some(alias_name.clone()), n, t)).collect()
+        } else {
+            fields
+                .iter()
+                .map(|f| {
+                    let mut c = ScopeCol::new(Some(alias_name.clone()), f.name.clone(), f.ty.clone());
+                    c.typmod = f.typmod;
+                    c
+                })
+                .collect()
+        };
         if ordinality {
             cols.push(ScopeCol::new(Some(alias_name.clone()), "ordinality", Type::Int8));
         }
         if let Some(a) = alias {
             // For single-column functions the alias also names the column.
-            if a.columns.is_empty() && cols.len() == 1 + usize::from(ordinality) {
+            if a.columns.is_empty() && cols.len() == 1 + usize::from(ordinality) && fields.is_empty() {
                 cols[0].name = a.name.clone();
             }
             apply_column_aliases(&mut cols, &a.columns, &a.name)?;
         }
         let correlated = !left.cols.is_empty() && own_level.correlated.get();
-        Ok((Rel::FuncScan { srf: crate::plan::Srf { name: "srf", f: srf }, args, ordinality }, Scope::from_cols(cols), correlated))
+        let mut rel = Rel::FuncScan { srf: crate::plan::Srf { name: "srf", f: srf }, args, ordinality };
+        if !fields.is_empty() {
+            let mut exprs: Vec<Expr> = (0..fields.len()).map(|idx| Expr::Field { expr: Box::new(Expr::Col(0)), idx }).collect();
+            if ordinality {
+                exprs.push(Expr::Col(1));
+            }
+            rel = Rel::Project { input: Box::new(rel), exprs };
+        }
+        Ok((rel, Scope::from_cols(cols), correlated))
     }
 
     /// `json(b)_populate_record(set)` / `json(b)_to_record(set)`: output columns come from the

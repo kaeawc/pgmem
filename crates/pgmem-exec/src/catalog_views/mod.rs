@@ -24,6 +24,7 @@ pub use model::{
     ATTRDEF_CLASS_OID, CLASS_CLASS_OID, CONSTRAINT_CLASS_OID, INFORMATION_SCHEMA_NAMESPACE_OID, Model, NAMESPACE_CLASS_OID, PROC_CLASS_OID,
     SUPERUSER_OID, TRIGGER_CLASS_OID, constraint_def, index_def, not_null_constraint_name, sequence_type,
 };
+pub use model::{rowtype_array_oid as rowtype_array_oid_of, rowtype_relid};
 pub use pg_catalog::{
     DomainCon, available_extension, builtin_cast_exists, domain_constraints, predefined_role, predefined_role_name, type_storage,
 };

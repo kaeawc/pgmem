@@ -421,9 +421,9 @@ fn validate_check(txn: &Txn, oid: Oid, check: &crate::plan::Expr, env: &SessionE
 
 /// Something that depends on a type and goes away with `DROP TYPE ... CASCADE`.
 #[derive(Clone, Debug)]
-enum Dependent {
-    /// A table column; `via_array` when it is declared with the type's array type.
-    Column { table: QualName, table_oid: Oid, slot: usize, column: String, via_array: bool },
+pub(crate) enum Dependent {
+    /// A table column.
+    Column { table: QualName, table_oid: Oid, slot: usize, column: String },
     /// A domain over the type.
     Domain { name: QualName, oid: Oid },
     /// An attribute of a composite type.
@@ -452,8 +452,9 @@ impl Dependent {
 }
 
 /// The objects that depend on type `oid`: those reached through its array type first, then
-/// the direct ones, each in creation order (`findDependentObjects`' order).
-fn dependents(cat: &Catalog, oid: Oid) -> Vec<Dependent> {
+/// the direct ones, each in creation order (`findDependentObjects`' order). The flag is set for
+/// the ones that use the array type.
+pub(crate) fn dependents(cat: &Catalog, oid: Oid) -> Vec<(Dependent, bool)> {
     let mut via_array = Vec::new();
     let mut direct = Vec::new();
     let mentions = |t: &Type| -> Option<bool> {
@@ -466,29 +467,33 @@ fn dependents(cat: &Catalog, oid: Oid) -> Vec<Dependent> {
     for t in cat.tables() {
         for (slot, c) in t.live_columns() {
             if let Some(arr) = mentions(&c.ty) {
-                let d = Dependent::Column { table: t.qualified(), table_oid: t.oid, slot, column: c.name.clone(), via_array: arr };
-                if arr { via_array.push(d) } else { direct.push(d) }
+                let d = Dependent::Column { table: t.qualified(), table_oid: t.oid, slot, column: c.name.clone() };
+                if arr { via_array.push((d, true)) } else { direct.push((d, false)) }
             }
         }
     }
     for t in cat.types() {
         match &t.kind {
-            TypeDefKind::Domain { base, .. } if mentions(base).is_some() => {
-                direct.push(Dependent::Domain { name: QualName::new(&t.schema, &t.name), oid: t.oid })
+            TypeDefKind::Domain { base, .. } if let Some(arr) = mentions(base) => {
+                let d = Dependent::Domain { name: QualName::new(&t.schema, &t.name), oid: t.oid };
+                if arr { via_array.push((d, true)) } else { direct.push((d, false)) }
             }
             TypeDefKind::Composite { fields, .. } => {
-                for f in fields.iter().filter(|f| mentions(&f.ty).is_some()) {
-                    direct.push(Dependent::Attribute { ty: QualName::new(&t.schema, &t.name), oid: t.oid, field: f.name.clone() });
+                for f in fields {
+                    if let Some(arr) = mentions(&f.ty) {
+                        let d = Dependent::Attribute { ty: QualName::new(&t.schema, &t.name), oid: t.oid, field: f.name.clone() };
+                        if arr { via_array.push((d, true)) } else { direct.push((d, false)) }
+                    }
                 }
             }
             _ => {}
         }
     }
     for c in cat.casts().filter(|c| type_mentions(&c.source, oid) || type_mentions(&c.target, oid)) {
-        direct.push(Dependent::Cast { oid: c.oid, label: crate::usercast::describe(c) });
+        direct.push((Dependent::Cast { oid: c.oid, label: crate::usercast::describe(c) }, false));
     }
-    via_array.sort_by_key(Dependent::order);
-    direct.sort_by_key(Dependent::order);
+    via_array.sort_by_key(|(d, _)| d.order());
+    direct.sort_by_key(|(d, _)| d.order());
     via_array.extend(direct);
     via_array
 }
@@ -507,6 +512,15 @@ pub fn drop_types(d: &ir::Drop, txn: &mut Txn, env: &SessionEnv, state: &Stateme
                 )
                 .with_hint(format!("You can drop table {base} instead.")));
             }
+            // An array type goes with its element type.
+            if !domain_only && let Some(Type::Array(elem)) = crate::usertypes::lookup_type(txn.catalog(), name)? {
+                let elem = elem.name();
+                return Err(SqlError::new(
+                    code::DEPENDENT_OBJECTS_STILL_EXIST,
+                    format!("cannot drop type {elem}[] because type {elem} requires it"),
+                )
+                .with_hint(format!("You can drop type {elem} instead.")));
+            }
             if d.if_exists {
                 notices.push(notice("00000", format!("type \"{base}\" does not exist, skipping")));
                 continue;
@@ -518,10 +532,8 @@ pub fn drop_types(d: &ir::Drop, txn: &mut Txn, env: &SessionEnv, state: &Stateme
         }
         let mut dropped = Vec::new();
         drop_one(txn, &def, d.cascade, &mut dropped, env, state)?;
-        match dropped.as_slice() {
-            [] => {}
-            [one] => notices.push(notice("00000", format!("drop cascades to {one}"))),
-            many => notices.push(notice("00000", format!("drop cascades to {} other objects", many.len()))),
+        if !dropped.is_empty() {
+            notices.push(crate::ddl::cascade_notice(&dropped));
         }
     }
     Ok(QueryResult { tag: tag_name.into(), notices, ..Default::default() })
@@ -535,27 +547,48 @@ fn drop_one(
     env: &SessionEnv,
     state: &StatementState,
 ) -> SqlResult<()> {
-    let deps = dependents(txn.catalog(), def.oid);
-    if !deps.is_empty() && !cascade {
-        let detail = deps
-            .iter()
-            .map(|dep| {
-                let target = match dep {
-                    Dependent::Column { via_array: true, .. } => format!("{}[]", def.name),
-                    _ => def.name.clone(),
-                };
-                format!("{} depends on type {target}", dep.describe())
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Err(SqlError::new(
-            code::DEPENDENT_OBJECTS_STILL_EXIST,
-            format!("cannot drop type {} because other objects depend on it", def.name),
-        )
-        .with_detail(detail)
-        .with_hint("Use DROP ... CASCADE to drop the dependent objects too."));
+    if !cascade && !dependents(txn.catalog(), def.oid).is_empty() {
+        let mut lines = Vec::new();
+        dependent_lines(txn.catalog(), def.oid, &def.name, &[], &mut lines);
+        return Err(crate::ddl::dependents_error("type", &def.name, lines.join("\n")));
     }
-    for dep in deps {
+    drop_dependents(txn, def.oid, &[], dropped, env, state)?;
+    txn.catalog_mut().drop_type(&QualName::new(&def.schema, &def.name));
+    txn.catalog_mut().drop_comments(def.oid);
+    Ok(())
+}
+
+/// The DETAIL lines of `DROP` refused because of the objects depending on type `oid` (named
+/// `name`): depth first through domains over it, as `reportDependentObjects` lists them.
+/// Columns of the tables in `dropping` (dropped by the same statement) are left out.
+pub(crate) fn dependent_lines(cat: &Catalog, oid: Oid, name: &str, dropping: &[QualName], out: &mut Vec<String>) {
+    for (dep, via_array) in dependents(cat, oid) {
+        if matches!(&dep, Dependent::Column { table, .. } if dropping.contains(table)) {
+            continue;
+        }
+        let target = if via_array { format!("{name}[]") } else { name.to_owned() };
+        out.push(format!("{} depends on type {target}", dep.describe()));
+        if let Dependent::Domain { name: domain, oid } = &dep {
+            dependent_lines(cat, *oid, &domain.name, dropping, out);
+        }
+    }
+}
+
+/// `DROP ... CASCADE` of the objects depending on type `oid`: columns and attributes using it
+/// are dropped (those of tables in `dropping` aside), domains over it go with their own
+/// dependents. `dropped` collects their descriptions for the cascade notice.
+pub(crate) fn drop_dependents(
+    txn: &mut Txn,
+    oid: Oid,
+    dropping: &[QualName],
+    dropped: &mut Vec<String>,
+    env: &SessionEnv,
+    state: &StatementState,
+) -> SqlResult<()> {
+    for (dep, _) in dependents(txn.catalog(), oid) {
+        if matches!(&dep, Dependent::Column { table, .. } if dropping.contains(table)) {
+            continue;
+        }
         dropped.push(dep.describe());
         match dep {
             Dependent::Column { table, column, .. } => {
@@ -573,15 +606,20 @@ fn drop_one(
             Dependent::Attribute { ty, field, .. } => {
                 if let Some(t) = txn.catalog().type_by_name(&ty.schema, &ty.name).cloned() {
                     let mut t = (*t).clone();
+                    let mut position = None;
                     if let TypeDefKind::Composite { fields, .. } = &mut t.kind {
+                        position = fields.iter().position(|f| f.name == field);
                         fields.retain(|f| f.name != field);
                     }
+                    let oid = t.oid;
                     txn.catalog_mut().replace_type(&ty, t);
+                    // Stored values of the type lose the field.
+                    if let Some(i) = position {
+                        crate::rowtype_deps::rewrite_stored(txn, oid, crate::rowtype_deps::FieldChange::Remove(i));
+                    }
                 }
             }
         }
     }
-    txn.catalog_mut().drop_type(&QualName::new(&def.schema, &def.name));
-    txn.catalog_mut().drop_comments(def.oid);
     Ok(())
 }
