@@ -17,6 +17,7 @@ mod extddl;
 mod funcddl;
 mod objddl;
 mod query;
+mod relopts;
 mod roles;
 mod search_cycle;
 mod sqljson;
@@ -46,11 +47,13 @@ pub fn parse_located(sql: &str) -> SqlResult<Vec<(Statement, SourceRefs)>> {
     VIEW_OPTIONS.with(|c| c.borrow_mut().clear());
     CTAS_COLUMNS.with(|c| c.borrow_mut().clear());
     TEMPORAL_KEYS.with(|c| c.borrow_mut().clear());
+    relopts::clear();
     CONFLICT_EXPRS.with(|c| c.borrow_mut().clear());
     INDEX_ONLY.with(|c| c.borrow_mut().clear());
     if sql.trim().trim_matches(';').trim().is_empty() {
         return Ok(vec![(Statement::Empty, SourceRefs::default())]);
     }
+    relopts::precheck(sql)?;
     // SQL/JSON query functions are rewritten up front (sqlparser can't parse their clauses).
     let json_rewritten = sqljson::rewrite(sql);
     let sql = json_rewritten.as_deref().unwrap_or(sql);
@@ -1021,6 +1024,8 @@ fn rewrite_unsupported(sql: &str) -> Option<String> {
         rewrite_index_only(&tokens, &sig, k, &mut drop);
         rewrite_ctas_columns(&tokens, &sig, k, &mut drop);
         rewrite_without_overlaps(&tokens, &sig, k, &mut drop);
+        relopts::rewrite_constraint_with(&tokens, &sig, k, &mut drop);
+        relopts::rewrite_partition_with(&tokens, &sig, k, &mut drop, &mut insert_after);
         // MERGE's `THEN INSERT DEFAULT VALUES` → `THEN INSERT VALUES (__pgmem_default_values())`.
         if word(&tokens[i], "THEN") && at(1, "INSERT") && at(2, "DEFAULT") && at(3, "VALUES") {
             drop[sig[k + 2]] = true;

@@ -954,7 +954,7 @@ pub(crate) fn check_statement(
     if is_superuser(catalog, env, &role) {
         return Ok(());
     }
-    let uses = crate::privilege_uses::statement_uses(stmt);
+    let uses = with_invoker_uses(catalog, crate::privilege_uses::statement_uses(stmt));
     // A view target written by INSTEAD OF triggers (or not automatically updatable) is not
     // bound onto a base table: its columns come from the statement's column names.
     let trigger_view = target_view_columns(stmt, catalog);
@@ -995,6 +995,25 @@ pub(crate) fn check_statement(
         }
     }
     check_function_use(&binder, catalog, env)
+}
+
+/// `uses` plus, after each read of a `security_invoker` view, the reads of the relations its
+/// query uses: the invoker needs privileges on those too.
+fn with_invoker_uses(
+    catalog: &Catalog,
+    uses: Vec<(ir::ObjectName, crate::privilege_uses::Need)>,
+) -> Vec<(ir::ObjectName, crate::privilege_uses::Need)> {
+    use crate::privilege_uses::Need;
+    let mut out = Vec::with_capacity(uses.len());
+    for (name, need) in uses {
+        if need == Need::Privilege('r') {
+            let expanded = crate::views::with_invoker_reads(catalog, vec![name]);
+            out.extend(expanded.into_iter().map(|n| (n, need)));
+        } else {
+            out.push((name, need));
+        }
+    }
+    out
 }
 
 /// What `need` on `rel` requires of `role`: nothing (Ok(None)), a check of the columns the

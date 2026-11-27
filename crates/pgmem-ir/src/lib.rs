@@ -1157,6 +1157,8 @@ pub struct ColumnConstraint {
     pub name: Option<String>,
     pub kind: ColumnConstraintKind,
     pub timing: ConstraintTiming,
+    /// `WITH (storage_parameter, ...)` of a PRIMARY KEY / UNIQUE constraint's index.
+    pub reloptions: Vec<RelOption>,
 }
 
 /// `[NOT] DEFERRABLE [INITIALLY DEFERRED | IMMEDIATE]` and `NOT VALID`.
@@ -1217,6 +1219,8 @@ pub struct TableConstraint {
     pub name: Option<String>,
     pub kind: TableConstraintKind,
     pub timing: ConstraintTiming,
+    /// `WITH (storage_parameter, ...)` of the constraint's index (PRIMARY KEY, UNIQUE, EXCLUDE).
+    pub reloptions: Vec<RelOption>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1554,6 +1558,11 @@ pub struct AlterTable {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum AlterTableAction {
+    /// `SET (storage_parameter, ...)` / `RESET (storage_parameter, ...)` among other actions.
+    RelOptions {
+        reset: bool,
+        options: Vec<RelOption>,
+    },
     /// `ATTACH PARTITION name FOR VALUES ... | DEFAULT`.
     AttachPartition {
         partition: ObjectName,

@@ -136,6 +136,11 @@ pub fn deparse_constraint(catalog: &Catalog, table: &TableDef, constraint: &Cons
             }
             let items = elements.iter().map(|(e, op)| Ok(format!("{} WITH {op}", key(e)?))).collect::<SqlResult<Vec<_>>>()?;
             let mut s = format!("EXCLUDE USING {method} ({})", items.join(", "));
+            if let Some(i) = table.indexes.iter().find(|i| i.name == constraint.name)
+                && !i.reloptions.is_empty()
+            {
+                s.push_str(&format!(" WITH ({})", crate::reloptions::flatten(&i.reloptions)));
+            }
             if let Some(p) = predicate {
                 s.push_str(&format!(" WHERE ({})", deparse_predicate(catalog, table, p)?));
             }

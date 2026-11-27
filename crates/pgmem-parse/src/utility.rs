@@ -259,6 +259,10 @@ fn alter_rel_options(p: &mut Parser) -> Result<Option<Utility>, ParserError> {
         (O::View, 2)
     } else if word_at(p, 1, "MATERIALIZED") && word_at(p, 2, "VIEW") {
         (O::MaterializedView, 3)
+    } else if word_at(p, 1, "TABLE") {
+        // sqlparser reads `RESET (name, ...)` of a table, but not `RESET (name = value)`, which
+        // Postgres rejects at execution.
+        (O::Table, 2)
     } else {
         return Ok(None);
     };
@@ -271,6 +275,28 @@ fn alter_rel_options(p: &mut Parser) -> Result<Option<Utility>, ParserError> {
     }
     if !((word_at(p, n, "SET") || word_at(p, n, "RESET")) && p.peek_nth_token(n + 1).token == Token::LParen) {
         return Ok(None);
+    }
+    if object == O::Table {
+        // Only a statement of just `RESET (...)`: combined actions go through sqlparser.
+        let mut depth = 0usize;
+        let mut m = n + 1;
+        loop {
+            match p.peek_nth_token(m).token {
+                Token::LParen => depth += 1,
+                Token::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                Token::EOF => return Ok(None),
+                _ => {}
+            }
+            m += 1;
+        }
+        if !word_at(p, n, "RESET") || !matches!(p.peek_nth_token(m + 1).token, Token::SemiColon | Token::EOF) {
+            return Ok(None);
+        }
     }
     for _ in 0..(if object == O::MaterializedView { 3 } else { 2 }) {
         p.next_token();
@@ -672,6 +698,24 @@ fn after_table_name(p: &Parser) -> usize {
 /// `SET WITHOUT CLUSTER`, `SET [UN]LOGGED`).
 fn alter_attrs_ahead(p: &Parser) -> bool {
     let mut n = after_table_name(p);
+    if attr_action_at(p, n) {
+        return true;
+    }
+    // A later comma-separated action may be an attribute one (`SET (fillfactor = 70), ALTER COLUMN ...`).
+    let mut depth = 0usize;
+    loop {
+        match p.peek_nth_token(n).token {
+            Token::LParen => depth += 1,
+            Token::RParen => depth = depth.saturating_sub(1),
+            Token::Comma if depth == 0 && attr_action_at(p, n + 1) => return true,
+            Token::SemiColon | Token::EOF => return false,
+            _ => {}
+        }
+        n += 1;
+    }
+}
+
+fn attr_action_at(p: &Parser, mut n: usize) -> bool {
     if word_at(p, n, "ALTER") {
         n += 1;
         if word_at(p, n, "COLUMN") {
@@ -754,6 +798,18 @@ fn attr_action(p: &mut Parser) -> Result<pgmem_ir::AlterTableAction, ParserError
             return p.expected("ON", p.peek_token());
         }
         return Ok(A::ClusterOn(Some(crate::ident(&p.parse_identifier()?))));
+    }
+    if word_at(p, 0, "RESET") || (word_at(p, 0, "SET") && p.peek_nth_token(1).token == Token::LParen) {
+        let reset = eat_word(p, "RESET");
+        if !reset {
+            p.next_token();
+        }
+        p.expect_token(&Token::LParen)?;
+        let options = p.parse_comma_separated(|p| p.parse_sql_option())?;
+        p.expect_token(&Token::RParen)?;
+        let options =
+            options.iter().map(crate::ddl::rel_option).collect::<SqlResult<Vec<_>>>().map_err(|e| ParserError::ParserError(e.message))?;
+        return Ok(A::RelOptions { reset, options });
     }
     if !eat_word(p, "SET") {
         return p.expected("an ALTER TABLE action", p.peek_token());

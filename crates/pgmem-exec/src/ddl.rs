@@ -278,6 +278,10 @@ pub(crate) fn alter_table_action(
     if crate::ddl_sequences::alter_identity(txn, &table, action)? {
         return Ok(current.clone());
     }
+    if let ir::AlterTableAction::RelOptions { reset, options } = action {
+        crate::reloptions::alter_table(txn, &table, *reset, options)?;
+        return Ok(current.clone());
+    }
     if crate::ddl_attrs::apply(txn, current, &table, action, state)? {
         return Ok(current.clone());
     }
