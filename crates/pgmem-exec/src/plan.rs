@@ -110,6 +110,10 @@ pub struct SubscriptPart {
     pub range: bool,
 }
 
+/// [`Expr::Grouping`]'s `col` when the grouping-set index is the value of its one argument
+/// (an outer reference to the grouped row, from a subquery) rather than a column of the row.
+pub const GROUPING_SET_ARG: usize = usize::MAX - 1;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
     /// `GROUPING(args)`: bound with its arguments, then (after aggregation) the value for
@@ -465,6 +469,10 @@ pub struct AggCall {
     /// Input (argument) type and result type.
     pub arg_ty: Type,
     pub ty: Type,
+    /// Query levels out from where the call appears that it belongs to: an aggregate whose
+    /// arguments reference only an enclosing query is that query's aggregate (Postgres'
+    /// `agglevelsup`), its arguments rebased to that level. Zero for the query's own.
+    pub levels_up: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

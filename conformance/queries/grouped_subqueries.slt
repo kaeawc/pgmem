@@ -1,0 +1,462 @@
+# Grouped queries whose subqueries read the grouped row: group keys and the outer query's
+# aggregates (#294).
+
+statement ok
+CREATE TABLE t (v int, w int)
+
+statement ok
+INSERT INTO t VALUES (1, 10), (2, 20), (2, 5), (3, 30)
+
+statement ok
+CREATE TABLE u (k int, z int)
+
+statement ok
+INSERT INTO u VALUES (1, 100), (2, 200), (2, 201), (25, 7), (30, 9)
+
+statement ok
+CREATE TABLE p (id int PRIMARY KEY, name text, x int)
+
+statement ok
+INSERT INTO p VALUES (1, 'a', 5), (2, 'b', 7)
+
+statement ok
+CREATE SEQUENCE s3
+
+# Group keys read through a subquery's outer references.
+query
+SELECT v, (SELECT x FROM generate_series(v, v) x) FROM t GROUP BY v ORDER BY v
+----
+v:int4 | x:int4
+1 | 1
+2 | 2
+3 | 3
+
+query
+SELECT v FROM t GROUP BY v HAVING EXISTS (SELECT 1 FROM generate_series(v, 2)) ORDER BY v
+----
+v:int4
+1
+2
+
+query
+SELECT v, (SELECT count(*) FROM u WHERE u.k = t.v) FROM t GROUP BY v ORDER BY v
+----
+v:int4 | count:int8
+1 | 1
+2 | 2
+3 | 0
+
+query
+SELECT v, array(SELECT z FROM u WHERE u.k = t.v ORDER BY z) FROM t GROUP BY v ORDER BY v
+----
+v:int4 | array:_int4
+1 | {100}
+2 | {200,201}
+3 | {}
+
+query
+SELECT v, EXISTS (SELECT 1 FROM u WHERE u.k = t.v), t.v IN (SELECT k FROM u) FROM t GROUP BY v ORDER BY v
+----
+v:int4 | exists:bool | ?column?:bool
+1 | t | t
+2 | t | t
+3 | f | f
+
+query
+SELECT v FROM t GROUP BY v ORDER BY (SELECT max(z) FROM u WHERE u.k = t.v) NULLS FIRST, v
+----
+v:int4
+3
+1
+2
+
+query
+SELECT v, (SELECT count(*) FROM u WHERE u.k = t.v) c FROM t GROUP BY v HAVING (SELECT count(*) FROM u WHERE u.k = t.v) > 0 ORDER BY v
+----
+v:int4 | c:int8
+1 | 1
+2 | 2
+
+query
+SELECT DISTINCT (SELECT count(*) FROM u WHERE u.k = t.v) FROM t GROUP BY v ORDER BY 1
+----
+count:int8
+0
+1
+2
+
+query
+SELECT v, rank() OVER (ORDER BY (SELECT count(*) FROM u WHERE u.k = t.v)) FROM t GROUP BY v ORDER BY v
+----
+v:int4 | rank:int8
+1 | 2
+2 | 3
+3 | 1
+
+query
+SELECT v, sum(w) OVER (), (SELECT count(*) FROM u WHERE u.k = t.v) FROM t GROUP BY v, w ORDER BY 1, 2
+----
+v:int4 | sum:int8 | count:int8
+1 | 65 | 1
+2 | 65 | 2
+2 | 65 | 2
+3 | 65 | 0
+
+# Nested subqueries, derived tables, LATERAL and CTEs inside the subquery.
+query
+SELECT v, (SELECT (SELECT t.v + count(*) FROM u u2 WHERE u2.k = u.k) FROM u WHERE u.k = t.v LIMIT 1) FROM t GROUP BY v ORDER BY v
+----
+v:int4 | ?column?:int8
+1 | 2
+2 | 4
+3 | NULL
+
+query
+SELECT v, (SELECT max(x) FROM (SELECT u.z + t.v AS x FROM u) q) FROM t GROUP BY v ORDER BY v
+----
+v:int4 | max:int4
+1 | 202
+2 | 203
+3 | 204
+
+query
+SELECT v, (SELECT y FROM u, LATERAL (SELECT u.z + t.v AS y) l WHERE u.k = t.v ORDER BY y LIMIT 1) FROM t GROUP BY v ORDER BY v
+----
+v:int4 | y:int4
+1 | 101
+2 | 202
+3 | NULL
+
+query
+SELECT v, (SELECT sum(g) FROM u, generate_series(u.k, t.v) g) FROM t GROUP BY v ORDER BY v
+----
+v:int4 | sum:int8
+1 | 1
+2 | 7
+3 | 16
+
+query
+SELECT v, (WITH c AS (SELECT z FROM u WHERE u.k = t.v) SELECT sum(z) FROM c) FROM t GROUP BY v ORDER BY v
+----
+v:int4 | sum:int8
+1 | 100
+2 | 401
+3 | NULL
+
+query
+SELECT v, (SELECT max(u.k) FROM u GROUP BY u.k HAVING u.k = t.v) FROM t GROUP BY v ORDER BY v
+----
+v:int4 | max:int4
+1 | 1
+2 | 2
+3 | NULL
+
+# Columns functionally dependent on a grouped primary key.
+query
+SELECT id, (SELECT p.name || p.x) FROM p GROUP BY id ORDER BY 1
+----
+id:int4 | ?column?:text
+1 | a5
+2 | b7
+
+query
+SELECT sum(x), p.name, (SELECT p.name || sum(p.x)) FROM p GROUP BY p.id ORDER BY 2
+----
+sum:int8 | name:text | ?column?:text
+5 | a | a5
+7 | b | b7
+
+# An aggregate whose arguments reference only the outer query is the outer query's.
+query
+SELECT v, sum(w), (SELECT max(z) FROM u WHERE u.k = sum(t.w)) FROM t GROUP BY v ORDER BY v
+----
+v:int4 | sum:int8 | max:int4
+1 | 10 | NULL
+2 | 25 | 7
+3 | 30 | 9
+
+query
+SELECT v, (SELECT sum(t.w)) FROM t GROUP BY v ORDER BY 1
+----
+v:int4 | sum:int8
+1 | 10
+2 | 25
+3 | 30
+
+query
+SELECT (SELECT sum(w)) FROM t
+----
+sum:int8
+65
+
+query
+SELECT (SELECT sum(w + z) FROM u) FROM t ORDER BY 1
+----
+sum:int8
+542
+567
+617
+667
+
+query
+SELECT (SELECT (SELECT sum(t.w)) FROM u LIMIT 1) FROM t
+----
+sum:int8
+65
+
+query
+SELECT (SELECT x FROM (SELECT sum(t.w) x) s) FROM t
+----
+x:int8
+65
+
+query
+SELECT (SELECT count(*)) FROM t
+----
+count:int8
+1
+1
+1
+1
+
+query
+SELECT (SELECT sum(t.w)) s, count(*) FROM t HAVING (SELECT sum(t.w)) > 0
+----
+s:int8 | count:int8
+65 | 4
+
+query
+SELECT (SELECT 1 FROM u GROUP BY sum(t.w) LIMIT 1) FROM t
+----
+?column?:int4
+1
+
+query
+SELECT v, (SELECT max(z) FROM u WHERE z > sum(t.w) + u.k) FROM t GROUP BY v ORDER BY 1
+----
+v:int4 | max:int4
+1 | 201
+2 | 201
+3 | 201
+
+query
+SELECT v, (SELECT count(*) + sum(t.w) FROM u GROUP BY u.k ORDER BY 1 LIMIT 1) FROM t GROUP BY v ORDER BY 1
+----
+v:int4 | ?column?:int8
+1 | 11
+2 | 26
+3 | 31
+
+query
+SELECT v, (SELECT (SELECT sum(t.w) + count(*) FROM u u2 WHERE u2.k = u.k) FROM u WHERE u.k = t.v LIMIT 1) FROM t GROUP BY v ORDER BY 1
+----
+v:int4 | ?column?:int8
+1 | 11
+2 | 27
+3 | NULL
+
+query
+SELECT v, (SELECT max(u.z) FROM u WHERE u.k > (SELECT min(t.w))) FROM t GROUP BY v ORDER BY 1
+----
+v:int4 | max:int4
+1 | 9
+2 | 9
+3 | NULL
+
+query
+SELECT v, (SELECT sum(t.w) FILTER (WHERE t.w > 6)) FROM t GROUP BY v ORDER BY 1
+----
+v:int4 | sum:int8
+1 | 10
+2 | 20
+3 | 30
+
+query
+SELECT v, (SELECT string_agg(t.w::text, ',' ORDER BY t.w)) FROM t GROUP BY v ORDER BY 1
+----
+v:int4 | string_agg:text
+1 | 10
+2 | 5,20
+3 | 30
+
+query
+SELECT v, (SELECT count(*) FILTER (WHERE t.w > 6)) FROM t GROUP BY v ORDER BY 1
+----
+v:int4 | count:int8
+1 | 1
+2 | 1
+3 | 1
+
+query
+SELECT v, rank(15) WITHIN GROUP (ORDER BY w), (SELECT rank(15) WITHIN GROUP (ORDER BY t.w)) FROM t GROUP BY v ORDER BY 1
+----
+v:int4 | rank:int8 | rank:int8
+1 | 2 | 2
+2 | 2 | 2
+3 | 1 | 1
+
+query
+SELECT v, (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY t.w)) FROM t GROUP BY v ORDER BY 1
+----
+v:int4 | percentile_cont:float8
+1 | 10
+2 | 12.5
+3 | 30
+
+query
+SELECT v, sum(w), rank() OVER (ORDER BY (SELECT sum(t.w))) FROM t GROUP BY v ORDER BY 1
+----
+v:int4 | sum:int8 | rank:int8
+1 | 10 | 1
+2 | 25 | 2
+3 | 30 | 3
+
+query
+SELECT v, 5 IN (SELECT t.v + sum(t.w) FROM u) FROM t GROUP BY v ORDER BY 1
+----
+v:int4 | ?column?:bool
+1 | f
+2 | f
+3 | f
+
+query
+SELECT DISTINCT (SELECT sum(t.w) > 20) FROM t GROUP BY v ORDER BY 1
+----
+?column?:bool
+f
+t
+
+# GROUPING SETS / ROLLUP / CUBE.
+query
+SELECT v, w, (SELECT t.v + t.w) FROM t GROUP BY ROLLUP (v, w) ORDER BY 1, 2
+----
+v:int4 | w:int4 | ?column?:int4
+1 | 10 | 11
+1 | NULL | NULL
+2 | 5 | 7
+2 | 20 | 22
+2 | NULL | NULL
+3 | 30 | 33
+3 | NULL | NULL
+NULL | NULL | NULL
+
+query
+SELECT v, (SELECT sum(t.w) + count(*) FROM u WHERE u.k = t.v) FROM t GROUP BY GROUPING SETS ((v), ()) ORDER BY 1
+----
+v:int4 | ?column?:int8
+1 | 11
+2 | 27
+3 | 30
+NULL | 65
+
+query
+SELECT v, (SELECT GROUPING(t.v)) FROM t GROUP BY ROLLUP (v) ORDER BY 1
+----
+v:int4 | grouping:int4
+1 | 0
+2 | 0
+3 | 0
+NULL | 1
+
+query
+SELECT v, w, GROUPING(v, w), (SELECT GROUPING(t.v, t.w) * 10 + count(*) FROM u WHERE u.k = t.v) FROM t GROUP BY CUBE (v, w) ORDER BY 1, 2
+----
+v:int4 | w:int4 | grouping:int4 | ?column?:int8
+1 | 10 | 0 | 1
+1 | NULL | 1 | 11
+2 | 5 | 0 | 2
+2 | 20 | 0 | 2
+2 | NULL | 1 | 12
+3 | 30 | 0 | 0
+3 | NULL | 1 | 10
+NULL | 5 | 2 | 20
+NULL | 10 | 2 | 20
+NULL | 20 | 2 | 20
+NULL | 30 | 2 | 20
+NULL | NULL | 3 | 30
+
+# Ungrouped outer references, and aggregates in clauses that do not allow them.
+statement error 42803 subquery uses ungrouped column "t.w" from outer query
+SELECT v, (SELECT w) FROM t GROUP BY v
+
+statement error 42803 subquery uses ungrouped column "t.w" from outer query
+SELECT v, (SELECT (SELECT t.w) FROM u LIMIT 1) FROM t GROUP BY v
+
+statement error 42803 subquery uses ungrouped column "t.w" from outer query
+SELECT v, (SELECT 1 FROM u WHERE u.k = t.w LIMIT 1) FROM t GROUP BY v
+
+statement error 42803 subquery uses ungrouped column "t.w" from outer query
+SELECT v, (SELECT x FROM generate_series(1, 2) x WHERE x = t.w) FROM t GROUP BY v
+
+statement error 42803 subquery uses ungrouped column "t.w" from outer query
+SELECT v FROM t GROUP BY v HAVING EXISTS (SELECT t.w)
+
+statement error 42803 subquery uses ungrouped column "t.w" from outer query
+SELECT v, (SELECT t.w) FROM t GROUP BY ROLLUP (v)
+
+statement error 42803 subquery uses ungrouped column "t.v" from outer query
+SELECT v + 1, (SELECT t.v + 1) FROM t GROUP BY v + 1
+
+statement error 42803 subquery uses ungrouped column "t.w" from outer query
+SELECT v, (SELECT sum(t.w + u.z) FROM u) FROM t GROUP BY v
+
+statement error 42803 column "t.w" must appear in the GROUP BY clause or be used in an aggregate function
+SELECT (SELECT sum(t.w)), w FROM t
+
+statement error 42803 aggregate functions are not allowed in WHERE
+SELECT count(*), (SELECT max(z) FROM u WHERE z > count(*)) FROM t
+
+statement error 42803 aggregate function calls cannot be nested
+SELECT v, (SELECT max(sum(t.w)) FROM u) FROM t GROUP BY v
+
+statement error 42803 aggregate functions are not allowed in FROM clause of their own query level
+SELECT * FROM t, LATERAL (SELECT sum(t.w)) s
+
+statement error 42803 aggregate functions are not allowed in WHERE
+SELECT * FROM t WHERE (SELECT sum(t.w)) > 0
+
+statement error 42803 aggregate functions are not allowed in GROUP BY
+SELECT v FROM t GROUP BY (SELECT sum(t.w)), v
+
+statement error 42803 aggregate function calls cannot be nested
+SELECT sum((SELECT sum(t.w))) FROM t
+
+# EXISTS does not evaluate its subquery's select list, ORDER BY or DISTINCT.
+query
+SELECT 1 WHERE EXISTS (SELECT nextval('s3'))
+----
+?column?:int4
+1
+
+query
+SELECT EXISTS (SELECT nextval('s3') FROM generate_series(1, 3) ORDER BY 1)
+----
+exists:bool
+t
+
+query
+SELECT EXISTS (SELECT DISTINCT nextval('s3') FROM generate_series(1, 3))
+----
+exists:bool
+t
+
+query
+SELECT EXISTS (SELECT nextval('s3') FROM generate_series(1, 3) LIMIT 1)
+----
+exists:bool
+t
+
+statement error 55000 currval of sequence "s3" is not yet defined in this session
+SELECT currval('s3')
+
+query
+SELECT EXISTS (SELECT max(nextval('s3')) FROM generate_series(1, 3))
+----
+exists:bool
+t
+
+query
+SELECT currval('s3')
+----
+currval:int8
+3

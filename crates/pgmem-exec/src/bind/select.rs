@@ -1,7 +1,7 @@
 //! Query binding: WITH, SELECT, VALUES, set operations, FROM, ORDER BY, LIMIT.
 
 use super::expr::{common_of, contains_agg, contains_window, output_name};
-use super::{Binder, Clause, CteBinding, Ctx, Level, Scope, ScopeCol, feature};
+use super::{Binder, Clause, CteBinding, Ctx, Level, Scope, ScopeCol};
 use crate::cast::CoercionContext;
 use crate::plan::{AggCall, CtePlan, Expr, JoinKind, OutCol, Rel, SetOpKind, SortKey, WinCall};
 use pgmem_catalog::Relation;
@@ -377,7 +377,8 @@ impl Binder<'_> {
                     Err(err) => return Err(err),
                 },
             };
-            if contains_agg(&e) {
+            // An enclosing query's aggregate is a constant here.
+            if contains_agg(&e) && !only_outer_aggs(&e) {
                 return Err(SqlError::new(code::GROUPING_ERROR, "aggregate functions are not allowed in GROUP BY"));
             }
             if contains_window(&e) {
@@ -444,7 +445,8 @@ impl Binder<'_> {
         if let Some(d) = &distinct_on {
             d.iter().for_each(&mut collect);
         }
-        let grouped = !group.is_empty() || !all_aggs.is_empty() || having.is_some();
+        // An aggregate of this level inside a subquery (`(SELECT sum(t.x))`) groups it too.
+        let grouped = !group.is_empty() || !all_aggs.is_empty() || having.is_some() || level.sublink_aggs.get();
         if grouped && let Some(l) = locking.first() {
             return Err(lock_misuse(l, "aggregate functions"));
         }
@@ -463,13 +465,23 @@ impl Binder<'_> {
                 aggs: grouping.aggs.clone(),
                 sets: grouping.sets.clone(),
             };
+            // Aggregate results follow the group keys (whose number is final only now), and
             // GROUPING() reads the set index, which follows the aggregates.
-            let set_col = grouping.group.len() + grouping.aggs.len();
+            let keys = grouping.group.len();
+            let set_col = keys + grouping.aggs.len();
             let fix = |e: Expr| {
-                e.transform(&mut |x| {
+                super::sublink::rewrite_expr(e, 0, &mut |x, k| {
                     Ok(match x {
-                        Expr::Grouping { col: usize::MAX, values, args } => Expr::Grouping { args, col: set_col, values },
-                        other => other,
+                        // (One with arguments left is an enclosing query's.)
+                        Expr::Grouping { col: usize::MAX, values, args } if k == 0 && args.is_empty() => {
+                            Some(Expr::Grouping { args: args.clone(), col: set_col, values: values.clone() })
+                        }
+                        Expr::Outer { depth, idx: SET_MARK } if *depth == k => Some(Expr::Outer { depth: k, idx: set_col }),
+                        Expr::Col(i) if k == 0 && *i >= AGG_MARK => Some(Expr::Col(keys + i - AGG_MARK)),
+                        Expr::Outer { depth, idx } if *depth == k && *idx >= AGG_MARK => {
+                            Some(Expr::Outer { depth: k, idx: keys + idx - AGG_MARK })
+                        }
+                        _ => None,
                     })
                 })
             };
@@ -1379,8 +1391,17 @@ fn coerce_columns(b: &Binder, rel: Rel, from: &[Type], to: &[Type]) -> SqlResult
     Ok(Rel::Project { input: Box::new(rel), exprs })
 }
 
+/// Whether every aggregate call in `e` belongs to an enclosing query.
+fn only_outer_aggs(e: &Expr) -> bool {
+    let mut only = true;
+    e.walk(&mut |x| only &= !matches!(x, Expr::AggCall(a) if a.levels_up == 0));
+    only
+}
+
 fn collect_aggs(e: &Expr, out: &mut Vec<AggCall>) {
     e.walk(&mut |x| match x {
+        // An enclosing query's aggregate is that query's to compute.
+        Expr::AggCall(a) if a.levels_up > 0 => {}
         Expr::AggCall(a) if !out.contains(a) => out.push((**a).clone()),
         // A window call's arguments may hold the query's aggregates.
         Expr::WindowCall(w) => {
@@ -1437,6 +1458,12 @@ fn functional_dependencies(group: &[Expr], scope: &Scope, catalog: &pgmem_catalo
     out
 }
 
+/// While rewriting a grouped query: aggregate `i`'s result column is `AGG_MARK + i` until the
+/// number of group keys is final (a functionally dependent column adds one).
+const AGG_MARK: usize = usize::MAX / 2;
+/// Likewise the grouping-set index column, read by a subquery's GROUPING().
+const SET_MARK: usize = usize::MAX - 1;
+
 /// Rewrites grouped-query expressions to reference the Aggregate's output.
 struct Grouping<'s> {
     group: Vec<Expr>,
@@ -1452,46 +1479,36 @@ impl Grouping<'_> {
             return Ok(Expr::Col(i));
         }
         match e {
+            // GROUPING() of an enclosing query (its arguments all reference that query).
+            g @ Expr::Grouping { .. } if matches!(&g, Expr::Grouping { args, .. } if !args.is_empty() && args.iter().all(|a| matches!(a, Expr::Outer { .. }))) => {
+                Ok(g)
+            }
             Expr::Grouping { args, .. } => {
-                // Bit n (from the right, for the last argument) is set when that argument is
-                // not grouped by the row's set.
-                let mut idx = Vec::with_capacity(args.len());
-                for a in &args {
-                    idx.push(self.group.iter().position(|g| g == a).ok_or_else(|| {
-                        SqlError::new(
-                            code::GROUPING_ERROR,
-                            "arguments to GROUPING must be grouping expressions of the associated query level",
-                        )
-                    })?);
-                }
-                let sets = self.sets.clone().unwrap_or_else(|| vec![(0..self.group.len()).collect()]);
-                let values = sets.iter().map(|set| idx.iter().fold(0i32, |acc, i| (acc << 1) | i32::from(!set.contains(i)))).collect();
+                let values = self.grouping_values(&args)?;
                 Ok(Expr::Grouping { args: Vec::new(), col: usize::MAX, values })
             }
-            Expr::AggCall(a) => {
-                let pos = match self.aggs.iter().position(|x| *x == *a) {
-                    Some(p) => p,
-                    None => {
-                        self.aggs.push(*a);
-                        self.aggs.len() - 1
-                    }
-                };
-                Ok(Expr::Col(self.group.len() + pos))
-            }
-            Expr::Col(i) => {
-                let c = &self.scope.cols[i];
-                if c.table_oid != 0 && self.pk_tables.contains(&c.table_oid) {
-                    // Functionally dependent on a grouped primary key: carry it as an extra key.
-                    self.group.push(Expr::Col(i));
-                    return Ok(Expr::Col(self.group.len() - 1));
-                }
-                let qual = c.qualifier.as_deref().map(|q| format!("{q}.")).unwrap_or_default();
-                Err(SqlError::new(
+            // An enclosing query's aggregate: a constant here.
+            agg @ Expr::AggCall(_) if matches!(&agg, Expr::AggCall(a) if a.levels_up > 0) => Ok(agg),
+            Expr::AggCall(a) => Ok(Expr::Col(AGG_MARK + self.agg_index(*a))),
+            Expr::Col(i) => match self.key_column(i) {
+                Some(p) => Ok(Expr::Col(p)),
+                None => Err(SqlError::new(
                     code::GROUPING_ERROR,
-                    format!("column \"{qual}{}\" must appear in the GROUP BY clause or be used in an aggregate function", c.name),
-                ))
+                    format!("column \"{}\" must appear in the GROUP BY clause or be used in an aggregate function", self.col_name(i)),
+                )),
+            },
+            // A subquery sees the grouped row: its references to this level must be group keys,
+            // and the aggregates of this level it holds are computed here.
+            Expr::Subquery { id, plan, kind, correlated } => {
+                let kind = match kind {
+                    crate::plan::SubqueryKind::Quantified { probe, cmp, all } => {
+                        crate::plan::SubqueryKind::Quantified { probe: Box::new(self.rewrite(*probe)?), cmp, all }
+                    }
+                    k => k,
+                };
+                let plan = super::sublink::rewrite_rel(*plan, 1, &mut |x, k| self.sublink(x, k))?;
+                Ok(Expr::Subquery { id, plan: Box::new(plan), kind, correlated })
             }
-            Expr::Subquery { correlated: true, .. } => Err(feature("correlated subqueries in the select list of a grouped query")),
             Expr::WindowCall(mut w) => {
                 w.args = w.args.into_iter().map(|a| self.rewrite(a)).collect::<SqlResult<Vec<_>>>()?;
                 w.partition_by = w.partition_by.into_iter().map(|a| self.rewrite(a)).collect::<SqlResult<Vec<_>>>()?;
@@ -1507,10 +1524,88 @@ impl Grouping<'_> {
             other => map_children(other, &mut |c| self.rewrite(c)),
         }
     }
+
+    /// GROUPING(args)'s value for each grouping set: bit n (from the right, for the last
+    /// argument) is set when that argument is not grouped by the set.
+    fn grouping_values(&self, args: &[Expr]) -> SqlResult<Vec<i32>> {
+        let mut idx = Vec::with_capacity(args.len());
+        for a in args {
+            idx.push(self.group.iter().position(|g| g == a).ok_or_else(|| {
+                SqlError::new(code::GROUPING_ERROR, "arguments to GROUPING must be grouping expressions of the associated query level")
+            })?);
+        }
+        let sets = self.sets.clone().unwrap_or_else(|| vec![(0..self.group.len()).collect()]);
+        Ok(sets.iter().map(|set| idx.iter().fold(0i32, |acc, i| (acc << 1) | i32::from(!set.contains(i)))).collect())
+    }
+
+    fn agg_index(&mut self, a: AggCall) -> usize {
+        match self.aggs.iter().position(|x| *x == a) {
+            Some(p) => p,
+            None => {
+                self.aggs.push(a);
+                self.aggs.len() - 1
+            }
+        }
+    }
+
+    /// The group-key position of input column `i`: a GROUP BY key, or a column functionally
+    /// dependent on a grouped primary key (carried as an extra key).
+    fn key_column(&mut self, i: usize) -> Option<usize> {
+        if let Some(p) = self.group.iter().position(|g| *g == Expr::Col(i)) {
+            return Some(p);
+        }
+        let c = &self.scope.cols[i];
+        if c.table_oid != 0 && self.pk_tables.contains(&c.table_oid) {
+            self.group.push(Expr::Col(i));
+            return Some(self.group.len() - 1);
+        }
+        None
+    }
+
+    fn col_name(&self, i: usize) -> String {
+        let c = &self.scope.cols[i];
+        let qual = c.qualifier.as_deref().map(|q| format!("{q}.")).unwrap_or_default();
+        format!("{qual}{}", c.name)
+    }
+
+    /// A node of a subquery plan `k` levels below this query: references to this level read
+    /// the grouped row (Postgres' check_ungrouped_columns for sublinks).
+    fn sublink(&mut self, e: &Expr, k: usize) -> SqlResult<Option<Expr>> {
+        Ok(match e {
+            Expr::Outer { depth, idx } if *depth == k => match self.key_column(*idx) {
+                Some(p) => Some(Expr::Outer { depth: k, idx: p }),
+                None => {
+                    return Err(SqlError::new(
+                        code::GROUPING_ERROR,
+                        format!("subquery uses ungrouped column \"{}\" from outer query", self.col_name(*idx)),
+                    ));
+                }
+            },
+            Expr::AggCall(a) if a.levels_up == k => {
+                let own = AggCall { levels_up: 0, ..(**a).clone() };
+                Some(Expr::Outer { depth: k, idx: AGG_MARK + self.agg_index(own) })
+            }
+            // GROUPING() of this level: its value for the grouped row's set.
+            Expr::Grouping { args, col: usize::MAX, .. }
+                if !args.is_empty() && args.iter().all(|a| matches!(a, Expr::Outer { depth, .. } if *depth == k)) =>
+            {
+                let own: Vec<Expr> =
+                    args.iter().map(|a| if let Expr::Outer { idx, .. } = a { Expr::Col(*idx) } else { a.clone() }).collect();
+                let values = self.grouping_values(&own)?;
+                Some(match self.sets {
+                    Some(_) => {
+                        Expr::Grouping { args: vec![Expr::Outer { depth: k, idx: SET_MARK }], col: crate::plan::GROUPING_SET_ARG, values }
+                    }
+                    None => Expr::Const(Value::Int4(values.first().copied().unwrap_or(0))),
+                })
+            }
+            _ => None,
+        })
+    }
 }
 
 /// Applies `f` to each direct child expression.
-fn map_children(e: Expr, f: &mut dyn FnMut(Expr) -> SqlResult<Expr>) -> SqlResult<Expr> {
+pub(super) fn map_children(e: Expr, f: &mut dyn FnMut(Expr) -> SqlResult<Expr>) -> SqlResult<Expr> {
     let b = |x: Box<Expr>, f: &mut dyn FnMut(Expr) -> SqlResult<Expr>| -> SqlResult<Box<Expr>> { Ok(Box::new(f(*x)?)) };
     Ok(match e {
         leaf @ (Expr::Const(_) | Expr::Col(_) | Expr::Outer { .. } | Expr::Param(_) | Expr::AggCall(_) | Expr::WindowCall(_)) => leaf,
