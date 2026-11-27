@@ -94,7 +94,7 @@ pub static DEFS: &[Def] = &[
     def!("views", 13_108, VIEWS, views),
     def!("sequences", 13_109, SEQUENCES, sequences),
     def!("table_privileges", 13_110, TABLE_PRIVILEGES, table_privileges),
-    def!("role_table_grants", 13_111, TABLE_PRIVILEGES, table_privileges),
+    def!("role_table_grants", 13_111, TABLE_PRIVILEGES, role_table_grants),
     def!("column_privileges", 13_112, COLUMN_PRIVILEGES, column_privileges),
     def!("enabled_roles", 13_113, ENABLED_ROLES, enabled_roles),
     def!("applicable_roles", 13_114, APPLICABLE_ROLES, empty),
@@ -654,9 +654,27 @@ fn sequences(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         .collect())
 }
 
+/// `table_privileges`: each table privilege whose grantor or grantee is a role the current
+/// user has the privileges of, or whose grantee is PUBLIC.
 fn table_privileges(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    table_privilege_rows(ctx, true)
+}
+
+/// `role_table_grants`: [`table_privileges`] whose grantor or grantee is an enabled role.
+fn role_table_grants(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
+    table_privilege_rows(ctx, false)
+}
+
+fn table_privilege_rows(ctx: &EvalCtx, public_visible: bool) -> SqlResult<Vec<Row>> {
     let m = snapshot(ctx);
     let s = Spec::parse(TABLE_PRIVILEGES);
+    let me = crate::roles::current_role(ctx.env);
+    let mine = m.catalog.roles_of(&me);
+    let superuser = crate::roles::is_superuser(m.catalog, ctx.env, &me);
+    let enabled = |r: &str| superuser || mine.iter().any(|x| x == r);
+    let visible = |grantor: &str, grantee: &str| {
+        enabled(grantor) || (!grantee.is_empty() && enabled(grantee)) || (public_visible && grantee.is_empty())
+    };
     let rels: Vec<(u32, String, String)> = m
         .tables()
         .into_iter()
@@ -679,10 +697,17 @@ fn table_privileges(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     for (oid, schema, rel) in rels {
         // The owner holds every privilege, grantable.
         let owner = crate::roles::owner_of(m.catalog, ctx.env, oid);
-        for p in ["INSERT", "SELECT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"] {
-            rows.push(row(&owner, &owner, &schema, &rel, p, true));
+        if visible(&owner, &owner) {
+            for p in ["INSERT", "SELECT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"] {
+                rows.push(row(&owner, &owner, &schema, &rel, p, true));
+            }
         }
-        for g in m.catalog.grants().iter().filter(|g| g.object == pgmem_catalog::GrantObject::Relation(oid)) {
+        for g in m
+            .catalog
+            .grants()
+            .iter()
+            .filter(|g| g.object == pgmem_catalog::GrantObject::Relation(oid) && g.grantee != owner && visible(&g.grantor, &g.grantee))
+        {
             for c in "arwdDxt".chars().filter(|c| g.privileges.contains(c)) {
                 rows.push(row(&g.grantor, &g.grantee, &schema, &rel, crate::roles::privilege_name(c), g.grantable.contains(&c)));
             }

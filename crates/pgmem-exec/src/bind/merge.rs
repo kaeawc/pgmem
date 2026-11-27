@@ -1,6 +1,7 @@
-//! MERGE planning: every expression is bound over the target row followed by the source row.
+//! MERGE planning: every expression is bound over the target row (with its system columns)
+//! followed by the source row.
 
-use super::dml::{RowRules, bind_assignments, lookup_table, physical_scope};
+use super::dml::{RowRules, bind_assignments, lookup_table, target_scope};
 use super::{Binder, Clause, Ctx, Level, Scope, coerce_assignment};
 use crate::plan::{Expr, OutCol, Rel};
 use pgmem_ir as ir;
@@ -43,14 +44,14 @@ pub fn bind_merge(b: &Binder, m: &ir::Merge, outer: &Ctx) -> SqlResult<MergePlan
     b.lock_table_and_indexes(&table, crate::lock_levels::ROW_EXCLUSIVE);
     let qualifier = m.alias.clone().unwrap_or_else(|| table.name.clone());
     let rules = b.bind_row_rules(&table)?;
-    let target_scope = physical_scope(&table, &qualifier);
-    let width = target_scope.width();
+    let tscope = target_scope(&table, &qualifier);
+    let width = tscope.width();
     let empty = Level::new(Scope::default());
     let (source, sscope) = b.bind_from(std::slice::from_ref(&m.source), &outer.from_item(&[&empty]))?;
     let source_width = sscope.width();
-    let mut cols = target_scope.cols.clone();
+    let mut cols = tscope.cols.clone();
     cols.extend(sscope.cols.iter().cloned());
-    let mut star = target_scope.star.clone();
+    let mut star = tscope.star.clone();
     star.extend(sscope.star.iter().map(|i| i + width));
     let level = Level::new(Scope { cols, star });
     let ctx = outer.from_item(&[&level]);
@@ -80,6 +81,10 @@ pub fn bind_merge(b: &Binder, m: &ir::Merge, outer: &Ctx) -> SqlResult<MergePlan
                     }
                     out
                 };
+                // DEFAULT VALUES inserts no column of the statement's own.
+                for &slot in slots.iter().filter(|_| values.is_some()) {
+                    b.note_target_use(table.oid, i16::try_from(slot + 1).unwrap_or(i16::MAX), 'a');
+                }
                 let values = match values {
                     None => None,
                     Some(vals) => {
