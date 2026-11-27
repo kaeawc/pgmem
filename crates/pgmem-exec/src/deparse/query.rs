@@ -294,7 +294,7 @@ impl Analyzer<'_> {
                     ir::Expr::Column(parts) => {
                         columns.iter().position(|c| Some(&c.name) == parts.last()).map_or_else(|| parts.join("."), |i| (i + 1).to_string())
                     }
-                    other => super::print::expr_text(&self.expr(other)),
+                    other => super::print::expr_text(self.catalog, &self.expr(other)),
                 };
                 Sort { expr: Node::Raw { text: colno, ty: Type::Unknown }, desc: o.desc, nulls_first: o.nulls_first }
             })
@@ -519,8 +519,8 @@ impl Analyzer<'_> {
         let rel = self.catalog.lookup_relation(name).ok().flatten()?;
         let schema = rel.schema().to_owned();
         let visible = match &self.display_path {
-            Some(path) => pgmem_types::context::with_search_path(path, || self.catalog.relation_visible(&schema, name.base())),
-            None => self.catalog.relation_visible(&schema, name.base()),
+            Some(path) => pgmem_types::context::with_search_path(path, || crate::reg::relation_visible(self.catalog, &schema, name.base())),
+            None => crate::reg::relation_visible(self.catalog, &schema, name.base()),
         };
         (!visible).then_some(schema)
     }
@@ -575,7 +575,7 @@ impl Analyzer<'_> {
                 }
                 ir::SelectItem::FieldStar(expr) => {
                     let inner = self.expr(expr);
-                    let text = format!("({}).*", super::print::expr_text(&inner));
+                    let text = format!("({}).*", super::print::expr_text(self.catalog, &inner));
                     out.push(Target { expr: Node::Raw { text, ty: Type::Unknown }, resname: "?column?".into() });
                 }
                 ir::SelectItem::Expr { expr, alias } => {

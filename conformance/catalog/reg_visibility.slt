@@ -1,0 +1,819 @@
+# reg* output qualifies a name unless it is the first match along the search path:
+# regclass, regtype, regproc / regprocedure, and regclass constants in deparsed expressions.
+
+statement ok
+CREATE SCHEMA app
+
+statement ok
+CREATE SCHEMA "Odd Schema"
+
+statement ok
+CREATE SCHEMA other
+
+statement ok
+CREATE TABLE t (id serial PRIMARY KEY, v text)
+
+statement ok
+CREATE TABLE app.t (id serial)
+
+statement ok
+CREATE TABLE app.u (id int)
+
+statement ok
+CREATE TABLE "Odd Schema"."Odd Table" (id int)
+
+statement ok
+CREATE SEQUENCE s1
+
+statement ok
+CREATE TABLE d (a int DEFAULT nextval('app.t_id_seq'::regclass), b int DEFAULT nextval('t_id_seq'::regclass), c regclass DEFAULT 'app.u', e regclass DEFAULT '"Odd Schema"."Odd Table"'::regclass, f int DEFAULT nextval('s1'))
+
+statement ok
+CREATE VIEW vv AS SELECT 'app.u'::regclass AS r, 'public.t'::regclass AS s
+
+statement ok
+CREATE TABLE ck (id int, CONSTRAINT ck_c CHECK (id::regclass::text <> 'x' AND 'app.u'::regclass::text <> 'y'))
+
+statement ok
+CREATE TYPE mood AS ENUM ('a')
+
+statement ok
+CREATE TYPE app.mood2 AS ENUM ('a')
+
+statement ok
+CREATE TYPE other.mood AS ENUM ('b')
+
+statement ok
+CREATE FUNCTION public.f(int) RETURNS int LANGUAGE sql AS 'select $1'
+
+statement ok
+CREATE FUNCTION app.f(int) RETURNS int LANGUAGE sql AS 'select $1 + 1'
+
+statement ok
+CREATE FUNCTION other.h(int) RETURNS int LANGUAGE sql AS 'select $1'
+
+# default search_path
+
+query
+SELECT 'public.t'::regclass::text, 'app.t'::regclass::text, 'app.u'::regclass::text, '"Odd Schema"."Odd Table"'::regclass::text, 'pg_class'::regclass::text, 'information_schema.columns'::regclass::text
+----
+text:text | text:text | text:text | text:text | text:text | text:text
+t | app.t | app.u | "Odd Schema"."Odd Table" | pg_class | information_schema.columns
+
+
+statement ok
+SELECT 'public.t_id_seq'::regclass::text, 'app.t_id_seq'::regclass::text, 'app.u'::regclass::text, 'public.s1'::regclass::text
+
+
+query
+SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef WHERE adrelid = 'public.d'::regclass ORDER BY adnum
+----
+pg_get_expr:text
+nextval('app.t_id_seq'::regclass)
+nextval('t_id_seq'::regclass)
+'app.u'::regclass
+'"Odd Schema"."Odd Table"'::regclass
+nextval('s1'::regclass)
+
+
+query
+SELECT column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'd' ORDER BY ordinal_position
+----
+column_default:varchar
+nextval('app.t_id_seq'::regclass)
+nextval('t_id_seq'::regclass)
+'app.u'::regclass
+'"Odd Schema"."Odd Table"'::regclass
+nextval('s1'::regclass)
+
+
+query
+SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'ck_c'
+----
+pg_get_constraintdef:text
+CHECK (((((id)::regclass)::text <> 'x'::text) AND (('app.u'::regclass)::text <> 'y'::text)))
+
+
+query
+SELECT pg_get_viewdef('public.vv'::regclass)
+----
+pg_get_viewdef:text
+ SELECT 'app.u'::regclass AS r,\n    't'::regclass AS s;
+
+
+query
+SELECT pg_get_serial_sequence('public.t', 'id'), pg_get_serial_sequence('app.t', 'id')
+----
+pg_get_serial_sequence:text | pg_get_serial_sequence:text
+public.t_id_seq | app.t_id_seq
+
+
+query
+SELECT 'public.mood'::regtype::text, 'app.mood2'::regtype::text, 'other.mood'::regtype::text, 'public.mood[]'::regtype::text, 'int4'::regtype::text, 'text'::regtype::text
+----
+text:text | text:text | text:text | text:text | text:text | text:text
+mood | app.mood2 | other.mood | mood[] | integer | text
+
+
+query
+SELECT oid::regproc::text FROM pg_proc WHERE proname IN ('f', 'h') ORDER BY 1
+----
+oid:text
+app.f
+f
+other.h
+
+
+query
+SELECT oid::regprocedure::text FROM pg_proc WHERE proname IN ('f', 'h') ORDER BY 1
+----
+oid:text
+app.f(integer)
+f(integer)
+other.h(integer)
+
+
+query
+SELECT 'public'::regnamespace::text, 'app'::regnamespace::text, '"Odd Schema"'::regnamespace::text, 'pg_catalog'::regnamespace::text
+----
+text:text | text:text | text:text | text:text
+public | app | "Odd Schema" | pg_catalog
+
+
+# search_path = public
+
+statement ok
+SET search_path = public
+
+query
+SELECT 'public.t'::regclass::text, 'app.t'::regclass::text, 'app.u'::regclass::text, '"Odd Schema"."Odd Table"'::regclass::text, 'pg_class'::regclass::text, 'information_schema.columns'::regclass::text
+----
+text:text | text:text | text:text | text:text | text:text | text:text
+t | app.t | app.u | "Odd Schema"."Odd Table" | pg_class | information_schema.columns
+
+
+statement ok
+SELECT 'public.t_id_seq'::regclass::text, 'app.t_id_seq'::regclass::text, 'app.u'::regclass::text, 'public.s1'::regclass::text
+
+
+query
+SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef WHERE adrelid = 'public.d'::regclass ORDER BY adnum
+----
+pg_get_expr:text
+nextval('app.t_id_seq'::regclass)
+nextval('t_id_seq'::regclass)
+'app.u'::regclass
+'"Odd Schema"."Odd Table"'::regclass
+nextval('s1'::regclass)
+
+
+query
+SELECT column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'd' ORDER BY ordinal_position
+----
+column_default:varchar
+nextval('app.t_id_seq'::regclass)
+nextval('t_id_seq'::regclass)
+'app.u'::regclass
+'"Odd Schema"."Odd Table"'::regclass
+nextval('s1'::regclass)
+
+
+query
+SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'ck_c'
+----
+pg_get_constraintdef:text
+CHECK (((((id)::regclass)::text <> 'x'::text) AND (('app.u'::regclass)::text <> 'y'::text)))
+
+
+query
+SELECT pg_get_viewdef('public.vv'::regclass)
+----
+pg_get_viewdef:text
+ SELECT 'app.u'::regclass AS r,\n    't'::regclass AS s;
+
+
+query
+SELECT pg_get_serial_sequence('public.t', 'id'), pg_get_serial_sequence('app.t', 'id')
+----
+pg_get_serial_sequence:text | pg_get_serial_sequence:text
+public.t_id_seq | app.t_id_seq
+
+
+query
+SELECT 'public.mood'::regtype::text, 'app.mood2'::regtype::text, 'other.mood'::regtype::text, 'public.mood[]'::regtype::text, 'int4'::regtype::text, 'text'::regtype::text
+----
+text:text | text:text | text:text | text:text | text:text | text:text
+mood | app.mood2 | other.mood | mood[] | integer | text
+
+
+query
+SELECT oid::regproc::text FROM pg_proc WHERE proname IN ('f', 'h') ORDER BY 1
+----
+oid:text
+app.f
+f
+other.h
+
+
+query
+SELECT oid::regprocedure::text FROM pg_proc WHERE proname IN ('f', 'h') ORDER BY 1
+----
+oid:text
+app.f(integer)
+f(integer)
+other.h(integer)
+
+
+query
+SELECT 'public'::regnamespace::text, 'app'::regnamespace::text, '"Odd Schema"'::regnamespace::text, 'pg_catalog'::regnamespace::text
+----
+text:text | text:text | text:text | text:text
+public | app | "Odd Schema" | pg_catalog
+
+
+# search_path = pg_catalog
+
+statement ok
+SET search_path = pg_catalog
+
+statement ok
+SELECT 'public.t'::regclass::text, 'app.t'::regclass::text, 'app.u'::regclass::text, '"Odd Schema"."Odd Table"'::regclass::text, 'pg_class'::regclass::text, 'information_schema.columns'::regclass::text
+
+
+statement ok
+SELECT 'public.t_id_seq'::regclass::text, 'app.t_id_seq'::regclass::text, 'app.u'::regclass::text, 'public.s1'::regclass::text
+
+
+query
+SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef WHERE adrelid = 'public.d'::regclass ORDER BY adnum
+----
+pg_get_expr:text
+nextval('app.t_id_seq'::regclass)
+nextval('public.t_id_seq'::regclass)
+'app.u'::regclass
+'"Odd Schema"."Odd Table"'::regclass
+nextval('public.s1'::regclass)
+
+
+query
+SELECT column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'd' ORDER BY ordinal_position
+----
+column_default:varchar
+nextval('app.t_id_seq'::regclass)
+nextval('public.t_id_seq'::regclass)
+'app.u'::regclass
+'"Odd Schema"."Odd Table"'::regclass
+nextval('public.s1'::regclass)
+
+
+query
+SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'ck_c'
+----
+pg_get_constraintdef:text
+CHECK (((((id)::regclass)::text <> 'x'::text) AND (('app.u'::regclass)::text <> 'y'::text)))
+
+
+query
+SELECT pg_get_viewdef('public.vv'::regclass)
+----
+pg_get_viewdef:text
+ SELECT 'app.u'::regclass AS r,\n    'public.t'::regclass AS s;
+
+
+query
+SELECT pg_get_serial_sequence('public.t', 'id'), pg_get_serial_sequence('app.t', 'id')
+----
+pg_get_serial_sequence:text | pg_get_serial_sequence:text
+public.t_id_seq | app.t_id_seq
+
+
+query
+SELECT 'public.mood'::regtype::text, 'app.mood2'::regtype::text, 'other.mood'::regtype::text, 'public.mood[]'::regtype::text, 'int4'::regtype::text, 'text'::regtype::text
+----
+text:text | text:text | text:text | text:text | text:text | text:text
+public.mood | app.mood2 | other.mood | public.mood[] | integer | text
+
+
+query
+SELECT oid::regproc::text FROM pg_proc WHERE proname IN ('f', 'h') ORDER BY 1
+----
+oid:text
+app.f
+other.h
+public.f
+
+
+query
+SELECT oid::regprocedure::text FROM pg_proc WHERE proname IN ('f', 'h') ORDER BY 1
+----
+oid:text
+app.f(integer)
+other.h(integer)
+public.f(integer)
+
+
+query
+SELECT 'public'::regnamespace::text, 'app'::regnamespace::text, '"Odd Schema"'::regnamespace::text, 'pg_catalog'::regnamespace::text
+----
+text:text | text:text | text:text | text:text
+public | app | "Odd Schema" | pg_catalog
+
+
+# search_path = app, public
+
+statement ok
+SET search_path = app, public
+
+query
+SELECT 'public.t'::regclass::text, 'app.t'::regclass::text, 'app.u'::regclass::text, '"Odd Schema"."Odd Table"'::regclass::text, 'pg_class'::regclass::text, 'information_schema.columns'::regclass::text
+----
+text:text | text:text | text:text | text:text | text:text | text:text
+public.t | t | u | "Odd Schema"."Odd Table" | pg_class | information_schema.columns
+
+
+query
+SELECT 'public.t_id_seq'::regclass::text, 'app.t_id_seq'::regclass::text, 'app.u'::regclass::text, 'public.s1'::regclass::text
+----
+text:text | text:text | text:text | text:text
+public.t_id_seq | t_id_seq | u | s1
+
+
+query
+SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef WHERE adrelid = 'public.d'::regclass ORDER BY adnum
+----
+pg_get_expr:text
+nextval('t_id_seq'::regclass)
+nextval('public.t_id_seq'::regclass)
+'u'::regclass
+'"Odd Schema"."Odd Table"'::regclass
+nextval('s1'::regclass)
+
+
+query
+SELECT column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'd' ORDER BY ordinal_position
+----
+column_default:varchar
+nextval('t_id_seq'::regclass)
+nextval('public.t_id_seq'::regclass)
+'u'::regclass
+'"Odd Schema"."Odd Table"'::regclass
+nextval('s1'::regclass)
+
+
+query
+SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'ck_c'
+----
+pg_get_constraintdef:text
+CHECK (((((id)::regclass)::text <> 'x'::text) AND (('u'::regclass)::text <> 'y'::text)))
+
+
+query
+SELECT pg_get_viewdef('public.vv'::regclass)
+----
+pg_get_viewdef:text
+ SELECT 'u'::regclass AS r,\n    'public.t'::regclass AS s;
+
+
+query
+SELECT pg_get_serial_sequence('public.t', 'id'), pg_get_serial_sequence('app.t', 'id')
+----
+pg_get_serial_sequence:text | pg_get_serial_sequence:text
+public.t_id_seq | app.t_id_seq
+
+
+query
+SELECT 'public.mood'::regtype::text, 'app.mood2'::regtype::text, 'other.mood'::regtype::text, 'public.mood[]'::regtype::text, 'int4'::regtype::text, 'text'::regtype::text
+----
+text:text | text:text | text:text | text:text | text:text | text:text
+mood | mood2 | other.mood | mood[] | integer | text
+
+
+query
+SELECT oid::regproc::text FROM pg_proc WHERE proname IN ('f', 'h') ORDER BY 1
+----
+oid:text
+f
+other.h
+public.f
+
+
+query
+SELECT oid::regprocedure::text FROM pg_proc WHERE proname IN ('f', 'h') ORDER BY 1
+----
+oid:text
+f(integer)
+other.h(integer)
+public.f(integer)
+
+
+query
+SELECT 'public'::regnamespace::text, 'app'::regnamespace::text, '"Odd Schema"'::regnamespace::text, 'pg_catalog'::regnamespace::text
+----
+text:text | text:text | text:text | text:text
+public | app | "Odd Schema" | pg_catalog
+
+
+# search_path = public, app
+
+statement ok
+SET search_path = public, app
+
+query
+SELECT 'public.t'::regclass::text, 'app.t'::regclass::text, 'app.u'::regclass::text, '"Odd Schema"."Odd Table"'::regclass::text, 'pg_class'::regclass::text, 'information_schema.columns'::regclass::text
+----
+text:text | text:text | text:text | text:text | text:text | text:text
+t | app.t | u | "Odd Schema"."Odd Table" | pg_class | information_schema.columns
+
+
+query
+SELECT 'public.t_id_seq'::regclass::text, 'app.t_id_seq'::regclass::text, 'app.u'::regclass::text, 'public.s1'::regclass::text
+----
+text:text | text:text | text:text | text:text
+t_id_seq | app.t_id_seq | u | s1
+
+
+query
+SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef WHERE adrelid = 'public.d'::regclass ORDER BY adnum
+----
+pg_get_expr:text
+nextval('app.t_id_seq'::regclass)
+nextval('t_id_seq'::regclass)
+'u'::regclass
+'"Odd Schema"."Odd Table"'::regclass
+nextval('s1'::regclass)
+
+
+query
+SELECT column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'd' ORDER BY ordinal_position
+----
+column_default:varchar
+nextval('app.t_id_seq'::regclass)
+nextval('t_id_seq'::regclass)
+'u'::regclass
+'"Odd Schema"."Odd Table"'::regclass
+nextval('s1'::regclass)
+
+
+query
+SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'ck_c'
+----
+pg_get_constraintdef:text
+CHECK (((((id)::regclass)::text <> 'x'::text) AND (('u'::regclass)::text <> 'y'::text)))
+
+
+query
+SELECT pg_get_viewdef('public.vv'::regclass)
+----
+pg_get_viewdef:text
+ SELECT 'u'::regclass AS r,\n    't'::regclass AS s;
+
+
+query
+SELECT pg_get_serial_sequence('public.t', 'id'), pg_get_serial_sequence('app.t', 'id')
+----
+pg_get_serial_sequence:text | pg_get_serial_sequence:text
+public.t_id_seq | app.t_id_seq
+
+
+query
+SELECT 'public.mood'::regtype::text, 'app.mood2'::regtype::text, 'other.mood'::regtype::text, 'public.mood[]'::regtype::text, 'int4'::regtype::text, 'text'::regtype::text
+----
+text:text | text:text | text:text | text:text | text:text | text:text
+mood | mood2 | other.mood | mood[] | integer | text
+
+
+query
+SELECT oid::regproc::text FROM pg_proc WHERE proname IN ('f', 'h') ORDER BY 1
+----
+oid:text
+app.f
+f
+other.h
+
+
+query
+SELECT oid::regprocedure::text FROM pg_proc WHERE proname IN ('f', 'h') ORDER BY 1
+----
+oid:text
+app.f(integer)
+f(integer)
+other.h(integer)
+
+
+query
+SELECT 'public'::regnamespace::text, 'app'::regnamespace::text, '"Odd Schema"'::regnamespace::text, 'pg_catalog'::regnamespace::text
+----
+text:text | text:text | text:text | text:text
+public | app | "Odd Schema" | pg_catalog
+
+
+# search_path = other, public, app
+
+statement ok
+SET search_path = other, public, app
+
+query
+SELECT 'public.t'::regclass::text, 'app.t'::regclass::text, 'app.u'::regclass::text, '"Odd Schema"."Odd Table"'::regclass::text, 'pg_class'::regclass::text, 'information_schema.columns'::regclass::text
+----
+text:text | text:text | text:text | text:text | text:text | text:text
+t | app.t | u | "Odd Schema"."Odd Table" | pg_class | information_schema.columns
+
+
+query
+SELECT 'public.t_id_seq'::regclass::text, 'app.t_id_seq'::regclass::text, 'app.u'::regclass::text, 'public.s1'::regclass::text
+----
+text:text | text:text | text:text | text:text
+t_id_seq | app.t_id_seq | u | s1
+
+
+query
+SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef WHERE adrelid = 'public.d'::regclass ORDER BY adnum
+----
+pg_get_expr:text
+nextval('app.t_id_seq'::regclass)
+nextval('t_id_seq'::regclass)
+'u'::regclass
+'"Odd Schema"."Odd Table"'::regclass
+nextval('s1'::regclass)
+
+
+query
+SELECT column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'd' ORDER BY ordinal_position
+----
+column_default:varchar
+nextval('app.t_id_seq'::regclass)
+nextval('t_id_seq'::regclass)
+'u'::regclass
+'"Odd Schema"."Odd Table"'::regclass
+nextval('s1'::regclass)
+
+
+query
+SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'ck_c'
+----
+pg_get_constraintdef:text
+CHECK (((((id)::regclass)::text <> 'x'::text) AND (('u'::regclass)::text <> 'y'::text)))
+
+
+query
+SELECT pg_get_viewdef('public.vv'::regclass)
+----
+pg_get_viewdef:text
+ SELECT 'u'::regclass AS r,\n    't'::regclass AS s;
+
+
+query
+SELECT pg_get_serial_sequence('public.t', 'id'), pg_get_serial_sequence('app.t', 'id')
+----
+pg_get_serial_sequence:text | pg_get_serial_sequence:text
+public.t_id_seq | app.t_id_seq
+
+
+query
+SELECT 'public.mood'::regtype::text, 'app.mood2'::regtype::text, 'other.mood'::regtype::text, 'public.mood[]'::regtype::text, 'int4'::regtype::text, 'text'::regtype::text
+----
+text:text | text:text | text:text | text:text | text:text | text:text
+public.mood | mood2 | mood | public.mood[] | integer | text
+
+
+query
+SELECT oid::regproc::text FROM pg_proc WHERE proname IN ('f', 'h') ORDER BY 1
+----
+oid:text
+app.f
+f
+h
+
+
+query
+SELECT oid::regprocedure::text FROM pg_proc WHERE proname IN ('f', 'h') ORDER BY 1
+----
+oid:text
+app.f(integer)
+f(integer)
+h(integer)
+
+
+query
+SELECT 'public'::regnamespace::text, 'app'::regnamespace::text, '"Odd Schema"'::regnamespace::text, 'pg_catalog'::regnamespace::text
+----
+text:text | text:text | text:text | text:text
+public | app | "Odd Schema" | pg_catalog
+
+
+# search_path = nope, "Odd Schema"
+
+statement ok
+SET search_path = nope, "Odd Schema"
+
+statement ok
+SELECT 'public.t'::regclass::text, 'app.t'::regclass::text, 'app.u'::regclass::text, '"Odd Schema"."Odd Table"'::regclass::text, 'pg_class'::regclass::text, 'information_schema.columns'::regclass::text
+
+
+statement ok
+SELECT 'public.t_id_seq'::regclass::text, 'app.t_id_seq'::regclass::text, 'app.u'::regclass::text, 'public.s1'::regclass::text
+
+
+query
+SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef WHERE adrelid = 'public.d'::regclass ORDER BY adnum
+----
+pg_get_expr:text
+nextval('app.t_id_seq'::regclass)
+nextval('public.t_id_seq'::regclass)
+'app.u'::regclass
+'"Odd Table"'::regclass
+nextval('public.s1'::regclass)
+
+
+query
+SELECT column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'd' ORDER BY ordinal_position
+----
+column_default:varchar
+nextval('app.t_id_seq'::regclass)
+nextval('public.t_id_seq'::regclass)
+'app.u'::regclass
+'"Odd Table"'::regclass
+nextval('public.s1'::regclass)
+
+
+query
+SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'ck_c'
+----
+pg_get_constraintdef:text
+CHECK (((((id)::regclass)::text <> 'x'::text) AND (('app.u'::regclass)::text <> 'y'::text)))
+
+
+query
+SELECT pg_get_viewdef('public.vv'::regclass)
+----
+pg_get_viewdef:text
+ SELECT 'app.u'::regclass AS r,\n    'public.t'::regclass AS s;
+
+
+query
+SELECT pg_get_serial_sequence('public.t', 'id'), pg_get_serial_sequence('app.t', 'id')
+----
+pg_get_serial_sequence:text | pg_get_serial_sequence:text
+public.t_id_seq | app.t_id_seq
+
+
+query
+SELECT 'public.mood'::regtype::text, 'app.mood2'::regtype::text, 'other.mood'::regtype::text, 'public.mood[]'::regtype::text, 'int4'::regtype::text, 'text'::regtype::text
+----
+text:text | text:text | text:text | text:text | text:text | text:text
+public.mood | app.mood2 | other.mood | public.mood[] | integer | text
+
+
+query
+SELECT oid::regproc::text FROM pg_proc WHERE proname IN ('f', 'h') ORDER BY 1
+----
+oid:text
+app.f
+other.h
+public.f
+
+
+query
+SELECT oid::regprocedure::text FROM pg_proc WHERE proname IN ('f', 'h') ORDER BY 1
+----
+oid:text
+app.f(integer)
+other.h(integer)
+public.f(integer)
+
+
+query
+SELECT 'public'::regnamespace::text, 'app'::regnamespace::text, '"Odd Schema"'::regnamespace::text, 'pg_catalog'::regnamespace::text
+----
+text:text | text:text | text:text | text:text
+public | app | "Odd Schema" | pg_catalog
+
+
+# pg_catalog listed last: a user table named like a catalog hides it
+
+statement ok
+RESET search_path
+
+statement ok
+CREATE TABLE public.pg_proc (a int)
+
+statement ok
+SET search_path = public
+
+query
+SELECT 'public.pg_proc'::regclass::text, 'pg_catalog.pg_proc'::regclass::text, 'pg_proc'::regclass::oid = 'pg_catalog.pg_proc'::regclass::oid
+----
+text:text | text:text | ?column?:bool
+public.pg_proc | pg_proc | t
+
+
+statement ok
+SET search_path = public, pg_catalog
+
+query
+SELECT 'public.pg_proc'::regclass::text, 'pg_catalog.pg_proc'::regclass::text, 'pg_proc'::regclass::oid = 'public.pg_proc'::regclass::oid
+----
+text:text | text:text | ?column?:bool
+pg_proc | pg_catalog.pg_proc | t
+
+
+# a user function with a builtin's signature
+
+statement ok
+CREATE FUNCTION public.lower(text) RETURNS text LANGUAGE sql AS 'select $1'
+
+query
+SELECT 'public.lower(text)'::regprocedure::text, 'pg_catalog.lower(text)'::regprocedure::text, 'pg_catalog.upper(text)'::regprocedure::text
+----
+text:text | text:text | text:text
+lower(text) | pg_catalog.lower(text) | upper(text)
+
+
+statement ok
+SET search_path = public
+
+query
+SELECT 'public.lower(text)'::regprocedure::text, 'pg_catalog.lower(text)'::regprocedure::text
+----
+text:text | text:text
+public.lower(text) | lower(text)
+
+
+# temporary relations are always visible and hide same-named ones
+
+statement ok
+RESET search_path
+
+statement ok
+CREATE TEMP TABLE tt (a serial)
+
+statement ok
+CREATE TEMP TABLE t (a int)
+
+statement ok
+SET search_path = public
+
+query
+SELECT 'tt'::regclass::text, 'tt_a_seq'::regclass::text, replace('pg_temp.t'::regclass::text, (SELECT nspname FROM pg_namespace WHERE oid = pg_my_temp_schema()), 'TMP'), 'public.t'::regclass::text
+----
+text:text | text:text | replace:text | text:text
+tt | tt_a_seq | t | public.t
+
+
+query
+SELECT replace(pg_get_expr(adbin, adrelid), (SELECT nspname FROM pg_namespace WHERE oid = pg_my_temp_schema()), 'TMP') FROM pg_attrdef WHERE adrelid = 'tt'::regclass
+----
+replace:text
+nextval('tt_a_seq'::regclass)
+
+
+statement ok
+SET search_path = pg_catalog
+
+query
+SELECT 'tt'::regclass::text, 'tt_a_seq'::regclass::text, replace('pg_temp.t'::regclass::text, (SELECT nspname FROM pg_namespace WHERE oid = pg_my_temp_schema()), 'TMP'), 'public.t'::regclass::text
+----
+text:text | text:text | replace:text | text:text
+tt | tt_a_seq | t | public.t
+
+
+query
+SELECT replace(pg_get_expr(adbin, adrelid), (SELECT nspname FROM pg_namespace WHERE oid = pg_my_temp_schema()), 'TMP') FROM pg_attrdef WHERE adrelid = 'tt'::regclass
+----
+replace:text
+nextval('tt_a_seq'::regclass)
+
+
+statement ok
+SET search_path = pg_temp, public
+
+query
+SELECT 'tt'::regclass::text, 'tt_a_seq'::regclass::text, replace('pg_temp.t'::regclass::text, (SELECT nspname FROM pg_namespace WHERE oid = pg_my_temp_schema()), 'TMP'), 'public.t'::regclass::text
+----
+text:text | text:text | replace:text | text:text
+tt | tt_a_seq | t | public.t
+
+
+query
+SELECT replace(pg_get_expr(adbin, adrelid), (SELECT nspname FROM pg_namespace WHERE oid = pg_my_temp_schema()), 'TMP') FROM pg_attrdef WHERE adrelid = 'tt'::regclass
+----
+replace:text
+nextval('tt_a_seq'::regclass)
+
+
+statement ok
+SET search_path = pg_catalog, pg_temp
+
+query
+SELECT 'tt'::regclass::text, 'tt_a_seq'::regclass::text, replace('pg_temp.t'::regclass::text, (SELECT nspname FROM pg_namespace WHERE oid = pg_my_temp_schema()), 'TMP'), 'public.t'::regclass::text
+----
+text:text | text:text | replace:text | text:text
+tt | tt_a_seq | t | public.t
+
+
+query
+SELECT replace(pg_get_expr(adbin, adrelid), (SELECT nspname FROM pg_namespace WHERE oid = pg_my_temp_schema()), 'TMP') FROM pg_attrdef WHERE adrelid = 'tt'::regclass
+----
+replace:text
+nextval('tt_a_seq'::regclass)
+

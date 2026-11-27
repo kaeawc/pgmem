@@ -2,7 +2,7 @@
 //! `regtypein`, ... and their output functions).
 
 use crate::funcs::string::quote_ident;
-use pgmem_catalog::{Catalog, PG_CATALOG_NAMESPACE_OID, PUBLIC_NAMESPACE_OID};
+use pgmem_catalog::{Catalog, PG_CATALOG, PG_CATALOG_NAMESPACE_OID, PUBLIC_NAMESPACE_OID, PathEntry};
 use pgmem_types::{RegKind, SqlError, SqlResult, Type, Value, code, text};
 
 /// Namespaces pgmem knows, with Postgres' fixed OIDs (information_schema's varies per
@@ -78,7 +78,7 @@ pub fn reg_name(kind: RegKind, oid: u32, catalog: &Catalog, user: &str) -> Strin
         RegKind::Class => catalog
             .relation_by_oid(oid)
             .map(|r| class_display(catalog, &r))
-            .or_else(|| crate::catalog_views::system_relation_by_oid(oid).map(system_display)),
+            .or_else(|| crate::catalog_views::system_relation_by_oid(oid).map(|d| system_display(catalog, d))),
         RegKind::Type => Type::from_oid(oid).map(|t| t.name()),
         RegKind::Namespace => namespace_name(oid).map(quote_ident).or_else(|| catalog.schema_by_oid(oid).map(|sc| quote_ident(&sc.name))),
         RegKind::Role => role_name(catalog, oid, user),
@@ -91,27 +91,47 @@ pub fn reg_name(kind: RegKind, oid: u32, catalog: &Catalog, user: &str) -> Strin
 fn lookup_class(s: &str, catalog: &Catalog) -> SqlResult<Value> {
     let parts = parse_qualified(s)?;
     let missing = || SqlError::undefined_table(s.trim());
-    // pg_catalog is searched first, as in Postgres' effective search_path.
-    let system = match parts.as_slice() {
-        [n] => crate::catalog_views::system_relation(None, n),
-        [schema, n] if schema == "pg_catalog" || schema == "information_schema" => crate::catalog_views::system_relation(Some(schema), n),
-        _ => None,
-    };
-    if let Some(d) = system {
-        return Ok(Value::Reg(RegKind::Class, d.oid, system_display(d)));
+    let system = |d: &crate::catalog_views::Def| Value::Reg(RegKind::Class, d.oid, system_display(catalog, d));
+    let user = |rel: &pgmem_catalog::Relation| Value::Reg(RegKind::Class, rel.oid(), class_display(catalog, rel));
+    match parts.as_slice() {
+        // An unqualified name takes the first match along the effective search path
+        // (pg_catalog implicitly first), system relations included.
+        [n] => {
+            for e in catalog.search_path() {
+                let schema = match &e {
+                    PathEntry::System => PG_CATALOG,
+                    PathEntry::Schema(s) => s.as_str(),
+                };
+                if let Some(d) = crate::catalog_views::system_relation(Some(schema), n) {
+                    return Ok(system(d));
+                }
+                if let Some(rel) = catalog.relation(schema, n) {
+                    return Ok(user(&rel));
+                }
+            }
+            Err(missing())
+        }
+        [schema, n] if schema == "pg_catalog" || schema == "information_schema" => {
+            crate::catalog_views::system_relation(Some(schema), n).map(system).ok_or_else(missing)
+        }
+        _ => catalog.find_relation(&pgmem_ir::ObjectName(parts))?.map(|rel| user(&rel)).ok_or_else(missing),
     }
-    let rel = catalog.find_relation(&pgmem_ir::ObjectName(parts))?.ok_or_else(missing)?;
-    Ok(Value::Reg(RegKind::Class, rel.oid(), class_display(catalog, &rel)))
 }
 
-/// `regclassout`: the name, schema-qualified when the search path doesn't find it by name.
+/// `RelationIsVisible`: whether an unqualified name finds the relation `schema.name`, user
+/// or system, along the effective search path.
+pub fn relation_visible(catalog: &Catalog, schema: &str, name: &str) -> bool {
+    catalog.relation_visible(schema, name, |s, n| crate::catalog_views::system_relation(Some(s), n).is_some())
+}
+
+/// `regclassout`: the name, schema-qualified unless the search path finds it by name.
 fn class_display(catalog: &Catalog, rel: &pgmem_catalog::Relation) -> String {
     crate::deparse::relation_name(catalog, rel.schema(), rel.name())
 }
 
-/// How a system relation prints as regclass: unqualified when on the search path.
-fn system_display(d: &crate::catalog_views::Def) -> String {
-    if d.schema == "pg_catalog" { d.name.to_owned() } else { format!("{}.{}", d.schema, d.name) }
+/// How a system relation prints as regclass.
+fn system_display(catalog: &Catalog, d: &crate::catalog_views::Def) -> String {
+    crate::deparse::relation_name(catalog, d.schema, d.name)
 }
 
 /// `regtypein`: a type name as `format_type` or SQL writes it (`integer`, `int4`,
@@ -264,32 +284,100 @@ fn lookup_procedure(s: &str, catalog: &Catalog) -> SqlResult<Value> {
     Ok(Value::Reg(RegKind::Procedure, found.0, reg_name(RegKind::Procedure, found.0, catalog, "")))
 }
 
-/// `regprocout`: the function's name, schema-qualified when the name alone is ambiguous.
+/// `regprocout`: the function's name, schema-qualified unless that name alone finds exactly
+/// this function (`FuncnameGetCandidates`).
 fn proc_name(catalog: &Catalog, oid: u32) -> Option<String> {
     let (schema, name) = match catalog.function_by_oid(oid) {
         Some(f) => (f.schema.clone(), f.name.clone()),
-        None => ("pg_catalog".to_owned(), crate::catalog_views::builtin_procs().iter().find(|p| p.oid == oid)?.name.to_owned()),
+        None => (PG_CATALOG.to_owned(), crate::catalog_views::builtin_procs().iter().find(|p| p.oid == oid)?.name.to_owned()),
     };
-    let unique = functions_named(std::slice::from_ref(&name), catalog).len() == 1;
+    let unique = matches!(path_candidates(catalog, &name).as_slice(), [(only, _)] if *only == oid);
     Some(if unique { quote_ident(&name) } else { format!("{}.{}", quote_ident(&schema), quote_ident(&name)) })
 }
 
-/// `regprocedureout` (`format_procedure`): `name(type,type)`.
+/// `FuncnameGetCandidates` for an unqualified name: (oid, argument type OIDs) of the functions
+/// along the search path, a function hiding any later one with the same arguments.
+fn path_candidates(catalog: &Catalog, name: &str) -> Vec<(u32, Vec<u32>)> {
+    let temp = pgmem_types::context::search_path().temp_schema;
+    let mut out: Vec<(u32, Vec<u32>)> = Vec::new();
+    for e in catalog.search_path() {
+        let found: Vec<(u32, Vec<u32>)> = match e {
+            PathEntry::System => {
+                crate::catalog_views::builtin_procs().iter().filter(|p| p.name == name).map(|p| (p.oid, p.args.clone())).collect()
+            }
+            PathEntry::Schema(s) if temp.as_deref() == Some(s.as_str()) => continue,
+            PathEntry::Schema(s) => catalog
+                .functions()
+                .filter(|f| f.schema == s && f.name == name)
+                .map(|f| (f.oid, f.input_types().iter().map(Type::oid).collect()))
+                .collect(),
+        };
+        for c in found {
+            if !out.iter().any(|(_, args)| *args == c.1) {
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
+/// `regprocedureout` (`format_procedure`): `name(type,type)`, the name qualified unless
+/// `FunctionIsVisible`.
 fn procedure_name(catalog: &Catalog, oid: u32) -> Option<String> {
     let (name, args) = match catalog.function_by_oid(oid) {
         Some(f) => {
-            let on_path = catalog.search_path().iter().any(|e| matches!(e, pgmem_catalog::PathEntry::Schema(s) if *s == f.schema));
-            let name = if on_path { quote_ident(&f.name) } else { format!("{}.{}", quote_ident(&f.schema), quote_ident(&f.name)) };
+            let visible = catalog.function_visible(f, &crate::catalog_views::builtin_function_exists);
+            let name = if visible { quote_ident(&f.name) } else { format!("{}.{}", quote_ident(&f.schema), quote_ident(&f.name)) };
             (name, f.input_types().iter().map(Type::oid).collect::<Vec<_>>())
         }
         None => {
             let p = crate::catalog_views::builtin_procs().iter().find(|p| p.oid == oid)?;
-            (quote_ident(p.name), p.args.clone())
+            let name =
+                if builtin_visible(catalog, p.name, &p.args) { quote_ident(p.name) } else { format!("pg_catalog.{}", quote_ident(p.name)) };
+            (name, p.args.clone())
         }
     };
     let types: Vec<String> =
         args.iter().map(|a| crate::funcs::catalog::format_type(*a, -1, catalog).unwrap_or_else(|| a.to_string())).collect();
     Some(format!("{name}({})", types.join(",")))
+}
+
+/// `FunctionIsVisible` for a pg_catalog function: no user function with the same signature
+/// sits in a schema searched before pg_catalog (which is first unless listed later).
+fn builtin_visible(catalog: &Catalog, name: &str, args: &[u32]) -> bool {
+    let temp = pgmem_types::context::search_path().temp_schema;
+    for e in catalog.search_path() {
+        match e {
+            PathEntry::System => return true,
+            PathEntry::Schema(s) if temp.as_deref() == Some(s.as_str()) => {}
+            PathEntry::Schema(s) => {
+                let shadows = catalog
+                    .functions()
+                    .any(|f| f.schema == s && f.name == name && f.input_types().iter().map(Type::oid).eq(args.iter().copied()));
+                if shadows {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// The text a `reg*` constant written `text` prints as in a deparsed expression. Postgres
+/// stores the constant as an OID and prints it with the type's output function, so the name
+/// follows the session's search path, not the one the text was written under: `text`
+/// resolves under `def_path` (the path of the definition, when it is not the session's) and
+/// prints under the session's. `None` when it names nothing (printed as written).
+pub fn const_display(kind: RegKind, text: &str, catalog: &Catalog, user: &str, def_path: Option<&[String]>) -> Option<String> {
+    let resolve = || to_reg(Value::Text(text.to_owned()), kind, catalog, user);
+    let resolved = match def_path {
+        Some(path) => pgmem_types::context::with_search_path(path, resolve),
+        None => resolve(),
+    };
+    match resolved.ok()? {
+        Value::Reg(_, oid, _) => Some(reg_name(kind, oid, catalog, user)),
+        _ => None,
+    }
 }
 
 /// Converts a value to a reg* type (`'t'::regclass`, `16384::regclass`, `oid::regtype`).

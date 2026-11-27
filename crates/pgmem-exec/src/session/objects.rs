@@ -518,7 +518,8 @@ impl Session {
                 let matches: Vec<_> = catalog
                     .tables()
                     .filter(|t| {
-                        n.schema().is_none_or(|s| s == t.schema) && (n.schema().is_some() || catalog.relation_visible(&t.schema, &t.name))
+                        n.schema().is_none_or(|s| s == t.schema)
+                            && (n.schema().is_some() || crate::reg::relation_visible(&catalog, &t.schema, &t.name))
                     })
                     .flat_map(|t| t.constraints.iter().filter(|c| c.name == n.base()).map(move |c| (t.oid, c)))
                     .collect();
