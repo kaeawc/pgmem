@@ -427,6 +427,8 @@ pub enum CommentTarget {
     Function(Option<Vec<TypeName>>),
     /// `CONSTRAINT name ON table`.
     Constraint(ObjectName),
+    /// `CONSTRAINT name ON DOMAIN domain`.
+    DomainConstraint(ObjectName),
     /// `TRIGGER name ON table`.
     Trigger(ObjectName),
     /// `POLICY name ON table`.
@@ -1818,20 +1820,28 @@ pub enum AlterTypeAction {
         to: String,
     },
     Rename(String),
-    AddAttribute {
-        name: String,
-        ty: TypeName,
-    },
-    DropAttribute {
-        name: String,
-        if_exists: bool,
-    },
+    /// The comma-separated `ADD | DROP | ALTER ATTRIBUTE` actions of one statement.
+    Attributes(Vec<TypeAttributeAction>),
     RenameAttribute {
         from: String,
         to: String,
     },
     /// `OWNER TO`, `SET SCHEMA public`: accepted without effect.
     NoOp,
+}
+
+/// One `ALTER TYPE ... {ADD | DROP | ALTER} ATTRIBUTE` action of a composite type. A trailing
+/// `RESTRICT` / `CASCADE` is parsed for all of them but only matters to `DROP` (CASCADE also
+/// drops the objects using the attribute); pgmem has no typed tables, the other thing it
+/// would extend to.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TypeAttributeAction {
+    /// `ADD ATTRIBUTE name type [COLLATE collation]`.
+    Add { name: String, ty: TypeName, collation: Option<String> },
+    /// `DROP ATTRIBUTE [IF EXISTS] name [CASCADE]`.
+    Drop { name: String, if_exists: bool, cascade: bool },
+    /// `ALTER ATTRIBUTE name [SET DATA] TYPE type [COLLATE collation]`.
+    AlterType { name: String, ty: TypeName, collation: Option<String> },
 }
 
 #[derive(Clone, Debug, PartialEq)]

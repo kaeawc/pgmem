@@ -1117,7 +1117,7 @@ impl Catalog {
                 PathEntry::System => PG_CATALOG,
                 PathEntry::Schema(s) => s.as_str(),
             };
-            if system(s, name) || self.relation(s, name).is_some() {
+            if system(s, name) || self.relation(s, name).is_some() || self.composite_relation(s, name).is_some() {
                 return s == schema;
             }
         }
@@ -1241,6 +1241,21 @@ impl Catalog {
         self.comments.get(&(classoid, objoid, subid)).map(String::as_str)
     }
 
+    /// Drops the comment on attribute `attnum` of relation `relid`, and renumbers the comments
+    /// on the attributes after it (pgmem numbers a composite type's attributes by position).
+    pub fn drop_attribute_comment(&mut self, relid: Oid, attnum: i32) {
+        let moved: Vec<((Oid, Oid, i32), String)> =
+            self.comments.iter().filter(|((_, o, n), _)| *o == relid && *n >= attnum).map(|(k, v)| (*k, v.clone())).collect();
+        for (k, _) in &moved {
+            self.comments.remove(k);
+        }
+        for ((class, oid, n), text) in moved {
+            if n > attnum {
+                self.comments.insert((class, oid, n - 1), text);
+            }
+        }
+    }
+
     /// Drops the comments on an object and its columns (when the object is dropped).
     pub fn drop_comments(&mut self, objoid: Oid) {
         self.comments.retain(|(_, o, _), _| *o != objoid);
@@ -1265,6 +1280,26 @@ impl Catalog {
             return Err(SqlError::new(code::DUPLICATE_TABLE, format!("relation \"{name}\" already exists")));
         }
         Ok(())
+    }
+
+    /// The composite type whose own relation (its `pg_class` entry, relkind `c`) is
+    /// `schema.name`.
+    pub fn composite_relation(&self, schema: &str, name: &str) -> Option<&Arc<TypeDef>> {
+        self.types.get(&QualName::new(schema, name)).filter(|t| matches!(t.kind, TypeDefKind::Composite { .. }))
+    }
+
+    /// The composite type owning `pg_class` entry `relid` (`typrelid`).
+    pub fn composite_by_relid(&self, relid: Oid) -> Option<&Arc<TypeDef>> {
+        self.types.values().find(|t| matches!(t.kind, TypeDefKind::Composite { relid: r, .. } if r == relid))
+    }
+
+    /// [`Catalog::lookup_relation`] for composite types' relations; like
+    /// [`Catalog::find_relation`], a qualifier naming no schema just finds nothing.
+    pub fn find_composite_relation(&self, name: &pgmem_ir::ObjectName) -> SqlResult<Option<Arc<TypeDef>>> {
+        match self.resolve(name, |schema, n| self.composite_relation(schema, n).cloned()) {
+            Err(e) if e.code == code::INVALID_SCHEMA_NAME => Ok(None),
+            other => other,
+        }
     }
 
     pub fn type_by_name(&self, schema: &str, name: &str) -> Option<&Arc<TypeDef>> {

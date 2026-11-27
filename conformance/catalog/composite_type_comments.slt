@@ -1,0 +1,238 @@
+# COMMENT ON for composite type attributes and domain constraints; regclass of a composite
+# type's relation.
+
+statement ok
+CREATE TYPE p AS (x int, z text)
+
+statement ok
+COMMENT ON COLUMN p.x IS 'the x'
+
+statement ok
+COMMENT ON COLUMN public.p.z IS 'the z'
+
+query
+SELECT col_description('p'::regclass, 1), col_description('p'::regclass, 2), col_description('p'::regclass, 3), obj_description('p'::regclass, 'pg_class')
+----
+col_description:text | col_description:text | col_description:text | obj_description:text
+the x | the z | NULL | NULL
+
+query
+SELECT objoid = 'p'::regclass, classoid::regclass, objsubid, description FROM pg_description WHERE objoid = 'p'::regclass ORDER BY objsubid
+----
+?column?:bool | classoid:regclass | objsubid:int4 | description:text
+t | pg_class | 1 | the x
+t | pg_class | 2 | the z
+
+statement ok
+COMMENT ON TYPE p IS 'the type'
+
+query
+SELECT obj_description('p'::regtype, 'pg_type'), obj_description('p'::regclass, 'pg_class')
+----
+obj_description:text | obj_description:text
+the type | NULL
+
+statement ok
+COMMENT ON COLUMN p.x IS NULL
+
+query
+SELECT col_description('p'::regclass, 1)
+----
+col_description:text
+NULL
+
+# The comment follows a rename and goes away with the attribute
+statement ok
+ALTER TYPE p RENAME ATTRIBUTE z TO zz
+
+query
+SELECT col_description('p'::regclass, 2)
+----
+col_description:text
+the z
+
+statement ok
+ALTER TYPE p DROP ATTRIBUTE zz
+
+query
+SELECT count(*) FROM pg_description WHERE description = 'the z'
+----
+count:int8
+0
+
+# ... and with the type
+statement ok
+COMMENT ON COLUMN p.x IS 'again'
+
+statement ok
+DROP TYPE p
+
+query
+SELECT count(*) FROM pg_description WHERE description IN ('again', 'the type')
+----
+count:int8
+0
+
+statement ok
+CREATE TYPE p AS (x int)
+
+statement ok
+CREATE TYPE e AS ENUM ('a')
+
+statement ok
+CREATE DOMAIN d AS int
+
+statement ok
+CREATE TABLE t (a int)
+
+statement error 42703 column "nope" of relation "p" does not exist
+COMMENT ON COLUMN p.nope IS 'x'
+
+statement error 42P01 relation "nosuch" does not exist
+COMMENT ON COLUMN nosuch.x IS 'x'
+
+statement error 42P01 relation "e" does not exist
+COMMENT ON COLUMN e.x IS 'x'
+
+statement error 42P01 relation "d" does not exist
+COMMENT ON COLUMN d.x IS 'x'
+
+statement error 42809 "p" is not a table
+COMMENT ON TABLE p IS 'x'
+
+statement error 42809 "p" is not a view
+COMMENT ON VIEW p IS 'x'
+
+statement error 42809 "p" is not a sequence
+COMMENT ON SEQUENCE p IS 'x'
+
+statement error 42809 "p" is not an index
+COMMENT ON INDEX p IS 'x'
+
+# regclass of a composite type's relation
+statement ok
+CREATE SCHEMA s
+
+statement ok
+CREATE TYPE s.sp AS (y int)
+
+query
+SELECT 'p'::regclass, 'public.p'::regclass, to_regclass('p'), 's.sp'::regclass, to_regclass('e'), to_regclass('nosuch')
+----
+regclass:regclass | regclass:regclass | to_regclass:regclass | regclass:regclass | to_regclass:regclass | to_regclass:regclass
+p | p | p | s.sp | NULL | NULL
+
+query
+SELECT 'p'::regclass::oid = typrelid FROM pg_type WHERE oid = 'p'::regtype
+----
+?column?:bool
+t
+
+query
+SELECT relkind, pg_table_is_visible(oid) FROM pg_class WHERE oid = 'p'::regclass
+----
+relkind:char | pg_table_is_visible:bool
+c | t
+
+query
+SELECT 'p'::regclass::oid::regclass
+----
+regclass:regclass
+p
+
+statement error 42P01 relation "e" does not exist
+SELECT 'e'::regclass
+
+statement error 42P01 relation "nosuch" does not exist
+SELECT 'nosuch'::regclass
+
+# Domain constraints
+statement ok
+CREATE DOMAIN dd AS int CONSTRAINT dc CHECK (VALUE > 0)
+
+statement ok
+COMMENT ON CONSTRAINT dc ON DOMAIN dd IS 'positive'
+
+query
+SELECT obj_description(oid, 'pg_constraint') FROM pg_constraint WHERE conname = 'dc' AND contypid = 'dd'::regtype
+----
+obj_description:text
+positive
+
+query
+SELECT classoid::regclass, objsubid, description FROM pg_description WHERE objoid = (SELECT oid FROM pg_constraint WHERE conname = 'dc')
+----
+classoid:regclass | objsubid:int4 | description:text
+pg_constraint | 0 | positive
+
+statement ok
+ALTER DOMAIN dd RENAME CONSTRAINT dc TO dc2
+
+query
+SELECT obj_description(oid, 'pg_constraint') FROM pg_constraint WHERE conname = 'dc2'
+----
+obj_description:text
+positive
+
+statement ok
+ALTER DOMAIN dd DROP CONSTRAINT dc2
+
+query
+SELECT count(*) FROM pg_description WHERE description = 'positive'
+----
+count:int8
+0
+
+statement ok
+ALTER DOMAIN dd ADD CONSTRAINT dc3 CHECK (VALUE < 100)
+
+statement ok
+COMMENT ON CONSTRAINT dc3 ON DOMAIN dd IS 'small'
+
+statement ok
+COMMENT ON CONSTRAINT dc3 ON DOMAIN dd IS NULL
+
+query
+SELECT count(*) FROM pg_description WHERE description = 'small'
+----
+count:int8
+0
+
+statement ok
+COMMENT ON CONSTRAINT dc3 ON DOMAIN dd IS 'small'
+
+statement ok
+DROP DOMAIN dd
+
+query
+SELECT count(*) FROM pg_description WHERE description = 'small'
+----
+count:int8
+0
+
+statement ok
+CREATE DOMAIN dd AS int CONSTRAINT dc CHECK (VALUE > 0)
+
+statement ok
+CREATE TABLE tc (a int CONSTRAINT tcc CHECK (a > 0))
+
+statement error 42704 constraint "nope" for domain dd does not exist
+COMMENT ON CONSTRAINT nope ON DOMAIN dd IS 'x'
+
+statement error 42704 constraint "tcc" for domain dd does not exist
+COMMENT ON CONSTRAINT tcc ON DOMAIN dd IS 'x'
+
+statement error 42704 type "nosuch" does not exist
+COMMENT ON CONSTRAINT dc ON DOMAIN nosuch IS 'x'
+
+statement error 42809 "tc" is not a domain
+COMMENT ON CONSTRAINT dc ON DOMAIN tc IS 'x'
+
+statement error 42809 "e" is not a domain
+COMMENT ON CONSTRAINT dc ON DOMAIN e IS 'x'
+
+statement error 42P01 relation "dd" does not exist
+COMMENT ON CONSTRAINT dc ON dd IS 'x'
+
+statement error 42704 constraint "dc" for table "tc" does not exist
+COMMENT ON CONSTRAINT dc ON tc IS 'x'

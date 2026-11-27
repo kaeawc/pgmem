@@ -153,3 +153,52 @@ fn rewrites_postgres_only_lock_syntax() {
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+fn alter_type_attribute_actions() {
+    use pgmem_ir::{AlterTypeAction, TypeAttributeAction as A};
+    let actions = |sql: &str| match one(sql) {
+        Statement::AlterType(at) => match at.action {
+            AlterTypeAction::Attributes(a) => a,
+            other => panic!("{sql}: {other:?}"),
+        },
+        other => panic!("{sql}: {other:?}"),
+    };
+    let a = actions(
+        "ALTER TYPE p ADD ATTRIBUTE v text COLLATE \"C\" CASCADE, DROP ATTRIBUTE IF EXISTS z RESTRICT, DROP ATTRIBUTE y CASCADE, \
+         ALTER ATTRIBUTE x SET DATA TYPE bigint COLLATE pg_catalog.\"POSIX\", ALTER ATTRIBUTE w TYPE int",
+    );
+    assert_eq!(a.len(), 5);
+    assert!(matches!(&a[0], A::Add { name, collation: Some(c), .. } if name == "v" && c == "C"));
+    assert!(matches!(&a[1], A::Drop { name, if_exists: true, cascade: false } if name == "z"));
+    assert!(matches!(&a[2], A::Drop { name, if_exists: false, cascade: true } if name == "y"));
+    assert!(matches!(&a[3], A::AlterType { name, collation: Some(c), .. } if name == "x" && c == "POSIX"));
+    assert!(matches!(&a[4], A::AlterType { name, collation: None, .. } if name == "w"));
+    assert!(
+        matches!(one("ALTER TYPE p RENAME ATTRIBUTE a TO b CASCADE"), Statement::AlterType(at) if at.action == AlterTypeAction::RenameAttribute { from: "a".into(), to: "b".into() })
+    );
+    // gram.y has no USING, DEFAULT or IF NOT EXISTS for attributes, and no list after RENAME.
+    for sql in [
+        "ALTER TYPE p ALTER ATTRIBUTE x TYPE int USING x",
+        "ALTER TYPE p ADD ATTRIBUTE x int DEFAULT 1",
+        "ALTER TYPE p ADD ATTRIBUTE IF NOT EXISTS x int",
+        "ALTER TYPE p ALTER ATTRIBUTE x",
+        "ALTER TYPE p RENAME ATTRIBUTE a TO b, DROP ATTRIBUTE c",
+    ] {
+        assert_eq!(parse_one(sql).expect_err(sql).code, "42601", "{sql}");
+    }
+}
+
+#[test]
+fn comment_on_domain_constraint() {
+    use pgmem_ir::{CommentTarget, ObjectName};
+    let name = |parts: &[&str]| ObjectName(parts.iter().map(|p| (*p).to_owned()).collect());
+    assert_eq!(
+        one("COMMENT ON CONSTRAINT c ON DOMAIN s.d IS 'x'"),
+        Statement::Comment { target: CommentTarget::DomainConstraint(name(&["s", "d"])), name: name(&["c"]), text: Some("x".into()) }
+    );
+    assert_eq!(
+        one("COMMENT ON CONSTRAINT c ON t IS NULL"),
+        Statement::Comment { target: CommentTarget::Constraint(name(&["t"])), name: name(&["c"]), text: None }
+    );
+}

@@ -650,9 +650,10 @@ fn table_is_visible_fn() -> SqlResult<Option<Resolved>> {
         strict("pg_table_is_visible", |a, c| {
             let Some(o) = oid_arg(&a[0]) else { return Ok(Value::Null) };
             let cat = c.txn.catalog();
-            Ok(match cat.relation_by_oid(o) {
-                Some(r) => Value::Bool(crate::reg::relation_visible(cat, r.schema(), r.name())),
-                None => Value::Null,
+            Ok(match (cat.relation_by_oid(o), cat.composite_by_relid(o)) {
+                (Some(r), _) => Value::Bool(crate::reg::relation_visible(cat, r.schema(), r.name())),
+                (None, Some(t)) => Value::Bool(crate::reg::relation_visible(cat, &t.schema, &t.name)),
+                (None, None) => Value::Null,
             })
         }),
         vec![Type::Oid],

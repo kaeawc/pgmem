@@ -1420,11 +1420,11 @@ pub fn collation_name(oid: u32) -> Option<&'static str> {
 
 /// Validates `COLLATE name` on a column of type `ty`: None for the type's default collation.
 pub fn column_collation(ty: &Type, collation: &str) -> SqlResult<Option<String>> {
-    if !collatable(ty) {
-        return Err(SqlError::datatype_mismatch(format!("collations are not supported by type {}", ty.name())));
-    }
     if !COLLATIONS.iter().any(|(n, _)| *n == collation) {
         return Err(SqlError::new(code::UNDEFINED_OBJECT, format!("collation \"{collation}\" for encoding \"UTF8\" does not exist")));
+    }
+    if !collatable(ty) {
+        return Err(SqlError::datatype_mismatch(format!("collations are not supported by type {}", ty.name())));
     }
     Ok((collation != "default").then(|| collation.to_owned()))
 }

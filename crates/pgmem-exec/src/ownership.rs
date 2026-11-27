@@ -458,6 +458,7 @@ fn check_comment(ck: &Checker, target: &ir::CommentTarget, name: &ir::ObjectName
         T::Constraint(table) | T::Trigger(table) | T::Policy(table) => ck.relation_named(table, Label::Relation, |_| true).map(drop),
         T::Schema => ck.require_schema(name.base()),
         T::Type | T::Domain => ck.require_type(name).map(drop),
+        T::DomainConstraint(domain) => ck.require_type(domain).map(drop),
         T::Function(types) => match ck.routine(name, types.as_deref())? {
             Some(f) => ck.require_function(&f, if f.procedure { "procedure" } else { "function" }),
             None => Ok(()),
