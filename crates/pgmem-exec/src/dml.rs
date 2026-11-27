@@ -423,6 +423,23 @@ fn referential_actions(
     depth: usize,
     ck: Checks,
 ) -> SqlResult<()> {
+    referential_actions_from(txn, table, table, removed, replaced, is_delete, depth, ck)
+}
+
+/// `leaf` is the table the rows physically left; violations name it (and its copy of the
+/// foreign key), as PostgreSQL's per-partition triggers do, not the ancestor `table` the
+/// constraint references.
+#[allow(clippy::too_many_arguments)]
+fn referential_actions_from(
+    txn: &mut Txn,
+    table: &TableDef,
+    leaf: &TableDef,
+    removed: &[Row],
+    replaced: &[Row],
+    is_delete: bool,
+    depth: usize,
+    ck: Checks,
+) -> SqlResult<()> {
     if removed.is_empty() {
         return Ok(());
     }
@@ -435,7 +452,7 @@ fn referential_actions(
     {
         let up = |rows: &[Row]| rows.iter().map(|r| crate::partition::remap(r, table, &parent)).collect::<Vec<_>>();
         let (removed_up, replaced_up) = (up(removed), up(replaced));
-        referential_actions(txn, &parent, &removed_up, &replaced_up, is_delete, depth + 1, ck)?;
+        referential_actions_from(txn, &parent, leaf, &removed_up, &replaced_up, is_delete, depth + 1, ck)?;
     }
     let qualified = table.qualified();
     let children: Vec<Arc<TableDef>> = txn
@@ -460,6 +477,7 @@ fn referential_actions(
                 continue;
             }
             let action = if is_delete { *on_delete } else { *on_update };
+            let (rel, con_name) = (leaf.name.as_str(), crate::partition::fk_clone_name(txn.catalog(), table, leaf, &child, &con.name));
             // Keys that disappeared from the parent.
             let gone: Vec<Vec<Value>> = removed
                 .iter()
@@ -495,12 +513,12 @@ fn referential_actions(
                         "23001",
                         format!(
                             "update or delete on table \"{}\" violates RESTRICT setting of foreign key constraint \"{}\" on table \"{}\"",
-                            table.name, con.name, child.name
+                            rel, con_name, child.name
                         ),
                     )
                     .with_detail(format!("Key ({})=({}) is referenced from table \"{}\".", names.join(", "), vals.join(", "), child.name))
                     .with_table(&child.name)
-                    .with_constraint(&con.name));
+                    .with_constraint(&con_name));
                 }
                 FkAction::NoAction => {
                     let key = &gone[0];
@@ -510,12 +528,12 @@ fn referential_actions(
                         code::FOREIGN_KEY_VIOLATION,
                         format!(
                             "update or delete on table \"{}\" violates foreign key constraint \"{}\" on table \"{}\"",
-                            table.name, con.name, child.name
+                            rel, con_name, child.name
                         ),
                     )
                     .with_detail(still_referenced(table, ref_columns, &names, &vals, &child.name))
                     .with_table(&child.name)
-                    .with_constraint(&con.name));
+                    .with_constraint(&con_name));
                 }
                 FkAction::Cascade if is_delete => {
                     let mut removed_children = Vec::new();
@@ -600,7 +618,7 @@ fn referential_actions(
                                 code::FOREIGN_KEY_VIOLATION,
                                 format!(
                                     "update or delete on table \"{}\" violates foreign key constraint \"{}\" on table \"{}\"",
-                                    table.name, con.name, child.name
+                                    rel, con_name, child.name
                                 ),
                             )
                             .with_detail(still_referenced(table, ref_columns, &names, &vals, &child.name)));
@@ -705,9 +723,8 @@ pub(crate) fn insert_preview(
     let table = Arc::clone(&plan.rules.table);
     let mut rows = Vec::new();
     for src in insert_sources(plan, &ctx)? {
-        let row = source_row(plan, &table, src, &ctx)?;
-        check_checks(&plan.rules, &row, &ctx)?;
-        rows.push(row);
+        // CHECKs are evaluated against the partition the row routes to, which names itself.
+        rows.push(source_row(plan, &table, src, &ctx)?);
     }
     Ok(rows)
 }

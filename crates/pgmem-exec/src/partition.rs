@@ -728,7 +728,20 @@ pub(crate) fn create_partition(
         oid: 0,
         schema,
         name: name.clone(),
-        columns: parent.live_columns().map(|(_, c)| c.clone()).collect(),
+        // A partition's NOT NULL constraints keep the parent's names; new copies carry no
+        // "missing" default value (`atthasmissing` is false).
+        columns: parent
+            .live_columns()
+            .map(|(_, c)| {
+                let mut c = c.clone();
+                c.missing = Value::Null;
+                if c.not_null {
+                    c.not_null_name =
+                        Some(c.not_null_name.unwrap_or_else(|| crate::catalog_views::not_null_constraint_name(&parent.name, &c.name)));
+                }
+                c
+            })
+            .collect(),
         constraints: parent
             .constraints
             .iter()
@@ -1314,4 +1327,28 @@ pub(crate) fn latest_rows(txn: &Txn, table: &TableDef) -> Vec<Row> {
         }
     }
     out
+}
+
+/// Name of the copy of foreign key `con` (on `child`, referencing the partitioned `root`)
+/// that PostgreSQL keeps for `leaf`, a descendant of `root`: the first free
+/// `<con>_<n>` among `child`'s constraints, numbered over the partition tree depth first.
+pub(crate) fn fk_clone_name(catalog: &Catalog, root: &TableDef, leaf: &TableDef, child: &TableDef, con: &str) -> String {
+    if leaf.oid == root.oid {
+        return con.to_owned();
+    }
+    let mut taken: std::collections::HashSet<String> = child.constraints.iter().map(|c| c.name.clone()).collect();
+    let mut n = 0;
+    for part in catalog.partition_descendants(root.oid) {
+        let name = loop {
+            n += 1;
+            let name = format!("{con}_{n}");
+            if taken.insert(name.clone()) {
+                break name;
+            }
+        };
+        if part.oid == leaf.oid {
+            return name;
+        }
+    }
+    con.to_owned()
 }

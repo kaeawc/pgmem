@@ -94,6 +94,8 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
   `SET (a, b) = (x, y)`.
 - `information_schema.table_privileges` and `role_table_grants` show only grants whose grantor or
   grantee is a role the current user has the privileges of (`table_privileges` also PUBLIC's).
+- Partitioning matches PostgreSQL in six details: `CREATE TABLE ... PARTITION OF parent (col DEFAULT ...)` column options parse; a partition's NOT NULL constraints keep the parent's names; a CHECK violated through the parent names the partition; a foreign key violation when deleting a referenced row names the partition (and its copy of the constraint, `<name>_<n>`); new partitions do not copy `atthasmissing`.
+- `DROP SCHEMA ... CASCADE` reports its dependents as the notice's `DETAIL` in creation order, leaves out partitions, and qualifies names only when they are not on the `search_path`; `DROP SCHEMA` without `CASCADE` lists them the same way.
 
 ### Changed
 

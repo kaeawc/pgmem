@@ -996,20 +996,25 @@ pub(crate) fn create_schema(cs: &ir::CreateSchema, txn: &mut Txn, user: &str) ->
 
 /// The objects in a schema, as `DROP SCHEMA ... CASCADE` reports them ("table app.items").
 fn schema_members(cat: &Catalog, schema: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for t in cat.tables().filter(|t| t.schema == schema) {
-        out.push(format!("table {schema}.{}", t.name));
+    let mut found: Vec<(pgmem_catalog::Oid, String)> = Vec::new();
+    // Partitions are dropped with their parent, so they are not listed.
+    for t in cat.tables().filter(|t| t.schema == schema && cat.partition_of(t.oid).is_none()) {
+        found.push((t.oid, format!("table {}", display_name(cat, &t.qualified()))));
     }
     for v in cat.views().filter(|v| v.schema == schema) {
-        out.push(format!("view {schema}.{}", v.name));
+        found.push((v.oid, format!("view {}", display_name(cat, &QualName::new(schema, &v.name)))));
     }
     for s in cat.sequences().filter(|s| s.schema == schema && s.owned_by.is_none()) {
-        out.push(format!("sequence {schema}.{}", s.name));
+        found.push((s.oid, format!("sequence {}", display_name(cat, &QualName::new(schema, &s.name)))));
     }
+    let on_path = cat.resolved_search_path().iter().any(|p| p == schema);
     for t in cat.types().filter(|t| t.schema == schema) {
-        out.push(format!("{} {schema}.{}", t.kind_name(), t.name));
+        let name = if on_path { t.name.clone() } else { format!("{schema}.{}", t.name) };
+        found.push((t.oid, format!("{} {name}", t.kind_name())));
     }
-    out
+    // PostgreSQL reports dependents newest first as it found them: in creation (OID) order.
+    found.sort_by_key(|(oid, _)| *oid);
+    found.into_iter().map(|(_, m)| m).collect()
 }
 
 fn drop_schemas(d: &ir::Drop, txn: &mut Txn) -> SqlResult<QueryResult> {
