@@ -1,0 +1,243 @@
+# Domain defaults, collations, array typmods and NOT VALID checks as pg_type, pg_constraint,
+# pg_attribute and information_schema record them.
+
+# DEFAULT takes a b_expr: NOT NULL, NULL, CHECK and COLLATE after it are domain clauses
+statement ok
+CREATE DOMAIN dd1 AS integer DEFAULT 1 NOT NULL
+
+statement ok
+CREATE DOMAIN dd2 AS integer DEFAULT 1 NULL
+
+statement ok
+CREATE DOMAIN dd3 AS integer DEFAULT 1 CHECK (VALUE > 0)
+
+statement ok
+CREATE DOMAIN dd4 AS text DEFAULT 'x' COLLATE "C"
+
+statement ok
+CREATE DOMAIN dd5 AS integer DEFAULT 1 + 2 NOT NULL CHECK (VALUE > 0)
+
+query
+SELECT typname, typnotnull, typdefault, pg_get_expr(typdefaultbin, 0) AS bin, typcollation FROM pg_type WHERE typname IN ('dd1', 'dd2', 'dd3', 'dd4', 'dd5') ORDER BY 1
+----
+typname:name | typnotnull:bool | typdefault:text | bin:text | typcollation:oid
+dd1 | t | 1 | 1 | 0
+dd2 | f | 1 | 1 | 0
+dd3 | f | 1 | 1 | 0
+dd4 | f | 'x'::text | 'x'::text | 950
+dd5 | t | (1 + 2) | (1 + 2) | 0
+
+query
+SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE contypid IN ('dd1'::regtype, 'dd3'::regtype, 'dd5'::regtype) ORDER BY 1
+----
+conname:name | pg_get_constraintdef:text
+dd1_not_null | NOT NULL
+dd3_check | CHECK ((VALUE > 0))
+dd5_check | CHECK ((VALUE > 0))
+dd5_not_null | NOT NULL
+
+statement error 42601 multiple default expressions
+CREATE DOMAIN dd6 AS integer DEFAULT 1 DEFAULT 2
+
+statement error 42601 multiple COLLATE clauses not allowed
+CREATE DOMAIN dd6 AS text COLLATE "C" COLLATE "POSIX"
+
+# typdefaultbin follows SET DEFAULT and DROP DEFAULT
+statement ok
+CREATE DOMAIN de AS integer DEFAULT 2
+
+statement ok
+ALTER DOMAIN de SET DEFAULT 3 + 4
+
+query
+SELECT typdefault, pg_get_expr(typdefaultbin, 0) AS bin FROM pg_type WHERE typname = 'de'
+----
+typdefault:text | bin:text
+(3 + 4) | (3 + 4)
+
+statement ok
+ALTER DOMAIN de DROP DEFAULT
+
+query
+SELECT typdefault, typdefaultbin IS NULL AS no_bin FROM pg_type WHERE typname = 'de'
+----
+typdefault:text | no_bin:bool
+NULL | t
+
+# A domain over a domain copies its default when created
+statement ok
+CREATE DOMAIN da AS integer DEFAULT 1
+
+statement ok
+CREATE DOMAIN db AS da
+
+statement ok
+CREATE DOMAIN dc AS da DEFAULT 5
+
+statement ok
+ALTER DOMAIN da SET DEFAULT 9
+
+query
+SELECT typname, typdefault, pg_get_expr(typdefaultbin, 0) AS bin FROM pg_type WHERE typname IN ('da', 'db', 'dc') ORDER BY 1
+----
+typname:name | typdefault:text | bin:text
+da | 9 | 9
+db | 1 | 1
+dc | 5 | 5
+
+query
+SELECT domain_name, domain_default FROM information_schema.domains WHERE domain_name IN ('da', 'db', 'dc') ORDER BY 1
+----
+domain_name:name | domain_default:varchar
+da | 9
+db | 1
+dc | 5
+
+statement ok
+CREATE TABLE dt (id int, x db, y dc)
+
+statement ok
+INSERT INTO dt (id) VALUES (1)
+
+query
+SELECT x, y FROM dt
+----
+x:int4 | y:int4
+1 | 5
+
+# NOT VALID domain checks
+statement ok
+CREATE DOMAIN dv AS integer
+
+statement ok
+ALTER DOMAIN dv ADD CONSTRAINT dv_pos CHECK (VALUE > 0) NOT VALID
+
+query
+SELECT conname, convalidated, pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'dv_pos'
+----
+conname:name | convalidated:bool | pg_get_constraintdef:text
+dv_pos | f | CHECK ((VALUE > 0)) NOT VALID
+
+statement ok
+ALTER DOMAIN dv VALIDATE CONSTRAINT dv_pos
+
+query
+SELECT conname, convalidated, pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'dv_pos'
+----
+conname:name | convalidated:bool | pg_get_constraintdef:text
+dv_pos | t | CHECK ((VALUE > 0))
+
+# Array domains keep the element typmod
+statement ok
+CREATE DOMAIN dna AS numeric(10,2)[]
+
+statement ok
+CREATE DOMAIN dva AS varchar(5)[]
+
+statement ok
+CREATE DOMAIN dn1 AS numeric(10,2)
+
+statement ok
+CREATE DOMAIN di2 AS integer[][]
+
+query
+SELECT typname, typtypmod, format_type(typbasetype, typtypmod), typndims FROM pg_type WHERE typname IN ('dna', 'dva', 'dn1', 'di2') ORDER BY 1
+----
+typname:name | typtypmod:int4 | format_type:text | typndims:int4
+di2 | -1 | integer[] | 2
+dn1 | 655366 | numeric(10,2) | 0
+dna | 655366 | numeric(10,2)[] | 1
+dva | 9 | character varying(5)[] | 1
+
+query
+SELECT domain_name, data_type, character_maximum_length, numeric_precision, numeric_scale, udt_name FROM information_schema.domains WHERE domain_name IN ('dna', 'dva', 'dn1') ORDER BY 1
+----
+domain_name:name | data_type:varchar | character_maximum_length:int4 | numeric_precision:int4 | numeric_scale:int4 | udt_name:name
+dn1 | numeric | NULL | 10 | 2 | numeric
+dna | numeric[] | NULL | NULL | NULL | _numeric
+dva | character varying[] | NULL | NULL | NULL | _varchar
+
+# Collations of domains and composite attributes
+statement ok
+CREATE DOMAIN dtc AS text COLLATE "C"
+
+statement ok
+CREATE DOMAIN dtc2 AS dtc
+
+statement ok
+CREATE DOMAIN dtc3 AS dtc COLLATE "POSIX"
+
+statement ok
+CREATE DOMAIN dtu AS text COLLATE ucs_basic
+
+statement ok
+CREATE DOMAIN dtd AS text
+
+query
+SELECT typname, typcollation FROM pg_type WHERE typname IN ('dtc', 'dtc2', 'dtc3', 'dtu', 'dtd', 'dd1') ORDER BY 1
+----
+typname:name | typcollation:oid
+dd1 | 0
+dtc | 950
+dtc2 | 950
+dtc3 | 951
+dtd | 100
+dtu | 962
+
+query
+SELECT domain_name, collation_schema, collation_name FROM information_schema.domains WHERE domain_name IN ('dtc', 'dtc3', 'dtd') ORDER BY 1
+----
+domain_name:name | collation_schema:name | collation_name:name
+dtc | pg_catalog | C
+dtc3 | pg_catalog | POSIX
+dtd | NULL | NULL
+
+statement ok
+CREATE TYPE dcomp AS (y text COLLATE "C", z text, w int, v varchar(3) COLLATE "POSIX", u dtc)
+
+query
+SELECT attname, attcollation FROM pg_attribute WHERE attrelid = (SELECT typrelid FROM pg_type WHERE typname = 'dcomp') ORDER BY attnum
+----
+attname:name | attcollation:oid
+y | 950
+z | 100
+w | 0
+v | 951
+u | 950
+
+statement ok
+CREATE TABLE dct (v dtc, w text, x text COLLATE "POSIX")
+
+query
+SELECT attname, attcollation FROM pg_attribute WHERE attrelid = 'dct'::regclass AND attnum > 0 ORDER BY attnum
+----
+attname:name | attcollation:oid
+v | 950
+w | 100
+x | 951
+
+query
+SELECT column_name, collation_name FROM information_schema.columns WHERE table_name = 'dct' ORDER BY ordinal_position
+----
+column_name:name | collation_name:name
+v | C
+w | NULL
+x | POSIX
+
+statement ok
+INSERT INTO dct (v) VALUES ('b'), ('B'), ('a'), ('A')
+
+query
+SELECT string_agg(v, ',' ORDER BY v) FROM dct
+----
+string_agg:text
+A,B,a,b
+
+statement error 42804 collations are not supported by type integer
+CREATE DOMAIN dbad AS integer COLLATE "C"
+
+statement error 42804 collations are not supported by type integer
+CREATE TYPE dbad AS (i int COLLATE "C")
+
+statement error 42704 collation "nosuch" for encoding "UTF8" does not exist
+CREATE DOMAIN dbad AS text COLLATE nosuch

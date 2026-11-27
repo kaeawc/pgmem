@@ -361,7 +361,10 @@ pub fn builtin_type(type_oid: u32) -> Option<BuiltinType<'static>> {
 pub fn type_storage(t: &Type) -> (i16, bool, char, char, u32) {
     match t {
         Type::Enum(_) => return (4, true, 'i', 'p', 0),
-        Type::Domain(_) => return type_storage(&t.base()),
+        Type::Domain(o) => {
+            let (len, byval, align, storage, collation) = type_storage(&t.base());
+            return (len, byval, align, storage, pgmem_types::usertype::domain_collation(*o).unwrap_or(collation));
+        }
         Type::Composite(_) | Type::Record => return (-1, false, 'd', 'x', 0),
         Type::Array(e) if matches!(**e, Type::Enum(_) | Type::Domain(_) | Type::Composite(_) | Type::Record) => {
             let align = if type_storage(e).2 == 'd' { 'd' } else { 'i' };
@@ -553,12 +556,15 @@ fn fk_tables(m: &Model) -> Vec<u32> {
 }
 
 fn att_row(s: &Spec, relid: u32, a: &Att) -> Row {
+    att_row_collated(s, relid, a, a.column.and_then(|c| c.collation.as_deref()))
+}
+
+/// [`att_row`] with the attribute's own `COLLATE` (None: its type's collation).
+fn att_row_collated(s: &Spec, relid: u32, a: &Att, own_collation: Option<&str>) -> Row {
     let (len, byval, align, storage, type_collation) = type_storage(&a.ty);
     let column = a.column;
-    let collation = column
-        .and_then(|c| c.collation.as_deref())
-        .and_then(|n| crate::bind::ddl::COLLATIONS.iter().find(|(c, _)| *c == n))
-        .map_or(type_collation, |(_, o)| *o);
+    let collation =
+        own_collation.and_then(|n| crate::bind::ddl::COLLATIONS.iter().find(|(c, _)| *c == n)).map_or(type_collation, |(_, o)| *o);
     let mut vals = vec![
         ("attrelid", oid(relid)),
         ("attname", name(&a.name)),
@@ -652,7 +658,7 @@ fn pg_attribute(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                     dropped: false,
                     column: None,
                 };
-                rows.push(att_row(&s, *relid, &a));
+                rows.push(att_row_collated(&s, *relid, &a, f.collation.as_deref()));
             }
         }
     }
@@ -864,7 +870,7 @@ fn user_type_rows(s: &Spec, catalog: &pgmem_catalog::Catalog, t: &pgmem_catalog:
         vec![("oid", oid(t.oid)), ("typname", name(&t.name)), ("typtype", ch(t.typtype())), ("typarray", oid(t.array_oid))];
     common(&mut vals);
     let collation = match &t.kind {
-        TypeDefKind::Domain { base, .. } => type_storage(base).4,
+        TypeDefKind::Domain { collation, .. } => *collation,
         _ => 0,
     };
     let align = match &t.kind {
@@ -901,8 +907,8 @@ fn user_type_rows(s: &Spec, catalog: &pgmem_catalog::Catalog, t: &pgmem_catalog:
             ]);
             'd'
         }
-        TypeDefKind::Domain { base, typmod, not_null, default, .. } => {
-            let (len, byval, align, storage, collation) = type_storage(base);
+        TypeDefKind::Domain { base, typmod, not_null, default, ndims, .. } => {
+            let (len, byval, align, storage, _) = type_storage(base);
             // I/O functions come from the ultimate (non-domain) base type.
             let b = builtin_type(base.base().oid());
             let fname = |i: usize, fallback: &str| b.as_ref().map_or_else(|| fallback.to_owned(), |b| b.field(i).to_owned());
@@ -939,7 +945,11 @@ fn user_type_rows(s: &Spec, catalog: &pgmem_catalog::Catalog, t: &pgmem_catalog:
                 ("typnotnull", boolean(*not_null)),
                 ("typbasetype", oid(base.oid())),
                 ("typtypmod", Value::Int4(*typmod)),
+                ("typndims", Value::Int4(*ndims)),
                 ("typcollation", oid(collation)),
+                // `pg_get_expr(typdefaultbin, 0)` prints the default the way `typdefault` has it
+                // (pgmem's node trees are their deparsed text, as `pg_attrdef.adbin` is).
+                ("typdefaultbin", default_text.clone().map_or(Value::Null, Value::Text)),
                 ("typdefault", default_text.map_or(Value::Null, Value::Text)),
             ]);
             align
@@ -1120,12 +1130,16 @@ pub struct DomainCon {
 }
 
 impl DomainCon {
-    /// `pg_get_constraintdef`.
+    /// `pg_get_constraintdef`: a CHECK added `NOT VALID` and not yet validated says so.
     pub fn def(&self) -> String {
-        match &self.check {
+        let mut def = match &self.check {
             Some(e) => format!("CHECK ({e})"),
             None => "NOT NULL".to_owned(),
+        };
+        if !self.validated {
+            def.push_str(" NOT VALID");
         }
+        def
     }
 }
 

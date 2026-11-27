@@ -795,7 +795,12 @@ impl Binder<'_> {
             }
             None => {
                 // A subquery's or function's row keeps its column names (a blessed record).
-                let named = cols.iter().map(|c| pgmem_types::usertype::Field { name: c.name.clone(), ty: c.ty.clone(), typmod: c.typmod });
+                let named = cols.iter().map(|c| pgmem_types::usertype::Field {
+                    name: c.name.clone(),
+                    ty: c.ty.clone(),
+                    typmod: c.typmod,
+                    collation: None,
+                });
                 let oid = pgmem_types::usertype::bless(named.collect());
                 (Expr::Row { fields, types, type_oid: oid }, Type::Record)
             }

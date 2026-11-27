@@ -1412,6 +1412,12 @@ fn split_collate(expr: &ir::Expr) -> (&ir::Expr, Option<&str>) {
     }
 }
 
+/// The name `information_schema` shows for a collation OID: None for no collation and for the
+/// database default.
+pub fn collation_name(oid: u32) -> Option<&'static str> {
+    COLLATIONS.iter().find(|(_, o)| *o == oid && *o != DEFAULT_COLLATION).map(|(n, _)| *n)
+}
+
 /// Validates `COLLATE name` on a column of type `ty`: None for the type's default collation.
 pub fn column_collation(ty: &Type, collation: &str) -> SqlResult<Option<String>> {
     if !collatable(ty) {

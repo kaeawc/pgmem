@@ -354,3 +354,171 @@ fn long_domain_constraint_names() {
     // The NOT NULL constraint can be dropped by that name.
     c.batch_execute(&format!("ALTER DOMAIN {d} DROP CONSTRAINT {}_not_null", &d[..54])).expect("drop not null");
 }
+
+/// Rows of `sql`, each row's columns joined with `|` (NULL as `NULL`).
+fn rows(c: &mut postgres::Client, sql: &str) -> Vec<String> {
+    texts(c, sql).into_iter().map(|r| r.into_iter().map(|v| v.unwrap_or_else(|| "NULL".into())).collect::<Vec<_>>().join("|")).collect()
+}
+
+#[test]
+fn domain_default_is_followed_by_constraints() {
+    // DEFAULT takes a b_expr: `DEFAULT 1 NOT NULL` is a default and a NOT NULL constraint.
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE DOMAIN d1 AS integer DEFAULT 1 NOT NULL; \
+         CREATE DOMAIN d2 AS integer DEFAULT 1 NULL; \
+         CREATE DOMAIN d3 AS integer DEFAULT 1 CHECK (VALUE > 0); \
+         CREATE DOMAIN d4 AS text DEFAULT 'x' COLLATE \"C\"; \
+         CREATE DOMAIN d5 AS integer DEFAULT 1 + 2 NOT NULL CHECK (VALUE > 0)",
+    )
+    .expect("create domains");
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT typname, typnotnull::text, typdefault, pg_get_expr(typdefaultbin, 0), typcollation::int FROM pg_type \
+             WHERE typname IN ('d1', 'd2', 'd3', 'd4', 'd5') ORDER BY 1"
+        ),
+        vec!["d1|true|1|1|0", "d2|false|1|1|0", "d3|false|1|1|0", "d4|false|'x'::text|'x'::text|950", "d5|true|(1 + 2)|(1 + 2)|0"]
+    );
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint \
+             WHERE contypid IN ('d1'::regtype, 'd3'::regtype, 'd5'::regtype) ORDER BY 1"
+        ),
+        vec!["d1_not_null|NOT NULL", "d3_check|CHECK ((VALUE > 0))", "d5_check|CHECK ((VALUE > 0))", "d5_not_null|NOT NULL"]
+    );
+    let e = expect_code(c.simple_query("CREATE DOMAIN d6 AS integer DEFAULT 1 DEFAULT 2"), "42601");
+    assert_eq!(message(&e), "multiple default expressions");
+    let e = expect_code(c.simple_query("CREATE DOMAIN d6 AS text COLLATE \"C\" COLLATE \"POSIX\""), "42601");
+    assert_eq!(message(&e), "multiple COLLATE clauses not allowed");
+}
+
+#[test]
+fn domain_default_has_a_node_tree() {
+    let (_db, mut c) = setup();
+    c.batch_execute("CREATE DOMAIN d AS integer DEFAULT 2").expect("create");
+    let q = "SELECT coalesce(typdefault, 'NULL'), coalesce(pg_get_expr(typdefaultbin, 0), 'NULL') FROM pg_type WHERE typname = 'd'";
+    assert_eq!(rows(&mut c, q), vec!["2|2"]);
+    c.batch_execute("ALTER DOMAIN d SET DEFAULT 3 + 4").expect("set default");
+    assert_eq!(rows(&mut c, q), vec!["(3 + 4)|(3 + 4)"]);
+    c.batch_execute("ALTER DOMAIN d DROP DEFAULT").expect("drop default");
+    assert_eq!(rows(&mut c, q), vec!["NULL|NULL"]);
+}
+
+#[test]
+fn domain_over_a_domain_copies_its_default() {
+    // DefineDomain copies the base domain's default when the new domain has none of its own;
+    // later changes to the base's default do not reach the copy.
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE DOMAIN a AS integer DEFAULT 1; \
+         CREATE DOMAIN b AS a; \
+         CREATE DOMAIN c AS a DEFAULT 5; \
+         ALTER DOMAIN a SET DEFAULT 9; \
+         CREATE TABLE t (id int, x b, y c); \
+         INSERT INTO t (id) VALUES (1)",
+    )
+    .expect("setup");
+    assert_eq!(
+        rows(&mut c, "SELECT typname, typdefault, pg_get_expr(typdefaultbin, 0) FROM pg_type WHERE typname IN ('a', 'b', 'c') ORDER BY 1"),
+        vec!["a|9|9", "b|1|1", "c|5|5"]
+    );
+    assert_eq!(
+        rows(&mut c, "SELECT domain_name, domain_default FROM information_schema.domains WHERE domain_name IN ('a', 'b', 'c') ORDER BY 1"),
+        vec!["a|9", "b|1", "c|5"]
+    );
+    assert_eq!(rows(&mut c, "SELECT x, y FROM t"), vec!["1|5"]);
+}
+
+#[test]
+fn not_valid_domain_check_until_validated() {
+    let (_db, mut c) = setup();
+    c.batch_execute("CREATE DOMAIN d AS integer; ALTER DOMAIN d ADD CONSTRAINT c1 CHECK (VALUE > 0) NOT VALID").expect("setup");
+    let q = "SELECT convalidated::text, pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'c1'";
+    assert_eq!(rows(&mut c, q), vec!["false|CHECK ((VALUE > 0)) NOT VALID"]);
+    c.batch_execute("ALTER DOMAIN d VALIDATE CONSTRAINT c1").expect("validate");
+    assert_eq!(rows(&mut c, q), vec!["true|CHECK ((VALUE > 0))"]);
+}
+
+#[test]
+fn array_domains_keep_the_element_typmod() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE DOMAIN na AS numeric(10,2)[]; \
+         CREATE DOMAIN va AS varchar(5)[] DEFAULT ARRAY['ab']; \
+         CREATE DOMAIN n1 AS numeric(10,2); \
+         CREATE DOMAIN i2 AS integer[][]",
+    )
+    .expect("setup");
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT typname, typtypmod, format_type(typbasetype, typtypmod), typndims FROM pg_type \
+             WHERE typname IN ('na', 'va', 'n1', 'i2') ORDER BY 1"
+        ),
+        vec!["i2|-1|integer[]|2", "n1|655366|numeric(10,2)|0", "na|655366|numeric(10,2)[]|1", "va|9|character varying(5)[]|1"]
+    );
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT domain_name, data_type, coalesce(numeric_precision::text, 'NULL'), udt_name, coalesce(domain_default, 'NULL') \
+             FROM information_schema.domains WHERE domain_name IN ('na', 'va', 'n1') ORDER BY 1"
+        ),
+        vec!["n1|numeric|10|numeric|NULL", "na|numeric[]|NULL|_numeric|NULL", "va|character varying[]|NULL|_varchar|ARRAY['ab'::text]"]
+    );
+}
+
+#[test]
+fn domain_and_composite_attribute_collations() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE DOMAIN tc AS text COLLATE \"C\"; \
+         CREATE DOMAIN tc2 AS tc; \
+         CREATE DOMAIN tc3 AS tc COLLATE \"POSIX\"; \
+         CREATE DOMAIN tu AS text COLLATE ucs_basic; \
+         CREATE DOMAIN td AS text; \
+         CREATE DOMAIN ti AS integer; \
+         CREATE TYPE p AS (y text COLLATE \"C\", z text, w int, v varchar(3) COLLATE \"POSIX\", u tc); \
+         CREATE TABLE t (v tc, w text, x text COLLATE \"POSIX\")",
+    )
+    .expect("setup");
+    assert_eq!(
+        rows(&mut c, "SELECT typname, typcollation::int FROM pg_type WHERE typname IN ('tc', 'tc2', 'tc3', 'tu', 'td', 'ti') ORDER BY 1"),
+        vec!["tc|950", "tc2|950", "tc3|951", "td|100", "ti|0", "tu|962"]
+    );
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT attname, attcollation::int FROM pg_attribute WHERE attrelid = (SELECT typrelid FROM pg_type WHERE typname = 'p') ORDER BY attnum"
+        ),
+        vec!["y|950", "z|100", "w|0", "v|951", "u|950"]
+    );
+    assert_eq!(
+        rows(&mut c, "SELECT attname, attcollation::int FROM pg_attribute WHERE attrelid = 't'::regclass AND attnum > 0 ORDER BY attnum"),
+        vec!["v|950", "w|100", "x|951"]
+    );
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT domain_name, coalesce(collation_name, 'NULL') FROM information_schema.domains \
+             WHERE domain_name IN ('tc', 'tc3', 'td') ORDER BY 1"
+        ),
+        vec!["tc|C", "tc3|POSIX", "td|NULL"]
+    );
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT column_name, coalesce(collation_name, 'NULL') FROM information_schema.columns WHERE table_name = 't' ORDER BY ordinal_position"
+        ),
+        vec!["v|C", "w|NULL", "x|POSIX"]
+    );
+    c.batch_execute("INSERT INTO t (v) VALUES ('b'), ('B'), ('a'), ('A')").expect("insert");
+    assert_eq!(rows(&mut c, "SELECT string_agg(v, ',' ORDER BY v) FROM t"), vec!["A,B,a,b"]);
+    let e = expect_code(c.simple_query("CREATE DOMAIN bad AS integer COLLATE \"C\""), "42804");
+    assert_eq!(message(&e), "collations are not supported by type integer");
+    let e = expect_code(c.simple_query("CREATE TYPE bad AS (i int COLLATE \"C\")"), "42804");
+    assert_eq!(message(&e), "collations are not supported by type integer");
+    let e = expect_code(c.simple_query("CREATE DOMAIN bad AS text COLLATE nosuch"), "42704");
+    assert_eq!(message(&e), "collation \"nosuch\" for encoding \"UTF8\" does not exist");
+}
