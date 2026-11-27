@@ -1,7 +1,7 @@
 //! Session statements over per-session objects: prepared statements, cursors, LISTEN /
 //! NOTIFY, DISCARD, EXPLAIN and the maintenance commands.
 
-use super::{QueryResult, Session, TxStatus};
+use super::{QueryResult, Session, SessionEnv, TxStatus};
 use crate::bind::{self, Binder, Ctx, Level, Scope};
 use crate::cast::{CoercionContext, cast_context};
 use crate::eval::{EvalCtx, StatementState};
@@ -228,8 +228,9 @@ impl Session {
         let txn = self.txn.as_ref().ok_or_else(|| SqlError::internal("no transaction"))?;
         let catalog = Arc::new(txn.catalog().clone());
         let binder = Binder::new(&catalog, &[]);
+        binder.set_rls(crate::rls::RlsUser::from_env(&env));
         let top = Level::new(Scope::default());
-        let ctx = Ctx::new(&top);
+        let ctx = Ctx::new(&top).with_clause(crate::bind::Clause::ExecuteParam);
         let ectx = EvalCtx::new(txn, &[], &env, &state);
         let mut values = Vec::with_capacity(args.len());
         for (i, (a, ty)) in args.iter().zip(types).enumerate() {
@@ -465,18 +466,31 @@ impl Session {
         let _ctx = pgmem_types::context::enter(self.format_context());
         let env = self.env();
         let state = StatementState::default();
+        // Details are limited to what the current role may read, as in the statement that
+        // queued the check (which wrote nothing at this point).
+        let snapshot = Arc::new(txn.catalog().clone());
+        crate::detail_privileges::as_reader(&snapshot, &env, || self.run_checks(txn, checks, &env, &state))
+    }
+
+    fn run_checks(
+        &self,
+        txn: &mut Txn,
+        checks: Vec<(pgmem_catalog::Oid, String)>,
+        env: &SessionEnv,
+        state: &StatementState,
+    ) -> SqlResult<()> {
         for (oid, name) in checks {
             let catalog = txn.catalog().clone();
             let Some(def) = catalog.table_by_oid(oid).cloned() else { continue };
             if def.constraints.iter().any(|c| c.name == name) {
                 // A unique violation reads as an insertion's, not as index creation's.
-                crate::ddl::validate_constraint(txn, &def, &name, &catalog, &env, &state).map_err(|e| {
+                crate::ddl::validate_constraint(txn, &def, &name, &catalog, env, state).map_err(|e| {
                     if e.code == code::UNIQUE_VIOLATION && e.message.starts_with("could not create unique index") {
-                        let detail = e.detail().unwrap_or_default().replace(" is duplicated.", " already exists.");
-                        SqlError::new(code::UNIQUE_VIOLATION, format!("duplicate key value violates unique constraint \"{name}\""))
-                            .with_detail(detail)
+                        let detail = e.detail().map(|d| d.replace(" is duplicated.", " already exists."));
+                        let e = SqlError::new(code::UNIQUE_VIOLATION, format!("duplicate key value violates unique constraint \"{name}\""));
+                        crate::dml::with_detail(e, detail)
                     } else if e.code == code::EXCLUSION_VIOLATION && e.message.starts_with("could not create exclusion constraint") {
-                        let detail = e.detail().unwrap_or_default().replace(" conflicts with key ", " conflicts with existing key ");
+                        let detail = e.detail().unwrap_or_default().replace(" conflicts with key", " conflicts with existing key");
                         SqlError::new(code::EXCLUSION_VIOLATION, format!("conflicting key value violates exclusion constraint \"{name}\""))
                             .with_detail(detail)
                     } else {

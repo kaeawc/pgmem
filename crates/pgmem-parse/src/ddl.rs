@@ -49,7 +49,8 @@ fn timing(c: Option<&sq::ConstraintCharacteristics>, what: &str) -> SqlResult<Co
     Ok(ConstraintTiming { deferrable, initially_deferred, not_valid: false })
 }
 
-fn lower_column_def(c: sq::ColumnDef) -> SqlResult<ColumnDef> {
+/// `untyped`: the column has no type (a column option of `PARTITION OF`), lowered to an empty type name.
+fn lower_column_def(c: sq::ColumnDef, untyped: bool) -> SqlResult<ColumnDef> {
     let mut constraints = Vec::new();
     for opt in c.options {
         let name = opt.name.as_ref().map(ident);
@@ -60,14 +61,16 @@ fn lower_column_def(c: sq::ColumnDef) -> SqlResult<ColumnDef> {
             sq::ColumnOption::PrimaryKey(pk) => {
                 let name = name.clone().or_else(|| pk.name.as_ref().map(ident));
                 let timing = timing(pk.characteristics.as_ref(), "PRIMARY KEY")?;
-                constraints.push(ColumnConstraint { name, kind: ColumnConstraintKind::PrimaryKey, timing });
+                let reloptions = crate::relopts::take('p', &[ident(&c.name)]);
+                constraints.push(ColumnConstraint { name, kind: ColumnConstraintKind::PrimaryKey, timing, reloptions });
                 continue;
             }
             sq::ColumnOption::Unique(u) => {
                 let name = name.clone().or_else(|| u.name.as_ref().map(ident));
                 let nulls_not_distinct = matches!(u.nulls_distinct, sq::NullsDistinctOption::NotDistinct);
                 let timing = timing(u.characteristics.as_ref(), "UNIQUE")?;
-                constraints.push(ColumnConstraint { name, kind: ColumnConstraintKind::Unique { nulls_not_distinct }, timing });
+                let reloptions = crate::relopts::take('u', &[ident(&c.name)]);
+                constraints.push(ColumnConstraint { name, kind: ColumnConstraintKind::Unique { nulls_not_distinct }, timing, reloptions });
                 continue;
             }
             sq::ColumnOption::ForeignKey(fk) => {
@@ -82,7 +85,7 @@ fn lower_column_def(c: sq::ColumnDef) -> SqlResult<ColumnDef> {
                     delete_set_columns: delete_set_columns(on_delete),
                 };
                 let timing = timing(fk.characteristics.as_ref(), "FOREIGN KEY")?;
-                constraints.push(ColumnConstraint { name, kind: ColumnConstraintKind::References(r), timing });
+                constraints.push(ColumnConstraint { name, kind: ColumnConstraintKind::References(r), timing, reloptions: Vec::new() });
                 continue;
             }
             sq::ColumnOption::Check(chk) => {
@@ -91,6 +94,7 @@ fn lower_column_def(c: sq::ColumnDef) -> SqlResult<ColumnDef> {
                     name,
                     kind: ColumnConstraintKind::Check(lower_expr(*chk.expr)?),
                     timing: ConstraintTiming::default(),
+                    reloptions: Vec::new(),
                 });
                 continue;
             }
@@ -106,49 +110,64 @@ fn lower_column_def(c: sq::ColumnDef) -> SqlResult<ColumnDef> {
             sq::ColumnOption::Comment(_) => continue,
             other => return Err(unsupported(&format!("column option {other}"))),
         };
-        constraints.push(ColumnConstraint { name, kind, timing: ConstraintTiming::default() });
+        constraints.push(ColumnConstraint { name, kind, timing: ConstraintTiming::default(), reloptions: Vec::new() });
     }
-    Ok(ColumnDef { name: ident(&c.name), ty: lower_type(&c.data_type)?, constraints })
+    let ty = if untyped && matches!(c.data_type, sq::DataType::Unspecified) {
+        pgmem_ir::TypeName::simple("")
+    } else {
+        lower_type(&c.data_type)?
+    };
+    Ok(ColumnDef { name: ident(&c.name), ty, constraints })
 }
 
 fn lower_table_constraint(c: sq::TableConstraint) -> SqlResult<TableConstraint> {
     Ok(match c {
-        sq::TableConstraint::PrimaryKey(pk) => TableConstraint {
-            name: pk.name.as_ref().map(ident),
-            kind: {
-                let columns = index_column_names(&pk.columns)?;
-                if crate::take_temporal_key(&columns) {
-                    TableConstraintKind::Temporal { primary: true, columns }
-                } else {
-                    TableConstraintKind::PrimaryKey(columns)
-                }
-            },
-            timing: timing(pk.characteristics.as_ref(), "PRIMARY KEY")?,
-        },
-        sq::TableConstraint::Unique(u) => TableConstraint {
-            name: u.name.as_ref().map(ident),
-            kind: {
-                let columns = index_column_names(&u.columns)?;
-                if crate::take_temporal_key(&columns) {
-                    TableConstraintKind::Temporal { primary: false, columns }
-                } else {
-                    TableConstraintKind::Unique {
-                        columns,
-                        nulls_not_distinct: matches!(u.nulls_distinct, sq::NullsDistinctOption::NotDistinct),
+        sq::TableConstraint::PrimaryKey(pk) => {
+            let columns = index_column_names(&pk.columns)?;
+            let reloptions = crate::relopts::take('p', &columns);
+            TableConstraint {
+                name: pk.name.as_ref().map(ident),
+                reloptions,
+                kind: {
+                    if crate::take_temporal_key(&columns) {
+                        TableConstraintKind::Temporal { primary: true, columns }
+                    } else {
+                        TableConstraintKind::PrimaryKey(columns)
                     }
-                }
-            },
-            timing: timing(u.characteristics.as_ref(), "UNIQUE")?,
-        },
+                },
+                timing: timing(pk.characteristics.as_ref(), "PRIMARY KEY")?,
+            }
+        }
+        sq::TableConstraint::Unique(u) => {
+            let columns = index_column_names(&u.columns)?;
+            let reloptions = crate::relopts::take('u', &columns);
+            TableConstraint {
+                name: u.name.as_ref().map(ident),
+                reloptions,
+                kind: {
+                    if crate::take_temporal_key(&columns) {
+                        TableConstraintKind::Temporal { primary: false, columns }
+                    } else {
+                        TableConstraintKind::Unique {
+                            columns,
+                            nulls_not_distinct: matches!(u.nulls_distinct, sq::NullsDistinctOption::NotDistinct),
+                        }
+                    }
+                },
+                timing: timing(u.characteristics.as_ref(), "UNIQUE")?,
+            }
+        }
         sq::TableConstraint::PrimaryKeyUsingIndex(u) => TableConstraint {
             name: u.name.as_ref().map(ident),
             kind: TableConstraintKind::UsingIndex { primary: true, index: ident(&u.index_name) },
             timing: timing(u.characteristics.as_ref(), "PRIMARY KEY")?,
+            reloptions: Vec::new(),
         },
         sq::TableConstraint::UniqueUsingIndex(u) => TableConstraint {
             name: u.name.as_ref().map(ident),
             kind: TableConstraintKind::UsingIndex { primary: false, index: ident(&u.index_name) },
             timing: timing(u.characteristics.as_ref(), "UNIQUE")?,
+            reloptions: Vec::new(),
         },
         sq::TableConstraint::Exclude(x) => TableConstraint {
             name: x.name.as_ref().map(ident),
@@ -162,11 +181,13 @@ fn lower_table_constraint(c: sq::TableConstraint) -> SqlResult<TableConstraint> 
                 predicate: x.where_clause.map(|w| lower_expr(*w)).transpose()?,
             },
             timing: timing(x.characteristics.as_ref(), "EXCLUDE")?,
+            reloptions: crate::relopts::take('x', &[]),
         },
         sq::TableConstraint::Check(chk) => TableConstraint {
             name: chk.name.as_ref().map(ident),
             kind: TableConstraintKind::Check(lower_expr(*chk.expr)?),
             timing: ConstraintTiming::default(),
+            reloptions: Vec::new(),
         },
         sq::TableConstraint::ForeignKey(fk) => TableConstraint {
             name: fk.name.as_ref().map(ident),
@@ -182,6 +203,7 @@ fn lower_table_constraint(c: sq::TableConstraint) -> SqlResult<TableConstraint> 
                 },
             },
             timing: timing(fk.characteristics.as_ref(), "FOREIGN KEY")?,
+            reloptions: Vec::new(),
         },
         _ => return Err(unsupported("this table constraint")),
     })
@@ -220,7 +242,7 @@ pub(crate) fn lower_create_table(ct: sq::CreateTable) -> SqlResult<CreateTable> 
         if let Some(spec) = c.name.value.strip_prefix(crate::LIKE_MARKER) {
             options.likes.push(like_clause(spec, columns.len())?);
         } else {
-            columns.push(lower_column_def(c)?);
+            columns.push(lower_column_def(c, options.partition_of.is_some())?);
         }
     }
     if ct.on_commit.is_some() && !ct.temporary {
@@ -286,11 +308,15 @@ pub(crate) fn lower_create_view(cv: sq::CreateView) -> SqlResult<CreateView> {
 }
 
 pub(crate) fn lower_create_index(ci: sq::CreateIndex) -> SqlResult<CreateIndex> {
+    let opclasses =
+        ci.columns.iter().map(|c| c.operator_class.as_ref().and_then(|o| o.0.last()).and_then(|p| p.as_ident()).map(ident)).collect();
+    let include = ci.include.iter().map(ident).collect();
     Ok(CreateIndex {
+        opclasses,
+        include,
         name: ci.name.as_ref().map(|n| object_name(n).map(|o| o.base().to_owned())).transpose()?,
         table: object_name(&ci.table_name)?,
         columns: ci.columns.into_iter().map(|c| lower_order_by_expr(c.column)).collect::<SqlResult<Vec<_>>>()?,
-        include: ci.include.iter().map(ident).collect(),
         unique: ci.unique,
         if_not_exists: ci.if_not_exists,
         concurrently: ci.concurrently,
@@ -301,6 +327,7 @@ pub(crate) fn lower_create_index(ci: sq::CreateIndex) -> SqlResult<CreateIndex> 
             sq::IndexType::Custom(i) => ident(&i),
             other => other.to_string().to_lowercase(),
         }),
+        only: crate::take_index_only(),
     })
 }
 
@@ -396,7 +423,7 @@ pub(crate) fn lower_alter_table(at: sq::AlterTable) -> SqlResult<AlterTable> {
                 actions.push(AlterTableAction::DetachPartition { partition: object_name(&partition)? });
             }
             O::AddColumn { if_not_exists, column_def, .. } => {
-                actions.push(AlterTableAction::AddColumn { if_not_exists, column: lower_column_def(column_def)? });
+                actions.push(AlterTableAction::AddColumn { if_not_exists, column: lower_column_def(column_def, false)? });
             }
             O::DropColumn { column_names, if_exists, drop_behavior, .. } => {
                 for name in column_names {
@@ -448,6 +475,18 @@ pub(crate) fn lower_alter_table(at: sq::AlterTable) -> SqlResult<AlterTable> {
                 if_exists,
                 cascade: matches!(drop_behavior, Some(sq::DropBehavior::Cascade)),
             }),
+            O::SetOptionsParens { options } => {
+                actions.push(AlterTableAction::RelOptions {
+                    reset: false,
+                    options: options.iter().map(rel_option).collect::<SqlResult<Vec<_>>>()?,
+                });
+            }
+            O::ResetOptions { options } => {
+                actions.push(AlterTableAction::RelOptions {
+                    reset: true,
+                    options: options.iter().map(|n| rel_option(&sq::SqlOption::Ident(n.clone()))).collect::<SqlResult<Vec<_>>>()?,
+                });
+            }
             O::EnableTrigger { name } => actions.push(trigger_toggle(&name, 'O')),
             O::EnableReplicaTrigger { name } => actions.push(trigger_toggle(&name, 'R')),
             O::EnableAlwaysTrigger { name } => actions.push(trigger_toggle(&name, 'A')),
@@ -458,7 +497,10 @@ pub(crate) fn lower_alter_table(at: sq::AlterTable) -> SqlResult<AlterTable> {
                 sq::Owner::CurrentUser => "current_user".to_owned(),
                 sq::Owner::SessionUser => "session_user".to_owned(),
             })),
-            O::EnableRowLevelSecurity | O::DisableRowLevelSecurity => {}
+            O::EnableRowLevelSecurity => actions.push(AlterTableAction::RowSecurity(true)),
+            O::DisableRowLevelSecurity => actions.push(AlterTableAction::RowSecurity(false)),
+            O::ForceRowLevelSecurity => actions.push(AlterTableAction::ForceRowSecurity(true)),
+            O::NoForceRowLevelSecurity => actions.push(AlterTableAction::ForceRowSecurity(false)),
             O::SetLogged => actions.push(AlterTableAction::SetUnlogged(false)),
             O::SetUnlogged => actions.push(AlterTableAction::SetUnlogged(true)),
             other => return Err(unsupported(&format!("ALTER TABLE {other}"))),
@@ -493,7 +535,7 @@ fn rel_option_name(name: &sq::ObjectName) -> SqlResult<(Option<String>, String)>
 fn rel_option_value(e: &sq::Expr) -> SqlResult<String> {
     match e {
         sq::Expr::Value(v) => match &v.value {
-            sq::Value::Number(n, _) => Ok(n.clone()),
+            sq::Value::Number(n, _) => Ok(crate::relopts::int_literal(n)),
             sq::Value::SingleQuotedString(s) => Ok(s.clone()),
             sq::Value::Boolean(b) => Ok(b.to_string()),
             _ => Err(SqlError::syntax("syntax error")),

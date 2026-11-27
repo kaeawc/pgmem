@@ -146,6 +146,12 @@ impl Session {
             let opts = copy::options(&c.options, false)?;
             return self.copy_to(c, None, &opts);
         };
+        {
+            let catalog = self.catalog_snapshot();
+            if let Ok(Some(rel)) = catalog.find_relation(name) {
+                crate::roles::check_copy(&catalog, &self.env(), &rel, &c.columns, c.from)?;
+            }
+        }
         let table = self.copy_table(name, c.from)?;
         if !c.from {
             let t = table?;
@@ -268,6 +274,7 @@ impl Session {
     }
 
     fn copy_into(&mut self, c: &ir::Copy, t: &TableDef, o: &Options) -> SqlResult<QueryResult> {
+        crate::rls::check_copy_from(&self.catalog_snapshot(), &self.env(), t)?;
         let cols = columns(t, &c.columns)?;
         let names: Vec<String> = cols.iter().map(|(n, _)| n.clone()).collect();
         check_force(o, Some(t), &names)?;

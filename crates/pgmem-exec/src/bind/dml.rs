@@ -80,6 +80,8 @@ pub struct InsertPlan {
     pub returning_cols: Vec<OutCol>,
     /// WITH CHECK OPTION of the view written through: (view name, predicate over the row).
     pub view_checks: Vec<(String, Expr)>,
+    /// Row-level security checks of new rows.
+    pub rls_checks: Vec<crate::rls::RlsCheck>,
 }
 
 #[derive(Clone, Debug)]
@@ -92,6 +94,8 @@ pub struct UpdatePlan {
     pub returning: Vec<Expr>,
     pub returning_cols: Vec<OutCol>,
     pub view_checks: Vec<(String, Expr)>,
+    /// Row-level security checks of new rows.
+    pub rls_checks: Vec<crate::rls::RlsCheck>,
 }
 
 #[derive(Clone, Debug)]
@@ -176,7 +180,14 @@ impl ViewTarget {
                 shown.map_or(0, |j| i16::try_from(j + 1).unwrap_or(i16::MAX))
             })
             .collect();
-        b.with_target_view((base.oid, self.oid, map), f)
+        let view = match b.catalog.relation_by_oid(self.oid) {
+            Some(pgmem_catalog::Relation::View(v)) => Some(v),
+            _ => None,
+        };
+        match view {
+            Some(v) => b.as_view_owner(&v, || b.with_target_view((base.oid, self.oid, map), f)),
+            None => b.with_target_view((base.oid, self.oid, map), f),
+        }
     }
 
     /// The base column a view column writes (Postgres' error for a computed one).
@@ -333,7 +344,7 @@ impl Binder<'_> {
     }
 
     /// Binds RETURNING over the statement's row followed by the old and the new version of
-    /// the target row (Postgres 18's `old.col` / `new.col`, renamed by
+    /// the target row, each with its system columns (Postgres 18's `old.col` / `new.col`, renamed by
     /// `RETURNING WITH (OLD AS o, NEW AS n)`), as the executor evaluates it.
     pub(crate) fn bind_returning(&self, items: &[ir::SelectItem], ctx: &Ctx, table: &TableDef) -> SqlResult<(Vec<Expr>, Vec<OutCol>)> {
         let (aliases, items) = match items.first() {
@@ -352,10 +363,12 @@ impl Binder<'_> {
         let current = &ctx.current().scope;
         let mut cols = current.cols.clone();
         for alias in [&aliases.0, &aliases.1] {
-            cols.extend(self.target_cols(physical_scope(table, alias)).cols.into_iter().map(|mut c| {
-                c.hidden_unqualified = true;
-                c
-            }));
+            cols.extend(self.target_cols(physical_scope(table, alias)).cols.into_iter().chain(super::system_scope_cols(alias)).map(
+                |mut c| {
+                    c.hidden_unqualified = true;
+                    c
+                },
+            ));
         }
         let level = Level::new(Scope { cols, star: current.star.clone() });
         let rctx = ctx.nested_same_level(&level).with_clause(Clause::Returning);
@@ -583,10 +596,41 @@ pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<Inser
         }
     };
     let row_scope = b.target_cols(physical_scope(&table, &qualifier));
-    let on_conflict = match &ins.on_conflict {
+    let ((on_conflict, (returning, returning_cols)), reads) = b.tracking_target_reads(table.oid, || {
+        let on_conflict = bind_on_conflict(b, ins, &rules, &table, &row_scope)?;
+        let returning_level = Level::new(b.target_cols(target_scope(&table, &qualifier)));
+        Ok((on_conflict, b.bind_returning(&ins.returning, &Ctx::new(&returning_level), &table)?))
+    })?;
+    if on_conflict.as_ref().is_some_and(|oc| oc.update.is_some()) {
+        b.rls_unsupported(&table, "INSERT ... ON CONFLICT DO UPDATE")?;
+    }
+    let rls = b.rls_target(&table, 'a', reads)?;
+    Ok(InsertPlan {
+        rules,
+        columns,
+        rows,
+        overriding_system_value: ins.overriding_system_value,
+        overriding_user_value: ins.overriding_user_value,
+        on_conflict,
+        returning,
+        returning_cols,
+        view_checks: Vec::new(),
+        rls_checks: rls.checks,
+    })
+}
+
+/// The ON CONFLICT clause of an INSERT into `table`.
+fn bind_on_conflict(
+    b: &Binder,
+    ins: &ir::Insert,
+    rules: &RowRules,
+    table: &Arc<TableDef>,
+    row_scope: &Scope,
+) -> SqlResult<Option<OnConflictPlan>> {
+    Ok(match &ins.on_conflict {
         None => None,
         Some(oc) => {
-            let arbiter = arbiter_for(b, &rules, &table, &oc.target)?;
+            let arbiter = arbiter_for(b, rules, table, &oc.target)?;
             if let Some(a) = &arbiter
                 && table.constraints.iter().any(|c| c.name == a.name && c.deferrable)
             {
@@ -612,26 +656,13 @@ pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<Inser
                     }
                     let combined = Level::new(Scope { star: row_scope.star.clone(), cols });
                     let uctx = Ctx::new(&combined);
-                    let assigns = bind_assignments(b, &table, assignments, &uctx)?;
+                    let assigns = bind_assignments(b, table, assignments, &uctx)?;
                     let filter = selection.as_ref().map(|s| b.bind_predicate(s, "WHERE", &uctx)).transpose()?;
                     Some(DoUpdatePlan { assignments: assigns, filter })
                 }
             };
             Some(OnConflictPlan { arbiter, update })
         }
-    };
-    let returning_level = Level::new(b.target_cols(target_scope(&table, &qualifier)));
-    let (returning, returning_cols) = b.bind_returning(&ins.returning, &Ctx::new(&returning_level), &table)?;
-    Ok(InsertPlan {
-        rules,
-        columns,
-        rows,
-        overriding_system_value: ins.overriding_system_value,
-        overriding_user_value: ins.overriding_user_value,
-        on_conflict,
-        returning,
-        returning_cols,
-        view_checks: Vec::new(),
     })
 }
 
@@ -789,10 +820,14 @@ pub fn bind_update(b: &Binder, upd: &ir::Update, outer: &Ctx) -> SqlResult<Updat
     };
     let level = Level::new(scope);
     let ctx = outer.from_item(&[&level]);
-    let assignments = bind_assignments(b, &table, &upd.assignments, &ctx)?;
-    let filter = upd.selection.as_ref().map(|s| b.bind_predicate(s, "WHERE", &ctx.with_clause(Clause::Where))).transpose()?;
-    let (returning, returning_cols) = b.bind_returning(&upd.returning, &ctx, &table)?;
-    Ok(UpdatePlan { rules, assignments, from, filter, returning, returning_cols, view_checks: Vec::new() })
+    let ((assignments, filter, (returning, returning_cols)), reads) = b.tracking_target_reads(table.oid, || {
+        let assignments = bind_assignments(b, &table, &upd.assignments, &ctx)?;
+        let filter = upd.selection.as_ref().map(|s| b.bind_predicate(s, "WHERE", &ctx.with_clause(Clause::Where))).transpose()?;
+        Ok((assignments, filter, b.bind_returning(&upd.returning, &ctx, &table)?))
+    })?;
+    let rls = b.rls_target(&table, 'w', reads)?;
+    let filter = super::rls::and_first(rls.quals, filter);
+    Ok(UpdatePlan { rules, assignments, from, filter, returning, returning_cols, view_checks: Vec::new(), rls_checks: rls.checks })
 }
 
 pub fn bind_delete(b: &Binder, del: &ir::Delete, outer: &Ctx) -> SqlResult<DeletePlan> {
@@ -825,7 +860,10 @@ pub fn bind_delete(b: &Binder, del: &ir::Delete, outer: &Ctx) -> SqlResult<Delet
     };
     let level = Level::new(scope);
     let ctx = outer.from_item(&[&level]);
-    let filter = del.selection.as_ref().map(|s| b.bind_predicate(s, "WHERE", &ctx.with_clause(Clause::Where))).transpose()?;
-    let (returning, returning_cols) = b.bind_returning(&del.returning, &ctx, &table)?;
+    let ((filter, (returning, returning_cols)), reads) = b.tracking_target_reads(table.oid, || {
+        let filter = del.selection.as_ref().map(|s| b.bind_predicate(s, "WHERE", &ctx.with_clause(Clause::Where))).transpose()?;
+        Ok((filter, b.bind_returning(&del.returning, &ctx, &table)?))
+    })?;
+    let filter = super::rls::and_first(b.rls_target(&table, 'd', reads)?.quals, filter);
     Ok(DeletePlan { table, using, filter, returning, returning_cols })
 }

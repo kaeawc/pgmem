@@ -1,0 +1,200 @@
+# regrole input/output, pg_default_acl and its application to new objects, pg_policies.
+
+statement ok
+CREATE ROLE slt_rr_a
+
+statement ok
+CREATE ROLE "SLT rr-b"
+
+statement ok
+CREATE SCHEMA slt_rr
+
+query
+SELECT 'slt_rr_a'::regrole, '-'::regrole, '"SLT rr-b"'::regrole, 'SLT_RR_A'::regrole
+----
+regrole:regrole | regrole:regrole | regrole:regrole | regrole:regrole
+slt_rr_a | - | "SLT rr-b" | slt_rr_a
+
+query
+SELECT 0::regrole, 424242::regrole, 424242::oid::regrole::text, pg_typeof('slt_rr_a'::regrole)
+----
+regrole:regrole | regrole:regrole | text:text | pg_typeof:regtype
+- | 424242 | 424242 | regrole
+
+query
+SELECT to_regrole('nope'), to_regrole('slt_rr_a'), to_regrole('"SLT rr-b"'), to_regrole('public'), to_regrole('a.b')
+----
+to_regrole:regrole | to_regrole:regrole | to_regrole:regrole | to_regrole:regrole | to_regrole:regrole
+NULL | slt_rr_a | "SLT rr-b" | NULL | NULL
+
+query
+SELECT 'slt_rr_a'::regrole::oid = (SELECT oid FROM pg_roles WHERE rolname = 'slt_rr_a')
+----
+?column?:bool
+t
+
+query
+SELECT (SELECT oid FROM pg_roles WHERE rolname = 'slt_rr_a')::regrole
+----
+oid:regrole
+slt_rr_a
+
+statement error 42704 role "slt_rr_nosuch" does not exist
+SELECT 'slt_rr_nosuch'::regrole
+
+statement error 42704 role "public" does not exist
+SELECT 'public'::regrole
+
+statement error 42602 invalid name syntax
+SELECT 'a.b'::regrole
+
+query
+SELECT oid, typname, typarray FROM pg_type WHERE typname = 'regrole'
+----
+oid:oid | typname:name | typarray:oid
+4096 | regrole | 4097
+
+query
+SELECT count(*) FROM pg_policies
+----
+count:int8
+0
+
+statement ok
+ALTER DEFAULT PRIVILEGES FOR ROLE slt_rr_a GRANT SELECT ON TABLES TO "SLT rr-b"
+
+query
+SELECT defaclrole::regrole, defaclnamespace::regnamespace, defaclobjtype, defaclacl::text FROM pg_default_acl WHERE defaclrole = 'slt_rr_a'::regrole ORDER BY 1, 3, 2
+----
+defaclrole:regrole | defaclnamespace:regnamespace | defaclobjtype:char | defaclacl:text
+slt_rr_a | - | r | {slt_rr_a=arwdDxtm/slt_rr_a,"\"SLT rr-b\"=r/slt_rr_a"}
+
+statement ok
+ALTER DEFAULT PRIVILEGES FOR ROLE slt_rr_a REVOKE SELECT ON TABLES FROM "SLT rr-b"
+
+query
+SELECT defaclrole::regrole, defaclnamespace::regnamespace, defaclobjtype, defaclacl::text FROM pg_default_acl WHERE defaclrole = 'slt_rr_a'::regrole ORDER BY 1, 3, 2
+----
+defaclrole:regrole | defaclnamespace:regnamespace | defaclobjtype:char | defaclacl:text
+
+statement ok
+ALTER DEFAULT PRIVILEGES FOR ROLE slt_rr_a GRANT SELECT ON TABLES TO "SLT rr-b" WITH GRANT OPTION
+
+statement ok
+ALTER DEFAULT PRIVILEGES FOR ROLE slt_rr_a IN SCHEMA public GRANT ALL ON SEQUENCES TO PUBLIC
+
+statement ok
+ALTER DEFAULT PRIVILEGES FOR ROLE slt_rr_a REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC
+
+statement ok
+ALTER DEFAULT PRIVILEGES FOR ROLE slt_rr_a GRANT USAGE ON TYPES TO slt_rr_a
+
+statement ok
+ALTER DEFAULT PRIVILEGES FOR ROLE slt_rr_a GRANT CREATE ON SCHEMAS TO slt_rr_a
+
+query
+SELECT defaclrole::regrole, defaclnamespace::regnamespace, defaclobjtype, defaclacl::text FROM pg_default_acl WHERE defaclrole = 'slt_rr_a'::regrole ORDER BY 1, 3, 2
+----
+defaclrole:regrole | defaclnamespace:regnamespace | defaclobjtype:char | defaclacl:text
+slt_rr_a | public | S | {=rwU/slt_rr_a}
+slt_rr_a | - | f | {slt_rr_a=X/slt_rr_a}
+slt_rr_a | - | r | {slt_rr_a=arwdDxtm/slt_rr_a,"\"SLT rr-b\"=r*/slt_rr_a"}
+
+statement ok
+ALTER DEFAULT PRIVILEGES FOR ROLE slt_rr_a GRANT EXECUTE ON FUNCTIONS TO PUBLIC
+
+query
+SELECT defaclrole::regrole, defaclnamespace::regnamespace, defaclobjtype, defaclacl::text FROM pg_default_acl WHERE defaclrole = 'slt_rr_a'::regrole ORDER BY 1, 3, 2
+----
+defaclrole:regrole | defaclnamespace:regnamespace | defaclobjtype:char | defaclacl:text
+slt_rr_a | public | S | {=rwU/slt_rr_a}
+slt_rr_a | - | r | {slt_rr_a=arwdDxtm/slt_rr_a,"\"SLT rr-b\"=r*/slt_rr_a"}
+
+statement ok
+ALTER DEFAULT PRIVILEGES FOR ROLE slt_rr_a REVOKE ALL ON TABLES FROM slt_rr_a
+
+query
+SELECT defaclrole::regrole, defaclnamespace::regnamespace, defaclobjtype, defaclacl::text FROM pg_default_acl WHERE defaclrole = 'slt_rr_a'::regrole ORDER BY 1, 3, 2
+----
+defaclrole:regrole | defaclnamespace:regnamespace | defaclobjtype:char | defaclacl:text
+slt_rr_a | public | S | {=rwU/slt_rr_a}
+slt_rr_a | - | r | {"\"SLT rr-b\"=r*/slt_rr_a"}
+
+statement ok
+ALTER DEFAULT PRIVILEGES FOR ROLE slt_rr_a GRANT ALL ON TABLES TO slt_rr_a
+
+query
+SELECT defaclrole::regrole, defaclnamespace::regnamespace, defaclobjtype, defaclacl::text FROM pg_default_acl WHERE defaclrole = 'slt_rr_a'::regrole ORDER BY 1, 3, 2
+----
+defaclrole:regrole | defaclnamespace:regnamespace | defaclobjtype:char | defaclacl:text
+slt_rr_a | public | S | {=rwU/slt_rr_a}
+slt_rr_a | - | r | {slt_rr_a=arwdDxtm/slt_rr_a,"\"SLT rr-b\"=r*/slt_rr_a"}
+
+statement ok
+DROP OWNED BY slt_rr_a
+
+query
+SELECT count(*) FROM pg_default_acl WHERE defaclrole = 'slt_rr_a'::regrole
+----
+count:int8
+0
+
+statement ok
+GRANT USAGE, CREATE ON SCHEMA slt_rr TO slt_rr_a
+
+statement ok
+ALTER DEFAULT PRIVILEGES FOR ROLE slt_rr_a IN SCHEMA slt_rr GRANT SELECT, INSERT ON TABLES TO "SLT rr-b"
+
+statement ok
+ALTER DEFAULT PRIVILEGES FOR ROLE slt_rr_a GRANT SELECT ON TABLES TO PUBLIC
+
+statement ok
+ALTER DEFAULT PRIVILEGES FOR ROLE slt_rr_a GRANT USAGE ON SEQUENCES TO "SLT rr-b"
+
+statement ok
+ALTER DEFAULT PRIVILEGES FOR ROLE slt_rr_a IN SCHEMA slt_rr GRANT UPDATE ON SEQUENCES TO "SLT rr-b"
+
+statement ok
+SET ROLE slt_rr_a
+
+statement ok
+CREATE TABLE slt_rr.t1 (a serial)
+
+statement ok
+CREATE VIEW slt_rr.v1 AS SELECT 1 AS x
+
+statement ok
+RESET ROLE
+
+statement ok
+CREATE TABLE slt_rr.plain (a int)
+
+query
+SELECT relname, relowner::regrole, relacl::text FROM pg_class WHERE relnamespace = 'slt_rr'::regnamespace AND relkind IN ('r', 'v', 'S') AND relname <> 'plain' ORDER BY 1
+----
+relname:name | relowner:regrole | relacl:text
+t1 | slt_rr_a | {=r/slt_rr_a,slt_rr_a=arwdDxtm/slt_rr_a,"\"SLT rr-b\"=ar/slt_rr_a"}
+t1_a_seq | slt_rr_a | {slt_rr_a=rwU/slt_rr_a,"\"SLT rr-b\"=wU/slt_rr_a"}
+v1 | slt_rr_a | {=r/slt_rr_a,slt_rr_a=arwdDxtm/slt_rr_a,"\"SLT rr-b\"=ar/slt_rr_a"}
+
+query
+SELECT relname, relacl::text FROM pg_class WHERE relname = 'plain'
+----
+relname:name | relacl:text
+plain | NULL
+
+statement ok
+DROP OWNED BY slt_rr_a
+
+statement ok
+DROP OWNED BY "SLT rr-b"
+
+statement ok
+DROP SCHEMA slt_rr CASCADE
+
+statement ok
+DROP ROLE slt_rr_a
+
+statement ok
+DROP ROLE "SLT rr-b"
+

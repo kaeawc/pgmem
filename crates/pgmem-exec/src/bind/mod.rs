@@ -11,6 +11,7 @@ pub(crate) fn like_key_name(e: &pgmem_ir::Expr) -> String {
     like::index_key_name(e)
 }
 pub mod merge;
+mod rls;
 mod select;
 
 pub use ddl::{bind_alter_table, bind_create_index, bind_create_sequence, bind_create_table, bind_create_view};
@@ -141,6 +142,12 @@ pub enum Clause {
     Returning,
     Check,
     Default,
+    /// A row-level security policy's USING / WITH CHECK expression.
+    Policy,
+    /// An argument of EXECUTE.
+    ExecuteParam,
+    /// An argument of CALL.
+    CallArg,
     /// Binding an operand of UNION/INTERSECT/EXCEPT: untyped select-list literals stay unknown
     /// until the set operation resolves the column type.
     SetOperand,
@@ -176,6 +183,9 @@ impl Clause {
             Clause::Returning => "RETURNING",
             Clause::Check => "check constraints",
             Clause::Default => "DEFAULT expressions",
+            Clause::Policy => "policy expressions",
+            Clause::ExecuteParam => "EXECUTE parameters",
+            Clause::CallArg => "CALL arguments",
             Clause::Filter => "FILTER",
             Clause::SetOperand | Clause::WindowArg | Clause::AggArg | Clause::Other => "this context",
         }
@@ -282,6 +292,25 @@ pub struct Binder<'a> {
     /// attnum of each base column, 0 when the view does not show it). Uses of the target's
     /// columns are noted on the view, whose privileges Postgres checks for the target.
     target_view: RefCell<Option<(Oid, Oid, Vec<i16>)>>,
+    /// Row-level security: the role whose policies apply (None: policies are not applied)
+    /// and the tables whose policies are being expanded (to detect recursion).
+    rls: RefCell<Option<crate::rls::RlsUser>>,
+    rls_expanding: RefCell<Vec<Oid>>,
+    /// While a statement on a partitioned table runs on its partitions: the partitioned
+    /// table, whose policies apply to the partitions as DML targets.
+    rls_root: RefCell<Option<std::sync::Arc<pgmem_catalog::TableDef>>>,
+    /// While binding the FROM of a SELECT with FOR UPDATE / SHARE: the relations it locks
+    /// (empty: all), whose UPDATE policies filter their scans too.
+    rls_lock: RefCell<Option<Vec<String>>>,
+    /// Set just before binding a FROM subquery or view the locking clause reaches: every
+    /// relation in that query's FROM is locked.
+    rls_lock_next: Cell<bool>,
+    /// While binding a policy's expressions: the relations they read, as written and as
+    /// resolved when the policy was created.
+    rel_pins: RefCell<Vec<(pgmem_ir::ObjectName, Oid)>>,
+    /// The user functions the bound statements call (their EXECUTE privilege is checked
+    /// before the statement runs).
+    function_use: RefCell<Vec<Oid>>,
 }
 
 impl<'a> Binder<'a> {
@@ -293,8 +322,27 @@ impl<'a> Binder<'a> {
             column_use: RefCell::new(None),
             quiet: Cell::new(0),
             target_view: RefCell::new(None),
+            rls: RefCell::new(None),
+            rls_expanding: RefCell::new(Vec::new()),
+            rls_root: RefCell::new(None),
+            rls_lock: RefCell::new(None),
+            rls_lock_next: Cell::new(false),
+            rel_pins: RefCell::new(Vec::new()),
+            function_use: RefCell::new(Vec::new()),
             locker: None,
             row_share: RefCell::new(None),
+        }
+    }
+
+    /// The user functions bound so far, each once.
+    pub fn function_use(&self) -> Vec<Oid> {
+        self.function_use.borrow().clone()
+    }
+
+    pub(crate) fn note_function(&self, oid: Oid) {
+        let mut used = self.function_use.borrow_mut();
+        if !used.contains(&oid) {
+            used.push(oid);
         }
     }
 
@@ -543,6 +591,11 @@ pub fn resolve_type_name(catalog: &Catalog, t: &pgmem_ir::TypeName) -> SqlResult
     let base = match builtin {
         Some(b) => b,
         None => {
+            if let Some(s) = &t.schema
+                && pgmem_types::context::search_path().no_usage.contains(s)
+            {
+                return Err(SqlError::new(code::INSUFFICIENT_PRIVILEGE, format!("permission denied for schema {s}")));
+            }
             let mut parts: Vec<String> = t.schema.iter().cloned().collect();
             parts.push(t.name.clone());
             let qualified = parts.join(".");

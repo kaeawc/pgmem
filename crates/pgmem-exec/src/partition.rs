@@ -487,9 +487,17 @@ fn routing_error(catalog: &Catalog, table: &TableDef, key: &PartitionKey, values
             }
         })
         .collect();
-    SqlError::new(code::CHECK_VIOLATION, format!("no partition of relation \"{}\" found for row", table.name))
-        .with_detail(format!("Partition key of the failing row contains ({}) = ({}).", names.join(", "), vals.join(", ")))
-        .with_table(table.name.clone())
+    let keys = key.parts.iter().map(|p| match p {
+        pgmem_catalog::PartitionKeyPart::Column(c) => Some(*c),
+        pgmem_catalog::PartitionKeyPart::Expr(_) => None,
+    });
+    let detail = crate::detail_privileges::key_visible(table.oid, keys)
+        .then(|| format!("Partition key of the failing row contains ({}) = ({}).", names.join(", "), vals.join(", ")));
+    crate::dml::with_detail(
+        SqlError::new(code::CHECK_VIOLATION, format!("no partition of relation \"{}\" found for row", table.name)),
+        detail,
+    )
+    .with_table(table.name.clone())
 }
 
 /// The direct partition of `parent` a row (in `parent`'s layout) belongs to.
@@ -547,9 +555,11 @@ pub(crate) fn satisfies_constraint(catalog: &Catalog, table: &TableDef, row: &Ro
 }
 
 pub(crate) fn constraint_error(table: &TableDef, row: &Row) -> SqlError {
-    SqlError::new(code::CHECK_VIOLATION, format!("new row for relation \"{}\" violates partition constraint", table.name))
-        .with_detail(crate::dml::failing_row(table, row))
-        .with_table(table.name.clone())
+    crate::dml::with_detail(
+        SqlError::new(code::CHECK_VIOLATION, format!("new row for relation \"{}\" violates partition constraint", table.name)),
+        crate::dml::failing_row(table, row),
+    )
+    .with_table(table.name.clone())
 }
 
 /// The rows of a partitioned table, read from its leaves in its layout: (leaf, row id, row).
@@ -637,18 +647,29 @@ fn partition_index_name(catalog: &Catalog, table: &TableDef, idx: &IndexDef, tak
 }
 
 /// Copies the parent's indexes (and their key constraints) to a partition whose slots map
-/// `slot_of(parent slot)`.
-fn clone_indexes(catalog: &Catalog, parent: &TableDef, part: &mut TableDef, slot_of: &dyn Fn(usize) -> Option<usize>) {
+/// `slot_of(parent slot)`, except those an existing index of the partition can stand for.
+/// Returns (partition index name, parent index OID) for each index to attach.
+fn clone_indexes(
+    catalog: &Catalog,
+    parent: &TableDef,
+    part: &mut TableDef,
+    slot_of: &dyn Fn(usize) -> Option<usize>,
+) -> Vec<(String, pgmem_catalog::Oid)> {
     let mut taken: Vec<String> = part.indexes.iter().map(|i| i.name.clone()).collect();
     taken.push(part.name.clone());
-    for idx in &parent.indexes {
-        let Some(columns) = idx.columns.iter().map(|c| slot_of(*c)).collect::<Option<Vec<usize>>>() else { continue };
-        if part.indexes.iter().any(|i| i.columns == columns && i.exprs == idx.exprs && i.unique == idx.unique) {
+    let mut links = Vec::new();
+    let plan: Vec<(IndexDef, Option<pgmem_catalog::Oid>)> =
+        crate::partition_index::plan_partition_indexes(catalog, parent, part).into_iter().map(|(i, f)| (i.clone(), f)).collect();
+    for (idx, existing) in plan {
+        if let Some(found) = existing.and_then(|o: pgmem_catalog::Oid| part.indexes.iter().find(|i| i.oid == o)) {
+            links.push((found.name.clone(), idx.oid));
             continue;
         }
+        let Some(columns) = idx.columns.iter().map(|c| slot_of(*c)).collect::<Option<Vec<usize>>>() else { continue };
         let Some(include) = idx.include.iter().map(|c| slot_of(*c)).collect::<Option<Vec<usize>>>() else { continue };
         let name = partition_index_name(catalog, part, &IndexDef { columns: columns.clone(), ..idx.clone() }, &taken);
         taken.push(name.clone());
+        links.push((name.clone(), idx.oid));
         let constraint = parent.constraints.iter().find(|c| c.name == idx.name).cloned();
         if let Some(mut c) = constraint {
             c.name.clone_from(&name);
@@ -664,6 +685,7 @@ fn clone_indexes(catalog: &Catalog, parent: &TableDef, part: &mut TableDef, slot
         }
         part.indexes.push(IndexDef { oid: 0, name, columns, include, ..idx.clone() });
     }
+    links
 }
 
 /// `CREATE TABLE name PARTITION OF parent [(constraints)] FOR VALUES ... [PARTITION BY ...]`.
@@ -706,7 +728,20 @@ pub(crate) fn create_partition(
         oid: 0,
         schema,
         name: name.clone(),
-        columns: parent.live_columns().map(|(_, c)| c.clone()).collect(),
+        // A partition's NOT NULL constraints keep the parent's names; a new partition holds no
+        // rows, so its copies carry no "missing" default (`atthasmissing` is false).
+        columns: parent
+            .live_columns()
+            .map(|(_, c)| {
+                let mut c = c.clone();
+                c.missing = Value::Null;
+                if c.not_null {
+                    c.not_null_name =
+                        Some(c.not_null_name.unwrap_or_else(|| crate::catalog_views::not_null_constraint_name(&parent.name, &c.name)));
+                }
+                c
+            })
+            .collect(),
         constraints: parent
             .constraints
             .iter()
@@ -730,7 +765,7 @@ pub(crate) fn create_partition(
     for c in &ct.columns {
         apply_column_options(&mut table, c)?;
     }
-    clone_indexes(&catalog, &parent, &mut table, &slot_of);
+    let index_links = clone_indexes(&catalog, &parent, &mut table, &slot_of);
     let sub_key = ct.options.partition_by.as_ref().map(|p| bind_key(&b, &table, p)).transpose()?;
     let cat = txn.catalog_mut();
     crate::ddl::assign_oids(cat, &mut table);
@@ -738,6 +773,7 @@ pub(crate) fn create_partition(
     cat.create_table(table)?;
     cat.set_partition_of(oid, Some(PartitionOf { parent: parent.oid, bound }));
     cat.set_partition_key(oid, sub_key);
+    crate::partition_index::link_by_name(cat, oid, &index_links);
     txn.created_table(oid);
     let created = txn.catalog().table_by_oid(oid).cloned().ok_or_else(|| SqlError::internal("partition vanished"))?;
     crate::triggers::clone_to_partition(txn, parent.oid, &created)?;
@@ -817,12 +853,13 @@ pub(crate) fn attach(
     }
     let mut def = (*part).clone();
     let slot_of = |s: usize| def_slot(&parent, &part, s);
-    clone_indexes(&catalog, &parent, &mut def, &slot_of);
+    let index_links = clone_indexes(&catalog, &parent, &mut def, &slot_of);
     let cat = txn.catalog_mut();
     crate::ddl::assign_oids(cat, &mut def);
     let q = def.qualified();
     cat.replace_table(&q, def);
     cat.set_partition_of(part.oid, Some(PartitionOf { parent: parent.oid, bound }));
+    crate::partition_index::link_by_name(cat, part.oid, &index_links);
     crate::triggers::clone_to_partition(txn, parent.oid, &part)?;
     Ok(())
 }
@@ -874,6 +911,7 @@ pub(crate) fn detach(parent_name: &pgmem_catalog::QualName, partition: &ir::Obje
         ));
     }
     txn.catalog_mut().set_partition_of(part.oid, None);
+    crate::partition_index::detach_indexes(txn.catalog_mut(), &part);
     crate::triggers::drop_partition_clones(txn, part.oid);
     Ok(())
 }
@@ -971,9 +1009,21 @@ pub(crate) fn exec_insert(
     stripped.returning.clear();
     stripped.on_conflict = None;
     let plan = crate::bind::bind_insert(binder, &stripped, ctx)?;
-    let columns = if i.returning.is_empty() { Vec::new() } else { crate::bind::bind_insert(binder, i, ctx)?.returning_cols };
+    let full = if i.returning.is_empty() { None } else { Some(crate::bind::bind_insert(binder, i, ctx)?) };
+    if matches!(&i.on_conflict, Some(ir::OnConflict { action: ir::ConflictAction::Update { .. }, .. })) {
+        binder.rls_unsupported(root, "INSERT ... ON CONFLICT DO UPDATE")?;
+    }
+    let columns = full.as_ref().map_or_else(Vec::new, |p| p.returning_cols.clone());
     crate::triggers::root_statement(txn, root, Event::Insert, TriggerTiming::Before, None, env, state)?;
     let rows = crate::dml::insert_preview(&plan, txn, params, env, state)?;
+    {
+        // The partitioned table's policies check the rows (the partitions' own do not apply).
+        let checks = full.as_ref().map_or(&plan.rls_checks, |p| &p.rls_checks);
+        let ectx = EvalCtx::new(txn, params, env, state);
+        for row in &rows {
+            crate::rls::check_new_row(checks, row, &ectx)?;
+        }
+    }
     let catalog = Arc::new(txn.catalog().clone());
     let b = Binder::new(&catalog, &[]);
     let mut groups: Vec<(Arc<TableDef>, Vec<Row>)> = Vec::new();
@@ -1033,7 +1083,9 @@ pub(crate) fn exec_update(
         lu.table = leaf_name(leaf);
         lu.alias = Some(alias.clone());
         let stmt = Statement::Update(Box::new(lu));
-        let r = routed(state, leaf.oid, || crate::statement::exec_statement(&stmt, binder, ctx, txn, params, env, state));
+        let r = binder.with_policy_root(root, || {
+            routed(state, leaf.oid, || crate::statement::exec_statement(&stmt, binder, ctx, txn, params, env, state))
+        });
         match r {
             Ok(r) => results.push(r),
             Err(e) => {
@@ -1062,26 +1114,31 @@ pub(crate) fn exec_update(
             let inserted_cols = if returning.is_empty() {
                 Vec::new()
             } else {
+                // Its system columns follow, for `new.ctid`, `new.tableoid`, ...
                 target
                     .live_columns()
-                    .map(|(_, c)| ir::SelectItem::Expr { expr: ir::Expr::Column(vec![c.name.clone()]), alias: None })
+                    .map(|(_, c)| c.name.as_str())
+                    .chain(crate::bind::SYSTEM_COLUMNS.iter().map(|(n, _)| *n))
+                    .map(|n| ir::SelectItem::Expr { expr: ir::Expr::Column(vec![n.to_owned()]), alias: None })
                     .collect()
             };
             let mut r = routed(state, target.oid, || insert_into(&target, vec![target_row], &alias, None, inserted_cols, txn, env, state))?;
             r.tag = "UPDATE 1".into();
             if !returning.is_empty() {
                 let mut rows = Vec::new();
-                for inserted in std::mem::take(&mut r.rows) {
+                for mut inserted in std::mem::take(&mut r.rows) {
+                    let new_system = inserted.split_off(live.len());
                     let mut leaf_row: Row = vec![Value::Null; target.columns.len()];
                     for (slot, v) in live.iter().zip(inserted) {
                         leaf_row[*slot] = v;
                     }
                     let new = remap(&leaf_row, &target, root);
                     let old = remap(&m.old, &leaf, root);
+                    let old_system = crate::dml::system_values(m.leaf, Some(m.id), 0);
                     let mut current = new.clone();
-                    current.extend(crate::dml::system_values(target.oid, None, 0));
+                    current.extend(new_system.iter().cloned());
                     current.extend(m.from.iter().cloned());
-                    let out = crate::dml::returning_row(&current, Some(&old), Some(&new), root.columns.len());
+                    let out = crate::dml::returning_row(&current, Some((&old, &old_system)), Some((&new, &new_system)), root.columns.len());
                     let ectx = EvalCtx::new(txn, params, env, state);
                     rows.push(returning.iter().map(|e| eval(e, &out, &ectx)).collect::<SqlResult<Vec<_>>>()?);
                 }
@@ -1115,7 +1172,9 @@ pub(crate) fn exec_delete(
         ld.table = leaf_name(&leaf);
         ld.alias = Some(alias.clone());
         let stmt = Statement::Delete(Box::new(ld));
-        results.push(routed(state, leaf.oid, || crate::statement::exec_statement(&stmt, binder, ctx, txn, params, env, state))?);
+        results.push(binder.with_policy_root(root, || {
+            routed(state, leaf.oid, || crate::statement::exec_statement(&stmt, binder, ctx, txn, params, env, state))
+        })?);
     }
     crate::triggers::root_statement(txn, root, Event::Delete, TriggerTiming::After, None, env, state)?;
     Ok(combine(results, "DELETE", columns))
@@ -1176,7 +1235,7 @@ pub(crate) fn recurses(action: &ir::AlterTableAction) -> Option<ir::AlterTableAc
 // Functions
 
 fn reg_class(catalog: &Catalog, oid: pgmem_catalog::Oid) -> Value {
-    Value::Reg(pgmem_types::RegKind::Class, oid, crate::reg::reg_name(pgmem_types::RegKind::Class, oid, catalog))
+    Value::Reg(pgmem_types::RegKind::Class, oid, crate::reg::reg_name(pgmem_types::RegKind::Class, oid, catalog, ""))
 }
 
 fn arg_oid(v: &Value) -> Option<pgmem_catalog::Oid> {
@@ -1186,16 +1245,55 @@ fn arg_oid(v: &Value) -> Option<pgmem_catalog::Oid> {
     }
 }
 
+/// Whether a relation is in a partition tree: a partition or a partitioned table, or an
+/// attached or partitioned index.
+fn in_tree(catalog: &Catalog, oid: pgmem_catalog::Oid) -> bool {
+    match catalog.index_by_oid(oid) {
+        Some((t, _)) => catalog.index_parent(oid).is_some() || catalog.is_partitioned(t.oid),
+        None => catalog.partition_of(oid).is_some() || catalog.is_partitioned(oid),
+    }
+}
+
+/// A relation's parent in its partition tree (a table's or an index's).
+fn tree_parent(catalog: &Catalog, oid: pgmem_catalog::Oid) -> Option<pgmem_catalog::Oid> {
+    catalog.partition_of(oid).map(|p| p.parent).or_else(|| catalog.index_parent(oid))
+}
+
+/// A relation's children in its partition tree, in OID order.
+fn tree_children(catalog: &Catalog, oid: pgmem_catalog::Oid) -> Vec<pgmem_catalog::Oid> {
+    let mut out: Vec<pgmem_catalog::Oid> = catalog.partitions(oid).into_iter().map(|(t, _)| t.oid).collect();
+    out.extend(catalog.index_children(oid));
+    out
+}
+
+/// Whether a tree member is a leaf: not a partitioned table, nor an index on one.
+fn tree_leaf(catalog: &Catalog, oid: pgmem_catalog::Oid) -> bool {
+    match catalog.index_by_oid(oid) {
+        Some((t, _)) => !catalog.is_partitioned(t.oid),
+        None => !catalog.is_partitioned(oid),
+    }
+}
+
+fn tree_ancestors(catalog: &Catalog, oid: pgmem_catalog::Oid) -> Vec<pgmem_catalog::Oid> {
+    let mut out = Vec::new();
+    let mut cur = oid;
+    while let Some(p) = tree_parent(catalog, cur) {
+        out.push(p);
+        cur = p;
+    }
+    out
+}
+
 /// `pg_partition_ancestors(rel)`: the relation and its ancestors (no rows for a relation that is
 /// neither a partition nor partitioned).
 pub(crate) fn ancestors_srf(a: &[Value], ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let catalog = ctx.txn.catalog();
     let Some(oid) = arg_oid(&a[0]) else { return Ok(Vec::new()) };
-    if catalog.partition_of(oid).is_none() && !catalog.is_partitioned(oid) {
+    if !in_tree(catalog, oid) {
         return Ok(Vec::new());
     }
     let mut out = vec![vec![reg_class(catalog, oid)]];
-    out.extend(catalog.partition_ancestors(oid).into_iter().map(|o| vec![reg_class(catalog, o)]));
+    out.extend(tree_ancestors(catalog, oid).into_iter().map(|o| vec![reg_class(catalog, o)]));
     Ok(out)
 }
 
@@ -1203,23 +1301,22 @@ pub(crate) fn ancestors_srf(a: &[Value], ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
 pub(crate) fn tree_srf(a: &[Value], ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let catalog = ctx.txn.catalog();
     let Some(oid) = arg_oid(&a[0]) else { return Ok(Vec::new()) };
-    if catalog.partition_of(oid).is_none() && !catalog.is_partitioned(oid) {
+    if !in_tree(catalog, oid) {
         return Ok(Vec::new());
     }
     fn walk(catalog: &Catalog, oid: pgmem_catalog::Oid, parent: Option<pgmem_catalog::Oid>, level: i32, out: &mut Vec<Row>) {
         out.push(vec![
             reg_class(catalog, oid),
             parent.map_or(Value::Null, |p| reg_class(catalog, p)),
-            Value::Bool(!catalog.is_partitioned(oid)),
+            Value::Bool(tree_leaf(catalog, oid)),
             Value::Int4(level),
         ]);
-        for (child, _) in catalog.partitions(oid) {
-            walk(catalog, child.oid, Some(oid), level + 1, out);
+        for child in tree_children(catalog, oid) {
+            walk(catalog, child, Some(oid), level + 1, out);
         }
     }
     let mut out = Vec::new();
-    let parent = catalog.partition_of(oid).map(|p| p.parent);
-    walk(catalog, oid, parent, 0, &mut out);
+    walk(catalog, oid, tree_parent(catalog, oid), 0, &mut out);
     Ok(out)
 }
 
@@ -1227,10 +1324,10 @@ pub(crate) fn tree_srf(a: &[Value], ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
 pub(crate) fn root_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
     let catalog = ctx.txn.catalog();
     let Some(oid) = arg_oid(&a[0]) else { return Ok(Value::Null) };
-    if catalog.partition_of(oid).is_none() && !catalog.is_partitioned(oid) {
+    if !in_tree(catalog, oid) {
         return Ok(Value::Null);
     }
-    Ok(reg_class(catalog, catalog.partition_ancestors(oid).last().copied().unwrap_or(oid)))
+    Ok(reg_class(catalog, tree_ancestors(catalog, oid).last().copied().unwrap_or(oid)))
 }
 
 /// The latest rows of a table (a partitioned one's from its leaves, in its layout), as
@@ -1246,4 +1343,28 @@ pub(crate) fn latest_rows(txn: &Txn, table: &TableDef) -> Vec<Row> {
         }
     }
     out
+}
+
+/// Name of the copy of foreign key `con` (on `child`, referencing the partitioned `root`)
+/// that PostgreSQL keeps for `leaf`, a descendant of `root`: the first free
+/// `<con>_<n>` among `child`'s constraints, numbered over the partition tree depth first.
+pub(crate) fn fk_clone_name(catalog: &Catalog, root: &TableDef, leaf: &TableDef, child: &TableDef, con: &str) -> String {
+    if leaf.oid == root.oid {
+        return con.to_owned();
+    }
+    let mut taken: std::collections::HashSet<String> = child.constraints.iter().map(|c| c.name.clone()).collect();
+    let mut n = 0;
+    for part in catalog.partition_descendants(root.oid) {
+        let name = loop {
+            n += 1;
+            let name = format!("{con}_{n}");
+            if taken.insert(name.clone()) {
+                break name;
+            }
+        };
+        if part.oid == leaf.oid {
+            return name;
+        }
+    }
+    con.to_owned()
 }

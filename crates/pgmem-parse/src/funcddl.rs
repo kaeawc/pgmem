@@ -61,6 +61,8 @@ pub(crate) enum RawAlter {
     Attrs(Attrs),
     Rename(String),
     SetSchema(String),
+    Owner(String),
+    DependsOn { extension: String, remove: bool },
 }
 
 /// The function attributes `CREATE` and `ALTER FUNCTION` share (gram.y `common_func_opt_item`);
@@ -232,6 +234,7 @@ pub(crate) enum CommentOn {
     Function(Option<Vec<sq::DataType>>),
     Constraint(sq::ObjectName),
     Trigger(sq::ObjectName),
+    Policy(sq::ObjectName),
 }
 
 pub(crate) struct RawFunction {
@@ -361,12 +364,13 @@ pub(crate) fn try_parse(p: &mut Parser) -> Result<Option<FuncDdl>, ParserError> 
     }
     if word_at(p, 0, "COMMENT")
         && word_at(p, 1, "ON")
-        && ["FUNCTION", "PROCEDURE", "ROUTINE", "CONSTRAINT", "TRIGGER"].iter().any(|w| word_at(p, 2, w))
+        && ["FUNCTION", "PROCEDURE", "ROUTINE", "CONSTRAINT", "TRIGGER", "POLICY"].iter().any(|w| word_at(p, 2, w))
     {
         p.next_token();
         p.next_token();
-        let routine = !(word_at(p, 0, "CONSTRAINT") || word_at(p, 0, "TRIGGER"));
+        let routine = !(word_at(p, 0, "CONSTRAINT") || word_at(p, 0, "TRIGGER") || word_at(p, 0, "POLICY"));
         let trigger = word_at(p, 0, "TRIGGER");
+        let policy = word_at(p, 0, "POLICY");
         p.next_token();
         let name = p.parse_object_name(false)?;
         let target = if routine {
@@ -393,7 +397,13 @@ pub(crate) fn try_parse(p: &mut Parser) -> Result<Option<FuncDdl>, ParserError> 
             expect(p, "ON")?;
             let _ = eat(p, "DOMAIN");
             let table = p.parse_object_name(false)?;
-            if trigger { CommentOn::Trigger(table) } else { CommentOn::Constraint(table) }
+            if trigger {
+                CommentOn::Trigger(table)
+            } else if policy {
+                CommentOn::Policy(table)
+            } else {
+                CommentOn::Constraint(table)
+            }
         };
         expect(p, "IS")?;
         let text = if eat(p, "NULL") { None } else { Some(string(p)?) };
@@ -448,7 +458,7 @@ fn arg_mode(p: &mut Parser) -> FunctionArgMode {
 }
 
 /// `[mode] [name] type [{DEFAULT | =} expr]`: a name is present when a type follows it.
-fn function_arg(p: &mut Parser) -> Result<(FunctionArgMode, Option<sq::Ident>, sq::DataType, Option<sq::Expr>), ParserError> {
+pub(crate) fn function_arg(p: &mut Parser) -> Result<(FunctionArgMode, Option<sq::Ident>, sq::DataType, Option<sq::Expr>), ParserError> {
     let mode = arg_mode(p);
     // `name type`: the second token starts a type (a word, not `,` `)` `DEFAULT` `=` `[` `(`).
     let named = matches!(p.peek_token().token, Token::Word(_))
@@ -558,21 +568,9 @@ fn function_options(p: &mut Parser, f: &mut RawFunction) -> Result<(), ParserErr
     Ok(())
 }
 
-/// `ALTER {FUNCTION | PROCEDURE | ROUTINE} name [(args)] {action ... | RENAME TO n | SET SCHEMA n}`;
-/// `OWNER TO` is left to the role statements.
+/// `ALTER {FUNCTION | PROCEDURE | ROUTINE} name [(args)] {action ... | RENAME TO n | SET SCHEMA n |
+/// OWNER TO role | [NO] DEPENDS ON EXTENSION n}`.
 fn alter_function(p: &mut Parser) -> Result<Option<FuncDdl>, ParserError> {
-    let mut i = 2;
-    let mut depth = 0i32;
-    loop {
-        match &p.peek_nth_token(i).token {
-            Token::EOF | Token::SemiColon => break,
-            Token::LParen => depth += 1,
-            Token::RParen => depth -= 1,
-            Token::Word(w) if depth == 0 && w.quote_style.is_none() && w.value.eq_ignore_ascii_case("owner") => return Ok(None),
-            _ => {}
-        }
-        i += 1;
-    }
     p.next_token();
     let kind = if eat(p, "FUNCTION") {
         RoutineKind::Function
@@ -608,6 +606,19 @@ fn alter_function(p: &mut Parser) -> Result<Option<FuncDdl>, ParserError> {
         p.next_token();
         p.next_token();
         RawAlter::SetSchema(ident(&p.parse_identifier()?))
+    } else if eat(p, "OWNER") {
+        expect(p, "TO")?;
+        RawAlter::Owner(match p.next_token().token {
+            Token::Word(w) if w.quote_style.is_some() => w.value,
+            Token::Word(w) => w.value.to_lowercase(),
+            other => return p.expected("a role name", sqlparser::tokenizer::TokenWithSpan::wrap(other)),
+        })
+    } else if word_at(p, 0, "DEPENDS") || (word_at(p, 0, "NO") && word_at(p, 1, "DEPENDS")) {
+        let remove = eat(p, "NO");
+        p.next_token();
+        expect(p, "ON")?;
+        expect(p, "EXTENSION")?;
+        RawAlter::DependsOn { extension: ident(&p.parse_identifier()?), remove }
     } else {
         let mut a = Attrs::default();
         let mut any = false;
@@ -818,6 +829,8 @@ pub(crate) fn lower(d: FuncDdl) -> SqlResult<Statement> {
             let actions = match action {
                 RawAlter::Rename(n) => vec![AlterFunctionAction::RenameTo(n)],
                 RawAlter::SetSchema(n) => vec![AlterFunctionAction::SetSchema(n)],
+                RawAlter::Owner(r) => vec![AlterFunctionAction::OwnerTo(r)],
+                RawAlter::DependsOn { extension, remove } => vec![AlterFunctionAction::DependsOnExtension { extension, remove }],
                 RawAlter::Attrs(a) => {
                     a.check()?;
                     let mut out = Vec::new();
@@ -876,6 +889,7 @@ pub(crate) fn lower(d: FuncDdl) -> SqlResult<Statement> {
                 }
                 CommentOn::Constraint(t) => pgmem_ir::CommentTarget::Constraint(object_name(&t)?),
                 CommentOn::Trigger(t) => pgmem_ir::CommentTarget::Trigger(object_name(&t)?),
+                CommentOn::Policy(t) => pgmem_ir::CommentTarget::Policy(object_name(&t)?),
             };
             Statement::Comment { target, name: object_name(&name)?, text }
         }

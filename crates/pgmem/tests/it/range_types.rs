@@ -148,3 +148,58 @@ fn exclusion_constraints_and_temporal_keys() {
         [["p", "PRIMARY KEY (id, valid WITHOUT OVERLAPS)"]]
     );
 }
+
+#[test]
+fn multirange_operators_unnest_and_casts() {
+    let (_db, mut c) = setup();
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT '{[1,3),[5,8)}'::int4multirange + '{[3,5)}', '{[1,10)}'::int4multirange - '{[2,3),[5,6),[9,12)}', \
+             '{[1,10),[20,30)}'::int4multirange * '{[5,25)}', '{(,)}'::int4multirange - '{[1,2)}'"
+        ),
+        [["{[1,8)}", "{[1,2),[3,5),[6,9)}", "{[5,10),[20,25)}", "{(,1),[2,)}"]]
+    );
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT '{[1,3),[5,8)}'::int4multirange @> '{[1,2),[6,7)}', '{[1,3),[5,8)}'::int4multirange @> '{[1,6)}'::int4multirange, \
+             int4range(1, 9) @> '{[2,3),[5,6)}'::int4multirange, 4 <@ '{[1,3),[5,8)}'::int4multirange, \
+             '{[1,3),[5,8)}'::int4multirange << int4range(8, 9), int4range(-1, 1) -|- '{[1,3),[7,9)}'::int4multirange, \
+             '{}'::int4multirange && int4range(1, 2)"
+        ),
+        [["t", "f", "t", "f", "t", "t", "f"]]
+    );
+    let e = expect_code(c.batch_execute("SELECT '{[1,3)}'::int4multirange + int4range(3, 4)"), "42883");
+    assert_eq!(message(&e), "operator does not exist: int4multirange + int4range");
+    assert_eq!(rows(&mut c, "SELECT x FROM unnest('{[1,3),[5,8)}'::int4multirange) AS x"), [["[1,3)"], ["[5,8)"]]);
+    assert_eq!(
+        rows(&mut c, "SELECT '[1,5)'::int4range::int4multirange, range_cmp(int4range(1, 2), int4range(1, 3)), int4range(1, 5) || 'x'"),
+        [["{[1,5)}", "-1", "[1,5)x"]]
+    );
+}
+
+#[test]
+fn range_bounds_resolution_and_catalog_rows() {
+    let (_db, mut c) = setup();
+    // daterange_canonical leaves infinite bounds inclusive.
+    assert_eq!(
+        rows(&mut c, "SELECT '[2024-01-01,infinity]'::daterange, '[-infinity,infinity]'::daterange, '[infinity,infinity]'::daterange"),
+        [["[2024-01-01,infinity]", "[-infinity,infinity]", "[infinity,infinity]"]]
+    );
+    // anyelement takes the subtype exactly; bounds take implicit casts only.
+    let e = expect_code(c.batch_execute("SELECT numrange(1, 2) @> 2"), "42883");
+    assert_eq!(message(&e), "operator does not exist: numrange @> integer");
+    let e = expect_code(c.batch_execute("SELECT int4range(1.5, 3)"), "42883");
+    assert_eq!(message(&e), "function int4range(numeric, integer) does not exist");
+    let e = expect_code(c.batch_execute("SELECT max(r) FROM (VALUES (int4range(1, 2))) v(r)"), "42883");
+    assert_eq!(message(&e), "function max(int4range) does not exist");
+    assert_eq!(
+        rows(&mut c, "SELECT rngsubopc, rngsubdiff::text FROM pg_range WHERE rngtypid = 'int8range'::regtype"),
+        [["3124", "int8range_subdiff"]]
+    );
+    assert_eq!(
+        rows(&mut c, "SELECT typalign::text, typanalyze::text FROM pg_type WHERE typname IN ('tstzrange', '_int4range') ORDER BY oid"),
+        [["i", "array_typanalyze"], ["d", "range_typanalyze"]]
+    );
+}
