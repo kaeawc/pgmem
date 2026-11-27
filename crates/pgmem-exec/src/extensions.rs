@@ -97,6 +97,8 @@ pub(crate) fn drop_extension(
             .with_detail(lines.join("\n"))
             .with_hint("Use DROP ... CASCADE to drop the dependent objects too."));
         }
+        // Everything that goes with the extension is reported by one notice.
+        let mut cascaded: Vec<String> = Vec::new();
         for (table, slot, column, tname, _) in users {
             if let Some(def) = txn.catalog().table_q(&table).cloned() {
                 let mut def = (*def).clone();
@@ -106,11 +108,7 @@ pub(crate) fn drop_extension(
                 col.not_null = false;
                 col.default = None;
                 txn.catalog_mut().replace_table(&table, def);
-                notices.push(Notice {
-                    severity: "NOTICE",
-                    code: "00000",
-                    message: format!("drop cascades to column {column} of table {tname}"),
-                });
+                cascaded.push(format!("column {column} of table {tname}"));
             }
         }
         if let Some(oid) = txn.catalog().extension(name).map(|e| e.oid) {
@@ -127,13 +125,18 @@ pub(crate) fn drop_extension(
         if !deps.is_empty() && !cascade {
             return Err(deps.error(&format!("extension {name}")));
         }
-        deps.drop(txn, &mut notices);
+        let mut dropped = Vec::new();
+        deps.drop(txn, &mut dropped);
+        cascaded.extend(dropped.iter().map(|n| n.message.trim_start_matches("drop cascades to ").to_owned()));
         for f in marked {
             let cat = txn.catalog_mut();
             cat.drop_comments(f.oid);
             cat.drop_function(f.oid);
         }
         txn.catalog_mut().drop_extension(name);
+        if !cascaded.is_empty() {
+            notices.push(crate::ddl::cascade_notice(&cascaded));
+        }
     }
     Ok(QueryResult { tag: "DROP EXTENSION".into(), notices, ..Default::default() })
 }

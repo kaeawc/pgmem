@@ -108,6 +108,11 @@ pub(super) fn pg_proc(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("provolatile", ch(f.volatility)),
                 ("proparallel", ch(f.parallel)),
                 (
+                    "proacl",
+                    crate::roles::acl_items(m.catalog, ctx.env, &pgmem_catalog::GrantObject::Function(f.oid), f.oid, false)
+                        .map_or(Value::Null, |items| Value::Array(items.into_iter().map(Value::Text).collect())),
+                ),
+                (
                     "proconfig",
                     if f.config.is_empty() { Value::Null } else { Value::Array(f.config.iter().cloned().map(Value::Text).collect()) },
                 ),

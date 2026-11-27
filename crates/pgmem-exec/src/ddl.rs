@@ -1060,7 +1060,7 @@ fn drop_schemas(d: &ir::Drop, txn: &mut Txn) -> SqlResult<QueryResult> {
 }
 
 /// Postgres' "drop cascades to ..." notice: one line, or a count with the list as detail.
-fn cascade_notice(members: &[String]) -> Notice {
+pub(crate) fn cascade_notice(members: &[String]) -> Notice {
     let message = if members.len() == 1 {
         format!("drop cascades to {}", members[0])
     } else {

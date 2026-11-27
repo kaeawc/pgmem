@@ -660,6 +660,124 @@ fn trigger_execute_user_schema_and_usage() {
     drop_test_roles(&mut c, USAGE_ROLES);
 }
 
+const CREATE_ROLES: &[&str] = &["itcr_a", "itcr_b"];
+
+/// CREATE on the schema is required to create objects in it, rename them and move them in
+/// (`permission denied for schema s`); the public schema grants PUBLIC only USAGE (#236).
+#[test]
+fn schema_create_privilege_is_enforced() {
+    let (_db, mut c) = setup();
+    drop_test_roles(&mut c, CREATE_ROLES);
+    let _ = c.batch_execute("DROP SCHEMA IF EXISTS crs CASCADE");
+    c.batch_execute(
+        "CREATE ROLE itcr_a; CREATE ROLE itcr_b; CREATE SCHEMA crs; GRANT USAGE ON SCHEMA crs TO itcr_a, itcr_b;
+         CREATE TABLE crs.owned (id int); ALTER TABLE crs.owned OWNER TO itcr_a;
+         CREATE FUNCTION crs.fo() RETURNS int LANGUAGE sql AS 'select 1'; ALTER FUNCTION crs.fo() OWNER TO itcr_a;
+         CREATE TYPE crs.tyo AS ENUM ('a'); ALTER TYPE crs.tyo OWNER TO itcr_a;
+         SET ROLE itcr_a",
+    )
+    .expect("setup");
+    for sql in [
+        "CREATE TABLE crs.t1 (id int)",
+        "CREATE TABLE t1 (id int)",
+        "CREATE TABLE crs.t2 AS SELECT 1",
+        "CREATE VIEW crs.v AS SELECT 1",
+        "CREATE MATERIALIZED VIEW crs.mv AS SELECT 1",
+        "CREATE SEQUENCE crs.sq",
+        "CREATE FUNCTION crs.f() RETURNS int LANGUAGE sql AS 'select 1'",
+        "CREATE PROCEDURE crs.p() LANGUAGE sql AS 'select 1'",
+        "CREATE TYPE crs.ty AS ENUM ('a')",
+        "CREATE DOMAIN crs.d AS int",
+        "CREATE INDEX ON crs.owned (id)",
+        "ALTER TABLE crs.owned RENAME TO owned2",
+        "ALTER FUNCTION crs.fo() RENAME TO fo2",
+    ] {
+        let want = if sql == "CREATE TABLE t1 (id int)" { "public" } else { "crs" };
+        denied_with(&mut c, sql, &format!("permission denied for schema {want}"));
+    }
+    // ALTER TYPE RENAME needs no CREATE; SET SCHEMA needs CREATE on the target.
+    c.batch_execute("ALTER TYPE crs.tyo RENAME TO tyo2").expect("type rename");
+    denied_with(&mut c, "ALTER TABLE crs.owned SET SCHEMA public", "permission denied for schema public");
+    c.batch_execute("CREATE TEMP TABLE crtmp (id int)").expect("temp tables need no CREATE");
+    c.batch_execute("RESET ROLE; GRANT CREATE ON SCHEMA crs TO itcr_a; SET ROLE itcr_a").expect("grant");
+    c.batch_execute(
+        "CREATE TABLE crs.t1 (id int); CREATE VIEW crs.v AS SELECT 1; CREATE SEQUENCE crs.sq; CREATE INDEX ON crs.owned (id);
+         CREATE FUNCTION crs.f() RETURNS int LANGUAGE sql AS 'select 1'; CREATE TYPE crs.ty AS ENUM ('a');
+         ALTER TABLE crs.owned RENAME TO owned2",
+    )
+    .expect("create with CREATE");
+    // Ownership is checked before CREATE on the target schema.
+    denied_with(&mut c, "SET ROLE itcr_b; ALTER TABLE crs.t1 SET SCHEMA public", "must be owner of table t1");
+    // Database-level CREATE: schemas.
+    c.batch_execute("RESET ROLE; SET ROLE itcr_a").expect("role");
+    let db = rows(&mut c, "SELECT current_database()")[0][0].clone();
+    denied_with(&mut c, "CREATE SCHEMA crs_new", &format!("permission denied for database {db}"));
+    c.batch_execute(&format!(
+        "RESET ROLE; GRANT CREATE ON DATABASE {db} TO itcr_a; SET ROLE itcr_a; CREATE SCHEMA crs_new; DROP SCHEMA crs_new"
+    ))
+    .expect("schema with database CREATE");
+    c.batch_execute(&format!("RESET ROLE; DROP SCHEMA crs CASCADE; REVOKE CREATE ON DATABASE {db} FROM itcr_a")).expect("cleanup");
+    drop_test_roles(&mut c, CREATE_ROLES);
+}
+
+const TYPE_USAGE_ROLES: &[&str] = &["ittu_a"];
+
+/// A qualified type name in a schema without USAGE is refused, and a SECURITY DEFINER
+/// function resolves `$user` as its owner (#236).
+#[test]
+fn type_usage_and_definer_user_schema() {
+    let (_db, mut c) = setup();
+    drop_test_roles(&mut c, TYPE_USAGE_ROLES);
+    let _ = c.batch_execute("DROP SCHEMA IF EXISTS tus CASCADE; DROP SCHEMA IF EXISTS ittu_a CASCADE; DROP FUNCTION IF EXISTS tusd()");
+    c.batch_execute(
+        "CREATE ROLE ittu_a; GRANT CREATE ON SCHEMA public TO ittu_a;
+         CREATE SCHEMA tus; CREATE TYPE tus.ty AS ENUM ('a'); CREATE DOMAIN tus.d AS int;
+         CREATE SCHEMA ittu_a AUTHORIZATION ittu_a;
+         CREATE FUNCTION tusd() RETURNS text LANGUAGE sql SECURITY DEFINER AS 'select current_schema()';
+         ALTER FUNCTION tusd() OWNER TO ittu_a",
+    )
+    .expect("setup");
+    assert_eq!(rows(&mut c, "SELECT tusd()"), [["ittu_a"]]);
+    c.batch_execute("SET ROLE ittu_a").expect("SET ROLE");
+    for sql in [
+        "CREATE TABLE tut (a tus.ty)",
+        "SELECT 'a'::tus.ty",
+        "SELECT CAST(1 AS tus.d)",
+        "CREATE FUNCTION tuf(x tus.ty) RETURNS int LANGUAGE sql AS 'select 1'",
+        "CREATE TABLE tut2 (a int); ALTER TABLE tut2 ADD COLUMN b tus.d",
+    ] {
+        denied_with(&mut c, sql, "permission denied for schema tus");
+    }
+    c.batch_execute("RESET ROLE; DROP TABLE IF EXISTS tut2; DROP FUNCTION tusd(); DROP SCHEMA tus CASCADE; DROP SCHEMA ittu_a CASCADE")
+        .expect("cleanup");
+    drop_test_roles(&mut c, TYPE_USAGE_ROLES);
+}
+
+const PROACL_ROLES: &[&str] = &["itpa_a", "itpa_b"];
+
+/// `pg_proc.proacl` holds the real ACL once EXECUTE was granted or revoked: PUBLIC's default
+/// entry, the owner's, then each grant (#236).
+#[test]
+fn proacl_reflects_execute_grants() {
+    let (_db, mut c) = setup();
+    drop_test_roles(&mut c, PROACL_ROLES);
+    let owner = rows(&mut c, "SELECT current_user")[0][0].clone();
+    let acl = |c: &mut postgres::Client| rows(c, "SELECT proacl::text FROM pg_proc WHERE proname = 'pacl_f'");
+    c.batch_execute("CREATE ROLE itpa_a; CREATE ROLE itpa_b; CREATE FUNCTION pacl_f() RETURNS int LANGUAGE sql AS 'select 1'")
+        .expect("setup");
+    assert_eq!(acl(&mut c), [["NULL"]]);
+    c.batch_execute("GRANT EXECUTE ON FUNCTION pacl_f() TO itpa_a").expect("grant");
+    assert_eq!(acl(&mut c), [[format!("{{=X/{owner},{owner}=X/{owner},itpa_a=X/{owner}}}")]]);
+    c.batch_execute("REVOKE EXECUTE ON FUNCTION pacl_f() FROM PUBLIC").expect("revoke public");
+    assert_eq!(acl(&mut c), [[format!("{{{owner}=X/{owner},itpa_a=X/{owner}}}")]]);
+    c.batch_execute("REVOKE EXECUTE ON FUNCTION pacl_f() FROM itpa_a").expect("revoke");
+    assert_eq!(acl(&mut c), [[format!("{{{owner}=X/{owner}}}")]]);
+    c.batch_execute("GRANT EXECUTE ON FUNCTION pacl_f() TO itpa_a WITH GRANT OPTION").expect("grant option");
+    assert_eq!(acl(&mut c), [[format!("{{{owner}=X/{owner},itpa_a=X*/{owner}}}")]]);
+    c.batch_execute("DROP FUNCTION pacl_f()").expect("cleanup");
+    drop_test_roles(&mut c, PROACL_ROLES);
+}
+
 #[track_caller]
 fn assert_denied(c: &mut postgres::Client, sql: &str, rel: &str) {
     let e = expect_code(c.batch_execute(sql), "42501");

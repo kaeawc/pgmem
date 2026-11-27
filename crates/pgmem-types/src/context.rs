@@ -87,11 +87,14 @@ pub struct SearchPath {
     pub user: String,
     /// The session's temporary schema (`pg_temp_N`), once it has one.
     pub temp_schema: Option<String>,
+    /// Existing schemas the current role has no USAGE on (empty for superusers): a qualified
+    /// type name in one is refused.
+    pub no_usage: Vec<String>,
 }
 
 impl Default for SearchPath {
     fn default() -> SearchPath {
-        SearchPath { entries: vec!["$user".into(), "public".into()], user: String::new(), temp_schema: None }
+        SearchPath { entries: vec!["$user".into(), "public".into()], user: String::new(), temp_schema: None, no_usage: Vec::new() }
     }
 }
 

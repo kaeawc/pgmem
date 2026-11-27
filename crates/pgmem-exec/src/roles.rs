@@ -51,6 +51,18 @@ pub fn is_superuser(catalog: &Catalog, env: &SessionEnv, role: &str) -> bool {
     role == env.user || catalog.role(role).is_some_and(|r| r.superuser)
 }
 
+/// The existing schemas `role` may not use (none for superusers).
+pub fn schemas_without_usage(catalog: &Catalog, env: &SessionEnv, role: &str) -> Vec<String> {
+    if is_superuser(catalog, env, role) {
+        return Vec::new();
+    }
+    catalog
+        .schemas()
+        .filter(|s| !has_privilege(catalog, env, role, &GrantObject::Schema(s.name.clone()), 'U'))
+        .map(|s| s.name.clone())
+        .collect()
+}
+
 /// The privilege letters an object kind has, for ALL and validation.
 fn object_privileges(object: &GrantObject, sequence: bool) -> &'static str {
     match object {
@@ -163,12 +175,18 @@ pub fn acl_items(catalog: &Catalog, env: &SessionEnv, object: &GrantObject, oid:
     }
     let owner = owner_of(catalog, env, oid);
     let mut items = Vec::new();
+    // PUBLIC's default EXECUTE on a function is an entry of its ACL once the ACL exists.
+    let public_default =
+        matches!(object, GrantObject::Function(_)) && !grants.iter().any(|g| g.grantee.is_empty() || g.grantee == "-revoked:public");
+    if public_default {
+        items.push(format!("={}/{}", object_privileges(object, sequence), acl_name(&owner)));
+    }
     // An explicit owner entry (from default privileges) keeps its position; otherwise the
     // owner's implicit entry leads.
     if !grants.iter().any(|g| g.grantee == owner) {
         items.push(format!("{}={}/{}", acl_name(&owner), object_privileges(object, sequence), acl_name(&owner)));
     }
-    items.extend(grants.iter().map(|g| acl_item(g)));
+    items.extend(grants.iter().filter(|g| g.grantee != "-revoked:public").map(|g| acl_item(g)));
     Some(items)
 }
 
