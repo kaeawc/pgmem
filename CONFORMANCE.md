@@ -7,13 +7,13 @@ PostgreSQL 18; CI re-verifies every record against PostgreSQL and runs it agains
 A record passes when pgmem returns the same column names, column types and text values, or
 the same SQLSTATE and error message.
 
-pgmem passes **4166 / 4166 records (100.0%)**.
+pgmem passes **4216 / 4216 records (100.0%)**.
 
 | Area | Records | Pass | Rate |
 |---|---:|---:|---:|
 | catalog | 317 | 317 | 100.0% |
 | constraints | 171 | 171 | 100.0% |
-| ddl | 753 | 753 | 100.0% |
+| ddl | 803 | 803 | 100.0% |
 | dml | 379 | 379 | 100.0% |
 | functions | 534 | 534 | 100.0% |
 | queries | 461 | 461 | 100.0% |
@@ -48,12 +48,13 @@ pgmem passes **4166 / 4166 records (100.0%)**.
 | ddl/create_table.slt | 40 | 40 | 100.0% |
 | ddl/deparse_keywords.slt | 14 | 14 | 100.0% |
 | ddl/drop.slt | 36 | 36 | 100.0% |
+| ddl/drop_schema_functions.slt | 26 | 26 | 100.0% |
 | ddl/generated.slt | 23 | 23 | 100.0% |
 | ddl/identity.slt | 38 | 38 | 100.0% |
 | ddl/index_access_methods.slt | 22 | 22 | 100.0% |
 | ddl/indexes.slt | 36 | 36 | 100.0% |
 | ddl/migrations.slt | 58 | 58 | 100.0% |
-| ddl/partitioning.slt | 111 | 111 | 100.0% |
+| ddl/partitioning.slt | 135 | 135 | 100.0% |
 | ddl/reloptions.slt | 53 | 53 | 100.0% |
 | ddl/schema.slt | 31 | 31 | 100.0% |
 | ddl/sequences.slt | 34 | 34 | 100.0% |
