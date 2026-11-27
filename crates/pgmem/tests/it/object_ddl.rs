@@ -347,3 +347,67 @@ fn long_statistics_names() {
     want.sort();
     assert_eq!(got, want);
 }
+
+#[test]
+fn pg_cast_builtin_rows_and_object_addresses() {
+    let (_db, mut c) = setup();
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT count(*), count(*) FILTER (WHERE castcontext = 'e'), count(*) FILTER (WHERE castcontext = 'a'), \
+             count(*) FILTER (WHERE castcontext = 'i'), count(*) FILTER (WHERE castmethod = 'b'), count(*) FILTER (WHERE castmethod = 'i') \
+             FROM pg_cast"
+        ),
+        [["235", "41", "77", "117", "64", "5"]]
+    );
+    assert_eq!(rows(&mut c, "SELECT count(*) FROM (SELECT * FROM pg_cast) s"), [["235"]]);
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT oid, castsource::regtype, casttarget::regtype, castfunc::regprocedure, castcontext, castmethod FROM pg_cast \
+             WHERE oid IN (10000, 10002, 10004) ORDER BY oid"
+        ),
+        [
+            ["10000", "bigint", "smallint", "int2(bigint)", "a", "f"],
+            ["10002", "bigint", "real", "float4(bigint)", "i", "f"],
+            ["10004", "bigint", "numeric", "\"numeric\"(bigint)", "i", "f"],
+        ]
+    );
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT pg_describe_object('pg_cast'::regclass, c.oid, 0), i.type, i.identity, a.object_names::text, a.object_args::text \
+             FROM pg_cast c, pg_identify_object('pg_cast'::regclass, c.oid, 0) i, pg_identify_object_as_address('pg_cast'::regclass, c.oid, 0) a \
+             WHERE c.oid IN (10014, 10131) ORDER BY c.oid"
+        ),
+        [
+            ["cast from integer to numeric", "cast", "(integer AS numeric)", "{integer}", "{numeric}"],
+            [
+                "cast from \"char\" to text",
+                "cast",
+                "(pg_catalog.\"char\" AS pg_catalog.text)",
+                "{\"pg_catalog.\\\"char\\\"\"}",
+                "{pg_catalog.text}"
+            ],
+        ]
+    );
+    // Domains and enums get no pg_cast rows; CREATE CAST adds them with user OIDs.
+    c.batch_execute(
+        "CREATE TYPE feel AS ENUM ('a'); CREATE DOMAIN posint AS int CHECK (VALUE > 0);
+         CREATE CAST (feel AS text) WITH INOUT AS ASSIGNMENT",
+    )
+    .expect("types");
+    assert_eq!(
+        rows(&mut c, "SELECT count(*) FROM pg_cast WHERE casttarget = 'posint'::regtype OR castsource = 'posint'::regtype"),
+        [["0"]]
+    );
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT pg_describe_object('pg_cast'::regclass, c.oid, 0), i.identity FROM pg_cast c, pg_identify_object('pg_cast'::regclass, c.oid, 0) i \
+             WHERE c.castsource = 'feel'::regtype"
+        ),
+        [["cast from feel to text", "(public.feel AS pg_catalog.text)"]]
+    );
+    assert_eq!(rows(&mut c, "SELECT pg_describe_object('pg_cast'::regclass, 1, 0) IS NULL"), [["t"]]);
+}

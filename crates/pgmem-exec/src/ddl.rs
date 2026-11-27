@@ -411,6 +411,11 @@ pub(crate) fn alter_table_action(
                 _ => None,
             };
             txn.catalog_mut().replace_table(rename_from.as_ref().unwrap_or(current), def);
+            if let ir::AlterTableAction::AlterType { column, .. } = action
+                && let Some(t) = txn.catalog().table_by_oid(oid).cloned()
+            {
+                crate::ddl_sequences::retype_identity(txn, &t, column)?;
+            }
             for index in gone {
                 txn.catalog_mut().forget_index(index);
             }

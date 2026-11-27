@@ -1,0 +1,132 @@
+# pg_cast: Postgres 18's builtin casts, CREATE CAST rows, and the object-address functions on casts.
+
+query
+SELECT count(*), count(*) FILTER (WHERE castcontext = 'e'), count(*) FILTER (WHERE castcontext = 'a'), count(*) FILTER (WHERE castcontext = 'i'), count(*) FILTER (WHERE castmethod = 'f'), count(*) FILTER (WHERE castmethod = 'b'), count(*) FILTER (WHERE castmethod = 'i'), min(oid), max(oid) FROM pg_cast
+----
+count:int8 | count:int8 | count:int8 | count:int8 | count:int8 | count:int8 | count:int8 | min:oid | max:oid
+235 | 41 | 77 | 117 | 166 | 64 | 5 | 10000 | 10234
+
+query
+SELECT count(*) FROM (SELECT * FROM pg_cast) s
+----
+count:int8
+235
+
+query
+SELECT md5(string_agg(oid || ' ' || castsource || ' ' || casttarget || ' ' || castfunc || ' ' || castcontext::text || castmethod::text, ',' ORDER BY oid)) FROM pg_cast
+----
+md5:text
+9778f8121776eead11701a5088de5339
+
+query
+SELECT oid, castsource::regtype, casttarget::regtype, castfunc::regprocedure, castcontext, castmethod FROM pg_cast WHERE oid BETWEEN 10000 AND 10009 ORDER BY oid
+----
+oid:oid | castsource:regtype | casttarget:regtype | castfunc:regprocedure | castcontext:char | castmethod:char
+10000 | bigint | smallint | int2(bigint) | a | f
+10001 | bigint | integer | int4(bigint) | a | f
+10002 | bigint | real | float4(bigint) | i | f
+10003 | bigint | double precision | float8(bigint) | i | f
+10004 | bigint | numeric | "numeric"(bigint) | i | f
+10005 | smallint | bigint | int8(smallint) | i | f
+10006 | smallint | integer | int4(smallint) | i | f
+10007 | smallint | real | float4(smallint) | i | f
+10008 | smallint | double precision | float8(smallint) | i | f
+10009 | smallint | numeric | "numeric"(smallint) | i | f
+
+query
+SELECT castsource::regtype, casttarget::regtype, castfunc, castcontext, castmethod FROM pg_cast WHERE (castsource, casttarget) IN (('int4'::regtype, 'int8'::regtype), ('int8'::regtype, 'int4'::regtype), ('text'::regtype, 'varchar'::regtype), ('varchar'::regtype, 'varchar'::regtype), ('json'::regtype, 'jsonb'::regtype), ('int4'::regtype, 'oid'::regtype), ('float8'::regtype, 'numeric'::regtype)) ORDER BY oid
+----
+castsource:regtype | casttarget:regtype | castfunc:oid | castcontext:char | castmethod:char
+bigint | integer | 480 | a | f
+integer | bigint | 481 | i | f
+double precision | numeric | 1743 | a | f
+integer | oid | 0 | i | b
+text | character varying | 0 | i | b
+character varying | character varying | 669 | i | f
+json | jsonb | 0 | a | i
+
+query
+SELECT oid FROM pg_class WHERE relname = 'pg_cast' AND relnamespace = 'pg_catalog'::regnamespace
+----
+oid:oid
+2605
+
+query
+SELECT count(*), count(DISTINCT castfunc), count(*) FILTER (WHERE castfunc::regprocedure::text ~ '^[0-9]+$') FROM pg_cast WHERE castfunc <> 0
+----
+count:int8 | count:int8 | count:int8
+166 | 118 | 0
+
+query
+SELECT pg_describe_object('pg_cast'::regclass, oid, 0) FROM pg_cast WHERE oid IN (10001, 10100, 10131, 10200, 10220) ORDER BY oid
+----
+pg_describe_object:text
+cast from bigint to integer
+cast from regconfig to bigint
+cast from "char" to text
+cast from cidr to character varying
+cast from json to jsonb
+
+query
+SELECT i.type, i.schema, i.name, i.identity, a.object_names, a.object_args FROM pg_cast c, pg_identify_object('pg_cast'::regclass, c.oid, 0) i, pg_identify_object_as_address('pg_cast'::regclass, c.oid, 0) a WHERE c.oid IN (10001, 10014, 10131, 10160, 10189, 10220) ORDER BY c.oid
+----
+type:text | schema:text | name:text | identity:text | object_names:_text | object_args:_text
+cast | NULL | NULL | (bigint AS integer) | {bigint} | {integer}
+cast | NULL | NULL | (integer AS numeric) | {integer} | {numeric}
+cast | NULL | NULL | (pg_catalog."char" AS pg_catalog.text) | {"pg_catalog.\"char\""} | {pg_catalog.text}
+cast | NULL | NULL | (time without time zone AS interval) | {"time without time zone"} | {interval}
+cast | NULL | NULL | (bit AS bit varying) | {bit} | {"bit varying"}
+cast | NULL | NULL | (json AS pg_catalog.jsonb) | {json} | {pg_catalog.jsonb}
+
+query
+SELECT md5(string_agg(pg_describe_object(2605, c.oid, 0) || ' ' || i.identity || ' ' || a.object_names::text || a.object_args::text, ',' ORDER BY c.oid)) FROM pg_cast c, pg_identify_object(2605, c.oid, 0) i, pg_identify_object_as_address(2605, c.oid, 0) a
+----
+md5:text
+a26ebde5794fd331eb11fd3c21d17c09
+
+query
+SELECT pg_describe_object(2605, 1, 0), i.type, i.identity, a.type, a.object_names FROM pg_identify_object(2605, 1, 0) i, pg_identify_object_as_address(2605, 1, 0) a
+----
+pg_describe_object:text | type:text | identity:text | type:text | object_names:_text
+NULL | cast | NULL | cast | NULL
+
+statement ok
+CREATE TYPE feel AS ENUM ('a', 'b')
+
+statement ok
+CREATE DOMAIN posint AS int CHECK (VALUE > 0)
+
+query
+SELECT count(*) FROM pg_cast WHERE castsource IN ('feel'::regtype, 'posint'::regtype, '_feel'::regtype) OR casttarget IN ('feel'::regtype, 'posint'::regtype, '_feel'::regtype)
+----
+count:int8
+0
+
+query
+SELECT count(*) FROM pg_cast
+----
+count:int8
+235
+
+statement ok
+CREATE FUNCTION int_to_feel(int) RETURNS feel LANGUAGE sql AS $$ SELECT 'a'::feel $$
+
+statement ok
+CREATE CAST (int AS feel) WITH FUNCTION int_to_feel(int)
+
+statement ok
+CREATE CAST (feel AS text) WITH INOUT AS ASSIGNMENT
+
+query
+SELECT castsource::regtype, casttarget::regtype, castfunc::regproc, castcontext, castmethod, pg_describe_object('pg_cast'::regclass, oid, 0) FROM pg_cast WHERE oid >= 16384 ORDER BY oid
+----
+castsource:regtype | casttarget:regtype | castfunc:regproc | castcontext:char | castmethod:char | pg_describe_object:text
+integer | feel | int_to_feel | e | f | cast from integer to feel
+feel | text | - | a | i | cast from feel to text
+
+query
+SELECT i.type, i.schema, i.name, i.identity, a.object_names, a.object_args FROM pg_cast c, pg_identify_object('pg_cast'::regclass, c.oid, 0) i, pg_identify_object_as_address('pg_cast'::regclass, c.oid, 0) a WHERE c.oid >= 16384 ORDER BY c.oid
+----
+type:text | schema:text | name:text | identity:text | object_names:_text | object_args:_text
+cast | NULL | NULL | (integer AS public.feel) | {integer} | {public.feel}
+cast | NULL | NULL | (public.feel AS pg_catalog.text) | {public.feel} | {pg_catalog.text}

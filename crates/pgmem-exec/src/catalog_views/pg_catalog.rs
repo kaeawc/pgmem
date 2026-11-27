@@ -1768,6 +1768,15 @@ fn pg_stat_activity(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     }))
 }
 
+/// The (source, target) type OIDs of the builtin `pg_cast` row with OID `o`.
+pub fn builtin_cast_by_oid(o: u32) -> Option<(u32, u32)> {
+    PG_CAST_DATA.lines().find_map(|l| {
+        let mut f = l.split('\t').map(|v| v.parse::<u32>().ok());
+        (f.next()?? == o).then_some(())?;
+        Some((f.next()??, f.next()??))
+    })
+}
+
 /// Whether Postgres has a builtin `pg_cast` row from type OID `source` to `target`.
 pub fn builtin_cast_exists(source: u32, target: u32) -> bool {
     PG_CAST_DATA.lines().any(|l| {

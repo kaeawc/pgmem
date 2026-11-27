@@ -13,6 +13,7 @@ use super::{Spec, ch, name, oid, snapshot, txt};
 use crate::eval::EvalCtx;
 use crate::funcs::string::quote_ident;
 use crate::plan::Row;
+use crate::usercast::CAST_CLASS_OID;
 use pgmem_catalog::{
     ArgMode, Catalog, ColumnDef, ConstraintKind, FIRST_USER_OID, FuncArg, FuncReturn, Oid, PG_CATALOG_NAMESPACE_OID, PartitionKeyPart,
     Relation, TableDef, TypeDefKind, ViewDef,
@@ -933,14 +934,33 @@ fn builtin_type_names(m: &Model, o: Oid) -> Option<(String, String)> {
     Some((typname, formatted))
 }
 
-/// `format_type_be_qualified` of a builtin type: SQL-standard names stay bare, the others get
-/// `pg_catalog.`.
+/// `format_type_be_qualified` of a builtin type: the types `format_type_extended` names
+/// specially (SQL-standard names, and `json`) stay bare, the others get `pg_catalog.`.
 fn builtin_qualified(typname: &str, formatted: &str) -> String {
     if let Some(elem) = formatted.strip_suffix("[]") {
         let elem_name = typname.strip_prefix('_').unwrap_or(typname);
         return format!("{}[]", builtin_qualified(elem_name, elem));
     }
-    if typname == formatted { format!("pg_catalog.{}", quote_ident(typname)) } else { formatted.to_owned() }
+    const SPECIAL: [&str; 17] = [
+        "bit",
+        "bool",
+        "bpchar",
+        "float4",
+        "float8",
+        "int2",
+        "int4",
+        "int8",
+        "interval",
+        "json",
+        "numeric",
+        "time",
+        "timetz",
+        "timestamp",
+        "timestamptz",
+        "varbit",
+        "varchar",
+    ];
+    if SPECIAL.contains(&typname) { formatted.to_owned() } else { format!("pg_catalog.{}", quote_ident(typname)) }
 }
 
 /// A function: schema, name, whether the search path finds it, input argument types, and
@@ -1024,6 +1044,14 @@ fn rule_info(m: &Model, o: Oid) -> Option<Oid> {
     rule_relations(m).iter().map(|v| v.oid).find(|v| rule_oid(*v) == o)
 }
 
+/// A cast's (source, target) type OIDs, builtin or `CREATE CAST`.
+fn cast_info(m: &Model, o: Oid) -> Option<(Oid, Oid)> {
+    if let Some(c) = m.catalog.casts().find(|c| c.oid == o) {
+        return Some((type_oid(m.catalog, &c.source), type_oid(m.catalog, &c.target)));
+    }
+    super::pg_catalog::builtin_cast_by_oid(o)
+}
+
 /// A relation's description, or its column's (`objsubid` > 0).
 fn rel_description(m: &Model, rel: Oid, sub: i32) -> Option<String> {
     let r = rel_info(m, rel)?;
@@ -1063,6 +1091,10 @@ fn describe_object(m: &Model, class: Oid, o: Oid, sub: i32) -> Option<String> {
             let t = m.catalog.triggers().find(|t| t.oid == o)?;
             Some(format!("trigger {} on {}", t.name, rel_description(m, t.table, 0)?))
         }
+        CAST_CLASS_OID => {
+            let (s, t) = cast_info(m, o)?;
+            Some(format!("cast from {} to {}", type_text(m, s, false), type_text(m, t, false)))
+        }
         _ => None,
     }
 }
@@ -1090,6 +1122,7 @@ fn class_kind(class: Oid) -> Option<&'static str> {
         ATTRDEF_CLASS_OID => "default value",
         REWRITE_CLASS_OID => "rule",
         TRIGGER_CLASS_OID => "trigger",
+        CAST_CLASS_OID => "cast",
         _ => return None,
     })
 }
@@ -1158,6 +1191,11 @@ fn identify(m: &Model, class: Oid, o: Oid, sub: i32) -> Option<Identity> {
             let r = rel_info(m, t.table)?;
             let identity = format!("{} on {}", quote_ident(&t.name), r.identity());
             Some(ident("trigger", None, None, identity, vec![r.schema, r.name, t.name.clone()], vec![]))
+        }
+        CAST_CLASS_OID => {
+            let (s, t) = cast_info(m, o)?;
+            let (s, t) = (type_text(m, s, true), type_text(m, t, true));
+            Some(ident("cast", None, None, format!("({s} AS {t})"), vec![s], vec![t]))
         }
         _ => None,
     }
