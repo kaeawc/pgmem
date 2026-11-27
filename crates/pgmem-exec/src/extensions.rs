@@ -2,7 +2,8 @@
 //! `pg_extension`); pgmem implements the functions and types of pgcrypto, uuid-ossp, citext,
 //! pg_trgm, hstore and btree_gist, which are available whether or not they are installed.
 
-use crate::session::{Notice, QueryResult};
+use crate::eval::StatementState;
+use crate::session::{Notice, QueryResult, SessionEnv};
 use pgmem_catalog::ExtensionDef;
 use pgmem_ir as ir;
 use pgmem_storage::Txn;
@@ -56,7 +57,14 @@ pub(crate) fn create_extension(
     Ok(QueryResult { tag: "CREATE EXTENSION".into(), ..Default::default() })
 }
 
-pub(crate) fn drop_extension(names: &[String], if_exists: bool, cascade: bool, txn: &mut Txn) -> SqlResult<QueryResult> {
+pub(crate) fn drop_extension(
+    names: &[String],
+    if_exists: bool,
+    cascade: bool,
+    txn: &mut Txn,
+    env: &SessionEnv,
+    state: &StatementState,
+) -> SqlResult<QueryResult> {
     let mut notices = Vec::new();
     for name in names {
         if txn.catalog().extension(name).is_none() {
@@ -105,9 +113,14 @@ pub(crate) fn drop_extension(names: &[String], if_exists: bool, cascade: bool, t
                 });
             }
         }
-        // Functions marked DEPENDS ON EXTENSION go with it (no CASCADE needed).
+        if let Some(oid) = txn.catalog().extension(name).map(|e| e.oid) {
+            crate::ext_alter::drop_members(oid, cascade, txn, env, state)?;
+        }
+        // Functions marked DEPENDS ON EXTENSION go with it (no CASCADE needed); members were
+        // dropped above, so each is dropped once.
         let marked: Vec<u32> = txn.catalog().functions().filter(|f| f.extensions.contains(name)).map(|f| f.oid).collect();
         for oid in marked {
+            txn.catalog_mut().drop_comments(oid);
             txn.catalog_mut().drop_function(oid);
         }
         txn.catalog_mut().drop_extension(name);

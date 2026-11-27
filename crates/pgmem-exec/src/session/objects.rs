@@ -1,7 +1,7 @@
 //! Session statements over per-session objects: prepared statements, cursors, LISTEN /
 //! NOTIFY, DISCARD, EXPLAIN and the maintenance commands.
 
-use super::{QueryResult, Session, TxStatus};
+use super::{QueryResult, Session, SessionEnv, TxStatus};
 use crate::bind::{self, Binder, Ctx, Level, Scope};
 use crate::cast::{CoercionContext, cast_context};
 use crate::eval::{EvalCtx, StatementState};
@@ -459,18 +459,31 @@ impl Session {
         let _ctx = pgmem_types::context::enter(self.format_context());
         let env = self.env();
         let state = StatementState::default();
+        // Details are limited to what the current role may read, as in the statement that
+        // queued the check (which wrote nothing at this point).
+        let snapshot = Arc::new(txn.catalog().clone());
+        crate::detail_privileges::as_reader(&snapshot, &env, || self.run_checks(txn, checks, &env, &state))
+    }
+
+    fn run_checks(
+        &self,
+        txn: &mut Txn,
+        checks: Vec<(pgmem_catalog::Oid, String)>,
+        env: &SessionEnv,
+        state: &StatementState,
+    ) -> SqlResult<()> {
         for (oid, name) in checks {
             let catalog = txn.catalog().clone();
             let Some(def) = catalog.table_by_oid(oid).cloned() else { continue };
             if def.constraints.iter().any(|c| c.name == name) {
                 // A unique violation reads as an insertion's, not as index creation's.
-                crate::ddl::validate_constraint(txn, &def, &name, &catalog, &env, &state).map_err(|e| {
+                crate::ddl::validate_constraint(txn, &def, &name, &catalog, env, state).map_err(|e| {
                     if e.code == code::UNIQUE_VIOLATION && e.message.starts_with("could not create unique index") {
-                        let detail = e.detail().unwrap_or_default().replace(" is duplicated.", " already exists.");
-                        SqlError::new(code::UNIQUE_VIOLATION, format!("duplicate key value violates unique constraint \"{name}\""))
-                            .with_detail(detail)
+                        let detail = e.detail().map(|d| d.replace(" is duplicated.", " already exists."));
+                        let e = SqlError::new(code::UNIQUE_VIOLATION, format!("duplicate key value violates unique constraint \"{name}\""));
+                        crate::dml::with_detail(e, detail)
                     } else if e.code == code::EXCLUSION_VIOLATION && e.message.starts_with("could not create exclusion constraint") {
-                        let detail = e.detail().unwrap_or_default().replace(" conflicts with key ", " conflicts with existing key ");
+                        let detail = e.detail().unwrap_or_default().replace(" conflicts with key", " conflicts with existing key");
                         SqlError::new(code::EXCLUSION_VIOLATION, format!("conflicting key value violates exclusion constraint \"{name}\""))
                             .with_detail(detail)
                     } else {
@@ -624,21 +637,36 @@ impl Session {
             return Err(SqlError::new(code::ACTIVE_SQL_TRANSACTION, format!("{tag_name} cannot run inside a transaction block")));
         }
         self.check_relations(tables)?;
+        // ANALYZE in a transaction block holds SHARE UPDATE EXCLUSIVE on each table and reads
+        // its indexes.
+        if tag_name == "ANALYZE"
+            && let Some(txn) = self.txn.as_ref()
+        {
+            let catalog = self.catalog_snapshot();
+            for t in tables {
+                if let Ok(Some(pgmem_catalog::Relation::Table(def))) = catalog.find_relation(t) {
+                    txn.lock_relation(def.oid, crate::lock_levels::SHARE_UPDATE_EXCLUSIVE);
+                    for i in &def.indexes {
+                        txn.lock_relation(i.oid, crate::lock_levels::ACCESS_SHARE);
+                    }
+                }
+            }
+        }
         Ok(tag(tag_name))
     }
 
-    pub(super) fn lock_tables(&self, tables: &[ir::ObjectName], mode: u8, nowait: bool) -> SqlResult<QueryResult> {
+    /// `LOCK [TABLE] [ONLY] name [, ...] [IN mode MODE] [NOWAIT]`: each table with its
+    /// partitions (not with ONLY), each view with the relations it reads.
+    pub(super) fn lock_tables(&self, tables: &[(ir::ObjectName, bool)], mode: u8, nowait: bool) -> SqlResult<QueryResult> {
         if !self.in_block() {
             return Err(SqlError::new(code::NO_ACTIVE_SQL_TRANSACTION, "LOCK TABLE can only be used in transaction blocks"));
         }
-        self.check_relations(tables)?;
         let _ctx = pgmem_types::context::enter(self.format_context());
         let catalog = self.catalog_snapshot();
-        if let Some(txn) = self.txn.as_ref() {
-            for t in tables {
-                if let Some(rel) = catalog.find_relation(t)? {
-                    txn.lock_table(rel.oid(), t.base(), mode, nowait)?;
-                }
+        let Some(txn) = self.txn.as_ref() else { return Ok(tag("LOCK TABLE")) };
+        for (name, only) in tables {
+            for (oid, rel_name) in crate::lock_levels::lock_statement_targets(&catalog, name, *only)? {
+                txn.lock_table(oid, &rel_name, mode, nowait)?;
             }
         }
         Ok(tag("LOCK TABLE"))

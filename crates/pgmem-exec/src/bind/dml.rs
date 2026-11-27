@@ -145,6 +145,7 @@ struct ViewTarget {
 /// delete), or Postgres' error for a view that is not automatically updatable.
 fn view_target(b: &Binder, name: &ir::ObjectName, verb: &str) -> SqlResult<Option<ViewTarget>> {
     let Some(pgmem_catalog::Relation::View(v)) = b.catalog.find_relation(name)? else { return Ok(None) };
+    b.lock(v.oid, crate::lock_levels::ROW_EXCLUSIVE);
     match crate::views::resolve(b.catalog, &v)? {
         Ok(u) => Ok(Some(ViewTarget { view: v.name.clone(), oid: v.oid, u })),
         Err(reason) => {
@@ -332,7 +333,7 @@ impl Binder<'_> {
     }
 
     /// Binds RETURNING over the statement's row followed by the old and the new version of
-    /// the target row (Postgres 18's `old.col` / `new.col`, renamed by
+    /// the target row, each with its system columns (Postgres 18's `old.col` / `new.col`, renamed by
     /// `RETURNING WITH (OLD AS o, NEW AS n)`), as the executor evaluates it.
     pub(crate) fn bind_returning(&self, items: &[ir::SelectItem], ctx: &Ctx, table: &TableDef) -> SqlResult<(Vec<Expr>, Vec<OutCol>)> {
         let (aliases, items) = match items.first() {
@@ -351,10 +352,12 @@ impl Binder<'_> {
         let current = &ctx.current().scope;
         let mut cols = current.cols.clone();
         for alias in [&aliases.0, &aliases.1] {
-            cols.extend(self.target_cols(physical_scope(table, alias)).cols.into_iter().map(|mut c| {
-                c.hidden_unqualified = true;
-                c
-            }));
+            cols.extend(self.target_cols(physical_scope(table, alias)).cols.into_iter().chain(super::system_scope_cols(alias)).map(
+                |mut c| {
+                    c.hidden_unqualified = true;
+                    c
+                },
+            ));
         }
         let level = Level::new(Scope { cols, star: current.star.clone() });
         let rctx = ctx.nested_same_level(&level).with_clause(Clause::Returning);
@@ -500,6 +503,7 @@ pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<Inser
         return Ok(plan);
     }
     let table = lookup_table(b, &ins.table)?;
+    b.lock(table.oid, crate::lock_levels::ROW_EXCLUSIVE);
     let qualifier = ins.alias.clone().unwrap_or_else(|| table.name.clone());
     let rules = b.bind_row_rules(&table)?;
     let columns: Vec<usize> = if ins.columns.is_empty() {
@@ -767,6 +771,7 @@ pub fn bind_update(b: &Binder, upd: &ir::Update, outer: &Ctx) -> SqlResult<Updat
         return Ok(plan);
     }
     let table = lookup_table(b, &upd.table)?;
+    b.lock_table_and_indexes(&table, crate::lock_levels::ROW_EXCLUSIVE);
     let qualifier = upd.alias.clone().unwrap_or_else(|| table.name.clone());
     let rules = b.bind_row_rules(&table)?;
     let target_scope = b.target_cols(target_scope(&table, &qualifier));
@@ -803,6 +808,7 @@ pub fn bind_delete(b: &Binder, del: &ir::Delete, outer: &Ctx) -> SqlResult<Delet
         return Ok(plan);
     }
     let table = lookup_table(b, &del.table)?;
+    b.lock_table_and_indexes(&table, crate::lock_levels::ROW_EXCLUSIVE);
     let qualifier = del.alias.clone().unwrap_or_else(|| table.name.clone());
     let target_scope = b.target_cols(target_scope(&table, &qualifier));
     let width = target_scope.width();

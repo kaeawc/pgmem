@@ -10,14 +10,29 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 
 - Static Linux binaries (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) on each release.
 - `cargo binstall pgmem` installs the prebuilt binary from the GitHub release.
+- `ALTER EXTENSION name UPDATE [TO version]`, `SET SCHEMA schema` and `ADD` / `DROP` of tables, views, sequences, functions, types, domains and schemas. Extension members cannot be dropped on their own (`2BP01`, "extension requires it"), `DROP EXTENSION` removes them, and `pg_extension.extrelocatable` follows the extension. `Catalog::extension_members()` exposes membership for `pg_depend` rows with deptype `e`.
 - `pg_get_keywords()` returns PostgreSQL 18's keyword list (word, catcode, barelabel, catdesc, baredesc).
+- `pg_locks` lists relation locks: the ones queries (with the indexes the planner opens), DML,
+  `LOCK TABLE` and DDL take, at PostgreSQL's lock level for each statement and ALTER TABLE
+  subcommand. They are held to the end of the transaction (or released by `ROLLBACK TO`) and
+  conflict with `LOCK ... NOWAIT` in other sessions.
+- `CREATE STATISTICS` (and `ALTER` / `DROP` / `COMMENT ON STATISTICS`): the object is stored, listed in `pg_statistic_ext`, printed by `pg_get_statisticsobjdef`, `pg_get_statisticsobjdef_columns` and `pg_get_statisticsobjdef_expressions`, shown in psql's `\d` footer, and dropped with its table or a referenced column. No statistics are gathered.
+- `CREATE CAST` (`WITH FUNCTION`, `WITHOUT FUNCTION`, `WITH INOUT`, `AS ASSIGNMENT | IMPLICIT`) and `DROP CAST`, with `pg_cast` listing PostgreSQL 18's builtin casts alongside user ones. Casts apply to `::` and `CAST` (and to assignments and implicit coercions of the expression itself, not to operator or function argument resolution).
 
 ### Fixed
 
 - Errors carry PostgreSQL's `position` field (`P`, the 1-based character offset into the query string, shown by psql as `LINE n:` with a caret) for syntax errors and for undefined columns, relations and functions, missing FROM-clause entries, ambiguous columns, undefined operators and invalid literal input, in simple and extended (`Parse`) queries; a statement of a multi-statement query is located in the whole string. Errors inside function and `DO` bodies carry none.
+- Indexes store their access method and operator classes: `CREATE INDEX ... USING hash|gin|gist|brin|spgist` shows in `pg_get_indexdef` / `pg_indexes.indexdef`, `pg_class.relam` and `pg_index.indclass` (default classes per type and method; explicit ones such as `jsonb_path_ops` or `text_pattern_ops` are stored and printed). PostgreSQL's errors apply: unknown method (42704), unique / multicolumn / `INCLUDE` on a method that lacks them (0A000), no default operator class for a type (42704 with HINT). `LIKE ... INCLUDING INDEXES` and partition index cloning keep the method.
 - Function attributes are stored and shown: `SECURITY DEFINER`, `SET param = value` (`pg_proc.proconfig`), `PARALLEL`, `COST`, `ROWS` and `LEAKPROOF` appear in `pg_proc` and `pg_get_functiondef` as PostgreSQL prints them (procedures use `$procedure$`), and a function's `SET` options apply during its call.
 - `ALTER FUNCTION / PROCEDURE / ROUTINE` supports `SET` / `RESET`, `[EXTERNAL] SECURITY`, volatility, `[NOT] LEAKPROOF`, `STRICT` / `CALLED ON NULL INPUT`, `PARALLEL`, `COST`, `ROWS`, `RENAME TO` and `SET SCHEMA`.
 - `ALTER TABLE ... ALTER COLUMN SET STATISTICS | STORAGE | COMPRESSION`, `REPLICA IDENTITY`, `CLUSTER ON`, `SET WITHOUT CLUSTER` and `SET LOGGED | UNLOGGED` are accepted with PostgreSQL's validation and errors, and show up in `pg_attribute` (`attstattarget`, `attstorage`, `attcompression`), `pg_class` (`relreplident`, `relpersistence`) and `pg_index` (`indisreplident`, `indisclustered`); `ALTER COLUMN TYPE` resets storage and compression. `SET LOGGED | UNLOGGED` were silently ignored before.
+- `int2vector` / `oidvector` print space-separated (`3 1 4`) when cast to text, cast to `int2[]` / `oid[]` with lower bound 0, and parse from text literals.
+- An index with mixed column and expression keys reports the plain column's attnum in `pg_index.indkey` (`1 0`) and lists only the real expressions in `indexprs`.
+- The SQL deparser (`pg_get_viewdef`, `pg_get_constraintdef`, `pg_get_indexdef`, column defaults) quotes identifiers with the same recorded keyword data as `quote_ident()`.
+- Function lookup and `pg_get_triggerdef` never resolve functions through `pg_temp` implicitly (a temp trigger function prints as `pg_temp.f()`), and a user function shadowed by a same-signature `pg_catalog` builtin is schema-qualified.
+- `DROP SCHEMA` lists the schema's functions and procedures (and materialized views) in the "depends on schema" detail and the `CASCADE` notice, in creation order, fails with 2BP01 while they exist, and `CASCADE` drops them.
+- `ALTER TABLE ... ADD COLUMN ... DEFAULT` on a partitioned table sets `atthasmissing` on existing partitions only, not on the parent or on partitions created afterwards.
+- Under `session_replication_role = replica`, foreign keys are not enforced and `ON DELETE` / `ON UPDATE` actions do not fire, as in PostgreSQL (`ADD CONSTRAINT` still validates existing rows).
 - `SECURITY DEFINER` functions, procedures and trigger functions run as their owner: `current_user` and privilege checks inside the body are the owner's (session_user and the `role` setting are unchanged), restored after the call even when it fails; `SET role` in one fails when called (`42501 cannot set parameter "role" within security-definer function`).
 - Statements inside function bodies are checked for the current user's privileges, and calling a function needs EXECUTE (`42501 permission denied for function f` / `procedure p`), checked before the statement runs; `REVOKE EXECUTE ... FROM PUBLIC` takes away the default, and `has_function_privilege` answers from the grants.
 - A function's `SET search_path` applies to the names its statements resolve, not only to `current_setting`.
@@ -49,6 +64,47 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - UNION / INTERSECT / EXCEPT and `SELECT DISTINCT` without ORDER BY return rows in PostgreSQL's
   order (sorted, or hash-table order, as its planner picks) for inputs of constants and VALUES
   lists, instead of first-seen order. Table inputs keep first-seen order.
+- `LOCK TABLE` locks a partitioned table's partitions (not with `ONLY`) and a view's base
+  relations, and refuses sequences and indexes (`42809 cannot lock relation`).
+- `regrole` input and output (`'role'::regrole`, `to_regrole()`, casts to and from `oid`), `pg_class.relowner` for objects owned by other roles, and the `pg_policies` view (empty until row-level security exists).
+- `ALTER DEFAULT PRIVILEGES [FOR ROLE r] [IN SCHEMA s]` is stored in `pg_default_acl` (as in Postgres, global entries start from the hard-wired defaults and vanish when equal to them) and applied to tables, views and sequences created afterwards by that role.
+- Single-row `INSERT`, and `UPDATE` / `DELETE` by key, no longer slow down as the table or the
+  transaction grows: unique, primary key and foreign key checks, `ON CONFLICT` and `WHERE col =
+  constant` use hash indexes, and `COMMIT` applies its changes in place instead of copying the
+  table. 5,000 inserts in one transaction: 5.5 s → 0.7 s; 5,000 autocommit inserts into a
+  5,000-row table: 15.9 s → 0.7 s; 5,000 updates plus 5,000 deletes by primary key in one
+  transaction: 52 s → 1.6 s. Cost per statement is now flat (20,000 inserts: 2.7 s).
+- `MERGE` into a partitioned table acts on the rows of its leaf partitions instead of none: inserts
+  are routed to their partition (23514 when none accepts the row), updates move rows across
+  partitions, and a target that is itself a partition enforces its partition constraint.
+  `MERGE ... RETURNING` can read the target's system columns (`tableoid` is the row's leaf).
+- `MERGE` fires triggers: the target's BEFORE / AFTER statement triggers for each action type its
+  WHEN clauses list (even when no row matches), and BEFORE / AFTER row triggers (WHEN, `UPDATE OF`)
+  of the table or leaf partition each row is stored in; BEFORE row triggers can change the new row
+  or skip it. A row moved to another partition fires DELETE and INSERT row triggers.
+- `RETURNING old.tableoid` / `new.tableoid` (and the other system columns of `old` / `new`) work in
+  INSERT, UPDATE, DELETE and MERGE instead of failing with "column does not exist".
+- Privilege checks cover every relation a statement reads, as in PostgreSQL: `UPDATE ... FROM`,
+  `DELETE ... USING`, subqueries in `WHERE` / `SET` / `RETURNING` / `VALUES`, `INSERT ... SELECT`,
+  `ON CONFLICT DO UPDATE`, and WITH queries (data-modifying ones always, SELECT ones when
+  referenced). `MERGE` needs each listed action's privilege on the target (column privileges for
+  `UPDATE SET` and `INSERT` columns), SELECT on the target columns it reads, and SELECT on the
+  source. `COPY table TO` / `FROM` need SELECT / INSERT on the copied columns, checked before the
+  copy starts. `UPDATE` / `DELETE` on a view with `INSTEAD OF` triggers need SELECT on the view
+  columns `WHERE`, `SET` and `RETURNING` read.
+- Constraint-violation DETAIL hides what the role cannot read: without SELECT on the table,
+  `Failing row contains (cols) = (values).` lists only the columns it may select or the statement
+  writes (no DETAIL when none), and unique, exclusion, foreign key and partition key details omit
+  the key unless every key column is readable, deferred checks at `COMMIT` / `SET CONSTRAINTS`
+  included. Writes through an automatically updatable view count the base columns they write.
+- A row routed into a partition is described in the partitioned table's column order in a
+  failing-row DETAIL, as PostgreSQL does.
+- `UPDATE` on a view with `INSTEAD OF` triggers accepts `SET c = DEFAULT` and
+  `SET (a, b) = (x, y)`.
+- `information_schema.table_privileges` and `role_table_grants` show only grants whose grantor or
+  grantee is a role the current user has the privileges of (`table_privileges` also PUBLIC's).
+- Partitioning matches PostgreSQL in six details: `CREATE TABLE ... PARTITION OF parent (col DEFAULT ...)` column options parse; a partition's NOT NULL constraints keep the parent's names; a CHECK violated through the parent names the partition; a foreign key violation when deleting a referenced row names the partition (and its copy of the constraint, `<name>_<n>`); new partitions do not copy `atthasmissing`.
+- `DROP SCHEMA ... CASCADE` reports its dependents as the notice's `DETAIL` in creation order, leaves out partitions, and qualifies names only when they are not on the `search_path`; `DROP SCHEMA` without `CASCADE` lists them the same way.
 
 ### Changed
 
@@ -59,6 +115,7 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 ### Fixed
 
 - `pg_get_triggerdef` schema-qualifies the trigger function when its schema is not on `search_path`, and quotes its name.
+- Partitioned indexes: `CREATE INDEX ... ON ONLY` and `ALTER INDEX ... ATTACH PARTITION` (with Postgres' checks and errors); partition indexes are attached to their parent (`pg_inherits`, `relispartition`, `pg_partition_tree` / `pg_partition_ancestors` / `pg_partition_root`), `pg_index.indisvalid` is false until every partition has one, `CREATE INDEX` on a partitioned table and `ATTACH PARTITION` reuse a matching index of the partition, and `pg_get_indexdef` prints `ON ONLY` for an index on a partitioned table.
 - `ALTER TRIGGER ... RENAME TO`, and `ALTER TABLE ... ENABLE REPLICA | ALWAYS TRIGGER` (`pg_trigger.tgenabled` `O`/`D`/`R`/`A`); triggers fire according to `session_replication_role`.
 - `CREATE TABLE ... PARTITION OF` builds the partition from the parent's live columns only, as
   PostgreSQL does: a partition created after a parent `DROP COLUMN` no longer copies the dropped
