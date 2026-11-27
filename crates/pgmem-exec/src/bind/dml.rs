@@ -801,6 +801,9 @@ pub fn bind_update(b: &Binder, upd: &ir::Update, outer: &Ctx) -> SqlResult<Updat
     }
     let table = lookup_table(b, &upd.table)?;
     b.lock_table_and_indexes(&table, crate::lock_levels::ROW_EXCLUSIVE);
+    if !upd.only {
+        b.lock_inherit_children(&table, crate::lock_levels::ROW_EXCLUSIVE);
+    }
     let qualifier = upd.alias.clone().unwrap_or_else(|| table.name.clone());
     let rules = b.bind_row_rules(&table)?;
     let target_scope = b.target_cols(target_scope(&table, &qualifier));
@@ -842,6 +845,9 @@ pub fn bind_delete(b: &Binder, del: &ir::Delete, outer: &Ctx) -> SqlResult<Delet
     }
     let table = lookup_table(b, &del.table)?;
     b.lock_table_and_indexes(&table, crate::lock_levels::ROW_EXCLUSIVE);
+    if !del.only {
+        b.lock_inherit_children(&table, crate::lock_levels::ROW_EXCLUSIVE);
+    }
     let qualifier = del.alias.clone().unwrap_or_else(|| table.name.clone());
     let target_scope = b.target_cols(target_scope(&table, &qualifier));
     let width = target_scope.width();

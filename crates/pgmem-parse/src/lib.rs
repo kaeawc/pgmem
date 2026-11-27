@@ -1501,6 +1501,7 @@ pub(crate) fn lower_statement(stmt: sq::Statement) -> SqlResult<Statement> {
         })),
         S::Truncate(t) => Statement::Truncate(Box::new(pgmem_ir::Truncate {
             tables: t.table_names.iter().map(|tt| object_name(&tt.name)).collect::<SqlResult<Vec<_>>>()?,
+            only: t.table_names.iter().map(|tt| tt.only).collect(),
             restart_identity: matches!(t.identity, Some(sq::TruncateIdentityOption::Restart)),
             cascade: matches!(t.cascade, Some(sq::CascadeOption::Cascade)),
         })),

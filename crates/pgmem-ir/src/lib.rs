@@ -577,6 +577,8 @@ pub enum TableRef {
     Table {
         name: ObjectName,
         alias: Option<TableAlias>,
+        /// `ONLY name`: the table without its inheritance children.
+        only: bool,
     },
     Subquery {
         query: Box<Query>,
@@ -994,6 +996,8 @@ pub struct Update {
     pub with: Option<With>,
     pub table: ObjectName,
     pub alias: Option<String>,
+    /// `UPDATE ONLY t`: not its inheritance children.
+    pub only: bool,
     pub assignments: Vec<Assignment>,
     pub from: Vec<TableRef>,
     pub selection: Option<Expr>,
@@ -1005,6 +1009,8 @@ pub struct Delete {
     pub with: Option<With>,
     pub table: ObjectName,
     pub alias: Option<String>,
+    /// `DELETE FROM ONLY t`: not its inheritance children.
+    pub only: bool,
     pub using: Vec<TableRef>,
     pub selection: Option<Expr>,
     pub returning: Vec<SelectItem>,
@@ -1086,6 +1092,8 @@ pub struct CreateTableOptions {
     pub partition_of: Option<(ObjectName, PartitionBoundSpec)>,
     /// `WITH (storage_parameter [= value], ...)`.
     pub reloptions: Vec<RelOption>,
+    /// `INHERITS (parent, ...)`.
+    pub inherits: Vec<ObjectName>,
 }
 
 /// One storage parameter of a `WITH (...)` / `SET (...)` / `RESET (...)` list: `[namespace.]name
@@ -1131,6 +1139,7 @@ impl Default for CreateTableOptions {
             partition_by: None,
             partition_of: None,
             reloptions: Vec::new(),
+            inherits: Vec::new(),
         }
     }
 }
@@ -1179,6 +1188,8 @@ pub struct ConstraintTiming {
     pub deferrable: bool,
     pub initially_deferred: bool,
     pub not_valid: bool,
+    /// `CHECK (...) NO INHERIT` (`connoinherit`).
+    pub no_inherit: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1601,11 +1612,17 @@ pub struct SequenceOptions {
 pub struct AlterTable {
     pub name: ObjectName,
     pub if_exists: bool,
+    /// `ALTER TABLE ONLY t`: the actions do not recurse to inheritance children.
+    pub only: bool,
     pub actions: Vec<AlterTableAction>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum AlterTableAction {
+    /// `INHERIT parent`.
+    Inherit(ObjectName),
+    /// `NO INHERIT parent`.
+    NoInherit(ObjectName),
     /// `SET (storage_parameter, ...)` / `RESET (storage_parameter, ...)` among other actions.
     RelOptions {
         reset: bool,
@@ -1870,6 +1887,8 @@ pub struct Drop {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Truncate {
     pub tables: Vec<ObjectName>,
+    /// Tables named with `ONLY` (their inheritance children are not truncated).
+    pub only: Vec<bool>,
     pub restart_identity: bool,
     pub cascade: bool,
 }

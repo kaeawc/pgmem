@@ -682,9 +682,9 @@ impl Binder<'_> {
     /// items as the immediately enclosing level). Returns whether the item is lateral.
     fn bind_table_ref(&self, item: &ir::TableRef, ctx: &Ctx, left: &Scope) -> SqlResult<(Rel, Scope, bool)> {
         match item {
-            ir::TableRef::Table { name, alias } => {
+            ir::TableRef::Table { name, alias, only } => {
                 let (rel, scope) = self
-                    .bind_relation(name, alias.as_ref(), ctx)
+                    .bind_relation(name, alias.as_ref(), *only, ctx)
                     .map_err(|e| super::about(e, &[code::UNDEFINED_TABLE], || pgmem_types::ErrorRef::Relation(name.0.join("."))))?;
                 Ok((rel, scope, false))
             }
@@ -1021,7 +1021,7 @@ impl Binder<'_> {
     }
 
     /// A named relation in FROM: CTE, table, view, or virtual catalog table.
-    fn bind_relation(&self, name: &ir::ObjectName, alias: Option<&ir::TableAlias>, ctx: &Ctx) -> SqlResult<(Rel, Scope)> {
+    fn bind_relation(&self, name: &ir::ObjectName, alias: Option<&ir::TableAlias>, only: bool, ctx: &Ctx) -> SqlResult<(Rel, Scope)> {
         let qualifier = alias.map_or_else(|| name.base().to_owned(), |a| a.name.clone());
         if name.0.len() == 1
             && let Some(cte) = ctx.ctes.iter().rev().find(|c| c.name == name.base())
@@ -1073,7 +1073,11 @@ impl Binder<'_> {
             )
             .with_hint("Use the REFRESH MATERIALIZED VIEW command.")),
             Some(Relation::Table(def)) => {
-                self.lock_table_and_indexes(&def, self.read_lock_mode(&qualifier));
+                let mode = self.read_lock_mode(&qualifier);
+                self.lock_table_and_indexes(&def, mode);
+                if !only {
+                    self.lock_inherit_children(&def, mode);
+                }
                 let mut cols = Vec::new();
                 let mut slots = Vec::new();
                 let mut missing = Vec::new();
@@ -1095,7 +1099,8 @@ impl Binder<'_> {
                     c
                 }));
                 let locked = self.locked(&qualifier);
-                let scan = self.rls_scan(&def, Rel::Scan { table: def.oid, slots, missing, system: true }, &cols, locked)?;
+                let scan =
+                    self.rls_scan(&def, Rel::Scan { table: def.oid, slots, missing, system: true, inherit: !only }, &cols, locked)?;
                 if let Some(a) = alias {
                     apply_column_aliases(&mut cols, &a.columns, &a.name)?;
                 }

@@ -483,7 +483,7 @@ fn select_from(view: &ir::ObjectName, alias: Option<&String>, extra: Vec<ir::Exp
     let alias = alias.map(|a| ir::TableAlias { name: a.clone(), columns: Vec::new(), column_types: Vec::new() });
     ir::Query::from_body(ir::SetExpr::Select(Box::new(ir::Select {
         projection,
-        from: vec![ir::TableRef::Table { name: view.clone(), alias }],
+        from: vec![ir::TableRef::Table { name: view.clone(), alias, only: false }],
         selection,
         ..Default::default()
     })))

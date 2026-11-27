@@ -1088,7 +1088,7 @@ fn trigger_view_reads(stmt: &ir::Statement) -> Option<ir::Query> {
     let alias = alias.as_ref().map(|a| ir::TableAlias { name: a.clone(), columns: Vec::new(), column_types: Vec::new() });
     let mut projection: Vec<ir::SelectItem> = values.into_iter().map(|expr| ir::SelectItem::Expr { expr, alias: None }).collect();
     projection.extend(returning.iter().cloned());
-    let mut tables = vec![ir::TableRef::Table { name: table.clone(), alias }];
+    let mut tables = vec![ir::TableRef::Table { name: table.clone(), alias, only: false }];
     tables.extend(from.iter().cloned());
     Some(ir::Query::from_body(ir::SetExpr::Select(Box::new(ir::Select { projection, from: tables, selection, ..Default::default() }))))
 }

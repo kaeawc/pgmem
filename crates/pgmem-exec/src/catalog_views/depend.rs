@@ -221,7 +221,7 @@ impl<'a> Analyzer<'a> {
             }
         };
         match t {
-            ir::TableRef::Table { name, alias } => {
+            ir::TableRef::Table { name, alias, .. } => {
                 let alias_name = alias.as_ref().map_or_else(|| name.base().to_owned(), |a| a.name.clone());
                 if name.0.len() == 1
                     && let Some((_, cols)) = self.ctes.iter().rev().find(|(n, _)| n == name.base())
@@ -563,6 +563,9 @@ fn relation_deps(m: &Model, d: &mut Deps) {
         }
         if let Some(of) = catalog.partition_of(t.oid) {
             d.add(me, Addr(CLASS_CLASS_OID, of.parent, 0), 'a');
+        }
+        for parent in catalog.inherit_parents(t.oid) {
+            d.add(me, Addr(CLASS_CLASS_OID, *parent, 0), 'n');
         }
         if let Some(key) = catalog.partition_key(t.oid) {
             for part in &key.parts {

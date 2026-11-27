@@ -12,10 +12,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 mod extmembers;
+mod inherit;
 mod partitions;
 mod policies;
 mod roles;
 pub use extmembers::{ExtMember, ExtMemberClass};
+pub use inherit::Inherited;
 pub use partitions::{PartitionBound, PartitionKey, PartitionKeyPart, PartitionOf, PartitionStrategy, RangeDatum};
 pub use policies::PolicyDef;
 pub use roles::{DefaultItem, DefaultPrivilege, ExtensionDef, Grant, GrantObject, RoleDef};
@@ -716,6 +718,8 @@ pub struct Catalog {
     partition_keys: BTreeMap<Oid, PartitionKey>,
     /// Partitions' parents and bounds, by partition OID.
     partition_bounds: BTreeMap<Oid, PartitionOf>,
+    /// Regular table inheritance (`INHERITS`).
+    inheritance: inherit::Inheritance,
     /// Row-level security policies by OID.
     policies: BTreeMap<Oid, Arc<PolicyDef>>,
     /// (`relrowsecurity`, `relforcerowsecurity`) of tables with either set, by OID.
@@ -765,6 +769,7 @@ impl Catalog {
             comments: BTreeMap::new(),
             partition_keys: BTreeMap::new(),
             partition_bounds: BTreeMap::new(),
+            inheritance: inherit::Inheritance::default(),
             policies: BTreeMap::new(),
             row_security: BTreeMap::new(),
             index_parents: BTreeMap::new(),
@@ -1384,6 +1389,7 @@ impl Catalog {
         let dropped = self.tables.remove(name)?;
         self.partition_keys.remove(&dropped.oid);
         self.partition_bounds.remove(&dropped.oid);
+        self.drop_inheritance(&dropped);
         for idx in &dropped.indexes {
             self.forget_index(idx.oid);
         }

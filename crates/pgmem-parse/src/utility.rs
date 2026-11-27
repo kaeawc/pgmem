@@ -118,13 +118,18 @@ pub(crate) fn lower(u: Utility) -> SqlResult<Statement> {
                 ColumnAction::SetExpression(e) => pgmem_ir::AlterTableAction::SetExpression { column, expr: crate::expr::lower_expr(e)? },
                 ColumnAction::DropExpression { if_exists } => pgmem_ir::AlterTableAction::DropExpression { column, if_exists },
             };
-            Statement::AlterTable(Box::new(pgmem_ir::AlterTable { name: object_name(&table)?, if_exists, actions: vec![action] }))
+            Statement::AlterTable(Box::new(pgmem_ir::AlterTable {
+                name: object_name(&table)?,
+                if_exists,
+                only: false,
+                actions: vec![action],
+            }))
         }
         Utility::AttachIndex { index, partition } => {
             Statement::AttachIndexPartition { index: object_name(&index)?, partition: object_name(&partition)? }
         }
         Utility::AlterAttrs { table, if_exists, actions } => {
-            Statement::AlterTable(Box::new(pgmem_ir::AlterTable { name: object_name(&table)?, if_exists, actions }))
+            Statement::AlterTable(Box::new(pgmem_ir::AlterTable { name: object_name(&table)?, if_exists, only: false, actions }))
         }
         Utility::RelOptions { object, name, if_exists, reset, options } => Statement::AlterRelOptions {
             object,
@@ -139,6 +144,7 @@ pub(crate) fn lower(u: Utility) -> SqlResult<Statement> {
         Utility::AlterConstraint { table, if_exists, name, timing } => Statement::AlterTable(Box::new(pgmem_ir::AlterTable {
             name: object_name(&table)?,
             if_exists,
+            only: false,
             actions: vec![pgmem_ir::AlterTableAction::AlterConstraint { name: crate::ident(&name), timing }],
         })),
     })

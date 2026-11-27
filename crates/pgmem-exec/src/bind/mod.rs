@@ -370,6 +370,18 @@ impl<'a> Binder<'a> {
         }
     }
 
+    /// Locks `table`'s inheritance descendants (and their indexes) in `mode`: a statement on
+    /// a parent without ONLY reads or writes its children too.
+    pub fn lock_inherit_children(&self, table: &pgmem_catalog::TableDef, mode: pgmem_storage::locks::TableLockMode) {
+        if self.locker.is_some() {
+            let mut locks = Vec::new();
+            crate::lock_levels::inherit_children(self.catalog, table.oid, mode, &mut locks);
+            for (oid, m) in locks {
+                self.lock(oid, m);
+            }
+        }
+    }
+
     /// The lock a query takes on a relation it reads as `qualifier`: ROW SHARE when a
     /// FOR UPDATE / SHARE clause applies to it, ACCESS SHARE otherwise.
     pub(crate) fn read_lock_mode(&self, qualifier: &str) -> pgmem_storage::locks::TableLockMode {

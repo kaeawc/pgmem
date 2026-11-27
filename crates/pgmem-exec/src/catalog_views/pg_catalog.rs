@@ -168,16 +168,17 @@ pub static DEFS: &[Def] = &[
 fn pg_inherits(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let m = snapshot(ctx);
     Ok(rows_of(PG_INHERITS, |s| {
-        let indexes = m.indexes().into_iter().filter_map(|(_, i)| m.catalog.index_parent(i.oid).map(|p| (i.oid, p)));
+        let indexes = m.indexes().into_iter().filter_map(|(_, i)| m.catalog.index_parent(i.oid).map(|p| (i.oid, p, 1)));
         m.tables()
             .into_iter()
-            .filter_map(|t| m.catalog.partition_of(t.oid).map(|of| (t.oid, of.parent)))
+            .filter_map(|t| m.catalog.partition_of(t.oid).map(|of| (t.oid, of.parent, 1)))
             .chain(indexes)
-            .map(|(child, parent)| {
+            .chain(m.catalog.inherit_links())
+            .map(|(child, parent, seqno)| {
                 s.row(vec![
                     ("inhrelid", oid(child)),
                     ("inhparent", oid(parent)),
-                    ("inhseqno", Value::Int4(1)),
+                    ("inhseqno", Value::Int4(seqno)),
                     ("inhdetachpending", boolean(false)),
                 ])
             })
@@ -405,6 +406,7 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("relhasindex", boolean(!t.indexes.is_empty())),
                 ("relhasrules", boolean(t.matview.is_some())),
                 ("relchecks", int2(checks)),
+                ("relhassubclass", boolean(m.catalog.had_inherit_children(t.oid))),
                 ("relhastriggers", boolean(triggers.contains(&t.oid) || !m.catalog.table_triggers(t.oid).is_empty())),
                 ("relrowsecurity", boolean(m.catalog.row_security(t.oid).0)),
                 ("relforcerowsecurity", boolean(m.catalog.row_security(t.oid).1)),
@@ -580,9 +582,19 @@ fn pg_attribute(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         }
         row
     };
+    let local = s.columns().iter().position(|(n, _)| n == "attislocal");
+    let inhcount = s.columns().iter().position(|(n, _)| n == "attinhcount");
     for t in m.tables() {
         rows.extend(system_att_rows(&s, t.oid));
-        rows.extend(Model::table_atts(t).iter().map(|a| with_acl(t.oid, a)));
+        rows.extend(Model::table_atts(t).iter().map(|a| {
+            let mut row = with_acl(t.oid, a);
+            let inh = m.catalog.column_inheritance(t.oid, a.attnum - 1);
+            if let (Some(l), Some(c)) = (local, inhcount) {
+                row[l] = boolean(inh.local);
+                row[c] = Value::Int2(inh.count);
+            }
+            row
+        }));
     }
     for v in m.views() {
         rows.extend(m.view_atts(v).iter().map(|a| with_acl(v.oid, a)));
@@ -1132,6 +1144,8 @@ fn pg_constraint(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("conindid", oid(c.conindid)),
                 ("conkey", int2_array(&c.conkey)),
             ];
+            let (islocal, inhcount, noinherit) = crate::inherit::constraint_flags(m.catalog, c.table.oid, c.oid, c.contype, &c.conkey);
+            vals.extend([("conislocal", boolean(islocal)), ("coninhcount", Value::Int2(inhcount)), ("connoinherit", boolean(noinherit))]);
             let (deferrable, deferred, validated) = c.flags();
             vals.extend([("condeferrable", boolean(deferrable)), ("condeferred", boolean(deferred)), ("convalidated", boolean(validated))]);
             if c.contype == 'f' {

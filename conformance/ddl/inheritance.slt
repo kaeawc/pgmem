@@ -1,0 +1,257 @@
+# Table inheritance: CREATE TABLE ... INHERITS with column merging, inherited CHECK / NOT NULL
+# constraints and defaults, scans of a parent with and without ONLY, UPDATE / DELETE recursion,
+# ALTER TABLE recursion and ALTER TABLE ... [NO] INHERIT, and the catalogs.
+
+statement ok
+CREATE TABLE inh_p (a int NOT NULL, b text DEFAULT 'pb', CONSTRAINT inh_pc CHECK (a > 0), CONSTRAINT inh_pn CHECK (a < 1000) NO INHERIT)
+
+statement ok
+CREATE TABLE inh_q (a int, d int NOT NULL)
+
+statement ok
+CREATE TABLE inh_c (b text, c int, a int) INHERITS (inh_p)
+
+statement ok
+CREATE TABLE inh_m (e int) INHERITS (inh_p, inh_q)
+
+query
+SELECT attrelid::regclass, attname, attnum, attnotnull, attislocal, attinhcount FROM pg_attribute WHERE attrelid IN ('inh_c'::regclass, 'inh_m'::regclass) AND attnum > 0 ORDER BY attrelid::regclass::text, 3
+----
+attrelid:regclass | attname:name | attnum:int2 | attnotnull:bool | attislocal:bool | attinhcount:int2
+inh_c | a | 1 | t | t | 1
+inh_c | b | 2 | f | t | 1
+inh_c | c | 3 | f | t | 0
+inh_m | a | 1 | t | f | 2
+inh_m | b | 2 | f | f | 1
+inh_m | d | 3 | t | f | 1
+inh_m | e | 4 | f | t | 0
+
+query
+SELECT conrelid::regclass, conname, contype, conislocal, coninhcount, connoinherit FROM pg_constraint WHERE conrelid IN ('inh_p'::regclass, 'inh_c'::regclass, 'inh_m'::regclass) ORDER BY conrelid::regclass::text, 2
+----
+conrelid:regclass | conname:name | contype:char | conislocal:bool | coninhcount:int2 | connoinherit:bool
+inh_c | inh_p_a_not_null | n | f | 1 | f
+inh_c | inh_pc | c | f | 1 | f
+inh_m | inh_p_a_not_null | n | f | 1 | f
+inh_m | inh_pc | c | f | 1 | f
+inh_m | inh_q_d_not_null | n | f | 1 | f
+inh_p | inh_p_a_not_null | n | t | 0 | f
+inh_p | inh_pc | c | t | 0 | f
+inh_p | inh_pn | c | t | 0 | t
+
+query
+SELECT inhrelid::regclass, inhparent::regclass, inhseqno FROM pg_inherits WHERE inhparent IN ('inh_p'::regclass, 'inh_q'::regclass) ORDER BY inhrelid::regclass::text, 3
+----
+inhrelid:regclass | inhparent:regclass | inhseqno:int4
+inh_c | inh_p | 1
+inh_m | inh_p | 1
+inh_m | inh_q | 2
+
+query
+SELECT relname, relhassubclass FROM pg_class WHERE relname IN ('inh_p', 'inh_q', 'inh_c', 'inh_m') ORDER BY 1
+----
+relname:name | relhassubclass:bool
+inh_c | f
+inh_m | f
+inh_p | t
+inh_q | t
+
+statement error 42804 column "a" has a type conflict
+CREATE TABLE inh_bad (a bigint) INHERITS (inh_p)
+
+statement error 42P07 relation "inh_p" would be inherited from more than once
+CREATE TABLE inh_bad () INHERITS (inh_p, inh_p)
+
+statement error 42P21 column "b" has a collation conflict
+CREATE TABLE inh_bad (b text COLLATE "C") INHERITS (inh_p)
+
+statement error 42710 constraint "inh_pc" for relation "inh_bad" already exists
+CREATE TABLE inh_bad (CONSTRAINT inh_pc CHECK (a > 5)) INHERITS (inh_p)
+
+statement ok
+INSERT INTO inh_p VALUES (1)
+
+statement error 22P02 invalid input syntax for type integer: "cb"
+INSERT INTO inh_c VALUES ('cb', 3, 2)
+
+statement ok
+INSERT INTO inh_m (a, d, e) VALUES (4, 5, 6)
+
+statement error 23514 new row for relation "inh_c" violates check constraint "inh_pc"
+INSERT INTO inh_c (a) VALUES (-1)
+
+statement error 23502 null value in column "a" of relation "inh_m" violates not-null constraint
+INSERT INTO inh_m (b) VALUES ('x')
+
+query
+INSERT INTO inh_m (a, d) VALUES (5000, 1) RETURNING b
+----
+b:text
+pb
+
+query
+SELECT tableoid::regclass, a, b FROM inh_p ORDER BY a
+----
+tableoid:regclass | a:int4 | b:text
+inh_p | 1 | pb
+inh_m | 4 | pb
+inh_m | 5000 | pb
+
+query
+SELECT a, b FROM ONLY inh_p ORDER BY a
+----
+a:int4 | b:text
+1 | pb
+
+query
+SELECT count(*) FROM inh_p*
+----
+count:int8
+3
+
+query
+SELECT tableoid::regclass, a, d FROM inh_q ORDER BY a
+----
+tableoid:regclass | a:int4 | d:int4
+inh_m | 4 | 5
+inh_m | 5000 | 1
+
+query
+UPDATE inh_p SET b = b || '!' WHERE a < 100 RETURNING tableoid::regclass, *
+----
+tableoid:regclass | a:int4 | b:text
+inh_p | 1 | pb!
+inh_m | 4 | pb!
+
+query
+UPDATE ONLY inh_p SET b = 'only' RETURNING a, b
+----
+a:int4 | b:text
+1 | only
+
+query
+DELETE FROM inh_p WHERE a = 5000 RETURNING tableoid::regclass, a
+----
+tableoid:regclass | a:int4
+inh_m | 5000
+
+query
+DELETE FROM ONLY inh_p RETURNING a
+----
+a:int4
+1
+
+query
+SELECT tableoid::regclass, a, b FROM inh_p ORDER BY a
+----
+tableoid:regclass | a:int4 | b:text
+inh_m | 4 | pb!
+
+statement ok
+ALTER TABLE inh_p ADD COLUMN f int DEFAULT 7
+
+query
+SELECT a, f FROM inh_c
+----
+a:int4 | f:int4
+
+statement error 42P16 column must be added to child tables too
+ALTER TABLE ONLY inh_p ADD COLUMN g int
+
+statement error 42P16 cannot drop inherited column "a"
+ALTER TABLE inh_c DROP COLUMN a
+
+statement error 42P16 cannot rename inherited column "a"
+ALTER TABLE inh_c RENAME COLUMN a TO z
+
+statement error 42P16 cannot drop inherited constraint "inh_p_a_not_null" of relation "inh_c"
+ALTER TABLE inh_c ALTER COLUMN a DROP NOT NULL
+
+statement error 42P16 inherited column "b" must be renamed in child tables too
+ALTER TABLE ONLY inh_p RENAME COLUMN b TO bb
+
+statement ok
+ALTER TABLE inh_p RENAME COLUMN b TO bb
+
+statement ok
+ALTER TABLE inh_p ADD CONSTRAINT inh_p_f CHECK (f > 0)
+
+statement error 42P16 constraint must be added to child tables too
+ALTER TABLE ONLY inh_p ADD CONSTRAINT inh_p_f2 CHECK (f > 0)
+
+statement error 42P16 cannot drop inherited constraint "inh_p_f" of relation "inh_m"
+ALTER TABLE inh_m DROP CONSTRAINT inh_p_f
+
+statement error 23514 new row for relation "inh_m" violates check constraint "inh_p_f"
+INSERT INTO inh_m (a, d, f) VALUES (9, 9, 0)
+
+query
+SELECT attrelid::regclass, attname, attislocal, attinhcount FROM pg_attribute WHERE attrelid IN ('inh_c'::regclass, 'inh_m'::regclass) AND attname IN ('bb', 'f') ORDER BY attrelid::regclass::text, 2
+----
+attrelid:regclass | attname:name | attislocal:bool | attinhcount:int2
+inh_c | bb | t | 1
+inh_c | f | f | 1
+inh_m | bb | f | 1
+inh_m | f | f | 1
+
+statement ok
+ALTER TABLE ONLY inh_p DROP COLUMN f
+
+query
+SELECT attrelid::regclass, attname, attislocal, attinhcount FROM pg_attribute WHERE attrelid IN ('inh_c'::regclass, 'inh_m'::regclass) AND attname = 'f' ORDER BY attrelid::regclass::text
+----
+attrelid:regclass | attname:name | attislocal:bool | attinhcount:int2
+inh_c | f | t | 0
+inh_m | f | t | 0
+
+statement ok
+CREATE TABLE inh_z (a int NOT NULL, bb text, CONSTRAINT inh_pc CHECK (a > 0))
+
+statement error 42P07 circular inheritance not allowed
+ALTER TABLE inh_p INHERIT inh_c
+
+statement error 42804 column "a" in child table "inh_q" must be marked NOT NULL
+ALTER TABLE inh_q INHERIT inh_p
+
+statement ok
+ALTER TABLE inh_z INHERIT inh_p
+
+query
+SELECT inhrelid::regclass, inhseqno FROM pg_inherits WHERE inhparent = 'inh_p'::regclass ORDER BY inhrelid::regclass::text
+----
+inhrelid:regclass | inhseqno:int4
+inh_c | 1
+inh_m | 1
+inh_z | 1
+
+statement ok
+ALTER TABLE inh_c NO INHERIT inh_p
+
+statement error 42P01 relation "inh_p" is not a parent of relation "inh_c"
+ALTER TABLE inh_c NO INHERIT inh_p
+
+query
+SELECT attname, attislocal, attinhcount FROM pg_attribute WHERE attrelid = 'inh_c'::regclass AND attnum > 0 AND NOT attisdropped ORDER BY attnum
+----
+attname:name | attislocal:bool | attinhcount:int2
+a | t | 0
+bb | t | 0
+c | t | 0
+f | t | 0
+
+query
+SELECT conname, conislocal, coninhcount FROM pg_constraint WHERE conrelid = 'inh_c'::regclass ORDER BY 1
+----
+conname:name | conislocal:bool | coninhcount:int2
+inh_p_a_not_null | t | 0
+inh_p_f | f | 1
+inh_pc | t | 0
+
+statement error 2BP01 cannot drop table inh_p because other objects depend on it
+DROP TABLE inh_p
+
+statement ok
+DROP TABLE inh_p, inh_m, inh_z
+
+statement ok
+DROP TABLE inh_q, inh_c

@@ -13,11 +13,12 @@ pub fn run(rel: &Rel, ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     match rel {
         Rel::Values { rows } => rows.iter().map(|r| r.iter().map(|e| eval(e, &[], ctx)).collect()).collect(),
         Rel::Virtual { rows } => (rows.0)(ctx),
-        Rel::Scan { table, slots, missing, system } => Ok({
+        Rel::Scan { table, slots, missing, system, inherit } => Ok({
             ctx.txn.note_read(*table);
             // A partitioned table's rows are its leaf partitions' (each row's tableoid is its
-            // partition's).
+            // partition's); an inheritance parent's are its own and its children's.
             let stored = crate::partition::scan(ctx.txn, *table)
+                .or_else(|| if *inherit { crate::inherit::scan(ctx.txn, *table) } else { None })
                 .unwrap_or_else(|| ctx.txn.scan(*table).into_iter().map(|(id, r)| (*table, id, r)).collect());
             stored
                 .into_iter()

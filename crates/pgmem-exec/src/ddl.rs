@@ -145,7 +145,7 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
         Statement::CreateTable(ct) if ct.as_query.is_some() => crate::ddl_views::create_table_as(ct, txn, binder, env, state),
         Statement::CreateTable(ct) if ct.options.partition_of.is_some() => crate::partition::create_partition(ct, txn, binder, env, state),
         Statement::CreateTable(ct) => {
-            let Some(CreateTablePlan { mut table, sequences, comments }) = bind::bind_create_table(binder, ct)? else {
+            let Some(CreateTablePlan { mut table, sequences, comments, inherit }) = bind::bind_create_table(binder, ct)? else {
                 let name = ct.name.base();
                 return Ok(notice("CREATE TABLE", format!("relation \"{name}\" already exists, skipping")));
             };
@@ -168,8 +168,9 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
             let cat = txn.catalog_mut();
             cat.create_table(table)?;
             cat.set_partition_key(oid, key);
+            let notices = crate::inherit::apply_plan(cat, oid, inherit);
             txn.created_table(oid);
-            Ok(tag("CREATE TABLE"))
+            Ok(QueryResult { tag: "CREATE TABLE".into(), notices, ..Default::default() })
         }
         Statement::CreateView(cv) if cv.materialized => crate::ddl_views::create_matview(cv, txn, binder, env, state),
         Statement::CreateView(cv) => crate::ddl_views::create_view(cv, txn, binder),
@@ -248,7 +249,7 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
             };
             let mut current = current;
             for action in &at.actions {
-                current = alter_table_action(txn, &current, action, env, state)?;
+                current = crate::inherit::alter(txn, &current, action, at.only, env, state)?;
             }
             Ok(tag("ALTER TABLE"))
         }
@@ -810,14 +811,35 @@ fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> 
             (ObjectType::Table, Some(Relation::Table(t))) => {
                 let referencing = referencing_fks(txn.catalog(), &t);
                 let views = crate::deps::dependent_views_transitive(txn.catalog(), t.oid);
-                if !d.cascade && (!referencing.is_empty() || !views.is_empty()) {
-                    let mut lines: Vec<String> = views.iter().map(|v| format!("view {} depends on table {base}", v.name)).collect();
+                // Inheritance children go with their parent (CASCADE), unless dropped here too.
+                let named: Vec<QualName> = d
+                    .names
+                    .iter()
+                    .filter_map(|n| match txn.catalog().lookup_relation(n) {
+                        Ok(Some(Relation::Table(x))) => Some(x.qualified()),
+                        _ => None,
+                    })
+                    .collect();
+                let children = crate::inherit::dependents(txn.catalog(), &t);
+                let blocking: Vec<&(Arc<pgmem_catalog::TableDef>, String)> =
+                    children.iter().filter(|(c, _)| !named.contains(&c.qualified())).collect();
+                if !d.cascade && (!referencing.is_empty() || !views.is_empty() || !blocking.is_empty()) {
+                    let mut lines: Vec<String> = blocking
+                        .iter()
+                        .map(|(c, parent)| format!("table {} depends on table {parent}", display_name(txn.catalog(), &c.qualified())))
+                        .collect();
+                    lines.extend(views.iter().map(|v| format!("view {} depends on table {base}", v.name)));
                     for (child, con) in &referencing {
                         lines.push(format!("constraint {con} on table {} depends on table {base}", display_name(txn.catalog(), child)));
                     }
                     return Err(dependents_error("table", &base, lines.join("\n")));
                 }
                 crate::rls::drop_dependents(txn, t.oid, "table", &base, d.cascade, &mut notices)?;
+                for (c, _) in blocking.iter().rev() {
+                    let shown = display_name(txn.catalog(), &c.qualified());
+                    notices.push(Notice { severity: "NOTICE", code: "00000", message: format!("drop cascades to table {shown}") });
+                    txn.catalog_mut().drop_table(&c.qualified());
+                }
                 drop_views_cascade(txn, &views, &mut notices);
                 if !referencing.is_empty() {
                     for (child, con) in &referencing {
@@ -930,8 +952,12 @@ fn drop_views_cascade(txn: &mut Txn, views: &[Arc<pgmem_catalog::ViewDef>], noti
 fn truncate(t: &ir::Truncate, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> {
     let _ = binder;
     let mut names: Vec<QualName> = Vec::new();
-    for n in &t.tables {
+    for (i, n) in t.tables.iter().enumerate() {
         let table = txn.catalog().lookup_table(n)?;
+        // An inheritance parent is truncated with its children (unless ONLY).
+        if !t.only.get(i).copied().unwrap_or(false) {
+            names.extend(txn.catalog().inherit_descendants(table.oid).iter().map(|c| c.qualified()));
+        }
         // A partitioned table is truncated through its partitions.
         for p in txn.catalog().partition_descendants(table.oid) {
             names.push(p.qualified());

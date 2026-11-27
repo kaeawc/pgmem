@@ -21,6 +21,7 @@ mod extensions;
 pub mod funcs;
 pub mod functions;
 mod hashorder;
+mod inherit;
 pub mod lock_levels;
 pub mod opclass;
 mod ownership;

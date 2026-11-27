@@ -78,6 +78,7 @@ mod generated_columns;
 mod group_by;
 mod index_access_method;
 mod index_noop;
+mod inheritance;
 mod insert_default_marker;
 mod insert_default_values;
 mod insert_returning;
