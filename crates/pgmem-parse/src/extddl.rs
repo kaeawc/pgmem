@@ -141,7 +141,9 @@ pub(crate) fn lower(e: ExtDdl) -> SqlResult<Statement> {
                 RawMember::Schema(s) => ExtensionMember::Schema(s),
                 RawMember::Function { name, args, kind } => ExtensionMember::Function {
                     name: object_name(&name)?,
-                    args: args.map(|ts| ts.iter().map(lower_type).collect::<SqlResult<Vec<_>>>()).transpose()?,
+                    args: args
+                        .map(|ts| crate::quietly(crate::QUIET_TYPES, || ts.iter().map(lower_type).collect::<SqlResult<Vec<_>>>()))
+                        .transpose()?,
                     kind,
                 },
             };

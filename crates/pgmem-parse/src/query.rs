@@ -1,6 +1,7 @@
 //! Query (SELECT / VALUES / set operation / WITH) lowering.
 
 use crate::expr::{lower_expr, lower_exprs};
+use crate::in_clause;
 use crate::{ident, object_name, unsupported};
 use pgmem_ir::{
     Cte, Distinct, Expr, FrameBound, FrameExclude, FrameUnits, FunctionCall, JoinConstraint, JoinKind, LockClause, LockStrength,
@@ -8,6 +9,7 @@ use pgmem_ir::{
 };
 use pgmem_types::{SqlError, SqlResult, code};
 use sqlparser::ast as sq;
+use sqlparser::ast::Spanned;
 
 pub(crate) fn lower_query(q: sq::Query) -> SqlResult<Query> {
     if !q.pipe_operators.is_empty() || q.settings.is_some() || q.format_clause.is_some() || q.for_clause.is_some() {
@@ -18,7 +20,9 @@ pub(crate) fn lower_query(q: sq::Query) -> SqlResult<Query> {
     let order_by = match q.order_by {
         None => Vec::new(),
         Some(ob) => match ob.kind {
-            sq::OrderByKind::Expressions(items) => items.into_iter().map(lower_order_by_expr).collect::<SqlResult<Vec<_>>>()?,
+            sq::OrderByKind::Expressions(items) => {
+                in_clause("ORDER BY", || items.into_iter().map(lower_order_by_expr).collect::<SqlResult<Vec<_>>>())?
+            }
             sq::OrderByKind::All(_) => return Err(unsupported("ORDER BY ALL")),
         },
     };
@@ -54,6 +58,9 @@ pub(crate) fn lower_query(q: sq::Query) -> SqlResult<Query> {
     let mut pending: Option<LockStrength> = None;
     for l in q.locks {
         let of = l.of.iter().map(object_name).collect::<SqlResult<Vec<_>>>()?;
+        for (written, name) in l.of.iter().zip(&of) {
+            crate::note_name(pgmem_types::ErrorRef::LockTarget, written, name);
+        }
         match of.first().map(|n| n.base()) {
             Some(crate::NO_KEY_UPDATE_MARKER) => {
                 pending = Some(LockStrength::NoKeyUpdate);
@@ -112,7 +119,20 @@ fn lower_set_expr(body: sq::SetExpr) -> SqlResult<SetExpr> {
     Ok(match body {
         sq::SetExpr::Select(s) => SetExpr::Select(Box::new(lower_select(*s)?)),
         sq::SetExpr::Query(q) => SetExpr::Query(Box::new(lower_query(*q)?)),
-        sq::SetExpr::Values(v) => SetExpr::Values(v.rows.into_iter().map(|row| lower_exprs(row.content)).collect::<SqlResult<Vec<_>>>()?),
+        sq::SetExpr::Values(v) => SetExpr::Values(
+            v.rows
+                .into_iter()
+                .enumerate()
+                .map(|(n, row)| {
+                    if crate::collecting() {
+                        for (i, e) in row.content.iter().enumerate() {
+                            crate::note_ref(pgmem_types::ErrorRef::ValuesItem(n, i), e.span().start);
+                        }
+                    }
+                    in_clause("VALUES", || lower_exprs(row.content))
+                })
+                .collect::<SqlResult<Vec<_>>>()?,
+        ),
         sq::SetExpr::Insert(st) | sq::SetExpr::Update(st) | sq::SetExpr::Delete(st) | sq::SetExpr::Merge(st) => {
             SetExpr::Dml(Box::new(crate::lower_statement(st)?))
         }
@@ -162,17 +182,17 @@ fn lower_select(s: sq::Select) -> SqlResult<Select> {
     };
     let projection = s.projection.into_iter().map(lower_select_item).collect::<SqlResult<Vec<_>>>()?;
     let from = s.from.into_iter().map(lower_table_with_joins).collect::<SqlResult<Vec<_>>>()?;
-    let selection = s.selection.map(lower_expr).transpose()?;
+    let selection = s.selection.map(|e| in_clause("WHERE", || lower_expr(e))).transpose()?;
     let (group_by, grouping_sets) = match s.group_by {
         sq::GroupByExpr::Expressions(exprs, modifiers) => {
             if !modifiers.is_empty() {
                 return Err(unsupported("GROUP BY modifiers"));
             }
-            lower_group_by(exprs)?
+            in_clause("GROUP BY", || lower_group_by(exprs))?
         }
         sq::GroupByExpr::All(_) => return Err(unsupported("GROUP BY ALL")),
     };
-    let having = s.having.map(lower_expr).transpose()?;
+    let having = s.having.map(|e| in_clause("HAVING", || lower_expr(e))).transpose()?;
     let windows = s
         .named_window
         .into_iter()
@@ -287,7 +307,13 @@ fn lower_select_item(item: sq::SelectItem) -> SqlResult<SelectItem> {
         sq::SelectItem::ExprWithAlias { expr, alias } => SelectItem::Expr { expr: lower_expr(expr)?, alias: Some(ident(&alias)) },
         sq::SelectItem::Wildcard(_) => SelectItem::Wildcard,
         sq::SelectItem::QualifiedWildcard(sq::SelectItemQualifiedWildcardKind::ObjectName(n), _) => {
-            SelectItem::QualifiedWildcard(object_name(&n)?)
+            let name = object_name(&n)?;
+            if crate::collecting()
+                && let Some(at) = crate::name_start(&n)
+            {
+                crate::note_ref(pgmem_types::ErrorRef::Column(format!("{name}.*")), at);
+            }
+            SelectItem::QualifiedWildcard(name)
         }
         _ => return Err(unsupported("this select-list item")),
     })
@@ -321,7 +347,7 @@ pub(crate) fn lower_table_with_joins(t: sq::TableWithJoins) -> SqlResult<TableRe
         };
         let mut using_alias = None;
         let constraint = match constraint {
-            sq::JoinConstraint::On(e) => JoinConstraint::On(lower_expr(e)?),
+            sq::JoinConstraint::On(e) => JoinConstraint::On(in_clause("JOIN conditions", || lower_expr(e))?),
             sq::JoinConstraint::Using(cols) => {
                 JoinConstraint::Using(cols.iter().map(|c| object_name(c).map(|n| n.base().to_owned())).collect::<SqlResult<Vec<_>>>()?)
             }
@@ -360,12 +386,16 @@ pub(crate) fn lower_table_factor(f: sq::TableFactor) -> SqlResult<TableRef> {
                 Some(args) => {
                     let mut call = FunctionCall::new(name.base(), Vec::new());
                     call.name = name;
+                    crate::note_function(&written, &call.name);
                     for a in args.args {
                         match a {
-                            sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Expr(e)) => call.args.push(lower_expr(e)?),
+                            sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Expr(e)) => {
+                                call.args.push(in_clause("functions in FROM", || lower_expr(e))?)
+                            }
                             _ => return Err(unsupported("this table function argument")),
                         }
                     }
+                    crate::expr::note_keyed_call(&written, &call);
                     TableRef::Function { call, alias: lower_alias(alias), lateral: false, with_ordinality }
                 }
             }
@@ -374,15 +404,20 @@ pub(crate) fn lower_table_factor(f: sq::TableFactor) -> SqlResult<TableRef> {
             TableRef::Subquery { query: Box::new(lower_query(*subquery)?), alias: lower_alias(alias), lateral }
         }
         sq::TableFactor::Function { lateral, name, args, with_ordinality, alias } => {
-            let name = object_name(&name)?;
+            let written = name;
+            let name = object_name(&written)?;
             let mut call = FunctionCall::new(name.base(), Vec::new());
             call.name = name;
+            crate::note_function(&written, &call.name);
             for a in args {
                 match a {
-                    sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Expr(e)) => call.args.push(lower_expr(e)?),
+                    sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Expr(e)) => {
+                        call.args.push(in_clause("functions in FROM", || lower_expr(e))?)
+                    }
                     _ => return Err(unsupported("this table function argument")),
                 }
             }
+            crate::expr::note_keyed_call(&written, &call);
             TableRef::Function { call, alias: lower_alias(alias), lateral, with_ordinality }
         }
         sq::TableFactor::UNNEST { alias, array_exprs, with_ordinality, with_offset, .. } => {

@@ -12,27 +12,58 @@ fn b(e: Expr) -> Box<Expr> {
 }
 
 pub(crate) fn lower_expr(e: sq::Expr) -> SqlResult<Expr> {
+    if !crate::collecting() {
+        return lower_expr_node(e);
+    }
+    // An expression sits where it starts (a parenthesized one where its contents start).
+    let prefix = matches!(e, sq::Expr::UnaryOp { .. });
+    let at = match &e {
+        sq::Expr::Nested(_) => None,
+        // sqlparser spans a prefix operation as its operand.
+        sq::Expr::UnaryOp { expr, .. } => crate::token_before(expr.span().start),
+        other => Some(other.span().start),
+    };
+    let out = lower_expr_node(e)?;
+    if let Some(at) = at
+        && let Some(key) = pgmem_types::node_key(&out)
+    {
+        if prefix && let Expr::Unary { op, .. } = &out {
+            note_ref(ErrorRef::Keyed(Box::new(ErrorRef::PrefixOperator(op.name().to_owned())), key.clone()), at);
+        }
+        crate::note_in_clauses(at, |clause| ErrorRef::InClause(clause, Box::new(ErrorRef::Expr(key.clone()))));
+        note_ref(ErrorRef::Expr(key), at);
+    }
+    Ok(out)
+}
+
+fn lower_expr_node(e: sq::Expr) -> SqlResult<Expr> {
     use sq::Expr as E;
     Ok(match e {
         E::Identifier(i) => {
             let e = lower_identifier(&i);
             if let Expr::Column(parts) = &e {
-                note_ref(ErrorRef::Column(parts.join(".")), i.span.start);
+                crate::note_column(parts, i.span.start);
             }
             e
         }
         E::CompoundIdentifier(parts) => {
             let names: Vec<String> = parts.iter().map(ident).collect();
             if let Some(first) = parts.first() {
-                note_ref(ErrorRef::Column(names.join(".")), first.span.start);
+                crate::note_column(&names, first.span.start);
             }
             Expr::Column(names)
         }
         E::Value(v) => {
-            if let Some(s) = string_value(&v.value) {
+            if crate::collecting()
+                && let Some(s) = string_value(&v.value)
+            {
                 note_ref(ErrorRef::Literal(s), v.span.start);
             }
-            lower_value(v.value)?
+            let at = v.span.start;
+            lower_value(v.value).map_err(|e| match crate::position_in_parsed(at) {
+                Some(p) if e.code == pgmem_types::code::SYNTAX_ERROR && e.position().is_none() => e.with_position(p),
+                _ => e,
+            })?
         }
         E::Nested(inner) => lower_expr(*inner)?,
         E::IsNull(x) => Expr::IsNull { expr: b(lower_expr(*x)?), negated: false },
@@ -250,7 +281,7 @@ pub(crate) fn lower_expr(e: sq::Expr) -> SqlResult<Expr> {
                     if parts.len() == 1 {
                         lower_expr(root)?
                     } else {
-                        note_ref(ErrorRef::Column(parts.join(".")), start);
+                        crate::note_column(&parts, start);
                         Expr::Column(parts)
                     }
                 }
@@ -490,10 +521,29 @@ fn place_named_args(func: &str, positional: Vec<Expr>, named: Vec<(String, Expr)
     Ok(out)
 }
 
+/// Where an expression starts (a parenthesized one where its contents start).
+fn expr_start(e: &sq::Expr) -> sqlparser::tokenizer::Location {
+    match e {
+        sq::Expr::Nested(inner) => expr_start(inner),
+        other => other.span().start,
+    }
+}
+
 fn lower_binary(left: sq::Expr, op: &sq::BinaryOperator, right: sq::Expr) -> SqlResult<Expr> {
     match op {
-        sq::BinaryOperator::And => Ok(Expr::And(b(lower_expr(left)?), b(lower_expr(right)?))),
-        sq::BinaryOperator::Or => Ok(Expr::Or(b(lower_expr(left)?), b(lower_expr(right)?))),
+        sq::BinaryOperator::And | sq::BinaryOperator::Or => {
+            let at = crate::collecting().then(|| (expr_start(&left), expr_start(&right)));
+            let (l, r) = (b(lower_expr(left)?), b(lower_expr(right)?));
+            let e = if matches!(op, sq::BinaryOperator::And) { Expr::And(l, r) } else { Expr::Or(l, r) };
+            if let Some((l, r)) = at
+                && let Some(key) = pgmem_types::node_key(&e)
+            {
+                for (i, at) in [l, r].into_iter().enumerate() {
+                    note_ref(ErrorRef::Operand(Box::new(ErrorRef::Expr(key.clone())), i), at);
+                }
+            }
+            Ok(e)
+        }
         // `(s1, e1) OVERLAPS (s2, e2)` is the function overlaps(s1, e1, s2, e2).
         sq::BinaryOperator::Overlaps => {
             let pair = |e: sq::Expr, side: &str| -> SqlResult<Vec<Expr>> {
@@ -508,10 +558,16 @@ fn lower_binary(left: sq::Expr, op: &sq::BinaryOperator, right: sq::Expr) -> Sql
         }
         _ => {
             let name = binary_op_name(op)?;
-            if let Some(at) = token_location(left.span().end, &name) {
+            let at = if crate::collecting() { token_location(left.span().end, &name) } else { None };
+            if let Some(at) = at {
                 note_ref(ErrorRef::Operator(name.clone()), at);
             }
             let (l, r) = (lower_expr(left)?, lower_expr(right)?);
+            if let Some(at) = at
+                && let Some(key) = pgmem_types::node_key(&(name.as_str(), &l, &r))
+            {
+                note_ref(ErrorRef::Keyed(Box::new(ErrorRef::Operator(name.clone())), key), at);
+            }
             // `~~` and friends are LIKE spelled as operators.
             let like = |negated, ci| Expr::Like { expr: b(l.clone()), pattern: b(r.clone()), escape: None, negated, case_insensitive: ci };
             Ok(match name.as_str() {
@@ -685,7 +741,32 @@ fn lower_json_constructor(base: &str, list: sq::FunctionArgumentList, filter: Op
 
 fn lower_function(f: sq::Function) -> SqlResult<Expr> {
     let name = object_name(&f.name)?;
-    crate::note_name(ErrorRef::Function, &f.name, &name);
+    crate::note_function(&f.name, &name);
+    let at = crate::name_start(&f.name);
+    let written = name.0.join(".");
+    let aggregate = f.over.is_none() && pgmem_ir::is_aggregate_function(name.base());
+    let e = if aggregate { crate::in_aggregate(|| lower_function_call(f, name)) } else { lower_function_call(f, name) }?;
+    // The one call (among equal-named ones) an error about it means: by its structure.
+    if crate::collecting()
+        && let (Some(at), Expr::Function(call)) = (at, &e)
+        && let Some(key) = pgmem_types::node_key(call.as_ref())
+    {
+        note_ref(ErrorRef::Keyed(Box::new(ErrorRef::Function(written)), key), at);
+    }
+    Ok(e)
+}
+
+/// Notes a table function call (`FROM f(x)`), written `name`, for errors about that call.
+pub(crate) fn note_keyed_call(name: &sq::ObjectName, call: &FunctionCall) {
+    if crate::collecting()
+        && let Some(at) = crate::name_start(name)
+        && let Some(key) = pgmem_types::node_key(call)
+    {
+        note_ref(ErrorRef::Keyed(Box::new(ErrorRef::Function(call.name.0.join("."))), key), at);
+    }
+}
+
+fn lower_function_call(f: sq::Function, name: pgmem_ir::ObjectName) -> SqlResult<Expr> {
     let base = name.base().to_owned();
     let mut call = FunctionCall { name: name.clone(), ..FunctionCall::new(&base, Vec::new()) };
     call.name = name;
@@ -846,6 +927,7 @@ pub(crate) fn lower_type(dt: &sq::DataType) -> SqlResult<TypeName> {
         }
         D::Custom(name, mods) => {
             let n = object_name(name)?;
+            crate::note_name(ErrorRef::Type, name, &n);
             TypeName {
                 name: n.base().to_owned(),
                 modifiers: mods.iter().filter_map(|m| m.to_string().parse().ok()).collect(),

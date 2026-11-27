@@ -647,6 +647,14 @@ pub fn is_reserved_keyword(s: &str) -> bool {
 /// Resolves a declared type name (`int4`, `varchar(20)`, `text[]`, a user type) to a type
 /// and typmod. `serial` family names are handled by CREATE TABLE before this is called.
 pub fn resolve_type_name(catalog: &Catalog, t: &pgmem_ir::TypeName) -> SqlResult<(Type, i32)> {
+    resolve_type_name_inner(catalog, t).map_err(|e| {
+        about(e, &[code::UNDEFINED_OBJECT, code::INVALID_SCHEMA_NAME], || {
+            pgmem_types::ErrorRef::Type(t.schema.iter().chain([&t.name]).cloned().collect::<Vec<_>>().join("."))
+        })
+    })
+}
+
+fn resolve_type_name_inner(catalog: &Catalog, t: &pgmem_ir::TypeName) -> SqlResult<(Type, i32)> {
     let builtin = match t.schema.as_deref() {
         None | Some("pg_catalog") => Type::from_sql_name(&t.name),
         Some(_) => None,
@@ -661,7 +669,7 @@ pub fn resolve_type_name(catalog: &Catalog, t: &pgmem_ir::TypeName) -> SqlResult
             }
             let mut parts: Vec<String> = t.schema.iter().cloned().collect();
             parts.push(t.name.clone());
-            let qualified = parts.join(".");
+            let qualified = format!("{}{}", parts.join("."), "[]".repeat(t.array_dims));
             let user = crate::usertypes::lookup_type(catalog, &pgmem_ir::ObjectName(parts))?
                 .ok_or_else(|| SqlError::new(code::UNDEFINED_OBJECT, format!("type \"{qualified}\" does not exist")))?;
             if !t.modifiers.is_empty() {
@@ -707,6 +715,52 @@ pub fn resolve_type_name(catalog: &Catalog, t: &pgmem_ir::TypeName) -> SqlResult
 /// [`SqlError::about`]): the classes Postgres reports at that reference's position.
 pub(crate) fn about(e: SqlError, codes: &[&str], subject: impl FnOnce() -> pgmem_types::ErrorRef) -> SqlError {
     if codes.contains(&e.code) { e.about(subject()) } else { e }
+}
+
+/// `e` about the expression `node` (Postgres points at where it starts).
+pub(crate) fn at_expr(e: SqlError, node: &pgmem_ir::Expr) -> SqlError {
+    match pgmem_types::node_key(node) {
+        Some(key) => e.about(pgmem_types::ErrorRef::Expr(key)),
+        None => e,
+    }
+}
+
+/// `e` about the expression `node` as the clause `clause` of the statement holds it.
+pub(crate) fn at_expr_in_clause(e: SqlError, clause: &'static str, node: &pgmem_ir::Expr) -> SqlError {
+    match pgmem_types::node_key(node) {
+        Some(key) => e.about(pgmem_types::ErrorRef::InClause(clause, Box::new(pgmem_types::ErrorRef::Expr(key)))),
+        None => e,
+    }
+}
+
+/// `e` about the expression `child` of the expression `parent` (Postgres points at it where
+/// it is not the first look-alike in the statement).
+pub(crate) fn at_expr_within(e: SqlError, parent: Option<pgmem_types::ErrorRef>, child: &pgmem_ir::Expr) -> SqlError {
+    let Some(parent) = parent else { return at_expr(e, child) };
+    match pgmem_types::node_key(child) {
+        Some(key) => e.about(pgmem_types::ErrorRef::Within(Box::new(parent), Box::new(pgmem_types::ErrorRef::Expr(key)))),
+        None => e,
+    }
+}
+
+/// The reference to a whole expression, to name as the parent of its parts.
+pub(crate) fn expr_ref(node: &pgmem_ir::Expr) -> Option<pgmem_types::ErrorRef> {
+    pgmem_types::node_key(node).map(pgmem_types::ErrorRef::Expr)
+}
+
+/// The reference to a function call, to name as the parent of its arguments.
+pub(crate) fn call_ref(call: &pgmem_ir::FunctionCall) -> Option<pgmem_types::ErrorRef> {
+    let key = pgmem_types::node_key(call)?;
+    Some(pgmem_types::ErrorRef::Keyed(Box::new(pgmem_types::ErrorRef::Function(call.name.0.join("."))), key))
+}
+
+/// `e` about the node `node`, one of possibly several in the statement that look alike as
+/// `subject` (see [`pgmem_types::ErrorRef::Keyed`]).
+pub(crate) fn keyed_about(e: SqlError, subject: pgmem_types::ErrorRef, node: &dyn std::fmt::Debug) -> SqlError {
+    match pgmem_types::node_key(node) {
+        Some(key) => e.about(pgmem_types::ErrorRef::Keyed(Box::new(subject), key)),
+        None => e.about(subject),
+    }
 }
 
 pub(crate) fn feature(what: &str) -> SqlError {

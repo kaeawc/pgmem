@@ -278,14 +278,28 @@ fn literal(l: &ir::Literal) -> SqlResult<Bound> {
 /// The common type of a set of expressions (CASE branches, COALESCE args, VALUES columns,
 /// UNION columns), following `select_common_type`: all unknown → text.
 pub fn common_of(types: &[Type], what: &str) -> SqlResult<Type> {
+    common_of_idx(types, what).map_err(|(e, _)| e)
+}
+
+/// [`common_of`], with the error about the expression of `exprs` that did not fit (Postgres
+/// points at it).
+fn common_of_exprs(types: &[Type], what: &str, parent: Option<ErrorRef>, exprs: &[&ir::Expr]) -> SqlResult<Type> {
+    common_of_idx(types, what).map_err(|(e, i)| match exprs.get(i) {
+        Some(x) => super::at_expr_within(e, parent, x),
+        None => e,
+    })
+}
+
+/// [`common_of`]; the error comes with the index of the type that did not fit.
+fn common_of_idx(types: &[Type], what: &str) -> Result<Type, (SqlError, usize)> {
     let mut acc = Type::Unknown;
-    for t in types {
+    for (i, t) in types.iter().enumerate() {
         acc = match (&acc, t) {
             (Type::Unknown, t) => t.clone(),
             (a, Type::Unknown) => a.clone(),
             (a, t) => common_type(a, t)
                 .filter(|c| *c != Type::Unknown)
-                .ok_or_else(|| SqlError::datatype_mismatch(format!("{what} types {} and {} cannot be matched", a.name(), t.name())))?,
+                .ok_or_else(|| (SqlError::datatype_mismatch(format!("{what} types {} and {} cannot be matched", a.name(), t.name())), i))?,
         };
     }
     Ok(if acc == Type::Unknown { Type::Text } else { acc })
@@ -502,30 +516,23 @@ impl Binder<'_> {
             }
             ir::Expr::Unary { op, expr } => {
                 let (inner, t) = self.bind_expr(expr, ctx)?;
-                let name = match op {
-                    ir::UnaryOp::Minus => "-",
-                    ir::UnaryOp::Plus => "+",
-                    ir::UnaryOp::BitNot => "~",
-                    ir::UnaryOp::SquareRoot => "|/",
-                    ir::UnaryOp::CubeRoot => "||/",
-                    ir::UnaryOp::Abs => "@",
-                };
-                let r = resolve_unary(name, &t)?;
+                let name = op.name();
+                let r = resolve_unary(name, &t).map_err(|err| super::keyed_about(err, ErrorRef::PrefixOperator(name.to_owned()), e))?;
                 let arg = coerce(self, inner, &t, &r.args[0], CoercionContext::Explicit)?;
                 Ok((fold(Expr::Call { func: r.func, args: vec![arg] }), r.ret))
             }
             ir::Expr::Binary { op, left, right } => self.bind_binary(op, left, right, ctx),
             ir::Expr::And(l, r) => {
-                let l = self.bind_bool(l, "AND", ctx)?;
-                let r = self.bind_bool(r, "AND", ctx)?;
+                let l = self.bind_bool(e, l, "AND", ctx)?;
+                let r = self.bind_bool(e, r, "AND", ctx)?;
                 Ok((flatten(Expr::And(vec![l, r])), Type::Bool))
             }
             ir::Expr::Or(l, r) => {
-                let l = self.bind_bool(l, "OR", ctx)?;
-                let r = self.bind_bool(r, "OR", ctx)?;
+                let l = self.bind_bool(e, l, "OR", ctx)?;
+                let r = self.bind_bool(e, r, "OR", ctx)?;
                 Ok((flatten(Expr::Or(vec![l, r])), Type::Bool))
             }
-            ir::Expr::Not(inner) => Ok((Expr::Not(Box::new(self.bind_bool(inner, "NOT", ctx)?)), Type::Bool)),
+            ir::Expr::Not(inner) => Ok((Expr::Not(Box::new(self.bind_bool(e, inner, "NOT", ctx)?)), Type::Bool)),
             ir::Expr::IsNull { expr, negated } => {
                 let (e, t) = self.bind_expr(expr, ctx)?;
                 if let Expr::Param(i) = &e
@@ -537,7 +544,7 @@ impl Binder<'_> {
                 Ok((Expr::IsNull { expr: Box::new(e), negated: *negated }, Type::Bool))
             }
             ir::Expr::IsBool { expr, value, negated } => {
-                let e = self.bind_bool(expr, "IS", ctx)?;
+                let e = self.bind_bool(e, expr, "IS", ctx)?;
                 Ok((
                     match value {
                         None => Expr::IsNull { expr: Box::new(e), negated: *negated },
@@ -624,10 +631,16 @@ impl Binder<'_> {
                 )?;
                 Ok((if *negated { Expr::Not(Box::new(call)) } else { call }, Type::Bool))
             }
-            ir::Expr::Case { operand, whens, else_result } => self.bind_case(operand.as_deref(), whens, else_result.as_deref(), ctx),
+            ir::Expr::Case { operand, whens, else_result } => self.bind_case(e, operand.as_deref(), whens, else_result.as_deref(), ctx),
             ir::Expr::Cast { expr, ty } => self.bind_cast(expr, ty, ctx),
             ir::Expr::Function(f) => self.bind_function(f, ctx).map_err(|e| {
-                super::about(e, &[code::UNDEFINED_FUNCTION, code::AMBIGUOUS_FUNCTION], || ErrorRef::Function(f.name.0.join(".")))
+                super::about(e, &[code::UNDEFINED_FUNCTION, code::AMBIGUOUS_FUNCTION, code::GROUPING_ERROR, code::WINDOWING_ERROR], || {
+                    let name = ErrorRef::Function(f.name.0.join("."));
+                    match pgmem_types::node_key(f.as_ref()) {
+                        Some(key) => ErrorRef::Keyed(Box::new(name), key),
+                        None => name,
+                    }
+                })
             }),
             ir::Expr::Array(items) => {
                 if items.is_empty() {
@@ -636,7 +649,7 @@ impl Binder<'_> {
                 }
                 let bound = items.iter().map(|i| self.bind_expr(i, ctx)).collect::<SqlResult<Vec<_>>>()?;
                 let types: Vec<Type> = bound.iter().map(|(_, t)| t.clone()).collect();
-                let t = common_of(&types, "ARRAY")?;
+                let t = common_of_exprs(&types, "ARRAY", super::expr_ref(e), &items.iter().collect::<Vec<_>>())?;
                 let items =
                     bound.into_iter().map(|(e, et)| coerce(self, e, &et, &t, CoercionContext::Implicit)).collect::<SqlResult<Vec<_>>>()?;
                 // ARRAY[ARRAY[...], ...] builds a multidimensional array of the same type.
@@ -666,10 +679,19 @@ impl Binder<'_> {
         }
     }
 
-    fn bind_bool(&self, e: &ir::Expr, what: &str, ctx: &Ctx) -> SqlResult<Expr> {
+    /// Binds `e`, an operand of `parent` (`what` names the operator in the error).
+    fn bind_bool(&self, parent: &ir::Expr, e: &ir::Expr, what: &str, ctx: &Ctx) -> SqlResult<Expr> {
         let (x, t) = self.bind_expr(e, ctx)?;
         if t != Type::Bool && t != Type::Unknown {
-            return Err(SqlError::datatype_mismatch(format!("argument of {what} must be type boolean, not type {}", t.name())));
+            let err = SqlError::datatype_mismatch(format!("argument of {what} must be type boolean, not type {}", t.name()));
+            // The operands of AND / OR are told apart by their place, the others by their text.
+            return Err(match (parent, super::expr_ref(parent)) {
+                (ir::Expr::And(l, _) | ir::Expr::Or(l, _), Some(p)) => {
+                    let left = std::ptr::eq(l.as_ref(), e);
+                    super::at_expr(err, e).refined(ErrorRef::Operand(Box::new(p), usize::from(!left)))
+                }
+                (_, p) => super::at_expr_within(err, p, e),
+            });
         }
         coerce(self, x, &t, &Type::Bool, CoercionContext::Implicit)
     }
@@ -678,7 +700,13 @@ impl Binder<'_> {
     pub fn bind_predicate(&self, e: &ir::Expr, what: &str, ctx: &Ctx) -> SqlResult<Expr> {
         let (x, t) = self.bind_expr(e, ctx)?;
         if t != Type::Bool && t != Type::Unknown {
-            return Err(SqlError::datatype_mismatch(format!("argument of {what} must be type boolean, not type {}", t.name())));
+            let err = SqlError::datatype_mismatch(format!("argument of {what} must be type boolean, not type {}", t.name()));
+            return Err(match what {
+                "WHERE" => super::at_expr_in_clause(err, "WHERE", e),
+                "HAVING" => super::at_expr_in_clause(err, "HAVING", e),
+                "JOIN/ON" => super::at_expr_in_clause(err, "JOIN conditions", e),
+                _ => super::at_expr(err, e),
+            });
         }
         coerce(self, x, &t, &Type::Bool, CoercionContext::Implicit)
     }
@@ -813,7 +841,10 @@ impl Binder<'_> {
         }
         let (l, lt) = self.bind_expr(left, ctx)?;
         let (r, rt) = self.bind_expr(right, ctx)?;
-        self.apply_binary(op, l, lt, r, rt)
+        self.apply_binary(op, l, lt, r, rt).map_err(|err| match pgmem_types::node_key(&(op, left, right)) {
+            Some(key) => err.about(ErrorRef::Keyed(Box::new(ErrorRef::Operator(op.to_owned())), key)),
+            None => err,
+        })
     }
 
     pub fn apply_binary(&self, op: &str, l: Expr, lt: Type, r: Expr, rt: Type) -> SqlResult<Bound> {
@@ -984,6 +1015,7 @@ impl Binder<'_> {
 
     fn bind_case(
         &self,
+        node: &ir::Expr,
         operand: Option<&ir::Expr>,
         whens: &[(ir::Expr, ir::Expr)],
         else_result: Option<&ir::Expr>,
@@ -994,7 +1026,7 @@ impl Binder<'_> {
         for (w, t) in whens {
             let cond = match operand {
                 Some(op) => self.bind_binary("=", op, w, ctx)?.0,
-                None => self.bind_bool(w, "CASE/WHEN", ctx)?,
+                None => self.bind_bool(node, w, "CASE/WHEN", ctx)?,
             };
             conds.push(cond);
             results.push(self.bind_expr(t, ctx)?);
@@ -1003,7 +1035,8 @@ impl Binder<'_> {
         // Postgres considers the ELSE result first (it heads transformCaseExpr's list).
         let mut types: Vec<Type> = else_bound.iter().map(|(_, t)| t.clone()).collect();
         types.extend(results.iter().map(|(_, t)| t.clone()));
-        let t = common_of(&types, "CASE")?;
+        let branches: Vec<&ir::Expr> = else_result.into_iter().chain(whens.iter().map(|(_, t)| t)).collect();
+        let t = common_of_exprs(&types, "CASE", super::expr_ref(node), &branches)?;
         let mut out_whens = Vec::new();
         for (c, (r, rt)) in conds.into_iter().zip(results) {
             out_whens.push((c, coerce(self, r, &rt, &t, CoercionContext::Implicit)?));
@@ -1130,7 +1163,7 @@ impl Binder<'_> {
                     return Err(SqlError::syntax(format!("syntax error: {name}() requires arguments")));
                 }
                 let types: Vec<Type> = bound.iter().map(|(_, t)| t.clone()).collect();
-                let t = common_of(&types, &name.to_ascii_uppercase())?;
+                let t = common_of_exprs(&types, &name.to_ascii_uppercase(), super::call_ref(f), &f.args.iter().collect::<Vec<_>>())?;
                 let args =
                     bound.into_iter().map(|(e, et)| coerce(self, e, &et, &t, CoercionContext::Implicit)).collect::<SqlResult<Vec<_>>>()?;
                 let e = match name {
@@ -1422,12 +1455,12 @@ impl Binder<'_> {
         let filter = f.filter.as_ref().map(|fl| self.bind_predicate(fl, "FILTER", &ctx.with_clause(Clause::Filter))).transpose()?;
         let ty = if matches!(kind, AggKind::HypRank | AggKind::HypDenseRank) { Type::Int8 } else { Type::Float8 };
         let call = AggCall { kind, args, distinct: false, filter, order_by, arg_ty: Type::Unknown, ty: ty.clone(), levels_up: 0 };
-        place_agg(call, ctx, false)
+        place_agg(call, ctx, false, f)
     }
 
     fn bind_aggregate(&self, name: &str, kind: AggKind, f: &ir::FunctionCall, ctx: &Ctx) -> SqlResult<Bound> {
         let call = self.make_agg(name, kind, f, ctx)?;
-        place_agg(call, ctx, true)
+        place_agg(call, ctx, true, f)
     }
 
     fn bind_window_call(&self, name: &str, kind: WinKind, agg: Option<AggKind>, f: &ir::FunctionCall, ctx: &Ctx) -> SqlResult<Bound> {
@@ -1863,7 +1896,7 @@ fn resolve_window_spec(spec: &ir::WindowSpec, named: &[ir::NamedWindow]) -> SqlR
 /// the current one, or the enclosing level its arguments all reference, where the clause the
 /// subquery sits in must allow aggregates. `nested_message`: an aggregate inside another (or in
 /// an unnamed context) reports nesting.
-fn place_agg(call: AggCall, ctx: &Ctx, nested_message: bool) -> SqlResult<Bound> {
+fn place_agg(call: AggCall, ctx: &Ctx, nested_message: bool, f: &ir::FunctionCall) -> SqlResult<Bound> {
     let ty = call.ty.clone();
     let n = ctx.levels.len();
     let up = super::sublink::agg_level(&call);
@@ -1871,7 +1904,10 @@ fn place_agg(call: AggCall, ctx: &Ctx, nested_message: bool) -> SqlResult<Bound>
         if nested_message && matches!(clause, Clause::Other | Clause::AggArg) {
             SqlError::new(code::GROUPING_ERROR, "aggregate function calls cannot be nested")
         } else {
+            // Postgres points at the call, where the clause it is not allowed in is the
+            // one the message names.
             agg_misuse(clause, "aggregate functions")
+                .about(ErrorRef::InClause(clause.name(), Box::new(ErrorRef::Function(f.name.0.join(".")))))
         }
     };
     if up == 0 || up >= n {
@@ -1944,4 +1980,14 @@ fn select_list_srf(name: &str, types: &[Type]) -> SqlResult<Option<funcs::array:
         return Ok(Some((cols.into_iter().map(|(_, t)| t).collect(), targets, f)));
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_lowering_aggregate_list_names_binder_aggregates() {
+        for name in pgmem_ir::AGGREGATE_FUNCTIONS {
+            assert!(super::aggregate_kind(name).is_some(), "{name} is listed as an aggregate but the binder has no such aggregate");
+        }
+    }
 }

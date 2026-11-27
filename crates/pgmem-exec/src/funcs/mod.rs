@@ -58,8 +58,12 @@ pub fn no_operator(op: &str, l: Option<&Type>, r: &Type) -> SqlError {
         Some(l) => format!("operator does not exist: {} {op} {}", l.name(), r.name()),
         None => format!("operator does not exist: {op} {}", r.name()),
     };
-    SqlError::undefined_function(text)
-        .with_hint("No operator matches the given name and argument types. You might need to add explicit type casts.")
+    let hint = if l.is_some() {
+        "No operator matches the given name and argument types. You might need to add explicit type casts."
+    } else {
+        "No operator matches the given name and argument type. You might need to add an explicit type cast."
+    };
+    SqlError::undefined_function(text).with_hint(hint)
 }
 
 /// Resolves a function call by name. `None` means "no such function name" (the caller may

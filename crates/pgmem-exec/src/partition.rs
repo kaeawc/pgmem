@@ -57,6 +57,7 @@ pub(crate) fn bind_key(b: &Binder, table: &TableDef, spec: &ir::PartitionSpec) -
             ir::Expr::Column(names) if names.len() == 1 => {
                 let slot = table.column_index(&names[0]).ok_or_else(|| {
                     SqlError::new(code::UNDEFINED_COLUMN, format!("column \"{}\" named in partition key does not exist", names[0]))
+                        .about(pgmem_types::ErrorRef::Column(names[0].clone()))
                 })?;
                 parts.push(PartitionKeyPart::Column(slot));
             }
@@ -130,7 +131,7 @@ pub fn key_definition(catalog: &Catalog, table: &TableDef) -> Option<String> {
 fn bound_value(b: &Binder, e: &ir::Expr, ty: &Type, ectx: &EvalCtx) -> SqlResult<Value> {
     let (bound, from) = top_ctx(|ctx| b.bind_expr(e, ctx)).map_err(|err| {
         if err.code == code::UNDEFINED_COLUMN {
-            SqlError::feature_not_supported("cannot use column reference in partition bound expression")
+            SqlError::feature_not_supported("cannot use column reference in partition bound expression").subject_of(&err)
         } else {
             err
         }

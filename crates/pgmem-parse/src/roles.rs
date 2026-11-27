@@ -588,7 +588,11 @@ pub(crate) fn lower(r: RoleStmt) -> SqlResult<Statement> {
             let fns = functions
                 .into_iter()
                 .map(|(n, ts)| {
-                    Ok((object_name(&n)?, ts.map(|ts| ts.iter().map(lower_type).collect::<SqlResult<Vec<TypeName>>>()).transpose()?))
+                    Ok((
+                        object_name(&n)?,
+                        ts.map(|ts| crate::quietly(crate::QUIET_TYPES, || ts.iter().map(lower_type).collect::<SqlResult<Vec<TypeName>>>()))
+                            .transpose()?,
+                    ))
                 })
                 .collect::<SqlResult<Vec<_>>>()?;
             stmt.target = GrantTarget::Functions(fns);

@@ -120,7 +120,7 @@ fn check_default_binds(b: &Binder, col: &ColumnDef, e: &ir::Expr) -> SqlResult<(
     let ctx = Ctx::new(&empty).with_clause(Clause::Default);
     let (bound, t) = b.bind_expr(e, &ctx).map_err(|err| {
         if err.code == code::UNDEFINED_COLUMN {
-            SqlError::feature_not_supported("cannot use column reference in DEFAULT expression")
+            SqlError::feature_not_supported("cannot use column reference in DEFAULT expression").subject_of(&err)
         } else {
             err
         }
@@ -1367,6 +1367,7 @@ pub const COLLATIONS: &[(&str, u32)] = &[("default", 100), ("C", 950), ("POSIX",
 
 fn key_column_missing(name: &str) -> SqlError {
     SqlError::new(code::UNDEFINED_COLUMN, format!("column \"{name}\" named in key does not exist"))
+        .about(pgmem_types::ErrorRef::Target(name.to_owned()))
 }
 
 /// The column names of an index's default name (`ChooseIndexColumnNames`): the key columns,

@@ -221,7 +221,11 @@ impl Binder<'_> {
             let expr = match ordinal(&o.expr) {
                 Some(n) if n >= 1 && n <= b.columns.len() => Expr::Col(n - 1),
                 Some(n) => {
-                    return Err(SqlError::new(code::INVALID_COLUMN_REFERENCE, format!("ORDER BY position {n} is not in select list")));
+                    return Err(super::at_expr_in_clause(
+                        SqlError::new(code::INVALID_COLUMN_REFERENCE, format!("ORDER BY position {n} is not in select list")),
+                        "ORDER BY",
+                        &o.expr,
+                    ));
                 }
                 None if set_op && !matches!(&o.expr, ir::Expr::Column(p) if p.len() == 1) => {
                     return Err(SqlError::new(code::FEATURE_NOT_SUPPORTED, "invalid UNION/INTERSECT/EXCEPT ORDER BY clause")
@@ -313,7 +317,8 @@ impl Binder<'_> {
                 ir::SelectItem::QualifiedWildcard(q) => {
                     let qual = q.base();
                     if !level.scope.has_qualifier(qual) {
-                        return Err(SqlError::new(code::UNDEFINED_TABLE, format!("missing FROM-clause entry for table \"{qual}\"")));
+                        return Err(SqlError::new(code::UNDEFINED_TABLE, format!("missing FROM-clause entry for table \"{qual}\""))
+                            .about(pgmem_types::ErrorRef::Column(format!("{q}.*"))));
                     }
                     for i in level.scope.qualified_star(qual) {
                         let c = &level.scope.cols[i];
@@ -363,7 +368,11 @@ impl Binder<'_> {
             let e = match ordinal(g) {
                 Some(n) if n >= 1 && n <= exprs.len() => exprs[n - 1].clone(),
                 Some(n) => {
-                    return Err(SqlError::new(code::INVALID_COLUMN_REFERENCE, format!("GROUP BY position {n} is not in select list")));
+                    return Err(super::at_expr_in_clause(
+                        SqlError::new(code::INVALID_COLUMN_REFERENCE, format!("GROUP BY position {n} is not in select list")),
+                        "GROUP BY",
+                        g,
+                    ));
                 }
                 None => match self.bind_expr(g, &gctx) {
                     Ok((e, _)) => e,
@@ -395,7 +404,11 @@ impl Binder<'_> {
             let e = match ordinal(&o.expr) {
                 Some(n) if n >= 1 && n <= exprs.len() => OrderTarget::Output(n - 1),
                 Some(n) => {
-                    return Err(SqlError::new(code::INVALID_COLUMN_REFERENCE, format!("ORDER BY position {n} is not in select list")));
+                    return Err(super::at_expr_in_clause(
+                        SqlError::new(code::INVALID_COLUMN_REFERENCE, format!("ORDER BY position {n} is not in select list")),
+                        "ORDER BY",
+                        &o.expr,
+                    ));
                 }
                 None => match bare_name(&o.expr)
                     .map(|n| columns.iter().enumerate().filter(|(_, c)| c.name == n).map(|(i, _)| i).collect::<Vec<_>>())
@@ -1495,7 +1508,8 @@ impl Grouping<'_> {
                 None => Err(SqlError::new(
                     code::GROUPING_ERROR,
                     format!("column \"{}\" must appear in the GROUP BY clause or be used in an aggregate function", self.col_name(i)),
-                )),
+                )
+                .about(self.written_as(i))),
             },
             // A subquery sees the grouped row: its references to this level must be group keys,
             // and the aggregates of this level it holds are computed here.
@@ -1562,6 +1576,17 @@ impl Grouping<'_> {
         None
     }
 
+    /// How the text can name column `i` of the scope: bare or qualified.
+    fn written_as(&self, i: usize) -> pgmem_types::ErrorRef {
+        use pgmem_types::ErrorRef;
+        let c = &self.scope.cols[i];
+        let mut names = vec![ErrorRef::Ungrouped(c.name.clone())];
+        if let Some(q) = &c.qualifier {
+            names.push(ErrorRef::Ungrouped(format!("{q}.{}", c.name)));
+        }
+        ErrorRef::AnyOf(names)
+    }
+
     fn col_name(&self, i: usize) -> String {
         let c = &self.scope.cols[i];
         let qual = c.qualifier.as_deref().map(|q| format!("{q}.")).unwrap_or_default();
@@ -1578,7 +1603,8 @@ impl Grouping<'_> {
                     return Err(SqlError::new(
                         code::GROUPING_ERROR,
                         format!("subquery uses ungrouped column \"{}\" from outer query", self.col_name(*idx)),
-                    ));
+                    )
+                    .about(self.written_as(*idx)));
                 }
             },
             Expr::AggCall(a) if a.levels_up == k => {
@@ -1766,7 +1792,8 @@ fn lock_targets(scope: &Scope, locking: &[ir::LockClause]) -> SqlResult<Vec<Expr
             return Err(SqlError::new(
                 code::UNDEFINED_TABLE,
                 format!("relation \"{n}\" in {} clause not found in FROM clause", lock_strength_name(first)),
-            ));
+            )
+            .about(pgmem_types::ErrorRef::LockTarget((*n).to_owned())));
         }
     }
     let mut out = Vec::new();

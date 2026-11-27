@@ -395,7 +395,8 @@ impl Binder<'_> {
                 ir::SelectItem::QualifiedWildcard(q) => {
                     let qual = q.base();
                     if !scope.has_qualifier(qual) {
-                        return Err(SqlError::new(code::UNDEFINED_TABLE, format!("missing FROM-clause entry for table \"{qual}\"")));
+                        return Err(SqlError::new(code::UNDEFINED_TABLE, format!("missing FROM-clause entry for table \"{qual}\""))
+                            .about(pgmem_types::ErrorRef::Column(format!("{q}.*"))));
                     }
                     for i in scope.qualified_star(qual) {
                         let c = &scope.cols[i];
@@ -527,13 +528,16 @@ pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<Inser
         table.live_columns().map(|(i, _)| i).take(n).collect()
     } else {
         let mut out = Vec::new();
-        for c in &ins.columns {
+        for (n, c) in ins.columns.iter().enumerate() {
             let idx = table.column_index(c).ok_or_else(|| {
                 SqlError::undefined_column(&format!("\"{c}\" of relation \"{}\"", table.name))
-                    .about(pgmem_types::ErrorRef::Column(c.clone()))
+                    .about(pgmem_types::ErrorRef::Target(c.clone()))
             })?;
             if out.contains(&idx) {
-                return Err(SqlError::new(code::DUPLICATE_COLUMN, format!("column \"{c}\" specified more than once")));
+                // Postgres points at the repeat.
+                let earlier = ins.columns[..n].iter().filter(|e| table.column_index(e) == Some(idx)).count();
+                return Err(SqlError::new(code::DUPLICATE_COLUMN, format!("column \"{c}\" specified more than once"))
+                    .about(pgmem_types::ErrorRef::Nth(Box::new(pgmem_types::ErrorRef::Target(c.clone())), earlier)));
             }
             out.push(idx);
         }
@@ -555,9 +559,13 @@ pub fn bind_insert(b: &Binder, ins: &ir::Insert, outer: &Ctx) -> SqlResult<Inser
         ir::InsertSource::DefaultValues => InsertRows::DefaultValues,
         ir::InsertSource::Values(rows) => {
             let mut out = Vec::with_capacity(rows.len());
-            for row in rows {
+            for (n, row) in rows.iter().enumerate() {
+                if n > 0 && row.len() != rows[0].len() {
+                    return Err(SqlError::syntax("VALUES lists must all be the same length").about(pgmem_types::ErrorRef::ValuesItem(n, 0)));
+                }
                 if row.len() > columns.len() {
-                    return Err(SqlError::syntax("INSERT has more expressions than target columns"));
+                    return Err(SqlError::syntax("INSERT has more expressions than target columns")
+                        .about(pgmem_types::ErrorRef::ValuesItem(n, columns.len())));
                 }
                 if row.len() < columns.len() {
                     return Err(SqlError::syntax("INSERT has more target columns than expressions"));
@@ -726,7 +734,7 @@ fn bind_one_assignment(b: &Binder, table: &TableDef, target: &[String], value: &
     };
     let slot = table.column_index(column).ok_or_else(|| {
         SqlError::undefined_column(&format!("\"{column}\" of relation \"{}\"", table.name))
-            .about(pgmem_types::ErrorRef::Column(column.to_owned()))
+            .about(pgmem_types::ErrorRef::Target(column.to_owned()))
     })?;
     let col = &table.columns[slot];
     if let [field] = fields {

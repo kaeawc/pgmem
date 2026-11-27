@@ -94,7 +94,11 @@ pub fn create_domain(cd: &ir::CreateDomain, txn: &mut Txn, binder: &Binder) -> S
     if matches!(base, Type::Record | Type::Unknown | Type::Void) {
         return Err(SqlError::datatype_mismatch(format!("\"{}\" is not a valid base type for a domain", base.name())));
     }
-    let collation = domain_collation(binder.catalog, &base, cd.collation.as_deref())?;
+    let collation = domain_collation(binder.catalog, &base, cd.collation.as_deref()).map_err(|e| {
+        crate::bind::about(e, &[code::DATATYPE_MISMATCH], || {
+            pgmem_types::ErrorRef::Type(cd.ty.schema.iter().chain([&cd.ty.name]).cloned().collect::<Vec<_>>().join("."))
+        })
+    })?;
     if let Some(d) = &cd.default {
         validate_default(binder, d, &base, typmod)?;
     }
