@@ -1088,9 +1088,10 @@ impl Binder<'_> {
                 self.lock(view.oid, mode);
                 let top = Level::new(Scope::default());
                 let vctx = Ctx::new(&top);
-                // The view's query runs with its owner's privileges.
-                let bound =
-                    self.quietly(|| pgmem_types::context::with_search_path(&view.search_path, || self.bind_query(&view.query, &vctx)))?;
+                // The view's query runs with its owner's privileges, or the caller's when the
+                // view is `security_invoker`.
+                let run = || pgmem_types::context::with_search_path(&view.search_path, || self.bind_query(&view.query, &vctx));
+                let bound = if crate::views::security_invoker(&view) { run() } else { self.quietly(run) }?;
                 let mut cols: Vec<ScopeCol> = bound
                     .columns
                     .iter()

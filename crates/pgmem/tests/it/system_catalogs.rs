@@ -126,6 +126,33 @@ fn pg_index_keys_and_indexdef() {
 }
 
 #[test]
+fn int2vector_text_casts_and_mixed_index_keys() {
+    let (_db, mut c) = setup();
+    c.batch_execute("CREATE TABLE mx (a int, b text, c int); CREATE INDEX mx_i ON mx (a, lower(b)); CREATE INDEX mx_j ON mx (lower(b), c)")
+        .expect("setup");
+    let got = rows(
+        &mut c,
+        "SELECT indexrelid::regclass::text, indkey::text, indkey::int2[]::text, indoption::text,
+                pg_get_expr(indexprs, indrelid), pg_get_indexdef(indexrelid)
+         FROM pg_index WHERE indrelid = 'mx'::regclass ORDER BY 1",
+    );
+    assert_eq!(
+        got,
+        vec![
+            vec!["mx_i", "1 0", "[0:1]={1,0}", "0 0", "lower(b)", "CREATE INDEX mx_i ON public.mx USING btree (a, lower(b))"],
+            vec!["mx_j", "0 3", "[0:1]={0,3}", "0 0", "lower(b)", "CREATE INDEX mx_j ON public.mx USING btree (lower(b), c)"],
+        ]
+    );
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT '3 1 4'::int2vector::text, ('3 1 4'::int2vector)::int2[]::text, '1 2'::oidvector::text, ''::int2vector::int2[]::text"
+        ),
+        vec![vec!["3 1 4", "[0:2]={3,1,4}", "1 2", "{}"]]
+    );
+}
+
+#[test]
 fn information_schema_columns_and_constraints() {
     let (_db, mut c) = setup();
     schema(&mut c);

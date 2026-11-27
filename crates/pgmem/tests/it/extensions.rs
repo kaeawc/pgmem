@@ -102,3 +102,205 @@ fn citext_trgm_and_hstore() {
         [["\"a\"=>\"1\", \"b\"=>\"2\"", "{\"a\": \"1\", \"b\": null}"]]
     );
 }
+
+/// Functions marked DEPENDS ON EXTENSION go with the extension, but what depends on them
+/// (column defaults, triggers) blocks DROP EXTENSION unless CASCADE drops it too (#234).
+#[test]
+fn drop_extension_checks_dependents_of_member_functions() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE EXTENSION hstore;
+         CREATE FUNCTION xdf() RETURNS int LANGUAGE sql AS 'select 1';
+         ALTER FUNCTION xdf() DEPENDS ON EXTENSION hstore;
+         CREATE TABLE xdt (id int DEFAULT xdf());
+         CREATE FUNCTION xdtf() RETURNS trigger LANGUAGE plpgsql AS 'begin return new; end';
+         ALTER FUNCTION xdtf() DEPENDS ON EXTENSION hstore;
+         CREATE TABLE xdu (id int);
+         CREATE TRIGGER xdtr BEFORE INSERT ON xdu FOR EACH ROW EXECUTE FUNCTION xdtf()",
+    )
+    .expect("setup");
+    let e = expect_code(c.batch_execute("DROP EXTENSION hstore"), "2BP01");
+    let db = e.as_db_error().expect("db error");
+    assert_eq!(db.message(), "cannot drop extension hstore because other objects depend on it");
+    assert_eq!(
+        db.detail(),
+        Some("default value for column id of table xdt depends on function xdf()\ntrigger xdtr on table xdu depends on function xdtf()")
+    );
+    assert_eq!(db.hint(), Some("Use DROP ... CASCADE to drop the dependent objects too."));
+    c.batch_execute("DROP EXTENSION hstore CASCADE").expect("cascade");
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT (SELECT count(*) FROM pg_trigger WHERE tgname = 'xdtr'), (SELECT count(*) FROM pg_proc WHERE proname IN ('xdf', 'xdtf')),
+                    (SELECT count(*) FROM information_schema.columns WHERE table_name = 'xdt' AND column_default IS NOT NULL)"
+        ),
+        [["0", "0", "0"]]
+    );
+    c.batch_execute("INSERT INTO xdu VALUES (1); INSERT INTO xdt DEFAULT VALUES").expect("tables still work");
+}
+
+/// DROP EXTENSION ... CASCADE reports every dependent in one notice: "drop cascades to N
+/// other objects" with the list as DETAIL (#236).
+#[test]
+fn drop_extension_cascade_notice_lists_dependents() {
+    use std::sync::{Arc, Mutex};
+    let (db, mut c) = setup();
+    type Seen = Vec<(String, Option<String>)>;
+    let seen: Arc<Mutex<Seen>> = Arc::default();
+    let sink = Arc::clone(&seen);
+    let mut cfg: postgres::Config = db.conninfo().parse().expect("conninfo");
+    cfg.notice_callback(move |n| sink.lock().expect("lock").push((n.message().to_owned(), n.detail().map(str::to_owned))));
+    let mut c2 = cfg.connect(postgres::NoTls).expect("connect");
+    c.batch_execute("CREATE EXTENSION hstore; CREATE TABLE xcn1 (a int, h hstore); CREATE TABLE xcn2 (h hstore, b int)").expect("setup");
+    c2.batch_execute("DROP EXTENSION hstore CASCADE").expect("cascade");
+    let got = seen.lock().expect("lock").clone();
+    assert_eq!(
+        got,
+        [(
+            "drop cascades to 2 other objects".to_owned(),
+            Some("drop cascades to column h of table xcn1\ndrop cascades to column h of table xcn2".to_owned())
+        )]
+    );
+    c.batch_execute("DROP TABLE xcn1, xcn2").expect("cleanup");
+}
+
+fn extension_row(c: &mut postgres::Client, name: &str) -> Vec<Vec<String>> {
+    rows(
+        c,
+        &format!("SELECT extversion, extnamespace::regnamespace::text, extrelocatable::text FROM pg_extension WHERE extname = '{name}'"),
+    )
+}
+
+#[test]
+fn alter_extension_update() {
+    let (_db, mut c) = setup();
+    c.batch_execute("CREATE EXTENSION citext VERSION '1.4'").expect("create");
+    assert_eq!(extension_row(&mut c, "citext"), [["1.4", "public", "true"]]);
+    // UPDATE without TO goes to the default version; again it is a notice, not an error.
+    c.batch_execute("ALTER EXTENSION citext UPDATE").expect("update");
+    assert_eq!(extension_row(&mut c, "citext")[0][0], "1.8");
+    c.batch_execute("ALTER EXTENSION citext UPDATE; ALTER EXTENSION citext UPDATE TO '1.8'").expect("already current");
+    for target in ["1.5", "9.9", "1.1"] {
+        let e = expect_code(c.batch_execute(&format!("ALTER EXTENSION citext UPDATE TO '{target}'")), "22023");
+        assert_eq!(message(&e), format!("extension \"citext\" has no update path from version \"1.8\" to version \"{target}\""));
+    }
+    c.batch_execute("DROP EXTENSION citext; CREATE EXTENSION hstore VERSION '1.5'").expect("hstore");
+    c.batch_execute("ALTER EXTENSION hstore UPDATE TO '1.7'").expect("explicit target");
+    assert_eq!(extension_row(&mut c, "hstore")[0][0], "1.7");
+    let e = expect_code(c.batch_execute("ALTER EXTENSION no_such_extension UPDATE"), "42704");
+    assert_eq!(message(&e), "extension \"no_such_extension\" does not exist");
+    let e = expect_code(c.batch_execute("ALTER EXTENSION plpgsql UPDATE TO '1.1'"), "22023");
+    assert_eq!(message(&e), "extension \"plpgsql\" has no update path from version \"1.0\" to version \"1.1\"");
+}
+
+#[test]
+fn alter_extension_set_schema() {
+    let (_db, mut c) = setup();
+    c.batch_execute("CREATE EXTENSION citext; CREATE SCHEMA s1").expect("setup");
+    c.batch_execute("ALTER EXTENSION citext SET SCHEMA s1").expect("move");
+    assert_eq!(extension_row(&mut c, "citext"), [["1.8", "s1", "true"]]);
+    c.batch_execute("ALTER EXTENSION citext SET SCHEMA s1").expect("same schema");
+    let e = expect_code(c.batch_execute("ALTER EXTENSION citext SET SCHEMA nope"), "3F000");
+    assert_eq!(message(&e), "schema \"nope\" does not exist");
+    let e = expect_code(c.batch_execute("ALTER EXTENSION plpgsql SET SCHEMA s1"), "0A000");
+    assert_eq!(message(&e), "extension \"plpgsql\" does not support SET SCHEMA");
+    // Members move with the extension; one outside its schema blocks the move.
+    c.batch_execute(
+        "CREATE SCHEMA s2; CREATE TABLE s1.t1 (a int); CREATE SEQUENCE s1.q1; CREATE TYPE s1.ty1 AS ENUM ('a');
+         ALTER EXTENSION citext ADD TABLE s1.t1; ALTER EXTENSION citext ADD SEQUENCE s1.q1; ALTER EXTENSION citext ADD TYPE s1.ty1",
+    )
+    .expect("members");
+    c.batch_execute("ALTER EXTENSION citext SET SCHEMA s2").expect("move with members");
+    assert_eq!(
+        rows(&mut c, "SELECT relname, relnamespace::regnamespace::text FROM pg_class WHERE relname IN ('t1', 'q1') ORDER BY 1"),
+        [["q1", "s2"], ["t1", "s2"]]
+    );
+    assert_eq!(rows(&mut c, "SELECT typnamespace::regnamespace::text FROM pg_type WHERE typname = 'ty1'"), [["s2"]]);
+    c.batch_execute("CREATE TABLE public.outside (a int); ALTER EXTENSION citext ADD TABLE public.outside").expect("outside");
+    let e = expect_code(c.batch_execute("ALTER EXTENSION citext SET SCHEMA s1"), "0A000");
+    assert_eq!(message(&e), "extension \"citext\" does not support SET SCHEMA");
+    assert_eq!(e.as_db_error().and_then(|d| d.detail()), Some("table outside is not in the extension's schema \"s2\""));
+}
+
+#[test]
+fn alter_extension_members() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE EXTENSION hstore; CREATE EXTENSION citext; CREATE SCHEMA s1; CREATE TABLE t1 (a serial PRIMARY KEY);
+         CREATE TABLE s1.t2 (a int); CREATE VIEW v1 AS SELECT 1 AS a; CREATE MATERIALIZED VIEW mv1 AS SELECT 1 AS a;
+         CREATE DOMAIN d1 AS int; CREATE TYPE ty1 AS ENUM ('a'); CREATE SEQUENCE q1; CREATE SCHEMA s2;
+         CREATE FUNCTION f1(int, text) RETURNS int LANGUAGE sql AS 'SELECT 1';
+         CREATE PROCEDURE p1() LANGUAGE sql AS 'SELECT 1'",
+    )
+    .expect("setup");
+    // The member must be of the named kind.
+    for (sql, msg) in [
+        ("ALTER EXTENSION hstore ADD TABLE v1", "\"v1\" is not a table"),
+        ("ALTER EXTENSION hstore ADD VIEW t1", "\"t1\" is not a view"),
+        ("ALTER EXTENSION hstore ADD MATERIALIZED VIEW v1", "\"v1\" is not a materialized view"),
+        ("ALTER EXTENSION hstore ADD DOMAIN ty1", "\"ty1\" is not a domain"),
+        ("ALTER EXTENSION hstore ADD FUNCTION p1()", "p1() is not a function"),
+        ("ALTER EXTENSION hstore ADD PROCEDURE f1(int, text)", "f1(integer, text) is not a procedure"),
+    ] {
+        assert_eq!(message(&expect_code(c.batch_execute(sql), "42809")), msg, "{sql}");
+    }
+    let e = expect_code(c.batch_execute("ALTER EXTENSION hstore ADD TABLE nope"), "42P01");
+    assert_eq!(message(&e), "relation \"nope\" does not exist");
+    let e = expect_code(c.batch_execute("ALTER EXTENSION hstore ADD FUNCTION nope()"), "42883");
+    assert_eq!(message(&e), "function nope() does not exist");
+    let e = expect_code(c.batch_execute("ALTER EXTENSION hstore ADD SCHEMA nope"), "3F000");
+    assert_eq!(message(&e), "schema \"nope\" does not exist");
+    let e = expect_code(c.batch_execute("ALTER EXTENSION nope ADD TABLE t1"), "42704");
+    assert_eq!(message(&e), "extension \"nope\" does not exist");
+
+    c.batch_execute(
+        "ALTER EXTENSION hstore ADD TABLE t1; ALTER EXTENSION hstore ADD TABLE s1.t2; ALTER EXTENSION hstore ADD VIEW v1;
+         ALTER EXTENSION hstore ADD MATERIALIZED VIEW mv1; ALTER EXTENSION hstore ADD DOMAIN d1; ALTER EXTENSION hstore ADD TYPE ty1;
+         ALTER EXTENSION hstore ADD SEQUENCE q1; ALTER EXTENSION hstore ADD SCHEMA s2; ALTER EXTENSION hstore ADD FUNCTION f1(int, text);
+         ALTER EXTENSION hstore ADD PROCEDURE p1()",
+    )
+    .expect("add members");
+    for (sql, msg) in [
+        ("ALTER EXTENSION hstore ADD TABLE t1", "table t1 is already a member of extension \"hstore\""),
+        ("ALTER EXTENSION citext ADD TABLE t1", "table t1 is already a member of extension \"hstore\""),
+        ("ALTER EXTENSION hstore ADD TABLE s1.t2", "table s1.t2 is already a member of extension \"hstore\""),
+        ("ALTER EXTENSION hstore ADD MATERIALIZED VIEW mv1", "materialized view mv1 is already a member of extension \"hstore\""),
+        ("ALTER EXTENSION hstore ADD TYPE d1", "type d1 is already a member of extension \"hstore\""),
+        ("ALTER EXTENSION hstore ADD SCHEMA s2", "schema s2 is already a member of extension \"hstore\""),
+        ("ALTER EXTENSION hstore ADD FUNCTION f1", "function f1(integer,text) is already a member of extension \"hstore\""),
+    ] {
+        assert_eq!(message(&expect_code(c.batch_execute(sql), "55000")), msg, "{sql}");
+    }
+    // Dropping a member on its own is refused.
+    for (sql, msg) in [
+        ("DROP TABLE t1", "cannot drop table t1 because extension hstore requires it"),
+        ("DROP TABLE s1.t2", "cannot drop table s1.t2 because extension hstore requires it"),
+        ("DROP VIEW v1", "cannot drop view v1 because extension hstore requires it"),
+        ("DROP MATERIALIZED VIEW mv1", "cannot drop materialized view mv1 because extension hstore requires it"),
+        ("DROP DOMAIN d1", "cannot drop type d1 because extension hstore requires it"),
+        ("DROP TYPE ty1", "cannot drop type ty1 because extension hstore requires it"),
+        ("DROP SEQUENCE q1", "cannot drop sequence q1 because extension hstore requires it"),
+        ("DROP SCHEMA s2", "cannot drop schema s2 because extension hstore requires it"),
+        ("DROP FUNCTION f1(int, text)", "cannot drop function f1(integer,text) because extension hstore requires it"),
+        ("DROP PROCEDURE p1()", "cannot drop function p1() because extension hstore requires it"),
+    ] {
+        let e = expect_code(c.batch_execute(sql), "2BP01");
+        assert_eq!(message(&e), msg, "{sql}");
+        assert_eq!(e.as_db_error().and_then(|d| d.hint()), Some("You can drop extension hstore instead."), "{sql}");
+    }
+    c.batch_execute("DROP TABLE IF EXISTS nope").expect("unrelated drop");
+    // DROP ... removes the membership; the object can then be dropped.
+    let e = expect_code(c.batch_execute("ALTER EXTENSION citext DROP TABLE t1"), "55000");
+    assert_eq!(message(&e), "table t1 is not a member of extension \"citext\"");
+    c.batch_execute("ALTER EXTENSION hstore DROP TABLE s1.t2; DROP TABLE s1.t2").expect("detach");
+    c.batch_execute("ALTER EXTENSION hstore DROP VIEW v1").expect("detach view");
+    let e = expect_code(c.batch_execute("ALTER EXTENSION hstore DROP VIEW v1"), "55000");
+    assert_eq!(message(&e), "view v1 is not a member of extension \"hstore\"");
+    c.batch_execute("DROP VIEW v1").expect("view");
+    // DROP EXTENSION takes the remaining members with it.
+    c.batch_execute("DROP EXTENSION hstore").expect("drop extension");
+    assert_eq!(rows(&mut c, "SELECT count(*) FROM pg_class WHERE relname IN ('t1', 't2', 'mv1', 'q1', 'v1', 't1_a_seq')"), [["0"]]);
+    assert_eq!(rows(&mut c, "SELECT count(*) FROM pg_type WHERE typname IN ('ty1', 'd1')"), [["0"]]);
+    assert_eq!(rows(&mut c, "SELECT count(*) FROM pg_proc WHERE proname IN ('f1', 'p1')"), [["0"]]);
+    assert_eq!(rows(&mut c, "SELECT count(*) FROM pg_namespace WHERE nspname = 's2'"), [["0"]]);
+}

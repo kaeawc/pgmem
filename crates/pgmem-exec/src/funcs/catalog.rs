@@ -100,7 +100,9 @@ fn routine_text_function(name: &str, n: usize) -> SqlResult<Option<Resolved>> {
 /// argument count (otherwise it falls through to the generic always-true arm).
 fn privilege_arity(name: &str, n: usize) -> bool {
     match name {
-        "has_table_privilege" | "has_schema_privilege" | "has_sequence_privilege" | "pg_has_role" => n == 2 || n == 3,
+        "has_table_privilege" | "has_schema_privilege" | "has_sequence_privilege" | "has_function_privilege" | "pg_has_role" => {
+            n == 2 || n == 3
+        }
         "has_column_privilege" => n == 3 || n == 4,
         "has_any_column_privilege" => n == 2 || n == 3,
         _ => false,
@@ -113,6 +115,7 @@ fn privilege_function(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> 
         "has_table_privilege" => strict("has_table_privilege", |a, c| privilege_check(a, c, PrivKind::Table)),
         "has_sequence_privilege" => strict("has_sequence_privilege", |a, c| privilege_check(a, c, PrivKind::Sequence)),
         "has_schema_privilege" => strict("has_schema_privilege", |a, c| privilege_check(a, c, PrivKind::Schema)),
+        "has_function_privilege" => strict("has_function_privilege", |a, c| privilege_check(a, c, PrivKind::Function)),
         "has_column_privilege" => strict("has_column_privilege", |a, c| column_privilege_check(a, c, false)),
         "has_any_column_privilege" => strict("has_any_column_privilege", |a, c| column_privilege_check(a, c, true)),
         _ => strict("pg_has_role", |a, c| privilege_check(a, c, PrivKind::Role)),
@@ -202,6 +205,7 @@ enum PrivKind {
     Sequence,
     Schema,
     Role,
+    Function,
 }
 
 /// A role argument: a name, or an OID of the session user / a created role.
@@ -261,6 +265,23 @@ fn privilege_check(a: &[Value], ctx: &EvalCtx, kind: PrivKind) -> SqlResult<Valu
             }
             (pgmem_catalog::GrantObject::Schema(s), "usage create")
         }
+        PrivKind::Function => {
+            // A function by `name(types)` (42883 when there is none) or OID (NULL when unknown).
+            let oid = match object {
+                Value::Text(t) => match crate::reg::to_reg(Value::Text(t.clone()), RegKind::Procedure, cat, &ctx.env.user)? {
+                    Value::Reg(_, o, _) => o,
+                    _ => 0,
+                },
+                other => {
+                    let o = oid_arg(other).unwrap_or(0);
+                    if cat.function_by_oid(o).is_none() && !crate::catalog_views::builtin_procs().iter().any(|p| p.oid == o) {
+                        return Ok(Value::Null);
+                    }
+                    o
+                }
+            };
+            (pgmem_catalog::GrantObject::Function(oid), "execute")
+        }
         _ => {
             let rel = match object {
                 Value::Text(t) => crate::reg::relation_from_text(t, cat)?,
@@ -305,6 +326,7 @@ fn privilege_check(a: &[Value], ctx: &EvalCtx, kind: PrivKind) -> SqlResult<Valu
             "trigger" => 't',
             "maintain" => 'm',
             "usage" => 'U',
+            "execute" => 'X',
             _ => 'C',
         };
         held |= crate::roles::has_privilege(cat, ctx.env, &user, &object, letter);
@@ -537,11 +559,24 @@ fn userbyid_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
 
 fn to_reg_fn(kind: RegKind) -> crate::plan::ScalarFn {
     match kind {
-        RegKind::Class => |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Class, ctx.txn.catalog()).unwrap_or(Value::Null)),
-        RegKind::Type => |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Type, ctx.txn.catalog()).unwrap_or(Value::Null)),
-        RegKind::Namespace => |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Namespace, ctx.txn.catalog()).unwrap_or(Value::Null)),
-        RegKind::Proc => |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Proc, ctx.txn.catalog()).unwrap_or(Value::Null)),
-        RegKind::Procedure => |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Procedure, ctx.txn.catalog()).unwrap_or(Value::Null)),
+        RegKind::Class => {
+            |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Class, ctx.txn.catalog(), &ctx.env.user).unwrap_or(Value::Null))
+        }
+        RegKind::Type => {
+            |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Type, ctx.txn.catalog(), &ctx.env.user).unwrap_or(Value::Null))
+        }
+        RegKind::Namespace => {
+            |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Namespace, ctx.txn.catalog(), &ctx.env.user).unwrap_or(Value::Null))
+        }
+        RegKind::Role => {
+            |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Role, ctx.txn.catalog(), &ctx.env.user).unwrap_or(Value::Null))
+        }
+        RegKind::Proc => {
+            |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Proc, ctx.txn.catalog(), &ctx.env.user).unwrap_or(Value::Null))
+        }
+        RegKind::Procedure => {
+            |a, ctx| Ok(crate::reg::to_reg(a[0].clone(), RegKind::Procedure, ctx.txn.catalog(), &ctx.env.user).unwrap_or(Value::Null))
+        }
     }
 }
 
@@ -586,10 +621,29 @@ fn partition_function(name: &str, n: usize) -> SqlResult<Option<Resolved>> {
             vec![Type::Reg(RegKind::Class)],
             Type::Bool,
         ),
-        // pgmem has no extended statistics objects.
-        "pg_get_statisticsobjdef_columns" | "pg_get_statisticsobjdef" if n == 1 => {
-            resolved(strict("pg_get_statisticsobjdef", |_, _| Ok(Value::Null)), vec![Type::Oid], Type::Text)
-        }
+        "pg_get_statisticsobjdef" if n == 1 => resolved(
+            strict("pg_get_statisticsobjdef", |a, c| {
+                Ok(oid_arg(&a[0]).and_then(|o| crate::statistics::definition(c.txn.catalog(), o)).map_or(Value::Null, Value::Text))
+            }),
+            vec![Type::Oid],
+            Type::Text,
+        ),
+        "pg_get_statisticsobjdef_columns" if n == 1 => resolved(
+            strict("pg_get_statisticsobjdef_columns", |a, c| {
+                Ok(oid_arg(&a[0]).and_then(|o| crate::statistics::columns_text(c.txn.catalog(), o)).map_or(Value::Null, Value::Text))
+            }),
+            vec![Type::Oid],
+            Type::Text,
+        ),
+        "pg_get_statisticsobjdef_expressions" if n == 1 => resolved(
+            strict("pg_get_statisticsobjdef_expressions", |a, c| {
+                Ok(oid_arg(&a[0])
+                    .and_then(|o| crate::statistics::expressions(c.txn.catalog(), o))
+                    .map_or(Value::Null, |v| Value::Array(v.into_iter().map(Value::Text).collect())))
+            }),
+            vec![Type::Oid],
+            Type::Array(Box::new(Type::Text)),
+        ),
         "pg_partition_root" if n == 1 => {
             resolved(strict("pg_partition_root", crate::partition::root_fn), vec![Type::Reg(RegKind::Class)], Type::Reg(RegKind::Class))
         }
@@ -597,11 +651,31 @@ fn partition_function(name: &str, n: usize) -> SqlResult<Option<Resolved>> {
     }
 }
 
+/// The `to_reg*` family: text name to reg* object, NULL when it does not exist.
+fn reg_function(name: &str, n: usize) -> SqlResult<Option<Resolved>> {
+    let (fname, kind) = match name {
+        "to_regclass" => ("to_regclass", RegKind::Class),
+        "to_regtype" => ("to_regtype", RegKind::Type),
+        "to_regnamespace" => ("to_regnamespace", RegKind::Namespace),
+        "to_regrole" => ("to_regrole", RegKind::Role),
+        "to_regproc" => ("to_regproc", RegKind::Proc),
+        "to_regprocedure" => ("to_regprocedure", RegKind::Procedure),
+        _ => return Ok(None),
+    };
+    if n != 1 {
+        return Ok(None);
+    }
+    resolved(strict(fname, to_reg_fn(kind)), vec![Type::Text], Type::Reg(kind))
+}
+
 pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
     use Type::{Bool, Int4, Oid, Text};
     let n = args.len();
     let name_arg = Type::Name;
     if let Some(r) = partition_function(name, n)? {
+        return Ok(Some(r));
+    }
+    if let Some(r) = reg_function(name, n)? {
         return Ok(Some(r));
     }
     match name {
@@ -659,15 +733,6 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
         {
             let targets = args.iter().map(|t| if *t == Type::Unknown { Text } else { t.clone() }).collect();
             resolved(strict("has_privilege", always_true), targets, Bool)
-        }
-        "to_regclass" if n == 1 => resolved(strict("to_regclass", to_reg_fn(RegKind::Class)), vec![Text], Type::Reg(RegKind::Class)),
-        "to_regtype" if n == 1 => resolved(strict("to_regtype", to_reg_fn(RegKind::Type)), vec![Text], Type::Reg(RegKind::Type)),
-        "to_regnamespace" if n == 1 => {
-            resolved(strict("to_regnamespace", to_reg_fn(RegKind::Namespace)), vec![Text], Type::Reg(RegKind::Namespace))
-        }
-        "to_regproc" if n == 1 => resolved(strict("to_regproc", to_reg_fn(RegKind::Proc)), vec![Text], Type::Reg(RegKind::Proc)),
-        "to_regprocedure" if n == 1 => {
-            resolved(strict("to_regprocedure", to_reg_fn(RegKind::Procedure)), vec![Text], Type::Reg(RegKind::Procedure))
         }
         "pg_relation_size" | "pg_total_relation_size" | "pg_table_size" | "pg_indexes_size" if n == 1 => {
             resolved(strict("pg_relation_size", relation_size_fn), vec![Type::Reg(RegKind::Class)], Type::Int8)

@@ -7,17 +7,17 @@ PostgreSQL 18; CI re-verifies every record against PostgreSQL and runs it agains
 A record passes when pgmem returns the same column names, column types and text values, or
 the same SQLSTATE and error message.
 
-pgmem passes **3875 / 3875 records (100.0%)**.
+pgmem passes **4497 / 4497 records (100.0%)**.
 
 | Area | Records | Pass | Rate |
 |---|---:|---:|---:|
-| catalog | 254 | 254 | 100.0% |
+| catalog | 317 | 317 | 100.0% |
 | constraints | 171 | 171 | 100.0% |
-| ddl | 606 | 606 | 100.0% |
-| dml | 282 | 282 | 100.0% |
-| functions | 534 | 534 | 100.0% |
+| ddl | 846 | 846 | 100.0% |
+| dml | 379 | 379 | 100.0% |
+| functions | 580 | 580 | 100.0% |
 | queries | 461 | 461 | 100.0% |
-| session | 482 | 482 | 100.0% |
+| session | 658 | 658 | 100.0% |
 | smoke | 7 | 7 | 100.0% |
 | transactions | 569 | 569 | 100.0% |
 | types | 509 | 509 | 100.0% |
@@ -29,10 +29,12 @@ pgmem passes **3875 / 3875 records (100.0%)**.
 | catalog/comments.slt | 32 | 32 | 100.0% |
 | catalog/dependencies.slt | 15 | 15 | 100.0% |
 | catalog/information_schema.slt | 38 | 38 | 100.0% |
+| catalog/int2vector.slt | 15 | 15 | 100.0% |
 | catalog/keywords.slt | 6 | 6 | 100.0% |
 | catalog/orm_reflection.slt | 35 | 35 | 100.0% |
 | catalog/pg_catalog.slt | 58 | 58 | 100.0% |
 | catalog/psql_describe.slt | 22 | 22 | 100.0% |
+| catalog/regrole_default_acl.slt | 48 | 48 | 100.0% |
 | catalog/regtypes.slt | 33 | 33 | 100.0% |
 | catalog/settings.slt | 15 | 15 | 100.0% |
 | constraints/check_notnull.slt | 35 | 35 | 100.0% |
@@ -42,23 +44,29 @@ pgmem passes **3875 / 3875 records (100.0%)**.
 | constraints/keys_unique.slt | 32 | 32 | 100.0% |
 | ddl/alter_table.slt | 46 | 46 | 100.0% |
 | ddl/alter_table_attrs.slt | 39 | 39 | 100.0% |
+| ddl/casts.slt | 39 | 39 | 100.0% |
 | ddl/create_table.slt | 40 | 40 | 100.0% |
+| ddl/deparse_keywords.slt | 14 | 14 | 100.0% |
 | ddl/drop.slt | 36 | 36 | 100.0% |
+| ddl/drop_schema_functions.slt | 26 | 26 | 100.0% |
 | ddl/generated.slt | 23 | 23 | 100.0% |
 | ddl/identity.slt | 38 | 38 | 100.0% |
+| ddl/index_access_methods.slt | 22 | 22 | 100.0% |
 | ddl/indexes.slt | 36 | 36 | 100.0% |
 | ddl/migrations.slt | 58 | 58 | 100.0% |
-| ddl/partitioning.slt | 89 | 89 | 100.0% |
-| ddl/reloptions.slt | 53 | 53 | 100.0% |
+| ddl/partitioning.slt | 135 | 135 | 100.0% |
+| ddl/reloptions.slt | 96 | 96 | 100.0% |
 | ddl/schema.slt | 31 | 31 | 100.0% |
 | ddl/sequences.slt | 34 | 34 | 100.0% |
+| ddl/statistics.slt | 50 | 50 | 100.0% |
 | ddl/temp_schema.slt | 4 | 4 | 100.0% |
 | ddl/triggers.slt | 32 | 32 | 100.0% |
 | ddl/truncate_comment.slt | 14 | 14 | 100.0% |
 | ddl/views.slt | 33 | 33 | 100.0% |
 | dml/delete.slt | 32 | 32 | 100.0% |
 | dml/insert.slt | 45 | 45 | 100.0% |
-| dml/merge.slt | 25 | 25 | 100.0% |
+| dml/keyed_lookups.slt | 37 | 37 | 100.0% |
+| dml/merge.slt | 85 | 85 | 100.0% |
 | dml/on_conflict.slt | 45 | 45 | 100.0% |
 | dml/orm_patterns.slt | 29 | 29 | 100.0% |
 | dml/truncate.slt | 37 | 37 | 100.0% |
@@ -73,6 +81,7 @@ pgmem passes **3875 / 3875 records (100.0%)**.
 | functions/json.slt | 85 | 85 | 100.0% |
 | functions/math.slt | 61 | 61 | 100.0% |
 | functions/regex.slt | 34 | 34 | 100.0% |
+| functions/security_definer.slt | 46 | 46 | 100.0% |
 | functions/string.slt | 68 | 68 | 100.0% |
 | queries/aggregates.slt | 53 | 53 | 100.0% |
 | queries/cte.slt | 36 | 36 | 100.0% |
@@ -85,12 +94,16 @@ pgmem passes **3875 / 3875 records (100.0%)**.
 | queries/subqueries.slt | 39 | 39 | 100.0% |
 | queries/where_operators.slt | 51 | 51 | 100.0% |
 | queries/windows.slt | 39 | 39 | 100.0% |
+| session/alter_extension.slt | 29 | 29 | 100.0% |
 | session/column_privileges.slt | 63 | 63 | 100.0% |
 | session/config_functions.slt | 45 | 45 | 100.0% |
+| session/dml_privileges.slt | 53 | 53 | 100.0% |
 | session/extensions.slt | 46 | 46 | 100.0% |
 | session/listen_notify.slt | 24 | 24 | 100.0% |
+| session/ownership.slt | 66 | 66 | 100.0% |
 | session/prepare_cursor.slt | 77 | 77 | 100.0% |
 | session/roles.slt | 46 | 46 | 100.0% |
+| session/schema_create.slt | 28 | 28 | 100.0% |
 | session/set_show.slt | 133 | 133 | 100.0% |
 | session/utility.slt | 48 | 48 | 100.0% |
 | smoke/basics.slt | 7 | 7 | 100.0% |

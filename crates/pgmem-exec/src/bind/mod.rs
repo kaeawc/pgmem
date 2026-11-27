@@ -282,6 +282,9 @@ pub struct Binder<'a> {
     /// attnum of each base column, 0 when the view does not show it). Uses of the target's
     /// columns are noted on the view, whose privileges Postgres checks for the target.
     target_view: RefCell<Option<(Oid, Oid, Vec<i16>)>>,
+    /// The user functions the bound statements call (their EXECUTE privilege is checked
+    /// before the statement runs).
+    function_use: RefCell<Vec<Oid>>,
 }
 
 impl<'a> Binder<'a> {
@@ -293,8 +296,21 @@ impl<'a> Binder<'a> {
             column_use: RefCell::new(None),
             quiet: Cell::new(0),
             target_view: RefCell::new(None),
+            function_use: RefCell::new(Vec::new()),
             locker: None,
             row_share: RefCell::new(None),
+        }
+    }
+
+    /// The user functions bound so far, each once.
+    pub fn function_use(&self) -> Vec<Oid> {
+        self.function_use.borrow().clone()
+    }
+
+    pub(crate) fn note_function(&self, oid: Oid) {
+        let mut used = self.function_use.borrow_mut();
+        if !used.contains(&oid) {
+            used.push(oid);
         }
     }
 
@@ -543,6 +559,11 @@ pub fn resolve_type_name(catalog: &Catalog, t: &pgmem_ir::TypeName) -> SqlResult
     let base = match builtin {
         Some(b) => b,
         None => {
+            if let Some(s) = &t.schema
+                && pgmem_types::context::search_path().no_usage.contains(s)
+            {
+                return Err(SqlError::new(code::INSUFFICIENT_PRIVILEGE, format!("permission denied for schema {s}")));
+            }
             let mut parts: Vec<String> = t.schema.iter().cloned().collect();
             parts.push(t.name.clone());
             let qualified = parts.join(".");

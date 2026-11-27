@@ -8,7 +8,6 @@ mod conn;
 use pgmem_exec::{Clock, ServerClock};
 use pgmem_storage::Database;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
@@ -17,16 +16,15 @@ use tokio::sync::watch;
 pub struct Shared {
     pub db: Arc<Database>,
     pub clock: Arc<ServerClock>,
-    next_pid: AtomicI32,
 }
 
 impl Shared {
     pub fn new(db: Arc<Database>, clock: Arc<ServerClock>) -> Shared {
-        Shared { db, clock, next_pid: AtomicI32::new(10_000) }
+        Shared { db, clock }
     }
 
     fn next_pid(&self) -> i32 {
-        self.next_pid.fetch_add(1, Ordering::Relaxed)
+        self.db.next_backend_pid()
     }
 
     fn clock(&self) -> Arc<dyn Clock> {

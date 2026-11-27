@@ -73,16 +73,22 @@ pub(crate) fn check_exclusions(rules: &RowRules, rows: &[(RowId, Row)], changed:
             continue;
         }
         if let Some((new, old)) = find_conflict(x, rows, changed, ctx)? {
+            let keys = x.columns.iter().map(|c| rules.table.column_index(c));
+            let detail = if crate::detail_privileges::key_visible(rules.table.oid, keys) {
+                format!(
+                    "Key ({cols})=({}) conflicts with existing key ({cols})=({}).",
+                    key_text(&new),
+                    key_text(&old),
+                    cols = x.columns.join(", ")
+                )
+            } else {
+                "Key conflicts with existing key.".to_owned()
+            };
             return Err(SqlError::new(
                 code::EXCLUSION_VIOLATION,
                 format!("conflicting key value violates exclusion constraint \"{}\"", x.name),
             )
-            .with_detail(format!(
-                "Key ({cols})=({}) conflicts with existing key ({cols})=({}).",
-                key_text(&new),
-                key_text(&old),
-                cols = x.columns.join(", ")
-            ))
+            .with_detail(detail)
             .with_table(&rules.table.name)
             .with_constraint(&x.name));
         }
@@ -97,8 +103,14 @@ pub(crate) fn validate(rules: &RowRules, name: &str, rows: &[(RowId, Row)], ctx:
     let all: HashSet<RowId> = rows.iter().map(|(id, _)| *id).collect();
     let Some((new, old)) = find_conflict(x, rows, &all, ctx)? else { return Ok(()) };
     let cols = x.columns.join(", ");
+    let keys = x.columns.iter().map(|c| rules.table.column_index(c));
+    let detail = if crate::detail_privileges::key_visible(rules.table.oid, keys) {
+        format!("Key ({cols})=({}) conflicts with key ({cols})=({}).", key_text(&old), key_text(&new))
+    } else {
+        "Key conflicts with key.".to_owned()
+    };
     Err(SqlError::new(code::EXCLUSION_VIOLATION, format!("could not create exclusion constraint \"{name}\""))
-        .with_detail(format!("Key ({cols})=({}) conflicts with key ({cols})=({}).", key_text(&old), key_text(&new)))
+        .with_detail(detail)
         .with_table(&rules.table.name)
         .with_constraint(name))
 }

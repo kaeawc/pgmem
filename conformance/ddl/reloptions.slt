@@ -227,3 +227,179 @@ CREATE MATERIALIZED VIEW m2 WITH (check_option = local) AS SELECT 1
 
 statement error 42809 "t" is not a materialized view
 ALTER MATERIALIZED VIEW t SET (fillfactor = 60)
+
+# PARTITION BY comes before WITH
+statement error 42809 cannot specify storage parameters for a partitioned table
+CREATE TABLE s193_p0 (a int) PARTITION BY RANGE (a) WITH (fillfactor = 70)
+
+statement error 42601 syntax error at or near "PARTITION"
+CREATE TABLE s193_p0 (a int) WITH (fillfactor = 70) PARTITION BY RANGE (a)
+
+statement ok
+CREATE TABLE s193_p (a int) PARTITION BY HASH (a); CREATE TABLE s193_p0 PARTITION OF s193_p FOR VALUES WITH (modulus 2, remainder 0) PARTITION BY RANGE (a); CREATE TABLE s193_p1 PARTITION OF s193_p FOR VALUES WITH (modulus 2, remainder 1) WITH (fillfactor = 70)
+
+query
+SELECT relname, reloptions FROM pg_class WHERE relname IN ('s193_p0', 's193_p1') ORDER BY relname
+----
+relname:name | reloptions:_text
+s193_p0 | NULL
+s193_p1 | {fillfactor=70}
+
+# Constraint-level options
+statement ok
+CREATE TABLE s193_c (a int, b int UNIQUE WITH (fillfactor = 60), c int, d int PRIMARY KEY WITH (fillfactor = 70), e int, CONSTRAINT s193_u_c UNIQUE (c) WITH (fillfactor = 0x32) USING INDEX TABLESPACE pg_default, CONSTRAINT s193_ex EXCLUDE USING btree (e WITH =) WITH (fillfactor = 40) WHERE (a > 0))
+
+query
+SELECT relname, reloptions FROM pg_class WHERE relname LIKE 's193_c%' OR relname LIKE 's193_u%' OR relname = 's193_ex' ORDER BY relname
+----
+relname:name | reloptions:_text
+s193_c | NULL
+s193_c_b_key | {fillfactor=60}
+s193_c_pkey | {fillfactor=70}
+s193_ex | {fillfactor=40}
+s193_u_c | {fillfactor=50}
+
+query
+SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 's193_c'::regclass AND contype IN ('x', 'p', 'u') ORDER BY 1
+----
+conname:name | pg_get_constraintdef:text
+s193_c_b_key | UNIQUE (b)
+s193_c_pkey | PRIMARY KEY (d)
+s193_ex | EXCLUDE USING btree (e WITH =) WITH (fillfactor='40') WHERE ((a > 0))
+s193_u_c | UNIQUE (c)
+
+query
+SELECT indexrelid::regclass::text, pg_get_indexdef(indexrelid) FROM pg_index WHERE indrelid = 's193_c'::regclass AND indisunique ORDER BY 1
+----
+indexrelid:text | pg_get_indexdef:text
+s193_c_b_key | CREATE UNIQUE INDEX s193_c_b_key ON public.s193_c USING btree (b) WITH (fillfactor='60')
+s193_c_pkey | CREATE UNIQUE INDEX s193_c_pkey ON public.s193_c USING btree (d) WITH (fillfactor='70')
+s193_u_c | CREATE UNIQUE INDEX s193_u_c ON public.s193_c USING btree (c) WITH (fillfactor='50')
+
+statement ok
+CREATE TABLE s193_a (x int, y int, z int); ALTER TABLE s193_a ADD CONSTRAINT s193_a_x UNIQUE (x) WITH (fillfactor = 33); ALTER TABLE s193_a ADD PRIMARY KEY (y) WITH (fillfactor = 22); ALTER TABLE s193_a ADD COLUMN w int UNIQUE WITH (fillfactor = 44)
+
+query
+SELECT relname, reloptions FROM pg_class WHERE relname LIKE 's193_a_%' ORDER BY relname
+----
+relname:name | reloptions:_text
+s193_a_pkey | {fillfactor=22}
+s193_a_w_key | {fillfactor=44}
+s193_a_x | {fillfactor=33}
+
+statement error 22023 value 5 out of bounds for option "fillfactor"
+CREATE TABLE s193_e (a int PRIMARY KEY WITH (fillfactor = 5))
+
+statement error 22023 unrecognized parameter "nope"
+CREATE TABLE s193_e (a int, UNIQUE (a) WITH (nope = 5))
+
+# Combined option actions
+statement ok
+CREATE TABLE s193_t (a int, b int); ALTER TABLE s193_t SET (autovacuum_vacuum_scale_factor = 5.), ADD COLUMN c int, SET (fillfactor = 50)
+
+query
+SELECT reloptions FROM pg_class WHERE relname = 's193_t'
+----
+reloptions:_text
+{autovacuum_vacuum_scale_factor=5.,fillfactor=50}
+
+statement ok
+ALTER TABLE s193_t ADD COLUMN d int, RESET (autovacuum_vacuum_scale_factor), SET (parallel_workers = 2), SET (fillfactor = 60)
+
+query
+SELECT reloptions FROM pg_class WHERE relname = 's193_t'
+----
+reloptions:_text
+{parallel_workers=2,fillfactor=60}
+
+statement error 22023 value 500 out of bounds for option "fillfactor"
+ALTER TABLE s193_t SET (fillfactor = 500), ADD COLUMN e int
+
+statement error 42809 cannot specify storage parameters for a partitioned table
+ALTER TABLE s193_p SET (fillfactor = 50), ADD COLUMN q int
+
+# RESET takes names; empty lists; integer literal forms
+statement error 42601 RESET must not include values for parameters
+ALTER TABLE s193_t RESET (fillfactor = 1)
+
+statement error 42601 RESET must not include values for parameters
+ALTER INDEX s193_c_pkey RESET (fillfactor = 1)
+
+statement error 42601 syntax error at or near ")"
+ALTER TABLE s193_t SET ()
+
+statement error 42601 syntax error at or near ")"
+ALTER TABLE s193_t RESET ()
+
+statement error 42601 syntax error at or near ")"
+CREATE TABLE s193_e (a int) WITH ()
+
+statement ok
+ALTER TABLE s193_t SET (fillfactor = 0x32, parallel_workers = 0b11, autovacuum_vacuum_threshold = 0o17, autovacuum_vacuum_insert_threshold = 1_0, autovacuum_analyze_threshold = 062)
+
+query
+SELECT reloptions FROM pg_class WHERE relname = 's193_t'
+----
+reloptions:_text
+{fillfactor=50,parallel_workers=3,autovacuum_vacuum_threshold=15,autovacuum_vacuum_insert_threshold=10,autovacuum_analyze_threshold=62}
+
+# WITH CHECK OPTION needs an automatically updatable view
+statement ok
+CREATE TABLE s193_vt (a int, b int)
+
+statement error 0A000 WITH CHECK OPTION is supported only on automatically updatable views
+CREATE VIEW s193_e AS SELECT a, count(*) FROM s193_vt GROUP BY a WITH CHECK OPTION
+
+statement error 0A000 WITH CHECK OPTION is supported only on automatically updatable views
+CREATE VIEW s193_e AS SELECT a + 1 AS x FROM s193_vt WITH LOCAL CHECK OPTION
+
+statement error 0A000 WITH CHECK OPTION is supported only on automatically updatable views
+CREATE VIEW s193_e WITH (check_option = local) AS SELECT DISTINCT a FROM s193_vt
+
+statement error 0A000 WITH CHECK OPTION is supported only on automatically updatable views
+CREATE VIEW s193_e AS VALUES (1) WITH CHECK OPTION
+
+statement ok
+CREATE VIEW s193_grouped AS SELECT a, count(*) FROM s193_vt GROUP BY a
+
+statement error 0A000 WITH CHECK OPTION is supported only on automatically updatable views
+ALTER VIEW s193_grouped SET (check_option = cascaded)
+
+# LOCAL and CASCADED
+statement ok
+CREATE TABLE s193_t2 (a int); CREATE VIEW s193_base AS SELECT * FROM s193_t2 WHERE a > 0; CREATE VIEW s193_mid_local AS SELECT * FROM s193_base WHERE a < 10 WITH LOCAL CHECK OPTION; CREATE VIEW s193_mid_casc AS SELECT * FROM s193_base WHERE a < 10 WITH CASCADED CHECK OPTION; CREATE VIEW s193_top_none AS SELECT * FROM s193_mid_local WHERE a <> 5; CREATE VIEW s193_casc_over_none AS SELECT * FROM s193_base WHERE a <> 5 WITH CASCADED CHECK OPTION
+
+statement ok
+INSERT INTO s193_mid_local VALUES (-1)
+
+statement error 44000 new row violates check option for view "s193_mid_local"
+INSERT INTO s193_mid_local VALUES (10)
+
+statement error 44000 new row violates check option for view "s193_base"
+INSERT INTO s193_mid_casc VALUES (-2)
+
+statement error 44000 new row violates check option for view "s193_mid_casc"
+INSERT INTO s193_mid_casc VALUES (10)
+
+statement ok
+INSERT INTO s193_top_none VALUES (5)
+
+statement error 44000 new row violates check option for view "s193_mid_local"
+INSERT INTO s193_top_none VALUES (20)
+
+statement error 44000 new row violates check option for view "s193_base"
+INSERT INTO s193_casc_over_none VALUES (-3)
+
+statement error 44000 new row violates check option for view "s193_casc_over_none"
+INSERT INTO s193_casc_over_none VALUES (5)
+
+statement ok
+INSERT INTO s193_casc_over_none VALUES (20)
+
+query rowsort
+SELECT a FROM s193_t2
+----
+a:int4
+-1
+5
+20

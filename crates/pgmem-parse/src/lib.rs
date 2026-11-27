@@ -13,8 +13,11 @@ mod copy;
 mod ddl;
 mod dml;
 mod expr;
+mod extddl;
 mod funcddl;
+mod objddl;
 mod query;
+mod relopts;
 mod roles;
 mod search_cycle;
 mod sqljson;
@@ -44,10 +47,13 @@ pub fn parse_located(sql: &str) -> SqlResult<Vec<(Statement, SourceRefs)>> {
     VIEW_OPTIONS.with(|c| c.borrow_mut().clear());
     CTAS_COLUMNS.with(|c| c.borrow_mut().clear());
     TEMPORAL_KEYS.with(|c| c.borrow_mut().clear());
+    relopts::clear();
     CONFLICT_EXPRS.with(|c| c.borrow_mut().clear());
+    INDEX_ONLY.with(|c| c.borrow_mut().clear());
     if sql.trim().trim_matches(';').trim().is_empty() {
         return Ok(vec![(Statement::Empty, SourceRefs::default())]);
     }
+    relopts::precheck(sql)?;
     // SQL/JSON query functions are rewritten up front (sqlparser can't parse their clauses).
     let json_rewritten = sqljson::rewrite(sql);
     let sql = json_rewritten.as_deref().unwrap_or(sql);
@@ -186,6 +192,8 @@ thread_local! {
     static FK_SET_COLUMNS: std::cell::RefCell<std::collections::VecDeque<Vec<String>>> = const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
     /// Expression elements of `ON CONFLICT (...)` targets, by marker column number.
     static CONFLICT_EXPRS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Whether each CREATE INDEX had `ON ONLY` (stripped by the rewrite), in statement order.
+    static INDEX_ONLY: std::cell::RefCell<std::collections::VecDeque<bool>> = const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
     /// The text the statements being lowered were parsed from (spans point into it).
     static PARSED_TEXT: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
     /// The references noted while lowering one statement (`None`: not recording).
@@ -197,6 +205,11 @@ thread_local! {
 /// Postgres' `syntax error at or near "X"` for the first token at or after `at` in the text
 /// being lowered (`at end of input` when there is none): for syntax sqlparser accepts but
 /// Postgres' grammar rejects.
+/// Whether the next CREATE INDEX being lowered had `ON ONLY` (see `rewrite_index_only`).
+pub(crate) fn take_index_only() -> bool {
+    INDEX_ONLY.with(|c| c.borrow_mut().pop_front()).unwrap_or(false)
+}
+
 /// The options the rewrite stripped from CREATE VIEW `name`: (check option, with data).
 pub(crate) fn take_view_options(name: &str) -> (bool, bool, bool) {
     VIEW_OPTIONS.with(|v| {
@@ -391,6 +404,8 @@ fn lower_parsed(p: Parsed) -> SqlResult<Statement> {
         Parsed::TypeDdl(t) => typeddl::lower(*t),
         Parsed::FuncDdl(f) => funcddl::lower(*f),
         Parsed::Role(r) => roles::lower(*r),
+        Parsed::ObjDdl(o) => objddl::lower(*o),
+        Parsed::ExtDdl(e) => extddl::lower(*e),
         Parsed::Utility(u) => utility::lower(*u),
         Parsed::Schema(s, elements) => {
             let sq::Statement::CreateSchema { schema_name, if_not_exists, .. } = *s else {
@@ -440,6 +455,8 @@ enum Parsed {
     TypeDdl(Box<typeddl::TypeDdl>),
     FuncDdl(Box<funcddl::FuncDdl>),
     Role(Box<roles::RoleStmt>),
+    ObjDdl(Box<objddl::ObjDdl>),
+    ExtDdl(Box<extddl::ExtDdl>),
     Utility(Box<utility::Utility>),
     /// `CREATE SCHEMA ...` followed by its schema elements.
     Schema(Box<sq::Statement>, Vec<Parsed>),
@@ -470,6 +487,16 @@ fn parse_statements(sql: &str) -> Result<Vec<Parsed>, ParserError> {
         }
         if let Some(f) = funcddl::try_parse(&mut p)? {
             out.push(Parsed::FuncDdl(Box::new(f)));
+            expecting_delimiter = true;
+            continue;
+        }
+        if let Some(o) = objddl::try_parse(&mut p)? {
+            out.push(Parsed::ObjDdl(Box::new(o)));
+            expecting_delimiter = true;
+            continue;
+        }
+        if let Some(e) = extddl::try_parse(&mut p)? {
+            out.push(Parsed::ExtDdl(Box::new(e)));
             expecting_delimiter = true;
             continue;
         }
@@ -643,6 +670,34 @@ fn rewrite_view_options(tokens: &Tokens, sig: &[usize], k: usize, drop: &mut [bo
         drop[sig[k + o]] = true;
     }
     VIEW_OPTIONS.with(|c| c.borrow_mut().push((name, check, local, data)));
+}
+
+/// `CREATE [UNIQUE] INDEX ... ON ONLY table`: records, for every CREATE INDEX in statement
+/// order, whether it had ONLY, and strips the ONLY sqlparser lacks.
+fn rewrite_index_only(tokens: &Tokens, sig: &[usize], k: usize, drop: &mut [bool]) {
+    use sqlparser::tokenizer::Token;
+    if !is_word(tokens, sig, k, "CREATE") {
+        return;
+    }
+    let start = if is_word(tokens, sig, k + 1, "UNIQUE") { k + 2 } else { k + 1 };
+    if !is_word(tokens, sig, start, "INDEX") {
+        return;
+    }
+    let mut n = start + 1;
+    while let Some(&j) = sig.get(n) {
+        if matches!(tokens[j], Token::SemiColon | Token::EOF | Token::LParen) {
+            break;
+        }
+        if is_word(tokens, sig, n, "ON") {
+            let only = is_word(tokens, sig, n + 1, "ONLY");
+            if only {
+                drop[sig[n + 1]] = true;
+            }
+            INDEX_ONLY.with(|c| c.borrow_mut().push_back(only));
+            return;
+        }
+        n += 1;
+    }
 }
 
 /// `ON DELETE SET NULL (cols)` / `SET DEFAULT (cols)`: records every such action's column list
@@ -966,8 +1021,11 @@ fn rewrite_unsupported(sql: &str) -> Option<String> {
         rewrite_fk_set_columns(&tokens, &sig, k, &mut drop);
         rewrite_conflict_exprs(&tokens, &sig, k, &mut drop, &mut insert_after);
         rewrite_view_options(&tokens, &sig, k, &mut drop);
+        rewrite_index_only(&tokens, &sig, k, &mut drop);
         rewrite_ctas_columns(&tokens, &sig, k, &mut drop);
         rewrite_without_overlaps(&tokens, &sig, k, &mut drop);
+        relopts::rewrite_constraint_with(&tokens, &sig, k, &mut drop);
+        relopts::rewrite_partition_with(&tokens, &sig, k, &mut drop, &mut insert_after);
         // MERGE's `THEN INSERT DEFAULT VALUES` → `THEN INSERT VALUES (__pgmem_default_values())`.
         if word(&tokens[i], "THEN") && at(1, "INSERT") && at(2, "DEFAULT") && at(3, "VALUES") {
             drop[sig[k + 2]] = true;
