@@ -149,3 +149,62 @@ pub(crate) fn alter_identity(txn: &mut Txn, table: &TableDef, action: &ir::Alter
     txn.catalog_mut().replace_table(&table.qualified(), def);
     Ok(true)
 }
+
+/// Sequences OWNED BY a column that currently exists (serial, identity, `OWNED BY t.c`).
+pub(crate) fn column_owned(catalog: &pgmem_catalog::Catalog) -> Vec<Arc<SequenceDef>> {
+    catalog.sequences().filter(|s| owner_column_exists(catalog, s)).cloned().collect()
+}
+
+fn owner_column_exists(catalog: &pgmem_catalog::Catalog, s: &SequenceDef) -> bool {
+    s.owned_by.as_ref().is_some_and(|(t, c)| catalog.table(&s.schema, t).is_some_and(|t| t.column_index(c).is_some()))
+}
+
+/// After ALTER TABLE ... DROP COLUMN: drops the sequences in `before` whose owning column is gone
+/// (Postgres' auto dependency of an owned sequence on its column), including those of inheritance
+/// children and partitions the drop recursed into. Defaults elsewhere drawing from such a sequence
+/// block the drop (2BP01) unless CASCADE, which drops those defaults.
+pub(crate) fn drop_orphaned(
+    txn: &mut Txn,
+    before: &[Arc<SequenceDef>],
+    column: &str,
+    table: &QualName,
+    cascade: bool,
+    notices: &mut Vec<Notice>,
+) -> SqlResult<()> {
+    let gone: Vec<&Arc<SequenceDef>> =
+        before.iter().filter(|s| txn.catalog().sequence(&s.schema, &s.name).is_some() && !owner_column_exists(txn.catalog(), s)).collect();
+    let describe = |cat: &pgmem_catalog::Catalog, (t, slot): &(QualName, usize)| {
+        let col = cat.table_q(t).map(|d| d.columns[*slot].name.clone()).unwrap_or_default();
+        format!("default value for column {col} of table {}", crate::ddl::display_name(cat, t))
+    };
+    let mut users = Vec::new();
+    let mut lines = Vec::new();
+    for s in &gone {
+        let name = crate::ddl::display_name(txn.catalog(), &QualName::new(&s.schema, &s.name));
+        for d in crate::deps::defaults_using_sequence(txn.catalog(), s.oid) {
+            lines.push(format!("{} depends on sequence {name}", describe(txn.catalog(), &d)));
+            if !users.contains(&d) {
+                users.push(d);
+            }
+        }
+    }
+    if !users.is_empty() && !cascade {
+        let what = format!("{column} of table {}", crate::ddl::display_name(txn.catalog(), table));
+        return Err(crate::ddl::dependents_error("column", &what, lines.join("\n")));
+    }
+    if !users.is_empty() {
+        let members: Vec<String> = users.iter().map(|d| describe(txn.catalog(), d)).collect();
+        notices.push(crate::ddl::cascade_notice(&members));
+    }
+    for d in &users {
+        if let Some(t) = txn.catalog().table_q(&d.0).cloned() {
+            let mut def = (*t).clone();
+            def.columns[d.1].default = None;
+            txn.catalog_mut().replace_table(&d.0, def);
+        }
+    }
+    for s in gone {
+        txn.catalog_mut().drop_sequence(&QualName::new(&s.schema, &s.name));
+    }
+    Ok(())
+}

@@ -248,10 +248,18 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
                 None => return Err(SqlError::undefined_table(&at.name.to_string())),
             };
             let mut current = current;
+            let mut notices = Vec::new();
             for action in &at.actions {
+                // DROP COLUMN takes the sequences its column (or a recursed-into child's) owns.
+                let owned =
+                    matches!(action, ir::AlterTableAction::DropColumn { .. }).then(|| crate::ddl_sequences::column_owned(txn.catalog()));
+                let table = current.clone();
                 current = crate::inherit::alter(txn, &current, action, at.only, env, state)?;
+                if let (Some(owned), ir::AlterTableAction::DropColumn { name, cascade, .. }) = (owned, action) {
+                    crate::ddl_sequences::drop_orphaned(txn, &owned, name, &table, *cascade, &mut notices)?;
+                }
             }
-            Ok(tag("ALTER TABLE"))
+            Ok(QueryResult { tag: "ALTER TABLE".into(), notices, ..Default::default() })
         }
         Statement::CreateType(ct) => crate::typeddl::create_type(ct, txn, binder),
         Statement::CreateDomain(cd) => crate::typeddl::create_domain(cd, txn, binder),
@@ -771,7 +779,7 @@ fn rename_table_refs(cat: &mut Catalog, old: &QualName, new: &str) {
     }
 }
 
-fn dependents_error(what: &str, name: &str, detail: String) -> SqlError {
+pub(crate) fn dependents_error(what: &str, name: &str, detail: String) -> SqlError {
     SqlError::new(code::DEPENDENT_OBJECTS_STILL_EXIST, format!("cannot drop {what} {name} because other objects depend on it"))
         .with_detail(detail)
         .with_hint("Use DROP ... CASCADE to drop the dependent objects too.")

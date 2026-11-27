@@ -1,4 +1,4 @@
-use crate::support::{TestDb, expect_code, setup, texts};
+use crate::support::{RawConn, TestDb, expect_code, message, setup, texts};
 use postgres::Client;
 
 fn alter_setup() -> (TestDb, Client) {
@@ -176,6 +176,145 @@ fn alter_table_drop_column_drops_partitioned_indexes() {
          WHERE inhparent IN (SELECT indexrelid FROM pg_index WHERE indrelid = 'pt'::regclass) ORDER BY 1",
     );
     assert_eq!(links, vec![vec![Some("pt1_a_b_idx".to_owned()), Some("pt_ab".to_owned())]]);
+}
+
+fn regclass(c: &mut Client, name: &str) -> Option<String> {
+    texts(c, &format!("SELECT to_regclass('{name}')::text"))[0][0].clone()
+}
+
+// A sequence OWNED BY a column goes with the column, as with DROP TABLE: serial, identity and
+// ALTER SEQUENCE ... OWNED BY alike; a sequence owned by another column stays (#203).
+#[test]
+fn alter_table_drop_column_drops_owned_sequences() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE t (id serial, g int GENERATED ALWAYS AS IDENTITY, o int, x int);
+         CREATE SEQUENCE o_seq OWNED BY t.o;
+         CREATE SEQUENCE x_seq OWNED BY t.x;
+         CREATE SEQUENCE free_seq;",
+    )
+    .expect("setup");
+    c.batch_execute("ALTER TABLE t DROP COLUMN id").expect("drop serial");
+    assert_eq!(regclass(&mut c, "t_id_seq"), None);
+    c.batch_execute("ALTER TABLE t DROP COLUMN g").expect("drop identity");
+    assert_eq!(regclass(&mut c, "t_g_seq"), None);
+    c.batch_execute("ALTER TABLE t DROP COLUMN o").expect("drop owner");
+    assert_eq!(regclass(&mut c, "o_seq"), None);
+    assert_eq!(regclass(&mut c, "x_seq").as_deref(), Some("x_seq"));
+    assert_eq!(regclass(&mut c, "free_seq").as_deref(), Some("free_seq"));
+    // The name is free again: a new serial column gets a fresh sequence.
+    c.batch_execute("ALTER TABLE t DROP COLUMN IF EXISTS id, ADD COLUMN id serial").expect("re-add");
+    assert_eq!(
+        texts(&mut c, "SELECT pg_get_serial_sequence('t', 'id'), nextval('t_id_seq')::text"),
+        vec![vec![Some("public.t_id_seq".to_owned()), Some("1".to_owned())]]
+    );
+    // Two serial columns dropped in one statement.
+    c.batch_execute("CREATE TABLE two (a serial, b serial, c int); ALTER TABLE two DROP COLUMN a, DROP COLUMN b").expect("two");
+    assert_eq!((regclass(&mut c, "two_a_seq"), regclass(&mut c, "two_b_seq")), (None, None));
+}
+
+// Defaults of other columns drawing from the sequence block the drop without CASCADE; with
+// CASCADE the defaults go too.
+#[test]
+fn alter_table_drop_column_owned_sequence_dependents() {
+    let (db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE t (id serial, y int DEFAULT nextval('t_id_seq'));
+         CREATE TABLE u (z int DEFAULT nextval('t_id_seq'), w int DEFAULT nextval('t_id_seq'));",
+    )
+    .expect("setup");
+    let e = expect_code(c.batch_execute("ALTER TABLE t DROP COLUMN id"), "2BP01");
+    assert_eq!(message(&e), "cannot drop column id of table t because other objects depend on it");
+    assert_eq!(
+        e.as_db_error().and_then(|d| d.detail()),
+        Some(
+            "default value for column y of table t depends on sequence t_id_seq\n\
+             default value for column z of table u depends on sequence t_id_seq\n\
+             default value for column w of table u depends on sequence t_id_seq"
+        )
+    );
+    // The failed statement changed nothing.
+    assert_eq!(regclass(&mut c, "t_id_seq").as_deref(), Some("t_id_seq"));
+    c.batch_execute("INSERT INTO t DEFAULT VALUES").expect("column still there");
+    let mut raw = RawConn::connect(&db, &mut c);
+    let r = raw.query("ALTER TABLE t DROP COLUMN id CASCADE");
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert_eq!(
+        r.notices,
+        ["drop cascades to 3 other objects\ndrop cascades to default value for column y of table t\n\
+             drop cascades to default value for column z of table u\ndrop cascades to default value for column w of table u"]
+    );
+    assert_eq!(regclass(&mut c, "t_id_seq"), None);
+    assert_eq!(
+        texts(
+            &mut c,
+            "SELECT attrelid::regclass::text, attname::text, atthasdef::text FROM pg_attribute WHERE attrelid IN ('t'::regclass, 'u'::regclass) AND attnum > 0 AND NOT attisdropped ORDER BY 1, attnum"
+        ),
+        vec![
+            vec![Some("t".to_owned()), Some("y".to_owned()), Some("false".to_owned())],
+            vec![Some("u".to_owned()), Some("z".to_owned()), Some("false".to_owned())],
+            vec![Some("u".to_owned()), Some("w".to_owned()), Some("false".to_owned())],
+        ]
+    );
+}
+
+// The sequence comes back on ROLLBACK, with its state; a failed DROP COLUMN inside a
+// transaction (rolled back to a savepoint) leaves both in place.
+#[test]
+fn alter_table_drop_column_owned_sequence_rollback() {
+    let (_db, mut c) = setup();
+    c.batch_execute("CREATE TABLE t (id serial, x int); INSERT INTO t (x) VALUES (1)").expect("setup");
+    c.batch_execute("BEGIN; ALTER TABLE t DROP COLUMN id").expect("drop");
+    assert_eq!(regclass(&mut c, "t_id_seq"), None);
+    c.batch_execute("ROLLBACK").expect("rollback");
+    assert_eq!(regclass(&mut c, "t_id_seq").as_deref(), Some("t_id_seq"));
+    c.batch_execute("INSERT INTO t (x) VALUES (2)").expect("insert");
+    assert_eq!(texts(&mut c, "SELECT max(id)::text FROM t"), vec![vec![Some("2".to_owned())]]);
+    c.batch_execute("CREATE TABLE u (z int DEFAULT nextval('t_id_seq')); BEGIN; SAVEPOINT s").expect("savepoint");
+    expect_code(c.batch_execute("ALTER TABLE t DROP COLUMN id"), "2BP01");
+    c.batch_execute("ROLLBACK TO s").expect("rollback to");
+    assert_eq!(regclass(&mut c, "t_id_seq").as_deref(), Some("t_id_seq"));
+    c.batch_execute("ALTER TABLE t DROP COLUMN id CASCADE").expect("cascade");
+    assert_eq!(regclass(&mut c, "t_id_seq"), None);
+    c.batch_execute("COMMIT").expect("commit");
+    assert_eq!(regclass(&mut c, "t_id_seq"), None);
+}
+
+// Inheritance children and partitions: the drop recurses, so a child's inherited serial
+// default does not block it, and a sequence owned by a child's dropped column goes too. A
+// child's own (merged) column keeps it: its default then blocks the drop.
+#[test]
+fn alter_table_drop_column_owned_sequence_children() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE p (id serial, k int, x int);
+         CREATE TABLE c () INHERITS (p);
+         CREATE SEQUENCE c_seq OWNED BY c.k;",
+    )
+    .expect("inheritance");
+    c.batch_execute("ALTER TABLE p DROP COLUMN id, DROP COLUMN k").expect("drop");
+    assert_eq!((regclass(&mut c, "p_id_seq"), regclass(&mut c, "c_seq")), (None, None));
+    assert_eq!(
+        texts(&mut c, "SELECT count(*)::text FROM pg_attribute WHERE attrelid = 'c'::regclass AND attname IN ('id', 'k')"),
+        vec![vec![Some("0".to_owned())]]
+    );
+    c.batch_execute(
+        "CREATE TABLE q (id int, x int);
+         CREATE SEQUENCE q_seq OWNED BY q.id;
+         CREATE TABLE qc (id int DEFAULT nextval('q_seq')) INHERITS (q);",
+    )
+    .expect("merged");
+    let e = expect_code(c.batch_execute("ALTER TABLE q DROP COLUMN id"), "2BP01");
+    assert_eq!(e.as_db_error().and_then(|d| d.detail()), Some("default value for column id of table qc depends on sequence q_seq"));
+    c.batch_execute("ALTER TABLE q DROP COLUMN id CASCADE").expect("cascade");
+    assert_eq!(regclass(&mut c, "q_seq"), None);
+    c.batch_execute(
+        "CREATE TABLE pt (id serial, g int GENERATED BY DEFAULT AS IDENTITY, x int) PARTITION BY RANGE (x);
+         CREATE TABLE pt1 PARTITION OF pt FOR VALUES FROM (0) TO (10);
+         ALTER TABLE pt DROP COLUMN id, DROP COLUMN g;",
+    )
+    .expect("partitioned");
+    assert_eq!((regclass(&mut c, "pt_id_seq"), regclass(&mut c, "pt_g_seq")), (None, None));
 }
 
 #[test]
