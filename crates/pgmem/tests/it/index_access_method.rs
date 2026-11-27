@@ -189,3 +189,155 @@ fn btree_unique_still_enforced() {
     c.batch_execute("CREATE TABLE u (a int); CREATE UNIQUE INDEX u_a ON u USING btree (a); INSERT INTO u VALUES (1)").expect("setup");
     expect_code(c.batch_execute("INSERT INTO u VALUES (1)"), "23505");
 }
+
+fn rows(c: &mut postgres::Client, sql: &str) -> Vec<Vec<String>> {
+    texts(c, sql).into_iter().map(|r| r.into_iter().map(|v| v.unwrap_or_else(|| "NULL".into())).collect()).collect()
+}
+
+#[test]
+fn indexdef_prints_opclass_order_and_collation() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE t (a text, b int);
+         CREATE INDEX t_k ON t (a text_pattern_ops DESC NULLS LAST, b NULLS FIRST);
+         CREATE INDEX t_c ON t (a COLLATE \"C\");
+         CREATE INDEX t_defaults ON t (a ASC NULLS LAST, b DESC NULLS FIRST);
+         CREATE INDEX t_desc ON t (b DESC, b DESC NULLS LAST, b ASC NULLS FIRST);
+         CREATE INDEX t_expr ON t ((b + 1) DESC, lower(a) COLLATE \"C\" NULLS FIRST, (a || 'x') text_pattern_ops) INCLUDE (a)",
+    )
+    .expect("indexes");
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT indexrelid::regclass::text, pg_get_indexdef(indexrelid) FROM pg_index WHERE indrelid = 't'::regclass ORDER BY 1"
+        ),
+        [
+            ["t_c", "CREATE INDEX t_c ON public.t USING btree (a COLLATE \"C\")"],
+            ["t_defaults", "CREATE INDEX t_defaults ON public.t USING btree (a, b DESC)"],
+            ["t_desc", "CREATE INDEX t_desc ON public.t USING btree (b DESC, b DESC NULLS LAST, b NULLS FIRST)"],
+            [
+                "t_expr",
+                "CREATE INDEX t_expr ON public.t USING btree (((b + 1)) DESC, lower(a) COLLATE \"C\" NULLS FIRST, ((a || 'x'::text)) text_pattern_ops) INCLUDE (a)"
+            ],
+            ["t_k", "CREATE INDEX t_k ON public.t USING btree (a text_pattern_ops DESC NULLS LAST, b NULLS FIRST)"],
+        ]
+    );
+}
+
+#[test]
+fn index_catalog_stores_options_collations_and_classes() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE t (a text, b int);
+         CREATE INDEX t_k ON t (a text_pattern_ops DESC NULLS LAST, b NULLS FIRST);
+         CREATE INDEX t_c ON t (a COLLATE \"C\");
+         CREATE INDEX t_desc ON t (b DESC, b DESC NULLS LAST, b ASC NULLS FIRST);
+         CREATE INDEX t_expr ON t ((b + 1) DESC, lower(a) COLLATE \"C\" NULLS FIRST, (a || 'x') text_pattern_ops) INCLUDE (a);
+         CREATE TABLE v (a text COLLATE \"C\", b text COLLATE \"POSIX\", c int);
+         CREATE INDEX v_a ON v (a);
+         CREATE INDEX v_ac ON v (a COLLATE \"C\");
+         CREATE INDEX v_ap ON v (a COLLATE \"POSIX\");
+         CREATE INDEX v_b ON v (b);
+         CREATE INDEX v_ad ON v (a COLLATE \"default\");
+         CREATE INDEX v_h ON v USING hash (a);
+         CREATE INDEX v_ex ON v ((a || 'x'), lower(a), (c + 1))",
+    )
+    .expect("indexes");
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT indexrelid::regclass::text, indoption::text, indcollation::text, indclass::text FROM pg_index \
+             WHERE indrelid = 't'::regclass ORDER BY 1"
+        ),
+        [
+            ["t_c", "0", "950", "3126"],
+            ["t_desc", "3 1 2", "0 0 0", "1978 1978 1978"],
+            ["t_expr", "3 2 0", "0 950 100", "1978 3126 4217"],
+            ["t_k", "1 2", "100 0", "4217 1978"],
+        ]
+    );
+    // A key's own `COLLATE` is printed only when it differs from the collation of its column.
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT indexrelid::regclass::text, pg_get_indexdef(indexrelid), indcollation::text FROM pg_index \
+             WHERE indrelid = 'v'::regclass ORDER BY 1"
+        ),
+        [
+            ["v_a", "CREATE INDEX v_a ON public.v USING btree (a)", "950"],
+            ["v_ac", "CREATE INDEX v_ac ON public.v USING btree (a)", "950"],
+            ["v_ad", "CREATE INDEX v_ad ON public.v USING btree (a COLLATE \"default\")", "100"],
+            ["v_ap", "CREATE INDEX v_ap ON public.v USING btree (a COLLATE \"POSIX\")", "951"],
+            ["v_b", "CREATE INDEX v_b ON public.v USING btree (b)", "951"],
+            ["v_ex", "CREATE INDEX v_ex ON public.v USING btree (((a || 'x'::text)), lower(a), ((c + 1)))", "950 950 0"],
+            ["v_h", "CREATE INDEX v_h ON public.v USING hash (a)", "950"],
+        ]
+    );
+}
+
+#[test]
+fn indexdef_per_column_and_pretty_forms() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE t (a text, b int);
+         CREATE INDEX t_k ON t (a text_pattern_ops DESC NULLS LAST, b NULLS FIRST);
+         CREATE INDEX t_expr ON t ((b + 1) DESC, lower(a) COLLATE \"C\" NULLS FIRST) INCLUDE (a);
+         CREATE INDEX t_part ON t (b, (b * 2), lower(a)) WHERE b > 0 AND b < 5",
+    )
+    .expect("indexes");
+    // One key alone: no collation, operator class or order; an INCLUDE column counts after the keys.
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT pg_get_indexdef('t_k'::regclass, 1, false), pg_get_indexdef('t_k'::regclass, 2, true), \
+                    pg_get_indexdef('t_expr'::regclass, 1, false), pg_get_indexdef('t_expr'::regclass, 1, true), \
+                    pg_get_indexdef('t_expr'::regclass, 2, false), pg_get_indexdef('t_expr'::regclass, 3, false), \
+                    pg_get_indexdef('t_expr'::regclass, 4, false)"
+        ),
+        [["a", "b", "((b + 1))", "(b + 1)", "lower(a)", "a", ""]]
+    );
+    assert_eq!(
+        rows(&mut c, "SELECT pg_get_indexdef('t_part'::regclass, 0, false), pg_get_indexdef('t_part'::regclass, 0, true)"),
+        [[
+            "CREATE INDEX t_part ON public.t USING btree (b, ((b * 2)), lower(a)) WHERE ((b > 0) AND (b < 5))",
+            "CREATE INDEX t_part ON t USING btree (b, (b * 2), lower(a)) WHERE b > 0 AND b < 5"
+        ]]
+    );
+}
+
+#[test]
+fn sort_options_and_collations_are_checked_like_postgres() {
+    let (_db, mut c) = setup();
+    c.batch_execute("CREATE TABLE t (a text, b int)").expect("setup");
+    let cases = [
+        ("CREATE INDEX x ON t USING hash (b DESC)", "0A000", "access method \"hash\" does not support ASC/DESC options"),
+        (
+            "CREATE INDEX x ON t USING gist (a NULLS FIRST)",
+            "42704",
+            "data type text has no default operator class for access method \"gist\"",
+        ),
+        ("CREATE INDEX x ON t (b COLLATE \"C\")", "42804", "collations are not supported by type integer"),
+        ("CREATE INDEX x ON t (a COLLATE \"nosuch\")", "42704", "collation \"nosuch\" for encoding \"UTF8\" does not exist"),
+    ];
+    for (sql, code, msg) in cases {
+        let e = expect_code(c.batch_execute(sql), code);
+        assert_eq!(message(&e), msg, "{sql}");
+    }
+}
+
+#[test]
+fn default_index_names_list_include_columns_and_number_repeats() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE k (a int, b int);
+         CREATE INDEX ON k (a, a);
+         CREATE INDEX ON k (a, b, a, a);
+         CREATE INDEX ON k (a) INCLUDE (a);
+         CREATE INDEX ON k (b) INCLUDE (a)",
+    )
+    .expect("indexes");
+    assert_eq!(
+        rows(&mut c, "SELECT indexrelid::regclass::text FROM pg_index WHERE indrelid = 'k'::regclass ORDER BY 1"),
+        [["k_a_a1_idx"], ["k_a_a1_idx1"], ["k_a_b_a1_a2_idx"], ["k_b_a_idx"]]
+    );
+}

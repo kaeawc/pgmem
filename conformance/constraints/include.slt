@@ -1,0 +1,75 @@
+# INCLUDE on PRIMARY KEY, UNIQUE and EXCLUDE constraints: pg_get_constraintdef, pg_get_indexdef,
+# the default names and pg_index.
+
+statement ok
+CREATE EXTENSION btree_gist
+
+statement ok
+CREATE TABLE u (a int, b int, UNIQUE (a) INCLUDE (b))
+
+statement ok
+CREATE TABLE p (a int, b int, c int, CONSTRAINT p_pk PRIMARY KEY (a, b) INCLUDE (c))
+
+statement ok
+CREATE TABLE n (a int, b int, c int, CONSTRAINT n_uq UNIQUE NULLS NOT DISTINCT (a) INCLUDE (b, c) DEFERRABLE)
+
+statement ok
+CREATE TABLE x (a int, b int, c int, CONSTRAINT x_ex EXCLUDE USING gist (a WITH =, b WITH =) INCLUDE (c) WHERE (a > 0))
+
+statement ok
+CREATE TABLE d (a int, b int, UNIQUE (a, b) INCLUDE (b, a))
+
+statement ok
+CREATE TABLE y (a int, r int4range, b int, PRIMARY KEY (a, r WITHOUT OVERLAPS) INCLUDE (b))
+
+statement ok
+CREATE TABLE z (a int, b int, UNIQUE (a), UNIQUE (a) INCLUDE (b), UNIQUE (a))
+
+statement ok
+ALTER TABLE z ADD CONSTRAINT z_late UNIQUE (b) INCLUDE (a)
+
+query
+SELECT conrelid::regclass::text, conname, pg_get_constraintdef(oid), conkey::text FROM pg_constraint WHERE conrelid IN ('u'::regclass, 'p'::regclass, 'n'::regclass, 'x'::regclass, 'd'::regclass, 'y'::regclass, 'z'::regclass) AND contype <> 'n' ORDER BY 1, 2
+----
+conrelid:text | conname:name | pg_get_constraintdef:text | conkey:text
+d | d_a_b_b1_a1_key | UNIQUE (a, b) INCLUDE (b, a) | {1,2}
+n | n_uq | UNIQUE NULLS NOT DISTINCT (a) INCLUDE (b, c) DEFERRABLE | {1}
+p | p_pk | PRIMARY KEY (a, b) INCLUDE (c) | {1,2}
+u | u_a_b_key | UNIQUE (a) INCLUDE (b) | {1}
+x | x_ex | EXCLUDE USING gist (a WITH =, b WITH =) INCLUDE (c) WHERE ((a > 0)) | {1,2}
+y | y_pkey | PRIMARY KEY (a, r WITHOUT OVERLAPS) INCLUDE (b) | {1,2}
+z | z_a_b_key | UNIQUE (a) INCLUDE (b) | {1}
+z | z_a_key | UNIQUE (a) | {1}
+z | z_late | UNIQUE (b) INCLUDE (a) | {2}
+
+query
+SELECT indexrelid::regclass::text, pg_get_indexdef(indexrelid), indnatts, indnkeyatts FROM pg_index WHERE indrelid IN ('u'::regclass, 'p'::regclass, 'n'::regclass, 'x'::regclass, 'd'::regclass, 'z'::regclass) ORDER BY 1
+----
+indexrelid:text | pg_get_indexdef:text | indnatts:int2 | indnkeyatts:int2
+d_a_b_b1_a1_key | CREATE UNIQUE INDEX d_a_b_b1_a1_key ON public.d USING btree (a, b) INCLUDE (b, a) | 4 | 2
+n_uq | CREATE UNIQUE INDEX n_uq ON public.n USING btree (a) INCLUDE (b, c) NULLS NOT DISTINCT | 3 | 1
+p_pk | CREATE UNIQUE INDEX p_pk ON public.p USING btree (a, b) INCLUDE (c) | 3 | 2
+u_a_b_key | CREATE UNIQUE INDEX u_a_b_key ON public.u USING btree (a) INCLUDE (b) | 2 | 1
+x_ex | CREATE INDEX x_ex ON public.x USING gist (a, b) INCLUDE (c) WHERE (a > 0) | 3 | 2
+z_a_b_key | CREATE UNIQUE INDEX z_a_b_key ON public.z USING btree (a) INCLUDE (b) | 2 | 1
+z_a_key | CREATE UNIQUE INDEX z_a_key ON public.z USING btree (a) | 1 | 1
+z_late | CREATE UNIQUE INDEX z_late ON public.z USING btree (b) INCLUDE (a) | 2 | 1
+
+statement error 42703 column "nope" named in key does not exist
+CREATE TABLE bad (a int, UNIQUE (a) INCLUDE (nope))
+
+statement error 0A000 access method "hash" does not support included columns
+CREATE TABLE bad (a int, b int, EXCLUDE USING hash (a WITH =) INCLUDE (b))
+
+# CREATE INDEX ... INCLUDE and the constraint index agree.
+statement ok
+CREATE TABLE ci (a int, b int)
+
+statement ok
+CREATE UNIQUE INDEX ci_idx ON ci (a) INCLUDE (b)
+
+query
+SELECT pg_get_indexdef('ci_idx'::regclass)
+----
+pg_get_indexdef:text
+CREATE UNIQUE INDEX ci_idx ON public.ci USING btree (a) INCLUDE (b)

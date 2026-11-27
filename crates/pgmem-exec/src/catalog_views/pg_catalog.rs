@@ -956,16 +956,23 @@ fn pg_index(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
         .map(|(t, idx)| {
             let attnums = idx.key_attnums(t);
             let mut keys: Vec<Value> = attnums.iter().map(|a| int2(*a)).collect();
-            let collations: Vec<Value> = attnums
-                .iter()
-                .map(|a| {
-                    oid(a
-                        .checked_sub(1)
-                        .and_then(|c| t.columns.get(c))
-                        .map_or(0, |col| if col.ty.is_string() { DEFAULT_COLLATION_OID } else { 0 }))
+            let nkey = keys.len();
+            // Per key: the stored collation, or that of the column when none was recorded.
+            let collations: Vec<Value> = (0..nkey)
+                .map(|k| {
+                    oid(idx.key_options.get(k).map_or_else(
+                        || {
+                            let col = attnums.get(k).and_then(|a| a.checked_sub(1)).and_then(|c| t.columns.get(c));
+                            col.map_or(
+                                0,
+                                |col| if col.ty.is_string() { crate::bind::ddl::collation_oid(col.collation.as_deref()) } else { 0 },
+                            )
+                        },
+                        |o| o.collation,
+                    ))
                 })
                 .collect();
-            let nkey = keys.len();
+            let options: Vec<Value> = (0..nkey).map(|k| Value::Int2(idx.key_options.get(k).map_or(0, |o| o.indoption()))).collect();
             keys.extend(idx.include.iter().map(|c| int2(c + 1)));
             let n = keys.len();
             let method = crate::opclass::method_oid(&idx.method).unwrap_or(403);
@@ -993,7 +1000,7 @@ fn pg_index(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("indkey", Value::Array(keys)),
                 ("indcollation", Value::Array(collations)),
                 ("indclass", Value::Array(classes)),
-                ("indoption", Value::Array(vec![Value::Int2(0); nkey])),
+                ("indoption", Value::Array(options)),
                 ("indexprs", exprs.map_or(Value::Null, txt)),
                 ("indpred", pred.map_or(Value::Null, txt)),
             ])

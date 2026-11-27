@@ -128,6 +128,7 @@ fn lower_table_constraint(c: sq::TableConstraint) -> SqlResult<TableConstraint> 
             TableConstraint {
                 name: pk.name.as_ref().map(ident),
                 reloptions,
+                include: pk.include.iter().map(ident).collect(),
                 kind: {
                     if crate::take_temporal_key(&columns) {
                         TableConstraintKind::Temporal { primary: true, columns }
@@ -144,6 +145,7 @@ fn lower_table_constraint(c: sq::TableConstraint) -> SqlResult<TableConstraint> 
             TableConstraint {
                 name: u.name.as_ref().map(ident),
                 reloptions,
+                include: u.include.iter().map(ident).collect(),
                 kind: {
                     if crate::take_temporal_key(&columns) {
                         TableConstraintKind::Temporal { primary: false, columns }
@@ -162,12 +164,14 @@ fn lower_table_constraint(c: sq::TableConstraint) -> SqlResult<TableConstraint> 
             kind: TableConstraintKind::UsingIndex { primary: true, index: ident(&u.index_name) },
             timing: timing(u.characteristics.as_ref(), "PRIMARY KEY")?,
             reloptions: Vec::new(),
+            include: Vec::new(),
         },
         sq::TableConstraint::UniqueUsingIndex(u) => TableConstraint {
             name: u.name.as_ref().map(ident),
             kind: TableConstraintKind::UsingIndex { primary: false, index: ident(&u.index_name) },
             timing: timing(u.characteristics.as_ref(), "UNIQUE")?,
             reloptions: Vec::new(),
+            include: Vec::new(),
         },
         sq::TableConstraint::Exclude(x) => TableConstraint {
             name: x.name.as_ref().map(ident),
@@ -182,12 +186,14 @@ fn lower_table_constraint(c: sq::TableConstraint) -> SqlResult<TableConstraint> 
             },
             timing: timing(x.characteristics.as_ref(), "EXCLUDE")?,
             reloptions: crate::relopts::take('x', &[]),
+            include: x.include.iter().map(ident).collect(),
         },
         sq::TableConstraint::Check(chk) => TableConstraint {
             name: chk.name.as_ref().map(ident),
             kind: TableConstraintKind::Check(lower_expr(*chk.expr)?),
             timing: ConstraintTiming { no_inherit: chk.no_inherit, ..ConstraintTiming::default() },
             reloptions: Vec::new(),
+            include: Vec::new(),
         },
         sq::TableConstraint::ForeignKey(fk) => TableConstraint {
             name: fk.name.as_ref().map(ident),
@@ -204,6 +210,7 @@ fn lower_table_constraint(c: sq::TableConstraint) -> SqlResult<TableConstraint> 
             },
             timing: timing(fk.characteristics.as_ref(), "FOREIGN KEY")?,
             reloptions: Vec::new(),
+            include: Vec::new(),
         },
         _ => return Err(unsupported("this table constraint")),
     })

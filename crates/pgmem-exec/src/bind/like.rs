@@ -29,6 +29,7 @@ pub struct LikeIndex {
     pub predicate: Option<ir::Expr>,
     pub method: String,
     pub opclasses: Vec<pgmem_catalog::IndexOpclass>,
+    pub key_options: Vec<pgmem_catalog::IndexKeyOptions>,
     pub include: Vec<String>,
     pub reloptions: Vec<String>,
 }
@@ -165,6 +166,7 @@ fn copy_columns(
                     predicate: idx.predicate.clone(),
                     method: idx.method.clone(),
                     opclasses: idx.opclasses.clone(),
+                    key_options: idx.key_options.clone(),
                     include: idx.include.iter().map(name_of).collect(),
                     reloptions: idx.reloptions.clone(),
                 }),
@@ -224,6 +226,7 @@ pub fn build_index(b: &Binder, table: &TableDef, li: &LikeIndex, taken: &mut Vec
         .map(|n| table.column_index(n).ok_or_else(|| SqlError::undefined_column(&format!("\"{n}\""))))
         .collect::<SqlResult<Vec<_>>>()?;
     let names: Vec<String> = if li.exprs.is_empty() { li.columns.clone() } else { li.exprs.iter().map(index_key_name).collect() };
+    let names = super::ddl::index_name_columns(names, &li.include);
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
     let mut used = taken.clone();
     used.extend(table.indexes.iter().map(|i| i.name.clone()));
@@ -241,6 +244,7 @@ pub fn build_index(b: &Binder, table: &TableDef, li: &LikeIndex, taken: &mut Vec
     Ok(IndexDef {
         method: li.method.clone(),
         opclasses: li.opclasses.clone(),
+        key_options: li.key_options.clone(),
         oid: 0,
         name,
         columns,

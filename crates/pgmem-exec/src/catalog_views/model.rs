@@ -338,10 +338,12 @@ pub fn constraint_def(model: &Model, con: &Con) -> String {
 fn constraint_def_body(model: &Model, con: &Con) -> String {
     match (con.contype, con.kind) {
         ('n', _) => format!("NOT NULL {}", column_list(con.table, &con.conkey)),
-        ('p', Some(ConstraintKind::PrimaryKey { .. }) | None) => format!("PRIMARY KEY ({})", column_list(con.table, &con.conkey)),
+        ('p', Some(ConstraintKind::PrimaryKey { .. }) | None) => {
+            format!("PRIMARY KEY ({}){}", column_list(con.table, &con.conkey), crate::deparse::include_clause(con.table, &con.name))
+        }
         ('u', Some(ConstraintKind::Unique { nulls_not_distinct, .. })) => {
             let nnd = if *nulls_not_distinct { "NULLS NOT DISTINCT " } else { "" };
-            format!("UNIQUE {nnd}({})", column_list(con.table, &con.conkey))
+            format!("UNIQUE {nnd}({}){}", column_list(con.table, &con.conkey), crate::deparse::include_clause(con.table, &con.name))
         }
         _ => {
             let constraint = con.table.constraints.iter().find(|c| c.oid == con.oid);

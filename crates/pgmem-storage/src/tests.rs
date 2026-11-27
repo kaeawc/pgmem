@@ -324,6 +324,7 @@ fn db_with_unique_id() -> (Arc<Database>, Oid) {
         replica: false,
         method: "btree".into(),
         opclasses: Vec::new(),
+        key_options: Vec::new(),
         unique: true,
         primary: false,
         nulls_not_distinct: false,

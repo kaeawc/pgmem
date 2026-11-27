@@ -188,6 +188,27 @@ pub struct IndexOpclass {
     pub shown: Option<String>,
 }
 
+/// The sort order and collation of one index key (`pg_index.indoption` / `indcollation`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct IndexKeyOptions {
+    /// `DESC` (`INDOPTION_DESC`).
+    pub desc: bool,
+    /// `NULLS FIRST` (`INDOPTION_NULLS_FIRST`): true by default for a `DESC` key, false for `ASC`.
+    pub nulls_first: bool,
+    /// `pg_index.indcollation`: the collation the index sorts with (0 for a type without one).
+    pub collation: u32,
+    /// The name `pg_get_indexdef` prints: set only when the key's `COLLATE` differs from the
+    /// collation of the column or expression it applies to.
+    pub shown_collation: Option<String>,
+}
+
+impl IndexKeyOptions {
+    /// `pg_index.indoption`.
+    pub fn indoption(&self) -> i16 {
+        i16::from(self.desc) | (i16::from(self.nulls_first) << 1)
+    }
+}
+
 /// An index. Unique indexes (including the ones backing PRIMARY KEY and UNIQUE constraints;
 /// unique is btree-only) are enforced; the rest exist for catalog fidelity only.
 #[derive(Clone, Debug, PartialEq)]
@@ -196,6 +217,9 @@ pub struct IndexDef {
     pub method: String,
     /// Operator class per key (columns, then expressions); empty means every key's default.
     pub opclasses: Vec<IndexOpclass>,
+    /// Sort order and collation per key, parallel to `opclasses`; empty means every key ascending
+    /// with its column's own collation.
+    pub key_options: Vec<IndexKeyOptions>,
     pub oid: Oid,
     pub name: String,
     /// Physical column positions. Empty when the index is on expressions only.
@@ -218,6 +242,11 @@ pub struct IndexDef {
 }
 
 impl IndexDef {
+    /// The number of key columns and expressions (`pg_index.indnkeyatts`), not counting `INCLUDE`.
+    pub fn key_count(&self) -> usize {
+        if self.exprs.is_empty() { self.columns.len() } else { self.exprs.len() }
+    }
+
     /// `pg_index.indkey`: per key, the attnum of a plain column and 0 for an expression.
     /// A mixed index stores every key in `exprs`; its bare-column keys are plain columns.
     pub fn key_attnums(&self, table: &TableDef) -> Vec<usize> {
