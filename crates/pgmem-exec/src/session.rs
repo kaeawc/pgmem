@@ -75,6 +75,10 @@ pub struct SessionEnv {
     /// While a SECURITY DEFINER function runs: its owner, the current user for the call
     /// (session_user and the `role` setting are unchanged).
     pub security_definer: Option<String>,
+    /// The connection's local (server) and remote (client) socket addresses
+    /// (`inet_server_addr()`, `inet_client_addr()`, ...); `None` without a TCP socket.
+    pub server_addr: Option<std::net::SocketAddr>,
+    pub client_addr: Option<std::net::SocketAddr>,
 }
 
 /// `SET CONSTRAINTS` within a transaction: ALL, then per-constraint overrides.
@@ -114,6 +118,8 @@ impl SessionEnv {
             objects: Arc::default(),
             constraint_modes: Arc::default(),
             security_definer: None,
+            server_addr: None,
+            client_addr: None,
         }
     }
 }
@@ -241,6 +247,9 @@ pub struct Session {
     currval: HashMap<Oid, i64>,
     lastval: Option<i64>,
     pub backend_pid: i32,
+    /// The connection's local and remote TCP addresses (`None` for in-process sessions).
+    pub server_addr: Option<std::net::SocketAddr>,
+    pub client_addr: Option<std::net::SocketAddr>,
     txid_counter: i64,
     default_isolation: Isolation,
     /// The session's temporary schema (`pg_temp_<pid>`), created with its first temporary
@@ -298,6 +307,8 @@ impl Session {
             currval: HashMap::new(),
             lastval: None,
             backend_pid,
+            server_addr: None,
+            client_addr: None,
             txid_counter: 1000,
             default_isolation: Isolation::ReadCommitted,
             temp_schema: Some(format!("pg_temp_{backend_pid}")),
@@ -339,6 +350,8 @@ impl Session {
             objects: self.objects(),
             constraint_modes: Arc::new(self.constraint_modes.clone()),
             security_definer: None,
+            server_addr: self.server_addr,
+            client_addr: self.client_addr,
         }
     }
 

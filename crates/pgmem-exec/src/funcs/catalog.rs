@@ -770,11 +770,27 @@ pub fn resolve(name: &str, args: &[Type]) -> SqlResult<Option<Resolved>> {
         "pg_postmaster_start_time" | "pg_conf_load_time" if n == 0 => {
             resolved(lenient("pg_postmaster_start_time", |_, ctx| Ok(Value::Timestamptz(ctx.env.txn_start))), vec![], Type::Timestamptz)
         }
-        "inet_server_port" | "inet_client_port" if n == 0 => resolved(lenient("inet_server_port", |_, _| Ok(Value::Null)), vec![], Int4),
+        "inet_server_addr" if n == 0 => resolved(lenient("inet_server_addr", |_, c| Ok(socket_ip(c.env.server_addr))), vec![], Type::Inet),
+        "inet_client_addr" if n == 0 => resolved(lenient("inet_client_addr", |_, c| Ok(socket_ip(c.env.client_addr))), vec![], Type::Inet),
+        "inet_server_port" if n == 0 => resolved(lenient("inet_server_port", |_, c| Ok(socket_port(c.env.server_addr))), vec![], Int4),
+        "inet_client_port" if n == 0 => resolved(lenient("inet_client_port", |_, c| Ok(socket_port(c.env.client_addr))), vec![], Int4),
         "pg_cancel_backend" | "pg_terminate_backend" if n == 1 => resolved(strict("pg_cancel_backend", always_false), vec![Int4], Bool),
         _ => {
             let _ = code::UNDEFINED_FUNCTION;
             Ok(None)
         }
     }
+}
+
+/// A connection address as `inet` (a host address: /32 or /128), NULL without a TCP socket.
+fn socket_ip(addr: Option<std::net::SocketAddr>) -> Value {
+    addr.map_or(Value::Null, |a| {
+        let ip = a.ip();
+        Value::Inet(ip, if ip.is_ipv4() { 32 } else { 128 })
+    })
+}
+
+/// A connection port as `int4`, NULL without a TCP socket.
+fn socket_port(addr: Option<std::net::SocketAddr>) -> Value {
+    addr.map_or(Value::Null, |a| Value::Int4(i32::from(a.port())))
 }
