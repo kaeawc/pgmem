@@ -1,0 +1,145 @@
+# CREATE / DROP CAST and pg_cast.
+
+statement ok
+CREATE TYPE mood AS ENUM ('sad', 'ok')
+
+statement ok
+CREATE DOMAIN pos AS int CHECK (VALUE > 0)
+
+statement ok
+CREATE TYPE pt AS (x int, y int)
+
+statement ok
+CREATE FUNCTION mood_to_int(m mood) RETURNS int LANGUAGE sql AS 'select case m when ''sad'' then 0 else 1 end'
+
+statement ok
+CREATE FUNCTION int_to_mood(i int) RETURNS mood LANGUAGE sql AS 'select case i when 0 then ''sad''::mood else ''ok''::mood end'
+
+statement ok
+CREATE FUNCTION pt_text(p pt) RETURNS text LANGUAGE sql AS 'select (p).x || '','' || (p).y'
+
+statement ok
+CREATE CAST (mood AS int) WITH FUNCTION mood_to_int(mood)
+
+statement ok
+CREATE CAST (int AS mood) WITH FUNCTION int_to_mood(int) AS ASSIGNMENT
+
+statement ok
+CREATE CAST (pt AS text) WITH FUNCTION pt_text(pt) AS IMPLICIT
+
+query
+SELECT 'ok'::mood::int, 0::mood, (1, 2)::pt::text, 1::mood::text
+----
+int4:int4 | mood:mood | row:text | text:text
+1 | sad | 1,2 | ok
+
+statement ok
+CREATE TABLE ct (m mood)
+
+statement ok
+INSERT INTO ct VALUES (1), (0)
+
+query rowsort
+SELECT m FROM ct
+----
+m:mood
+ok
+sad
+
+query
+SELECT castsource::regtype, casttarget::regtype, castfunc::regproc, castcontext, castmethod FROM pg_cast WHERE oid >= 16384 ORDER BY oid
+----
+castsource:regtype | casttarget:regtype | castfunc:regproc | castcontext:char | castmethod:char
+mood | integer | mood_to_int | e | f
+integer | mood | int_to_mood | a | f
+pt | text | pt_text | i | f
+
+query
+SELECT count(*), count(*) FILTER (WHERE castcontext = 'i'), count(*) FILTER (WHERE castmethod = 'b'), count(*) FILTER (WHERE castmethod = 'i') FROM pg_cast WHERE oid < 16384
+----
+count:int8 | count:int8 | count:int8 | count:int8
+235 | 117 | 64 | 5
+
+statement ok
+CREATE CAST (varchar AS pt) WITH INOUT AS ASSIGNMENT
+
+query
+SELECT '(1,2)'::varchar::pt::text
+----
+text:text
+1,2
+
+statement error 42710 cast from type mood to type integer already exists
+CREATE CAST (mood AS int) WITH FUNCTION mood_to_int(mood)
+
+statement error 42710 cast from type oid to type integer already exists
+CREATE CAST (oid AS int) WITHOUT FUNCTION
+
+statement error 42P17 source data type and target data type are the same
+CREATE CAST (int AS int) WITHOUT FUNCTION
+
+statement error 42P17 enum data types are not binary-compatible
+CREATE CAST (mood AS mood) WITHOUT FUNCTION
+
+statement error 42P17 domain data types must not be marked binary-compatible
+CREATE CAST (int AS pos) WITHOUT FUNCTION
+
+statement error 42809 target data type void is a pseudo-type
+CREATE CAST (int AS void) WITHOUT FUNCTION
+
+statement error 42P17 argument of cast function must match or be binary-coercible from source data type
+CREATE CAST (bigint AS pt) WITH FUNCTION int_to_mood(int)
+
+statement error 42P17 return data type of cast function must match or be binary-coercible to target data type
+CREATE CAST (int AS pt) WITH FUNCTION int_to_mood(int)
+
+statement error 42704 type "nosuchtype" does not exist
+CREATE CAST (int AS nosuchtype) WITHOUT FUNCTION
+
+statement ok
+COMMENT ON CAST (int AS mood) IS 'int to mood'
+
+query
+SELECT obj_description(oid, 'pg_cast') FROM pg_cast WHERE casttarget = 'mood'::regtype
+----
+obj_description:text
+int to mood
+
+statement error 2BP01 cannot drop function int_to_mood(integer) because other objects depend on it
+DROP FUNCTION int_to_mood(int)
+
+statement error 2BP01 cannot drop type mood because other objects depend on it
+DROP TYPE mood
+
+statement ok
+DROP CAST (int AS mood)
+
+statement error 42704 cast from type integer to type mood does not exist
+DROP CAST (int AS mood)
+
+statement ok
+DROP CAST IF EXISTS (int AS mood)
+
+statement error 2BP01 cannot drop cast from oid to integer because it is required by the database system
+DROP CAST (oid AS int)
+
+statement ok
+CREATE CAST (int AS mood) WITH FUNCTION int_to_mood(int)
+
+statement ok
+DROP FUNCTION int_to_mood(int) CASCADE
+
+query
+SELECT count(*) FROM pg_cast WHERE oid >= 16384 AND casttarget = 'mood'::regtype
+----
+count:int8
+0
+
+statement ok
+DROP TYPE pt CASCADE
+
+query
+SELECT castsource::regtype FROM pg_cast WHERE oid >= 16384 ORDER BY oid
+----
+castsource:regtype
+mood

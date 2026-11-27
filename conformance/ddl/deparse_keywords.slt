@@ -1,0 +1,61 @@
+# Identifier quoting in deparsed SQL: every non-unreserved keyword is quoted (ruleutils quote_identifier), and function qualification in pg_get_triggerdef.
+
+statement ok
+CREATE TABLE kw (id int, "between" int DEFAULT 1, "authorization" text DEFAULT 'a', "time" int, "position" int, "left" int, abort int, "a$b" int)
+
+statement ok
+CREATE INDEX kw_i ON kw ("between", "authorization", "time", abort, "a$b")
+
+statement ok
+ALTER TABLE kw ADD CONSTRAINT kw_c CHECK ("between" > "position" AND "left" > 0 AND abort > 0)
+
+statement ok
+CREATE VIEW kw_v AS SELECT "between", "authorization", "time", "position", "left", abort, "a$b" FROM kw WHERE "time" > 1
+
+query
+SELECT pg_get_viewdef('kw_v'::regclass)
+----
+pg_get_viewdef:text
+ SELECT "between",\n    "authorization",\n    "time",\n    "position",\n    "left",\n    abort,\n    "a$b"\n   FROM kw\n  WHERE ("time" > 1);
+
+query
+SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'kw_c'
+----
+pg_get_constraintdef:text
+CHECK ((("between" > "position") AND ("left" > 0) AND (abort > 0)))
+
+query
+SELECT pg_get_indexdef('kw_i'::regclass)
+----
+pg_get_indexdef:text
+CREATE INDEX kw_i ON public.kw USING btree ("between", "authorization", "time", abort, "a$b")
+
+query
+SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef WHERE adrelid = 'kw'::regclass ORDER BY adnum
+----
+pg_get_expr:text
+1
+'a'::text
+
+statement ok
+CREATE FUNCTION public.mytg() RETURNS trigger LANGUAGE plpgsql AS 'begin return new; end'
+
+statement ok
+CREATE FUNCTION public.suppress_redundant_updates_trigger() RETURNS trigger LANGUAGE plpgsql AS 'begin return new; end'
+
+statement ok
+CREATE TEMP TABLE tmp_anchor (x int)
+
+statement ok
+CREATE FUNCTION pg_temp.tmptg() RETURNS trigger LANGUAGE plpgsql AS 'begin return new; end'
+
+statement ok
+CREATE TRIGGER t1 BEFORE UPDATE ON kw FOR EACH ROW EXECUTE FUNCTION pg_temp.tmptg(); CREATE TRIGGER t2 BEFORE UPDATE ON kw FOR EACH ROW EXECUTE FUNCTION public.mytg(); CREATE TRIGGER t3 BEFORE UPDATE ON kw FOR EACH ROW EXECUTE FUNCTION public.suppress_redundant_updates_trigger()
+
+query
+SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname IN ('t1', 't2', 't3') ORDER BY tgname
+----
+pg_get_triggerdef:text
+CREATE TRIGGER t1 BEFORE UPDATE ON public.kw FOR EACH ROW EXECUTE FUNCTION pg_temp.tmptg()
+CREATE TRIGGER t2 BEFORE UPDATE ON public.kw FOR EACH ROW EXECUTE FUNCTION mytg()
+CREATE TRIGGER t3 BEFORE UPDATE ON public.kw FOR EACH ROW EXECUTE FUNCTION public.suppress_redundant_updates_trigger()

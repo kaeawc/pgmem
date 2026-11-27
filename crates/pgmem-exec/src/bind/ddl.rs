@@ -67,6 +67,18 @@ fn check_expr_binds(b: &Binder, table: &TableDef, e: &ir::Expr, clause: Clause) 
     Ok(())
 }
 
+/// Binds `e` against the row of `table` (an expression stored in the catalog) and returns its
+/// type; `what` names aggregates in the error (`statistics expressions`).
+pub(crate) fn bind_catalog_expr(b: &Binder, table: &TableDef, e: &ir::Expr, what: &str) -> SqlResult<Type> {
+    let level = Level::new(physical_scope(table, &table.name));
+    let ctx = Ctx::new(&level).with_clause(Clause::Other);
+    let (bound, ty) = b.bind_expr(e, &ctx)?;
+    if super::expr::contains_agg(&bound) {
+        return Err(SqlError::new(code::GROUPING_ERROR, format!("aggregate functions are not allowed in {what}")));
+    }
+    Ok(ty)
+}
+
 fn check_default_binds(b: &Binder, col: &ColumnDef, e: &ir::Expr) -> SqlResult<()> {
     let empty = Level::new(Scope::default());
     let ctx = Ctx::new(&empty).with_clause(Clause::Default);
@@ -426,6 +438,8 @@ pub fn add_constraint(
             });
             taken.push(name.clone());
             table.indexes.push(IndexDef {
+                method: "btree".into(),
+                opclasses: Vec::new(),
                 oid: 0,
                 name: name.clone(),
                 columns: idx_cols.clone(),
@@ -600,20 +614,41 @@ pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(
     let catalog = b.catalog;
     let table = catalog.lookup_table(&ci.table)?;
     let tname = table.name.clone();
+    let method = ci.method.as_deref().unwrap_or("btree");
+    if crate::opclass::method_oid(method).is_none() {
+        return Err(SqlError::new(code::UNDEFINED_OBJECT, format!("access method \"{method}\" does not exist")));
+    }
+    let (can_unique, can_multi, can_include) = crate::opclass::capabilities(method);
+    if ci.unique && !can_unique {
+        return Err(SqlError::feature_not_supported(format!("access method \"{method}\" does not support unique indexes")));
+    }
+    if ci.columns.len() > 1 && !can_multi {
+        return Err(SqlError::feature_not_supported(format!("access method \"{method}\" does not support multicolumn indexes")));
+    }
+    if !ci.include.is_empty() && !can_include {
+        return Err(SqlError::feature_not_supported(format!("access method \"{method}\" does not support included columns")));
+    }
     let mut columns = Vec::new();
     let mut exprs = Vec::new();
     let mut names = Vec::new();
+    let mut key_types = Vec::new();
     for key in &ci.columns {
         match &key.expr {
             ir::Expr::Column(parts) if parts.len() == 1 => {
                 let idx = table.column_index(&parts[0]).ok_or_else(|| SqlError::undefined_column(&format!("\"{}\"", parts[0])))?;
                 columns.push(idx);
                 names.push(parts[0].clone());
+                key_types.push(table.columns[idx].ty.clone());
             }
             e => {
-                check_expr_binds(b, &table, e, Clause::Other)?;
+                let level = Level::new(physical_scope(&table, &table.name));
+                let (bound, ty) = b.bind_expr(e, &Ctx::new(&level).with_clause(Clause::Other))?;
+                if super::expr::contains_agg(&bound) {
+                    return Err(super::agg_misuse(Clause::Other, "aggregate functions"));
+                }
                 exprs.push(e.clone());
                 names.push(super::like::index_key_name(e));
+                key_types.push(ty);
             }
         }
     }
@@ -630,16 +665,15 @@ pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(
     if let Some(p) = &ci.predicate {
         check_expr_binds(b, &table, p, Clause::Where)?;
     }
-    if let Some(m) = &ci.method {
-        if !["btree", "hash", "gist", "gin", "spgist", "brin"].contains(&m.as_str()) {
-            return Err(SqlError::new(code::UNDEFINED_OBJECT, format!("access method \"{m}\" does not exist")));
-        }
-        if ci.unique && m != "btree" {
-            return Err(SqlError::feature_not_supported(format!("access method \"{m}\" does not support unique indexes")));
-        }
-    }
-    let reloptions =
-        crate::reloptions::create(crate::reloptions::Target::Index(Some(ci.method.as_deref().unwrap_or("btree"))), &ci.reloptions)?;
+    let lenient = ["btree_gist", "btree_gin", "pg_trgm", "hstore", "citext", "ltree", "cube", "intarray"]
+        .iter()
+        .any(|e| catalog.extension(e).is_some());
+    let opclasses = key_types
+        .iter()
+        .zip(&ci.opclasses)
+        .map(|(ty, oc)| crate::opclass::resolve(method, ty, oc.as_deref(), lenient))
+        .collect::<SqlResult<Vec<_>>>()?;
+    let reloptions = crate::reloptions::create(crate::reloptions::Target::Index(Some(method)), &ci.reloptions)?;
     let name = match &ci.name {
         Some(n) => {
             if catalog.relation(&table.schema, n).is_some() {
@@ -658,6 +692,8 @@ pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(
     Ok(Some((
         table.qualified(),
         IndexDef {
+            method: method.to_owned(),
+            opclasses,
             oid: 0,
             name,
             columns,
@@ -1150,6 +1186,8 @@ fn add_exclusion(
         })
         .collect();
     table.indexes.push(IndexDef {
+        method: method.to_owned(),
+        opclasses: Vec::new(),
         oid: 0,
         name: name.clone(),
         columns: plain.clone().unwrap_or_default(),

@@ -448,7 +448,7 @@ fn arg_mode(p: &mut Parser) -> FunctionArgMode {
 }
 
 /// `[mode] [name] type [{DEFAULT | =} expr]`: a name is present when a type follows it.
-fn function_arg(p: &mut Parser) -> Result<(FunctionArgMode, Option<sq::Ident>, sq::DataType, Option<sq::Expr>), ParserError> {
+pub(crate) fn function_arg(p: &mut Parser) -> Result<(FunctionArgMode, Option<sq::Ident>, sq::DataType, Option<sq::Expr>), ParserError> {
     let mode = arg_mode(p);
     // `name type`: the second token starts a type (a word, not `,` `)` `DEFAULT` `=` `[` `(`).
     let named = matches!(p.peek_token().token, Token::Word(_))

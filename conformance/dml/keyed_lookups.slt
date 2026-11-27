@@ -1,0 +1,151 @@
+# Statements whose rows are found by key (WHERE col = constant, unique and foreign key
+# checks, ON CONFLICT): the same rows and errors as a scan of the whole table.
+statement ok
+CREATE TABLE kp (id int PRIMARY KEY)
+
+statement ok
+CREATE TABLE kl (id int PRIMARY KEY, email text UNIQUE, n int, p int REFERENCES kp, big bigint)
+
+statement ok
+INSERT INTO kp VALUES (1), (2)
+
+statement ok
+INSERT INTO kl VALUES (1, 'a', 1, 1, 10), (2, 'b', 2, NULL, 20)
+
+# Rows written before ADD COLUMN read its default: a lookup on that column finds them
+statement ok
+ALTER TABLE kl ADD COLUMN code text DEFAULT 'x'
+
+statement ok
+INSERT INTO kl (id, email, n, code) VALUES (3, 'c', 3, 'y')
+
+query rowsort
+UPDATE kl SET n = n + 10 WHERE code = 'x' RETURNING id, n
+----
+id:int4 | n:int4
+1 | 11
+2 | 12
+
+query rowsort
+DELETE FROM kl WHERE code = 'y' AND id = 3 RETURNING id
+----
+id:int4
+3
+
+# Comparisons across types
+query rowsort
+UPDATE kl SET n = 0 WHERE id = 1.0 RETURNING id
+----
+id:int4
+1
+
+query rowsort
+UPDATE kl SET n = 7 WHERE big = 20 RETURNING id
+----
+id:int4
+2
+
+query rowsort
+UPDATE kl SET n = 8 WHERE id = 2::bigint RETURNING id
+----
+id:int4
+2
+
+query rowsort
+DELETE FROM kl WHERE id = NULL RETURNING id
+----
+id:int4
+
+query rowsort
+UPDATE kl SET n = 9 WHERE email = 'A' RETURNING id
+----
+id:int4
+
+# Unique keys against rows written earlier in the transaction and freed by ROLLBACK TO
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO kl (id, email) VALUES (10, 'z')
+
+statement ok
+SAVEPOINT s
+
+statement ok
+INSERT INTO kl (id, email) VALUES (11, 'w')
+
+statement ok
+ROLLBACK TO s
+
+statement ok
+INSERT INTO kl (id, email) VALUES (11, 'w')
+
+statement error 23505 duplicate key value violates unique constraint "kl_email_key"
+INSERT INTO kl (id, email) VALUES (12, 'z')
+
+statement ok
+ROLLBACK
+
+# A key moved by an UPDATE is free for the next statement; a key taken is not
+statement ok
+UPDATE kl SET email = 'a2' WHERE id = 1
+
+statement ok
+INSERT INTO kl (id, email) VALUES (4, 'a')
+
+statement error 23505 duplicate key value violates unique constraint "kl_email_key"
+UPDATE kl SET email = 'b' WHERE id = 4
+
+statement error 23505 duplicate key value violates unique constraint "kl_pkey"
+UPDATE kl SET id = 2 WHERE id = 4
+
+# ON CONFLICT finds the row by key, including one the statement already updated
+query rowsort
+INSERT INTO kl (id, email) VALUES (4, 'q') ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email RETURNING id, email
+----
+id:int4 | email:text
+4 | q
+
+statement error 21000 ON CONFLICT DO UPDATE command cannot affect row a second time
+INSERT INTO kl (id, email) VALUES (4, 'r'), (4, 's') ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email
+
+statement error 23505 duplicate key value violates unique constraint "kl_email_key"
+INSERT INTO kl (id, email) VALUES (4, 'b') ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email
+
+query rowsort
+INSERT INTO kl (id, email) VALUES (5, 'q'), (6, 'b') ON CONFLICT DO NOTHING RETURNING id
+----
+id:int4
+
+# Foreign keys: a parent inserted in the same transaction, and a missing one
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO kp VALUES (3)
+
+statement ok
+INSERT INTO kl (id, email, p) VALUES (20, 'p3', 3)
+
+statement error 23503 insert or update on table "kl" violates foreign key constraint "kl_p_fkey"
+UPDATE kl SET p = 4 WHERE id = 20
+
+statement ok
+ROLLBACK
+
+statement error 23503 update or delete on table "kp" violates foreign key constraint "kl_p_fkey" on table "kl"
+DELETE FROM kp WHERE id = 1
+
+query rowsort
+DELETE FROM kp WHERE id = 2 RETURNING id
+----
+id:int4
+2
+
+query rowsort
+SELECT id, email, n, p, big, code FROM kl
+----
+id:int4 | email:text | n:int4 | p:int4 | big:int8 | code:text
+2 | b | 8 | NULL | 20 | x
+1 | a2 | 0 | 1 | 10 | x
+4 | q | NULL | NULL | NULL | x

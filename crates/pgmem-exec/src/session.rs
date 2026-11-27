@@ -631,7 +631,9 @@ impl Session {
         for (oid, mode) in crate::lock_levels::ddl_locks(stmt, &catalog) {
             txn.lock_relation(oid, mode);
         }
-        let result = crate::statement::exec_statement(stmt, &binder, &ctx, txn, params, &env, &state)?;
+        let result = crate::detail_privileges::as_viewer(&catalog, &env, stmt, || {
+            crate::statement::exec_statement(stmt, &binder, &ctx, txn, params, &env, &state)
+        })?;
         for (oid, mode) in crate::lock_levels::created_locks(stmt, &catalog, txn.catalog()) {
             txn.lock_relation(oid, mode);
         }
@@ -652,6 +654,16 @@ impl Session {
             }
             let schema = rel.schema().to_owned();
             crate::roles::apply_defaults(txn, &env, rel.oid(), &schema, kind);
+            // Serial / identity sequences are created with their table.
+            if let Relation::Table(t) = &rel {
+                let seqs: Vec<(Oid, String)> = txn.catalog().owned_sequences(t).map(|q| (q.oid, q.schema.clone())).collect();
+                for (oid, schema) in seqs {
+                    if role != env.user {
+                        txn.catalog_mut().set_owner(oid, Some(&role));
+                    }
+                    crate::roles::apply_defaults(txn, &env, oid, &schema, 'S');
+                }
+            }
         }
         if let Statement::CreateTable(ct) = stmt
             && ct.options.on_commit != ir::OnCommit::PreserveRows
@@ -1302,7 +1314,7 @@ fn write_command_name(stmt: &Statement) -> Option<&'static str> {
         Statement::CreateView(_) => "CREATE VIEW",
         Statement::RefreshMatview { .. } => "REFRESH MATERIALIZED VIEW",
         Statement::RenameView { .. } => "ALTER VIEW",
-        Statement::RenameIndex { .. } => "ALTER INDEX",
+        Statement::RenameIndex { .. } | Statement::AttachIndexPartition { .. } => "ALTER INDEX",
         Statement::AlterRelOptions { object, .. } => crate::reloptions::alter_tag(*object),
         Statement::AlterSequence { .. } => "ALTER SEQUENCE",
         Statement::CreateFunction(cf) if cf.procedure => "CREATE PROCEDURE",
@@ -1312,6 +1324,12 @@ fn write_command_name(stmt: &Statement) -> Option<&'static str> {
         Statement::CreateTrigger(_) => "CREATE TRIGGER",
         Statement::DropTrigger { .. } => "DROP TRIGGER",
         Statement::RenameTrigger { .. } => "ALTER TRIGGER",
+        Statement::AlterExtension { .. } => "ALTER EXTENSION",
+        Statement::AlterStatistics { .. } => "ALTER STATISTICS",
+        Statement::CreateCast(_) => "CREATE CAST",
+        Statement::CreateStatistics(_) => "CREATE STATISTICS",
+        Statement::DropCast { .. } => "DROP CAST",
+        Statement::DropStatistics { .. } => "DROP STATISTICS",
         Statement::CreateIndex(_) => "CREATE INDEX",
         Statement::CreateSequence(_) => "CREATE SEQUENCE",
         Statement::AlterTable(_) => "ALTER TABLE",
