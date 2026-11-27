@@ -18,6 +18,9 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
   conflict with `LOCK ... NOWAIT` in other sessions.
 - `CREATE STATISTICS` (and `ALTER` / `DROP` / `COMMENT ON STATISTICS`): the object is stored, listed in `pg_statistic_ext`, printed by `pg_get_statisticsobjdef`, `pg_get_statisticsobjdef_columns` and `pg_get_statisticsobjdef_expressions`, shown in psql's `\d` footer, and dropped with its table or a referenced column. No statistics are gathered.
 - `CREATE CAST` (`WITH FUNCTION`, `WITHOUT FUNCTION`, `WITH INOUT`, `AS ASSIGNMENT | IMPLICIT`) and `DROP CAST`, with `pg_cast` listing PostgreSQL 18's builtin casts alongside user ones. Casts apply to `::` and `CAST` (and to assignments and implicit coercions of the expression itself, not to operator or function argument resolution).
+- Database forks: `Embedded::fork()` and `Server::fork()` copy the committed state (catalog, rows, roles and grants, sequence values, pinned `now()`) cheaply, by sharing it copy-on-write; the copies are independent afterwards.
+- In-process embedding API: `pgmem::Embedded` → `session()` with `execute_batch(sql)` (simple-query semantics: implicit transaction block, rollback on error), `query(sql)` (column names and type OIDs, rows as Postgres text) and `DbError` (SQLSTATE, message, detail, hint, object fields). `pgmem::to_pg_text` renders a value in Postgres text form. `Server::embedded()` and `Builder::start_on(&Embedded)` connect the two.
+- The wire server is behind the default-on `server` feature: `pgmem = { default-features = false }` builds the embedding API without tokio.
 
 ### Fixed
 
