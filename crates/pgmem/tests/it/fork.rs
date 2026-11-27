@@ -147,3 +147,18 @@ fn server_fork_serves_an_independent_copy() {
     let epoch: i64 = fc.query_one("SELECT extract(epoch FROM now())::bigint", &[]).expect("now").get(0);
     assert_eq!(epoch, 86_400);
 }
+
+#[test]
+fn fork_keeps_the_public_schema_comment() {
+    let e = Embedded::new();
+    let comment = "SELECT obj_description('public'::regnamespace, 'pg_namespace')";
+    assert_eq!(one(&mut e.fork().session(), comment), "standard public schema");
+    // A changed comment is copied, and changing it in the fork leaves the origin alone.
+    e.session().query("COMMENT ON SCHEMA public IS 'app data'").expect("comment");
+    let fork = e.fork();
+    let mut f = fork.session();
+    assert_eq!(one(&mut f, comment), "app data");
+    f.query("COMMENT ON SCHEMA public IS NULL").expect("uncomment");
+    assert_eq!(rows(&mut f, comment), vec![vec![None]]);
+    assert_eq!(one(&mut e.session(), comment), "app data");
+}

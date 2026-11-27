@@ -219,3 +219,20 @@ fn clients_can_load_user_types_from_the_catalog() {
         vec![vec![Some("USER-DEFINED".to_owned()), Some("public".to_owned()), Some("mood".to_owned())]]
     );
 }
+
+/// A long domain's implicit constraint names keep their labels (`_check`, `_check1`,
+/// `_not_null`), as Postgres' ChooseConstraintName does.
+#[test]
+fn long_domain_constraint_names() {
+    let (_db, mut c) = setup();
+    let d = "d".repeat(63);
+    c.batch_execute(&format!("CREATE DOMAIN {d} AS int NOT NULL CHECK (VALUE > 0) CHECK (VALUE < 100)")).expect("create");
+    let mut got: Vec<String> = texts(&mut c, &format!("SELECT conname FROM pg_constraint WHERE contypid = '{d}'::regtype"))
+        .into_iter()
+        .map(|mut r| r.remove(0).unwrap_or_default())
+        .collect();
+    got.sort();
+    assert_eq!(got, [format!("{}_not_null", &d[..54]), format!("{}_check1", &d[..56]), format!("{}_check", &d[..57])]);
+    // The NOT NULL constraint can be dropped by that name.
+    c.batch_execute(&format!("ALTER DOMAIN {d} DROP CONSTRAINT {}_not_null", &d[..54])).expect("drop not null");
+}

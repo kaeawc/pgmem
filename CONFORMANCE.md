@@ -7,13 +7,13 @@ PostgreSQL 18; CI re-verifies every record against PostgreSQL and runs it agains
 A record passes when pgmem returns the same column names, column types and text values, or
 the same SQLSTATE and error message.
 
-pgmem passes **4937 / 4937 records (100.0%)**.
+pgmem passes **4980 / 4980 records (100.0%)**.
 
 | Area | Records | Pass | Rate |
 |---|---:|---:|---:|
-| catalog | 317 | 317 | 100.0% |
+| catalog | 329 | 329 | 100.0% |
 | constraints | 283 | 283 | 100.0% |
-| ddl | 971 | 971 | 100.0% |
+| ddl | 1002 | 1002 | 100.0% |
 | dml | 379 | 379 | 100.0% |
 | functions | 580 | 580 | 100.0% |
 | queries | 461 | 461 | 100.0% |
@@ -34,6 +34,7 @@ pgmem passes **4937 / 4937 records (100.0%)**.
 | catalog/orm_reflection.slt | 35 | 35 | 100.0% |
 | catalog/pg_catalog.slt | 58 | 58 | 100.0% |
 | catalog/psql_describe.slt | 22 | 22 | 100.0% |
+| catalog/public_schema_comment.slt | 12 | 12 | 100.0% |
 | catalog/regrole_default_acl.slt | 48 | 48 | 100.0% |
 | catalog/regtypes.slt | 33 | 33 | 100.0% |
 | catalog/settings.slt | 15 | 15 | 100.0% |
@@ -60,6 +61,7 @@ pgmem passes **4937 / 4937 records (100.0%)**.
 | ddl/index_deparse.slt | 28 | 28 | 100.0% |
 | ddl/indexes.slt | 36 | 36 | 100.0% |
 | ddl/inheritance.slt | 54 | 54 | 100.0% |
+| ddl/long_names.slt | 31 | 31 | 100.0% |
 | ddl/migrations.slt | 58 | 58 | 100.0% |
 | ddl/partitioning.slt | 135 | 135 | 100.0% |
 | ddl/reloptions.slt | 96 | 96 | 100.0% |

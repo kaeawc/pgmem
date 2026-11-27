@@ -941,3 +941,80 @@ fn merge_into_partitioned_table_foreign_keys() {
     assert_eq!(rows(&mut c, "SELECT string_agg(acct::text, ',' ORDER BY acct) FROM mt"), [["3"]]);
     assert_eq!(rows(&mut c, "SELECT string_agg(id::text, ',' ORDER BY id) FROM ma"), [["3,4,9"]]);
 }
+
+/// A partition's copies of the parent's indexes are named after the partition, shortened like
+/// Postgres' makeObjectName (on character boundaries), and numbered when taken.
+#[test]
+fn long_partition_index_names() {
+    let (_db, mut c) = setup();
+    let p61 = format!("{}1", "p".repeat(60));
+    let pe = format!("p{}", "\u{e9}".repeat(30));
+    c.batch_execute(&format!(
+        "CREATE TABLE p (id int, k int, v int, PRIMARY KEY (id), UNIQUE (id, k)) PARTITION BY RANGE (id);
+         CREATE INDEX ON p (v); CREATE INDEX ON p ((v + 1));
+         CREATE TABLE {p61} PARTITION OF p FOR VALUES FROM (0) TO (10);
+         CREATE TABLE \"{pe}\" PARTITION OF p FOR VALUES FROM (10) TO (20)"
+    ))
+    .expect("create");
+    let mut got: Vec<String> = texts(
+        &mut c,
+        "SELECT relname FROM pg_class WHERE relkind IN ('i', 'I') AND relname LIKE 'p%' AND relnamespace = 'public'::regnamespace",
+    )
+    .into_iter()
+    .map(|mut r| r.remove(0).unwrap_or_default())
+    .collect();
+    got.sort();
+    let p = |n: usize, rest: &str| format!("{}{rest}", "p".repeat(n));
+    let e = |n: usize, rest: &str| format!("p{}{rest}", "\u{e9}".repeat(n));
+    let mut want = vec![
+        "p_expr_idx".to_owned(),
+        "p_id_k_key".to_owned(),
+        "p_pkey".to_owned(),
+        "p_v_idx".to_owned(),
+        p(54, "_expr_idx"),
+        p(54, "_id_k_key"),
+        p(57, "_v_idx"),
+        p(58, "_pkey"),
+        e(26, "_expr_idx"),
+        e(26, "_id_k_key"),
+        e(28, "_pkey"),
+        e(28, "_v_idx"),
+    ];
+    want.sort();
+    assert_eq!(got, want);
+    // A taken name: the number joins the label.
+    let q61 = format!("{}1", "q".repeat(60));
+    c.batch_execute(&format!(
+        "CREATE TABLE q (id int) PARTITION BY RANGE (id);
+         CREATE TABLE {q61} PARTITION OF q FOR VALUES FROM (0) TO (10);
+         CREATE TABLE {}_id_idx (x int);
+         CREATE INDEX ON q (id)",
+        "q".repeat(56)
+    ))
+    .expect("create q");
+    assert_eq!(
+        rows(&mut c, &format!("SELECT indexrelid::regclass::text FROM pg_index WHERE indrelid = '{q61}'::regclass")),
+        [[format!("{}_id_idx1", "q".repeat(55))]]
+    );
+}
+
+/// The copy of a foreign key referencing a partitioned table that each partition gets is
+/// `<constraint>_<n>`, the constraint name cut to make room; violations name it.
+#[test]
+fn long_foreign_key_clone_names() {
+    let (_db, mut c) = setup();
+    let r61 = format!("{}1", "r".repeat(60));
+    let fk = format!("{}g", "f".repeat(62));
+    c.batch_execute(&format!(
+        "CREATE TABLE r (id int PRIMARY KEY) PARTITION BY RANGE (id);
+         CREATE TABLE {r61} PARTITION OF r FOR VALUES FROM (0) TO (10);
+         CREATE TABLE f (rid int CONSTRAINT {fk} REFERENCES r);
+         INSERT INTO r VALUES (1); INSERT INTO f VALUES (1)"
+    ))
+    .expect("create");
+    let e = expect_code(c.batch_execute("DELETE FROM r"), "23503");
+    assert_eq!(
+        message(&e),
+        format!("update or delete on table \"{r61}\" violates foreign key constraint \"{}_1\" on table \"f\"", "f".repeat(61))
+    );
+}

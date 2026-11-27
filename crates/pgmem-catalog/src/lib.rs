@@ -779,6 +779,9 @@ impl Default for Catalog {
     }
 }
 
+/// `pg_class.oid` of `pg_namespace` (`pg_description.classoid` of schema comments).
+const NAMESPACE_CLASS_OID: Oid = 2615;
+
 /// Schemas the catalog knows without them being created: their objects are virtual.
 pub fn is_system_schema(name: &str) -> bool {
     name == PG_CATALOG || name == INFORMATION_SCHEMA
@@ -791,6 +794,8 @@ impl Catalog {
             PUBLIC_SCHEMA.to_owned(),
             SchemaDef { oid: PUBLIC_NAMESPACE_OID, name: PUBLIC_SCHEMA.to_owned(), owner: "pg_database_owner".to_owned() },
         );
+        // initdb comments the public schema (pg_description, classoid pg_namespace).
+        let comments = BTreeMap::from([((NAMESPACE_CLASS_OID, PUBLIC_NAMESPACE_OID, 0), "standard public schema".to_owned())]);
         Catalog {
             schemas,
             tables: BTreeMap::new(),
@@ -808,7 +813,7 @@ impl Catalog {
             owners: BTreeMap::new(),
             extensions: BTreeMap::new(),
             ext_members: BTreeMap::new(),
-            comments: BTreeMap::new(),
+            comments,
             partition_keys: BTreeMap::new(),
             partition_bounds: BTreeMap::new(),
             inheritance: inherit::Inheritance::default(),
@@ -1485,13 +1490,11 @@ impl Catalog {
     }
 
     /// Picks an unused relation name in `schema` the way Postgres' `ChooseRelationName` does:
-    /// `base`, then `base1`, `base2`, ...
-    pub fn choose_name(&self, schema: &str, base: &str, taken: &[String]) -> String {
-        let free = |n: &str| self.relation(schema, n).is_none() && !taken.iter().any(|t| t == n);
-        if free(base) {
-            return base.to_owned();
-        }
-        (1..).map(|i| format!("{base}{i}")).find(|n| free(n)).unwrap_or_else(|| base.to_owned())
+    /// `makeObjectName(name1, columns, label)`, then with `label1`, `label2`, ... (the number
+    /// joins the label, so long names are truncated further to fit it). `taken` holds names
+    /// already claimed by the statement being analyzed.
+    pub fn choose_relation_name(&self, schema: &str, name1: &str, columns: &[&str], label: &str, taken: &[String]) -> String {
+        choose_object_name(name1, columns, label, |n| self.relation(schema, n).is_none() && !taken.iter().any(|t| t == n))
     }
 }
 
@@ -1504,27 +1507,85 @@ fn system_catalog_denied(object: &str) -> SqlError {
         .with_detail("System catalog modifications are currently disallowed.")
 }
 
-/// Postgres' default constraint/index name: `table_col1_col2_suffix`, truncated to 63 bytes.
+/// NAMEDATALEN - 1: the longest identifier, in bytes.
+pub const MAX_IDENTIFIER_LEN: usize = 63;
+
+/// Postgres' default constraint/index name, `table_col1_col2_suffix`, shortened to 63 bytes the
+/// way `makeObjectName` does (see [`make_object_name`]).
 pub fn default_constraint_name(table: &str, columns: &[&str], suffix: &str) -> String {
-    let mut name = String::from(table);
-    for c in columns {
-        name.push('_');
-        name.push_str(c);
+    let addition = name_addition(columns);
+    make_object_name(table, (!columns.is_empty()).then_some(addition.as_str()), suffix)
+}
+
+/// Postgres' `ChooseIndexNameAddition` (also `ChooseForeignKeyConstraintNameAddition` and
+/// `ChooseExtendedStatisticNameAddition`): the names joined by `_`, stopping once the result
+/// reaches NAMEDATALEN bytes.
+pub fn name_addition(names: &[&str]) -> String {
+    let mut buf = String::new();
+    for n in names {
+        if !buf.is_empty() {
+            buf.push('_');
+        }
+        buf.push_str(&truncate_identifier((*n).to_owned()));
+        if buf.len() > MAX_IDENTIFIER_LEN {
+            break;
+        }
     }
-    name.push('_');
-    name.push_str(suffix);
-    truncate_identifier(name)
+    buf
+}
+
+/// Postgres' `makeObjectName`: `name1[_name2]_label` in at most 63 bytes. The label is kept
+/// whole; bytes are taken from the longer of `name1` and `name2` until the rest fits, and each
+/// part is then cut back to a character boundary.
+pub fn make_object_name(name1: &str, name2: Option<&str>, label: &str) -> String {
+    let overhead = usize::from(name2.is_some()) + label.len() + 1;
+    let avail = MAX_IDENTIFIER_LEN.saturating_sub(overhead);
+    let (mut n1, mut n2) = (name1.len(), name2.map_or(0, str::len));
+    while n1 + n2 > avail {
+        if n1 > n2 {
+            n1 -= 1;
+        } else {
+            n2 -= 1;
+        }
+    }
+    let mut out = String::from(clip(name1, n1));
+    if let Some(n) = name2 {
+        out.push('_');
+        out.push_str(clip(n, n2));
+    }
+    out.push('_');
+    out.push_str(label);
+    out
+}
+
+/// `ChooseRelationName` / `ChooseConstraintName`: the first name `free` accepts among
+/// `makeObjectName(name1, columns, label)`, then with `label1`, `label2`, ...
+pub fn choose_object_name(name1: &str, columns: &[&str], label: &str, mut free: impl FnMut(&str) -> bool) -> String {
+    let addition = name_addition(columns);
+    let name2 = (!columns.is_empty()).then_some(addition.as_str());
+    let mut name = make_object_name(name1, name2, label);
+    let mut pass = 0;
+    while !free(&name) {
+        pass += 1;
+        name = make_object_name(name1, name2, &format!("{label}{pass}"));
+    }
+    name
+}
+
+/// The longest prefix of `s` of at most `len` bytes that ends on a character boundary
+/// (`pg_mbcliplen`).
+fn clip(s: &str, len: usize) -> &str {
+    let mut end = len.min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Identifiers longer than NAMEDATALEN-1 (63) bytes are truncated, on a char boundary.
 pub fn truncate_identifier(mut s: String) -> String {
-    if s.len() > 63 {
-        let mut end = 63;
-        while !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        s.truncate(end);
-    }
+    let end = clip(&s, MAX_IDENTIFIER_LEN).len();
+    s.truncate(end);
     s
 }
 
@@ -1568,6 +1629,20 @@ mod tests {
     fn choose_name_avoids_collisions() {
         let mut cat = Catalog::new();
         cat.create_table(table("t_pkey")).expect("create");
-        assert_eq!(cat.choose_name("public", "t_pkey", &[]), "t_pkey1");
+        assert_eq!(cat.choose_relation_name("public", "t", &[], "pkey", &[]), "t_pkey1");
+    }
+
+    #[test]
+    fn make_object_name_truncates_like_postgres() {
+        let t60 = "abcdefghij".repeat(6);
+        assert_eq!(make_object_name(&t60, Some("id"), "seq"), format!("{}_id_seq", &t60[..56]));
+        assert_eq!(make_object_name(&t60, Some("id"), "seq1"), format!("{}_id_seq1", &t60[..55]));
+        assert_eq!(make_object_name(&t60, None, "pkey"), format!("{}_pkey", &t60[..58]));
+        // The longer part gives way first.
+        let (t, c) = ("t".repeat(40), "c".repeat(40));
+        assert_eq!(make_object_name(&t, Some(&c), "seq"), format!("{}_{}_seq", &t[..29], &c[..29]));
+        // Multibyte characters are never split: 'x' + 30 two-byte characters.
+        let mb = format!("x{}", "\u{e9}".repeat(30));
+        assert_eq!(make_object_name(&mb, Some("id"), "seq"), format!("x{}_id_seq", "\u{e9}".repeat(27)));
     }
 }

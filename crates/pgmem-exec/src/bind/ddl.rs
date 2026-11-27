@@ -5,8 +5,7 @@
 use super::dml::physical_scope;
 use super::{Binder, Clause, Ctx, Level, Scope, resolve_type_name};
 use pgmem_catalog::{
-    Catalog, ColumnDef, Constraint, ConstraintKind, FkAction, Identity, IndexDef, IndexKeyOptions, QualName, SequenceDef, TableDef,
-    ViewDef, default_constraint_name, truncate_identifier,
+    Catalog, ColumnDef, Constraint, ConstraintKind, FkAction, Identity, IndexDef, IndexKeyOptions, QualName, SequenceDef, TableDef, ViewDef,
 };
 use pgmem_ir as ir;
 use pgmem_types::{SqlError, SqlResult, Type, code};
@@ -43,9 +42,10 @@ fn nextval_call(schema: &str, seq: &str) -> ir::FunctionCall {
     ir::FunctionCall::new("nextval", vec![ir::Expr::Literal(ir::Literal::String(qualified))])
 }
 
-/// Picks a constraint/index name not used in the table or its schema (`base`, `base1`, ...).
-fn choose_name(catalog: &Catalog, schema: &str, taken: &[String], base: String) -> String {
-    catalog.choose_name(schema, &truncate_identifier(base), taken)
+/// Picks a constraint/index name not used in the table or its schema, the way
+/// `ChooseRelationName` does: `table_columns_label`, then `label1`, `label2`, ...
+fn choose_name(catalog: &Catalog, schema: &str, taken: &[String], table: &str, columns: &[&str], label: &str) -> String {
+    catalog.choose_relation_name(schema, table, columns, label, taken)
 }
 
 /// The result of analyzing CREATE TABLE: the table and the sequences it owns.
@@ -125,7 +125,7 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
             return Err(SqlError::new(code::DUPLICATE_COLUMN, format!("column \"{}\" specified more than once", c.name)));
         }
         let mut col = if let Some((ty, _)) = serial_type(&c.ty.name).filter(|_| c.ty.array_dims == 0) {
-            let seq = choose_name(catalog, &schema, &taken, default_constraint_name(&name, &[&c.name], "seq"));
+            let seq = choose_name(catalog, &schema, &taken, &name, &[&c.name], "seq");
             taken.push(seq.clone());
             let mut def = SequenceDef::new(schema.clone(), seq.clone(), ty.clone());
             def.owned_by = Some((name.clone(), c.name.clone()));
@@ -465,12 +465,7 @@ pub fn add_constraint(
             let names = index_name_columns(cols.iter().cloned(), include);
             let names: Vec<&str> = names.iter().map(String::as_str).collect();
             let name = cname.unwrap_or_else(|| {
-                choose_name(
-                    catalog,
-                    &schema,
-                    &used,
-                    if primary { default_constraint_name(&tname, &[], "pkey") } else { default_constraint_name(&tname, &names, "key") },
-                )
+                choose_name(catalog, &schema, &used, &tname, if primary { &[] } else { &names }, if primary { "pkey" } else { "key" })
             });
             taken.push(name.clone());
             table.indexes.push(IndexDef {
@@ -510,11 +505,11 @@ pub fn add_constraint(
             // column of the table, wherever the constraint was written.
             let _ = column_level;
             let cols: Vec<String> = e.referenced_columns().into_iter().filter(|c| table.column_index(c).is_some()).collect();
-            let base = match cols.as_slice() {
-                [only] => default_constraint_name(&tname, &[only], "check"),
-                _ => default_constraint_name(&tname, &[], "check"),
+            let only: Vec<&str> = match cols.as_slice() {
+                [only] => vec![only.as_str()],
+                _ => Vec::new(),
             };
-            let name = cname.unwrap_or_else(|| choose_name(catalog, &schema, &used, base));
+            let name = cname.unwrap_or_else(|| choose_name(catalog, &schema, &used, &tname, &only, "check"));
             taken.push(name.clone());
             table.constraints.push(Constraint {
                 oid: 0,
@@ -572,7 +567,7 @@ pub fn add_constraint(
                 ));
             }
             let names: Vec<&str> = columns.iter().map(String::as_str).collect();
-            let name = cname.unwrap_or_else(|| choose_name(catalog, &schema, &used, default_constraint_name(&tname, &names, "fkey")));
+            let name = cname.unwrap_or_else(|| choose_name(catalog, &schema, &used, &tname, &names, "fkey"));
             for (l, r) in local.iter().zip(&ref_cols) {
                 let (lt, rt) = (&table.columns[*l].ty, &parent.columns[*r].ty);
                 if crate::funcs::common_type(lt, rt).is_none() {
@@ -753,7 +748,7 @@ pub fn bind_create_index(b: &Binder, ci: &ir::CreateIndex) -> SqlResult<Option<(
         None => {
             let names = index_name_columns(names, &ci.include);
             let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-            catalog.choose_name(&table.schema, &default_constraint_name(&tname, &refs, "idx"), &[])
+            catalog.choose_relation_name(&table.schema, &tname, &refs, "idx", &[])
         }
     };
     Ok(Some((
@@ -809,7 +804,7 @@ pub fn identity_sequence(
     if !matches!(ty, Type::Int2 | Type::Int4 | Type::Int8) {
         return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, "identity column type must be smallint, integer, or bigint"));
     }
-    let name = choose_name(catalog, schema, taken, default_constraint_name(table, &[column], "seq"));
+    let name = choose_name(catalog, schema, taken, table, &[column], "seq");
     taken.push(name.clone());
     let mut seq = SequenceDef::new(schema, name, ty.clone());
     crate::sequences::apply_options(catalog, &mut seq, options, true)?;
@@ -1257,11 +1252,11 @@ fn add_exclusion(
         Some(false) => "key",
         None => "excl",
     };
-    let base_name =
-        if temporal == Some(true) { default_constraint_name(&tname, &[], suffix) } else { default_constraint_name(&tname, &refs, suffix) };
     let mut all_used = used.to_vec();
     all_used.extend(taken.iter().cloned());
-    let name = cname.unwrap_or_else(|| choose_name(b.catalog, &table.schema, &all_used, base_name));
+    let name = cname.unwrap_or_else(|| {
+        choose_name(b.catalog, &table.schema, &all_used, &tname, if temporal == Some(true) { &[] } else { &refs }, suffix)
+    });
     if table.indexes.iter().any(|i| i.name == name) || b.catalog.relation(&table.schema, &name).is_some() {
         return Err(SqlError::new(code::DUPLICATE_TABLE, format!("relation \"{name}\" already exists")));
     }

@@ -22,3 +22,21 @@ fn big_serial_over_wire() {
     let id: i64 = c.query_one("INSERT INTO big (label) VALUES ($1) RETURNING id", &[&"x"]).expect("insert").get(0);
     assert_eq!(id, 1);
 }
+
+/// When the shortened sequence name is taken, the number joins the `seq` label and the table
+/// part is cut one byte more (`..._id_seq1`), as in Postgres' ChooseRelationName.
+#[test]
+fn long_serial_sequence_names_collide_like_postgres() {
+    let (_db, mut c) = setup();
+    let t60 = "abcdefghij".repeat(6);
+    let t57 = &t60[..57];
+    c.batch_execute(&format!("CREATE TABLE {t60} (id serial); CREATE TABLE {t57} (id serial)")).expect("create");
+    let seq = |c: &mut postgres::Client, t: &str| -> String {
+        c.query_one(&format!("SELECT pg_get_serial_sequence('{t}', 'id')"), &[]).expect("serial sequence").get(0)
+    };
+    assert_eq!(seq(&mut c, &t60), format!("public.{}_id_seq", &t60[..56]));
+    assert_eq!(seq(&mut c, t57), format!("public.{}_id_seq1", &t60[..55]));
+    // The sequences work under their shortened names.
+    let id: i32 = c.query_one(&format!("INSERT INTO {t57} DEFAULT VALUES RETURNING id"), &[]).expect("insert").get(0);
+    assert_eq!(id, 1);
+}

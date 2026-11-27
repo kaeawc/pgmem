@@ -116,12 +116,7 @@ pub fn create_domain(cd: &ir::CreateDomain, txn: &mut Txn, binder: &Binder) -> S
 
 /// `ChooseConstraintName(domain, NULL, "check", ...)`: `d_check`, `d_check1`, ...
 fn choose_check_name(domain: &str, taken: &[DomainCheck]) -> String {
-    let base = pgmem_catalog::truncate_identifier(format!("{domain}_check"));
-    let free = |n: &str| !taken.iter().any(|c| c.name == n);
-    if free(&base) {
-        return base;
-    }
-    (1..).map(|i| format!("{base}{i}")).find(|n| free(n)).unwrap_or(base)
+    pgmem_catalog::choose_object_name(domain, &[], "check", |n| !taken.iter().any(|c| c.name == n))
 }
 
 /// A domain DEFAULT must convert to the base type (it is checked against the domain's
@@ -354,7 +349,7 @@ pub fn alter_domain(
             check.validated = true;
         }
         ir::AlterDomainAction::DropConstraint { name: c, if_exists } => {
-            if *not_null && *c == format!("{name}_not_null") {
+            if *not_null && *c == pgmem_catalog::default_constraint_name(&name, &[], "not_null") {
                 *not_null = false;
             } else if let Some(i) = checks.iter().position(|x| &x.name == c) {
                 checks.remove(i);

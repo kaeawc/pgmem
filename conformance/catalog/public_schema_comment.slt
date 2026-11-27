@@ -1,0 +1,61 @@
+# initdb comments the public schema; the comment behaves like any other.
+
+query
+SELECT obj_description('public'::regnamespace, 'pg_namespace'), obj_description('public'::regnamespace)
+----
+obj_description:text | obj_description:text
+standard public schema | standard public schema
+
+query
+SELECT classoid::regclass, objsubid, description FROM pg_description WHERE objoid = 'public'::regnamespace
+----
+classoid:regclass | objsubid:int4 | description:text
+pg_namespace | 0 | standard public schema
+
+query
+SELECT n.nspname, pg_catalog.obj_description(n.oid, 'pg_namespace') AS "Description"
+FROM pg_catalog.pg_namespace n
+WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+ORDER BY 1
+----
+nspname:name | Description:text
+public | standard public schema
+
+statement ok
+COMMENT ON SCHEMA public IS 'mine'
+
+query
+SELECT obj_description('public'::regnamespace, 'pg_namespace')
+----
+obj_description:text
+mine
+
+statement ok
+COMMENT ON SCHEMA public IS NULL
+
+query
+SELECT obj_description('public'::regnamespace, 'pg_namespace')
+----
+obj_description:text
+NULL
+
+query
+SELECT count(*) FROM pg_description WHERE objoid = 'public'::regnamespace
+----
+count:int8
+0
+
+statement ok
+COMMENT ON SCHEMA public IS 'again'
+
+statement ok
+DROP SCHEMA public
+
+statement ok
+CREATE SCHEMA public
+
+query
+SELECT obj_description('public'::regnamespace, 'pg_namespace')
+----
+obj_description:text
+NULL

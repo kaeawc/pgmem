@@ -1,0 +1,162 @@
+# Implicit names longer than 63 bytes are shortened like makeObjectName: the label stays,
+# the longer of table and column parts is cut first, never inside a multibyte character, and a
+# collision number joins the label.
+
+statement ok
+CREATE TABLE abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij (id serial PRIMARY KEY, v int UNIQUE CHECK (v > 0), w int GENERATED ALWAYS AS IDENTITY, n int NOT NULL, r int REFERENCES abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij)
+
+statement ok
+CREATE INDEX ON abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij (n)
+
+statement ok
+CREATE INDEX ON abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij (n)
+
+query rowsort
+SELECT relname, relkind FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname LIKE 'abc%'
+----
+relname:name | relkind:char
+abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdef_id_seq | S
+abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdef_n_idx1 | i
+abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefg_n_idx | i
+abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefg_v_key | i
+abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefg_w_seq | S
+abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefgh_pkey | i
+abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij | r
+
+query rowsort
+SELECT conname, contype FROM pg_constraint WHERE conrelid = 'abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij'::regclass
+----
+conname:name | contype:char
+abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcde_v_check | c
+abcdefghijabcdefghijabcdefghijabcdefghijabcdefghija_id_not_null | n
+abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijab_w_not_null | n
+abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijab_n_not_null | n
+abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefgh_pkey | p
+abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefg_v_key | u
+abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdef_r_fkey | f
+
+query
+SELECT pg_get_serial_sequence('abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij', 'id'), pg_get_serial_sequence('abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij', 'w')
+----
+pg_get_serial_sequence:text | pg_get_serial_sequence:text
+public.abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdef_id_seq | public.abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefg_w_seq
+
+statement ok
+CREATE TABLE abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefg (id serial)
+
+query
+SELECT pg_get_serial_sequence('abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefg', 'id')
+----
+pg_get_serial_sequence:text
+public.abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcde_id_seq1
+
+statement ok
+CREATE TABLE tttttttttttttttttttttttttttttttttttttttt (cccccccccccccccccccccccccccccccccccccccc serial)
+
+query rowsort
+SELECT relname FROM pg_class WHERE relname LIKE 'ttt%'
+----
+relname:name
+ttttttttttttttttttttttttttttt_ccccccccccccccccccccccccccccc_seq
+tttttttttttttttttttttttttttttttttttttttt
+
+query
+SELECT conname FROM pg_constraint WHERE conrelid = 'tttttttttttttttttttttttttttttttttttttttt'::regclass
+----
+conname:name
+ttttttttttttttttttttttttttt_cccccccccccccccccccccccccc_not_null
+
+statement ok
+CREATE TABLE "xéééééééééééééééééééééééééééééé" (id serial, "ééééé" int UNIQUE)
+
+query rowsort
+SELECT relname, octet_length(relname::text) FROM pg_class WHERE relname LIKE 'xé%'
+----
+relname:name | octet_length:int4
+xééééééééééééééééééééééé_ééééé_key | 62
+xééééééééééééééééééééééééééé_id_seq | 62
+xéééééééééééééééééééééééééééééé | 61
+
+query
+SELECT conname, octet_length(conname::text) FROM pg_constraint WHERE conrelid = '"xéééééééééééééééééééééééééééééé"'::regclass ORDER BY 1
+----
+conname:name | octet_length:int4
+xééééééééééééééééééééééé_ééééé_key | 62
+xééééééééééééééééééééééééé_id_not_null | 63
+
+statement ok
+CREATE TABLE p (id int, k int, v int, PRIMARY KEY (id), UNIQUE (id, k)) PARTITION BY RANGE (id)
+
+statement ok
+CREATE INDEX ON p (v)
+
+statement ok
+CREATE INDEX ON p ((v + 1))
+
+statement ok
+CREATE TABLE pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp1 PARTITION OF p FOR VALUES FROM (0) TO (10)
+
+statement ok
+CREATE TABLE "pééééééééééééééééééééééééééééé" PARTITION OF p FOR VALUES FROM (10) TO (20)
+
+query rowsort
+SELECT relname FROM pg_class WHERE relkind = 'i' AND relname LIKE 'p%' AND relname NOT LIKE 'pg\_%'
+----
+relname:name
+péééééééééééééééééééééééééééé_pkey
+pppppppppppppppppppppppppppppppppppppppppppppppppppppppppp_pkey
+pppppppppppppppppppppppppppppppppppppppppppppppppppppp_id_k_key
+ppppppppppppppppppppppppppppppppppppppppppppppppppppppppp_v_idx
+pppppppppppppppppppppppppppppppppppppppppppppppppppppp_expr_idx
+péééééééééééééééééééééééééé_id_k_key
+péééééééééééééééééééééééééééé_v_idx
+péééééééééééééééééééééééééé_expr_idx
+
+statement ok
+CREATE TABLE q (id int) PARTITION BY RANGE (id)
+
+statement ok
+CREATE TABLE qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq1 PARTITION OF q FOR VALUES FROM (0) TO (10)
+
+statement ok
+CREATE TABLE qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq_id_idx (x int)
+
+statement ok
+CREATE INDEX ON q (id)
+
+query rowsort
+SELECT relname, relkind FROM pg_class WHERE relname LIKE 'q%'
+----
+relname:name | relkind:char
+q | p
+qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq1 | r
+qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq_id_idx | r
+q_id_idx | I
+qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq_id_idx1 | i
+
+statement ok
+CREATE DOMAIN ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd AS int NOT NULL CHECK (VALUE > 0) CHECK (VALUE < 100)
+
+query rowsort
+SELECT conname FROM pg_constraint WHERE contypid = 'ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'::regtype
+----
+conname:name
+dddddddddddddddddddddddddddddddddddddddddddddddddddddd_not_null
+ddddddddddddddddddddddddddddddddddddddddddddddddddddddddd_check
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddd_check1
+
+statement ok
+CREATE TABLE ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss (a int, b int)
+
+statement ok
+CREATE STATISTICS ON a, b FROM ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss
+
+statement ok
+CREATE STATISTICS ON a, b FROM ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss
+
+query rowsort
+SELECT stxname FROM pg_statistic_ext
+----
+stxname:name
+ssssssssssssssssssssssssssssssssssssssssssssssssssssss_a_b_stat
+sssssssssssssssssssssssssssssssssssssssssssssssssssss_a_b_stat1
