@@ -320,6 +320,9 @@ fn column_list(t: &TableDef, attnums: &[usize]) -> String {
 pub fn constraint_def(model: &Model, con: &Con) -> String {
     let (deferrable, deferred, validated) = con.flags();
     let mut def = constraint_def_body(model, con);
+    if con.contype == 'c' && model.catalog.is_no_inherit(con.oid) {
+        def.push_str(" NO INHERIT");
+    }
     if deferrable {
         def.push_str(" DEFERRABLE");
     }

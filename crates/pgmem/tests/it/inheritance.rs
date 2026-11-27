@@ -466,3 +466,136 @@ fn parent_policies_and_privileges_cover_children() {
     assert_eq!(rows(&mut c, "SELECT id, owner FROM rp ORDER BY id"), [["2", "other"], ["4", "other"], ["11", role]]);
     c.batch_execute(&format!("DROP TABLE rp CASCADE; DROP ROLE {role}")).expect("cleanup");
 }
+
+/// `NO INHERIT` CHECK constraints: recorded (`connoinherit`, `pg_get_constraintdef`) from table-
+/// and column-level CHECKs and ADD CONSTRAINT (with NOT VALID in either order), not copied to
+/// children nor enforced on their rows, and Postgres' merge errors and partitioned-table error.
+#[test]
+fn no_inherit_checks() {
+    let (db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE p (a int CHECK (a > 0) NO INHERIT, b int, CONSTRAINT pb CHECK (b > 0) NO INHERIT, CHECK (a < 1000) NO INHERIT);
+         ALTER TABLE p ADD CONSTRAINT nv1 CHECK (b < 100) NO INHERIT NOT VALID;
+         ALTER TABLE p ADD CONSTRAINT nv2 CHECK (b < 200) NOT VALID NO INHERIT;
+         ALTER TABLE p ADD CONSTRAINT nv3 CHECK (b < 300) NOT VALID;
+         ALTER TABLE p ADD CHECK (b <> 7) NO INHERIT",
+    )
+    .expect("schema");
+    let defs = "SELECT conname::text, connoinherit::text, convalidated::text, pg_get_constraintdef(oid)
+        FROM pg_constraint WHERE conrelid = 'p'::regclass ORDER BY 1";
+    assert_eq!(
+        rows(&mut c, defs),
+        [
+            ["nv1", "true", "false", "CHECK ((b < 100)) NO INHERIT NOT VALID"],
+            ["nv2", "true", "false", "CHECK ((b < 200)) NO INHERIT NOT VALID"],
+            ["nv3", "false", "false", "CHECK ((b < 300)) NOT VALID"],
+            ["p_a_check", "true", "true", "CHECK ((a > 0)) NO INHERIT"],
+            ["p_a_check1", "true", "true", "CHECK ((a < 1000)) NO INHERIT"],
+            ["p_b_check", "true", "true", "CHECK ((b <> 7)) NO INHERIT"],
+            ["pb", "true", "true", "CHECK ((b > 0)) NO INHERIT"],
+        ]
+    );
+    c.batch_execute("ALTER TABLE p VALIDATE CONSTRAINT nv1").expect("validate");
+    assert_eq!(
+        rows(&mut c, "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'nv1'"),
+        [["CHECK ((b < 100)) NO INHERIT"]]
+    );
+    let e = expect_code(c.batch_execute("INSERT INTO p VALUES (0, 1)"), "23514");
+    assert_eq!(message(&e), "new row for relation \"p\" violates check constraint \"p_a_check\"");
+
+    // Children (by INHERITS or ALTER TABLE ... INHERIT) get only nv3, and take rows p rejects.
+    c.batch_execute(
+        "CREATE TABLE c1 () INHERITS (p); CREATE TABLE c2 (a int, b int, CONSTRAINT nv3 CHECK (b < 300)); ALTER TABLE c2 INHERIT p",
+    )
+    .expect("children");
+    let child = "SELECT conrelid::regclass::text, conname::text, connoinherit::text FROM pg_constraint
+        WHERE conrelid IN ('c1'::regclass, 'c2'::regclass) ORDER BY 1, 2";
+    assert_eq!(rows(&mut c, child), [["c1", "nv3", "false"], ["c2", "nv3", "false"]]);
+    c.batch_execute("INSERT INTO c1 VALUES (-1, 7); INSERT INTO c2 VALUES (5000, -1)").expect("not enforced on children");
+    assert_eq!(rows(&mut c, "SELECT count(*)::text FROM p"), [["2"]]);
+    // ONLY is fine for a NO INHERIT check, and the children still do not get it.
+    c.batch_execute(
+        "ALTER TABLE ONLY p ADD CONSTRAINT o CHECK (a <> 3) NO INHERIT; ALTER TABLE p ADD CONSTRAINT r CHECK (a <> 4) NO INHERIT",
+    )
+    .expect("parent-only checks");
+    assert_eq!(rows(&mut c, child), [["c1", "nv3", "false"], ["c2", "nv3", "false"]]);
+
+    // Merging with a same-named constraint whose NO INHERIT differs.
+    c.batch_execute("CREATE TABLE q (a int, CONSTRAINT k CHECK (a > 0))").expect("q");
+    let e = expect_code(c.batch_execute("CREATE TABLE m1 (a int, CONSTRAINT k CHECK (a > 0) NO INHERIT) INHERITS (q)"), "42P17");
+    assert_eq!(message(&e), "constraint \"k\" conflicts with inherited constraint on relation \"m1\"");
+    let e = expect_code(c.batch_execute("CREATE TABLE m1 (CONSTRAINT k CHECK (a > 1) NO INHERIT) INHERITS (q)"), "42710");
+    assert_eq!(message(&e), "constraint \"k\" for relation \"m1\" already exists");
+    c.batch_execute("CREATE TABLE m2 (a int, CONSTRAINT k CHECK (a > 0) NO INHERIT)").expect("m2");
+    let e = expect_code(c.batch_execute("ALTER TABLE m2 INHERIT q"), "42P17");
+    assert_eq!(message(&e), "constraint \"k\" conflicts with non-inherited constraint on child table \"m2\"");
+    c.batch_execute("CREATE TABLE m3 (a int, CONSTRAINT k CHECK (a > 1) NO INHERIT)").expect("m3");
+    let e = expect_code(c.batch_execute("ALTER TABLE m3 INHERIT q"), "42804");
+    assert_eq!(message(&e), "child table \"m3\" has different definition for check constraint \"k\"");
+
+    c.batch_execute("CREATE TABLE p4 (a int); CREATE TABLE c4 () INHERITS (p4); ALTER TABLE c4 ADD CONSTRAINT k CHECK (a > 0) NO INHERIT")
+        .expect("p4");
+    let e = expect_code(c.batch_execute("ALTER TABLE p4 ADD CONSTRAINT k CHECK (a > 0)"), "42P17");
+    assert_eq!(message(&e), "constraint \"k\" conflicts with non-inherited constraint on relation \"c4\"");
+    let e = expect_code(c.batch_execute("ALTER TABLE p4 ADD CONSTRAINT k CHECK (a > 1)"), "42710");
+    assert_eq!(message(&e), "constraint \"k\" for relation \"c4\" already exists");
+
+    c.batch_execute("CREATE TABLE p5 (a int); CREATE TABLE c5 () INHERITS (p5); ALTER TABLE p5 ADD CONSTRAINT k CHECK (a > 0)")
+        .expect("p5");
+    let e = expect_code(c.batch_execute("ALTER TABLE c5 ADD CONSTRAINT k CHECK (a > 0) NO INHERIT"), "42P17");
+    assert_eq!(message(&e), "constraint \"k\" conflicts with inherited constraint on relation \"c5\"");
+    let e = expect_code(c.batch_execute("ALTER TABLE c5 ADD CONSTRAINT k CHECK (a > 1) NO INHERIT"), "42710");
+    assert_eq!(message(&e), "constraint \"k\" for relation \"c5\" already exists");
+    // The same constraint without NO INHERIT merges into the inherited one, which becomes local.
+    assert_eq!(
+        notices(&db, &mut c, "ALTER TABLE c5 ADD CONSTRAINT k CHECK (a > 0)"),
+        ["merging constraint \"k\" with inherited definition"]
+    );
+    assert_eq!(
+        rows(&mut c, "SELECT conislocal::text, coninhcount::text, connoinherit::text FROM pg_constraint WHERE conrelid = 'c5'::regclass"),
+        [["true", "1", "false"]]
+    );
+    let e = expect_code(c.batch_execute("ALTER TABLE c5 ADD CONSTRAINT k CHECK (a > 0)"), "42710");
+    assert_eq!(message(&e), "constraint \"k\" for relation \"c5\" already exists");
+
+    // A NO INHERIT parent constraint leaves a same-named child constraint alone.
+    c.batch_execute(
+        "CREATE TABLE pn (a int, CONSTRAINT k CHECK (a > 0) NO INHERIT);
+         CREATE TABLE cn1 (a int, CONSTRAINT k CHECK (a > 5) NO INHERIT) INHERITS (pn);
+         CREATE TABLE cn2 (a int, CONSTRAINT k CHECK (a > 5)) INHERITS (pn)",
+    )
+    .expect("pn");
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT conrelid::regclass::text, conislocal::text, coninhcount::text, connoinherit::text, pg_get_constraintdef(oid)
+             FROM pg_constraint WHERE conrelid IN ('cn1'::regclass, 'cn2'::regclass) ORDER BY 1"
+        ),
+        [["cn1", "true", "0", "true", "CHECK ((a > 5)) NO INHERIT"], ["cn2", "true", "0", "false", "CHECK ((a > 5))"]]
+    );
+
+    // Partitioned tables take no NO INHERIT check; their partitions may.
+    let e = expect_code(c.batch_execute("CREATE TABLE pt (a int, CHECK (a > 0) NO INHERIT) PARTITION BY LIST (a)"), "42P16");
+    assert_eq!(message(&e), "cannot add NO INHERIT constraint to partitioned table \"pt\"");
+    let e = expect_code(c.batch_execute("CREATE TABLE pt (a int CHECK (a > 0) NO INHERIT) PARTITION BY LIST (a)"), "42P16");
+    assert_eq!(message(&e), "cannot add NO INHERIT constraint to partitioned table \"pt\"");
+    c.batch_execute("CREATE TABLE pt (a int) PARTITION BY LIST (a)").expect("pt");
+    let e = expect_code(c.batch_execute("ALTER TABLE pt ADD CONSTRAINT x CHECK (a > 0) NO INHERIT"), "42P16");
+    assert_eq!(message(&e), "cannot add NO INHERIT constraint to partitioned table \"pt\"");
+    let e = expect_code(c.batch_execute("ALTER TABLE ONLY pt ADD CONSTRAINT x CHECK (a > 0) NO INHERIT"), "42P16");
+    assert_eq!(message(&e), "cannot add NO INHERIT constraint to partitioned table \"pt\"");
+    c.batch_execute(
+        "CREATE TABLE pt1 PARTITION OF pt (CONSTRAINT z CHECK (a > 0) NO INHERIT) FOR VALUES IN (1);
+         CREATE TABLE pt2 PARTITION OF pt FOR VALUES IN (2);
+         ALTER TABLE pt2 ADD CONSTRAINT y CHECK (a > 0) NO INHERIT",
+    )
+    .expect("partitions");
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT conrelid::regclass::text, conname::text, connoinherit::text, pg_get_constraintdef(oid)
+             FROM pg_constraint WHERE conrelid IN ('pt1'::regclass, 'pt2'::regclass) ORDER BY 1"
+        ),
+        [["pt1", "z", "true", "CHECK ((a > 0)) NO INHERIT"], ["pt2", "y", "true", "CHECK ((a > 0)) NO INHERIT"]]
+    );
+}

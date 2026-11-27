@@ -1054,6 +1054,13 @@ fn rewrite_unsupported(sql: &str) -> Option<String> {
             } else if !sig.get(close + 1).is_some_and(|&j| word(&tokens[j], "STORED")) {
                 insert_after.insert(sig[close], " STORED".to_owned());
             }
+        } else if word(&tokens[i], "NOT") && at(1, "VALID") && at(2, "NO") && at(3, "INHERIT") {
+            // `CHECK (...) NOT VALID NO INHERIT` → `NO INHERIT NOT VALID` (sqlparser takes only
+            // this order).
+            replace[i] = Some("NO");
+            replace[sig[k + 1]] = Some("INHERIT");
+            replace[sig[k + 2]] = Some("NOT");
+            replace[sig[k + 3]] = Some("VALID");
         } else if word(&tokens[i], "DROP") && at(1, "INDEX") && at(2, "CONCURRENTLY") {
             drop[sig[k + 2]] = true;
         } else if word(&tokens[i], "AT") && at(1, "LOCAL") {

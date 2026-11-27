@@ -1,0 +1,203 @@
+# CHECK ... NO INHERIT: connoinherit and pg_get_constraintdef (also with NOT VALID, in either
+# order), not inherited by INHERITS / ALTER TABLE ... INHERIT children nor enforced on their rows,
+# the merge errors when NO INHERIT differs, and the partitioned-table error.
+
+statement ok
+CREATE TABLE p (a int CHECK (a > 0) NO INHERIT, b int, CONSTRAINT pb CHECK (b > 0) NO INHERIT, CHECK (a < 1000) NO INHERIT)
+
+statement ok
+ALTER TABLE p ADD CONSTRAINT nv1 CHECK (b < 100) NO INHERIT NOT VALID
+
+statement ok
+ALTER TABLE p ADD CONSTRAINT nv2 CHECK (b < 200) NOT VALID NO INHERIT
+
+statement ok
+ALTER TABLE p ADD CONSTRAINT nv3 CHECK (b < 300) NOT VALID
+
+statement ok
+ALTER TABLE p ADD CHECK (b <> 7) NO INHERIT
+
+query
+SELECT conname, connoinherit, convalidated, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'p'::regclass ORDER BY 1
+----
+conname:name | connoinherit:bool | convalidated:bool | pg_get_constraintdef:text
+nv1 | t | f | CHECK ((b < 100)) NO INHERIT NOT VALID
+nv2 | t | f | CHECK ((b < 200)) NO INHERIT NOT VALID
+nv3 | f | f | CHECK ((b < 300)) NOT VALID
+p_a_check | t | t | CHECK ((a > 0)) NO INHERIT
+p_a_check1 | t | t | CHECK ((a < 1000)) NO INHERIT
+p_b_check | t | t | CHECK ((b <> 7)) NO INHERIT
+pb | t | t | CHECK ((b > 0)) NO INHERIT
+
+statement ok
+ALTER TABLE p VALIDATE CONSTRAINT nv1
+
+query
+SELECT pg_get_constraintdef(oid), pg_get_constraintdef(oid, true) FROM pg_constraint WHERE conname = 'nv1'
+----
+pg_get_constraintdef:text | pg_get_constraintdef:text
+CHECK ((b < 100)) NO INHERIT | CHECK (b < 100) NO INHERIT
+
+query
+SELECT constraint_name, check_clause FROM information_schema.check_constraints WHERE constraint_name IN ('pb', 'nv1') ORDER BY 1
+----
+constraint_name:name | check_clause:varchar
+nv1 | (b < 100)
+pb | (b > 0)
+
+statement error 23514 new row for relation "p" violates check constraint "p_a_check"
+INSERT INTO p VALUES (0, 1)
+
+statement ok
+CREATE TABLE c1 () INHERITS (p)
+
+statement ok
+CREATE TABLE c2 (a int, b int, CONSTRAINT nv3 CHECK (b < 300))
+
+statement ok
+ALTER TABLE c2 INHERIT p
+
+query
+SELECT conrelid::regclass, conname, conislocal, coninhcount, connoinherit FROM pg_constraint WHERE conrelid IN ('c1'::regclass, 'c2'::regclass) ORDER BY conrelid::regclass::text, 2
+----
+conrelid:regclass | conname:name | conislocal:bool | coninhcount:int2 | connoinherit:bool
+c1 | nv3 | f | 1 | f
+c2 | nv3 | t | 1 | f
+
+statement ok
+INSERT INTO c1 VALUES (-1, 7)
+
+statement ok
+INSERT INTO c2 VALUES (5000, -1)
+
+query
+SELECT tableoid::regclass, a, b FROM p ORDER BY a
+----
+tableoid:regclass | a:int4 | b:int4
+c1 | -1 | 7
+c2 | 5000 | -1
+
+statement ok
+ALTER TABLE ONLY p ADD CONSTRAINT o CHECK (a <> 3) NO INHERIT
+
+statement ok
+ALTER TABLE p ADD CONSTRAINT r CHECK (a <> 4) NO INHERIT
+
+statement ok
+CREATE TABLE c3 () INHERITS (p)
+
+query
+SELECT conname FROM pg_constraint WHERE conrelid = 'c3'::regclass ORDER BY 1
+----
+conname:name
+nv3
+
+statement ok
+CREATE TABLE q (a int, CONSTRAINT k CHECK (a > 0))
+
+statement error 42P17 constraint "k" conflicts with inherited constraint on relation "m1"
+CREATE TABLE m1 (a int, CONSTRAINT k CHECK (a > 0) NO INHERIT) INHERITS (q)
+
+statement error 42710 constraint "k" for relation "m1" already exists
+CREATE TABLE m1 (CONSTRAINT k CHECK (a > 1) NO INHERIT) INHERITS (q)
+
+statement ok
+CREATE TABLE m2 (a int, CONSTRAINT k CHECK (a > 0) NO INHERIT)
+
+statement error 42P17 constraint "k" conflicts with non-inherited constraint on child table "m2"
+ALTER TABLE m2 INHERIT q
+
+statement ok
+CREATE TABLE m3 (a int, CONSTRAINT k CHECK (a > 1) NO INHERIT)
+
+statement error 42804 child table "m3" has different definition for check constraint "k"
+ALTER TABLE m3 INHERIT q
+
+statement ok
+CREATE TABLE p4 (a int)
+
+statement ok
+CREATE TABLE c4 () INHERITS (p4)
+
+statement ok
+ALTER TABLE c4 ADD CONSTRAINT k CHECK (a > 0) NO INHERIT
+
+statement error 42P17 constraint "k" conflicts with non-inherited constraint on relation "c4"
+ALTER TABLE p4 ADD CONSTRAINT k CHECK (a > 0)
+
+statement error 42710 constraint "k" for relation "c4" already exists
+ALTER TABLE p4 ADD CONSTRAINT k CHECK (a > 1)
+
+statement ok
+CREATE TABLE p5 (a int)
+
+statement ok
+CREATE TABLE c5 () INHERITS (p5)
+
+statement ok
+ALTER TABLE p5 ADD CONSTRAINT k CHECK (a > 0)
+
+statement error 42P17 constraint "k" conflicts with inherited constraint on relation "c5"
+ALTER TABLE c5 ADD CONSTRAINT k CHECK (a > 0) NO INHERIT
+
+statement error 42710 constraint "k" for relation "c5" already exists
+ALTER TABLE c5 ADD CONSTRAINT k CHECK (a > 1) NO INHERIT
+
+statement ok
+ALTER TABLE c5 ADD CONSTRAINT k CHECK (a > 0)
+
+query
+SELECT conislocal, coninhcount, connoinherit FROM pg_constraint WHERE conrelid = 'c5'::regclass
+----
+conislocal:bool | coninhcount:int2 | connoinherit:bool
+t | 1 | f
+
+statement error 42710 constraint "k" for relation "c5" already exists
+ALTER TABLE c5 ADD CONSTRAINT k CHECK (a > 0)
+
+statement ok
+CREATE TABLE pn (a int, CONSTRAINT k CHECK (a > 0) NO INHERIT)
+
+statement ok
+CREATE TABLE cn1 (a int, CONSTRAINT k CHECK (a > 5) NO INHERIT) INHERITS (pn)
+
+statement ok
+CREATE TABLE cn2 (a int, CONSTRAINT k CHECK (a > 5)) INHERITS (pn)
+
+query
+SELECT conrelid::regclass, conislocal, coninhcount, connoinherit, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid IN ('cn1'::regclass, 'cn2'::regclass) ORDER BY conrelid::regclass::text
+----
+conrelid:regclass | conislocal:bool | coninhcount:int2 | connoinherit:bool | pg_get_constraintdef:text
+cn1 | t | 0 | t | CHECK ((a > 5)) NO INHERIT
+cn2 | t | 0 | f | CHECK ((a > 5))
+
+statement error 42P16 cannot add NO INHERIT constraint to partitioned table "pt"
+CREATE TABLE pt (a int, CHECK (a > 0) NO INHERIT) PARTITION BY LIST (a)
+
+statement error 42P16 cannot add NO INHERIT constraint to partitioned table "pt"
+CREATE TABLE pt (a int CHECK (a > 0) NO INHERIT) PARTITION BY LIST (a)
+
+statement ok
+CREATE TABLE pt (a int) PARTITION BY LIST (a)
+
+statement error 42P16 cannot add NO INHERIT constraint to partitioned table "pt"
+ALTER TABLE pt ADD CONSTRAINT x CHECK (a > 0) NO INHERIT
+
+statement error 42P16 cannot add NO INHERIT constraint to partitioned table "pt"
+ALTER TABLE ONLY pt ADD CONSTRAINT x CHECK (a > 0) NO INHERIT
+
+statement ok
+CREATE TABLE pt1 PARTITION OF pt (CONSTRAINT z CHECK (a > 0) NO INHERIT) FOR VALUES IN (1)
+
+statement ok
+CREATE TABLE pt2 PARTITION OF pt FOR VALUES IN (2)
+
+statement ok
+ALTER TABLE pt2 ADD CONSTRAINT y CHECK (a > 0) NO INHERIT
+
+query
+SELECT conrelid::regclass, conname, connoinherit, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid IN ('pt1'::regclass, 'pt2'::regclass) ORDER BY conrelid::regclass::text
+----
+conrelid:regclass | conname:name | connoinherit:bool | pg_get_constraintdef:text
+pt1 | z | t | CHECK ((a > 0)) NO INHERIT
+pt2 | y | t | CHECK ((a > 0)) NO INHERIT
