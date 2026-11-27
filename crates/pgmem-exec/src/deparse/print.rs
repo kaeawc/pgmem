@@ -5,6 +5,7 @@
 use super::node::{AggCall, Bound, Frame, Node, Sort, SubLinkKind, Syntax, WinSpec};
 use super::pg::{format_type, quote_ident, quote_literal};
 use super::query::{Body, DistinctKind, FromItem, Query, Select, SetTree, Target};
+use pgmem_catalog::Catalog;
 use pgmem_ir as ir;
 use pgmem_types::Type;
 
@@ -13,19 +14,19 @@ const INDENT_JOIN: i32 = 4;
 const INDENT_VAR: i32 = 4;
 const INDENT_LIMIT: i32 = 40;
 
-pub(super) struct Printer {
+pub(super) struct Printer<'a> {
     pub buf: String,
     indent: i32,
     varprefix: bool,
     /// `PRETTYFLAG_PAREN` (`pg_get_viewdef(v, true)` and friends): parentheses only where
     /// precedence needs them.
     pretty: bool,
-}
-
-impl Default for Printer {
-    fn default() -> Self {
-        Printer::new(false)
-    }
+    /// Resolves `reg*` constants, which Postgres stores as OIDs and prints by name.
+    catalog: &'a Catalog,
+    /// The search path the printed definition was written under, when it is not the
+    /// session's (a view's creation path): `reg*` constants resolve under it and print
+    /// under the session's.
+    def_path: Option<&'a [String]>,
 }
 
 thread_local! {
@@ -112,8 +113,8 @@ fn is_simple(n: &Node, parent: &Node, first: bool, showimplicit: bool) -> bool {
 }
 
 /// Prints an expression on its own (top level: implicit coercions hidden).
-pub(super) fn expr_text(n: &Node) -> String {
-    let mut p = Printer::default();
+pub(super) fn expr_text(catalog: &Catalog, n: &Node) -> String {
+    let mut p = Printer::new(false, catalog, None);
     p.expr(n, false);
     p.buf
 }
@@ -150,9 +151,21 @@ pub(super) fn looks_like_function(n: &Node) -> bool {
     matches!(n, Node::Func { .. } | Node::Coalesce { .. } | Node::MinMax { .. } | Node::NullIf { .. } | Node::SqlValue { .. })
 }
 
-impl Printer {
-    pub fn new(varprefix: bool) -> Printer {
-        Printer { buf: String::new(), indent: 0, varprefix, pretty: PRETTY.with(std::cell::Cell::get) }
+impl<'a> Printer<'a> {
+    pub fn new(varprefix: bool, catalog: &'a Catalog, def_path: Option<&'a [String]>) -> Printer<'a> {
+        Printer { buf: String::new(), indent: 0, varprefix, pretty: PRETTY.with(std::cell::Cell::get), catalog, def_path }
+    }
+
+    /// `get_const_expr` for the constant `value` of type `ty`: a `reg*` constant prints the
+    /// name its OID has under the session's search path (`regclassout`).
+    fn const_text(&self, ty: &Type, typmod: i32, value: Option<&str>, showtype: i32) -> String {
+        if let (Type::Reg(kind), Some(v)) = (ty, value) {
+            let user = pgmem_types::context::search_path().user;
+            if let Some(name) = crate::reg::const_display(*kind, v, self.catalog, &user, self.def_path) {
+                return const_text(ty, typmod, Some(&name), showtype);
+            }
+        }
+        const_text(ty, typmod, value, showtype)
     }
 
     /// `get_rule_expr_paren`: in pretty mode, parentheses unless the argument is simple.
@@ -224,7 +237,7 @@ impl Printer {
     pub fn expr(&mut self, n: &Node, showimplicit: bool) {
         match n {
             Node::Const { ty, typmod, value } => {
-                let s = const_text(ty, *typmod, value.as_deref(), 0);
+                let s = self.const_text(ty, *typmod, value.as_deref(), 0);
                 self.push(&s);
             }
             // A domain constraint's placeholder (`CoerceToDomainValue`).
@@ -389,7 +402,7 @@ impl Printer {
     fn coercion(&mut self, arg: &Node, ty: &Type, typmod: i32, node: &Node) {
         match arg {
             Node::Const { ty: cty, typmod: -1, value } if cty == ty => {
-                let s = const_text(cty, -1, value.as_deref(), -1);
+                let s = self.const_text(cty, -1, value.as_deref(), -1);
                 self.push(&s);
             }
             _ => {
@@ -557,7 +570,7 @@ impl Printer {
     fn sortgroup(&mut self, n: &Node) {
         match n {
             Node::Const { ty, typmod, value } => {
-                let s = const_text(ty, *typmod, value.as_deref(), 1);
+                let s = self.const_text(ty, *typmod, value.as_deref(), 1);
                 self.push(&s);
             }
             Node::Var { .. } | Node::Raw { .. } => self.expr(n, false),

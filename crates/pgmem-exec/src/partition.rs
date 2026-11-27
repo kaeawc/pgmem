@@ -763,7 +763,7 @@ pub(crate) fn create_partition(
         reloptions: crate::reloptions::table(&ct.options.reloptions, false)?,
     };
     for c in &ct.columns {
-        apply_column_options(&mut table, c)?;
+        apply_column_options(&catalog, &mut table, c)?;
     }
     let index_links = clone_indexes(&catalog, &parent, &mut table, &slot_of);
     let sub_key = ct.options.partition_by.as_ref().map(|p| bind_key(&b, &table, p)).transpose()?;
@@ -788,13 +788,17 @@ pub(crate) fn create_partition(
 }
 
 /// Column options in `PARTITION OF parent (col WITH OPTIONS ...)`: defaults and NOT NULL.
-fn apply_column_options(table: &mut TableDef, c: &ir::ColumnDef) -> SqlResult<()> {
+fn apply_column_options(catalog: &Catalog, table: &mut TableDef, c: &ir::ColumnDef) -> SqlResult<()> {
     let slot = table.column_index(&c.name).ok_or_else(|| SqlError::undefined_column(&format!("\"{}\"", c.name)))?;
     let col: &mut ColumnDef = &mut table.columns[slot];
     for con in &c.constraints {
         match &con.kind {
             ir::ColumnConstraintKind::NotNull => col.not_null = true,
-            ir::ColumnConstraintKind::Default(e) => col.default = Some(e.clone()),
+            ir::ColumnConstraintKind::Default(e) => {
+                let mut e = e.clone();
+                crate::bind::ddl::qualify_regclass_literals(catalog, &col.ty, &mut e);
+                col.default = Some(e);
+            }
             _ => {}
         }
     }

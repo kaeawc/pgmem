@@ -830,7 +830,7 @@ fn rel_info(m: &Model, o: Oid) -> Option<Rel> {
         schema: schema.to_owned(),
         name: name.to_owned(),
         kind,
-        visible: catalog.relation_visible(schema, name),
+        visible: crate::reg::relation_visible(catalog, schema, name),
         columns,
     };
     if let Some(r) = catalog.relation_by_oid(o) {

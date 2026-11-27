@@ -1099,16 +1099,18 @@ impl Catalog {
     }
 
     /// True if an unqualified reference to `name` in `schema` would find it (Postgres'
-    /// `RelationIsVisible`): object names print qualified otherwise.
-    pub fn relation_visible(&self, schema: &str, name: &str) -> bool {
+    /// `RelationIsVisible`): object names print qualified otherwise. The relation is visible
+    /// when the first schema on the search path holding a relation of that name is `schema`;
+    /// `system(schema, name)` says whether the executor provides a `pg_catalog` /
+    /// `information_schema` relation of that name, which this catalog does not hold.
+    pub fn relation_visible(&self, schema: &str, name: &str, system: impl Fn(&str, &str) -> bool) -> bool {
         for e in self.search_path() {
-            match e {
-                PathEntry::System => {}
-                PathEntry::Schema(s) => {
-                    if self.relation(&s, name).is_some() {
-                        return s == schema;
-                    }
-                }
+            let s = match &e {
+                PathEntry::System => PG_CATALOG,
+                PathEntry::Schema(s) => s.as_str(),
+            };
+            if system(s, name) || self.relation(s, name).is_some() {
+                return s == schema;
             }
         }
         false

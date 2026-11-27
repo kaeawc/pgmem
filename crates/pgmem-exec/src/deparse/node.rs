@@ -274,7 +274,7 @@ impl Node {
 fn normalize_literal(s: &str, ty: &Type) -> String {
     match ty {
         Type::Unknown | Type::Text | Type::Varchar | Type::Bpchar | Type::Name | Type::Json => s.to_owned(),
-        Type::Reg(_) => s.strip_prefix("public.").unwrap_or(s).to_owned(),
+        Type::Reg(_) => s.to_owned(),
         _ => text::decode(s, ty).and_then(|v| text::encode(&v, ty)).unwrap_or_else(|_| s.to_owned()),
     }
 }
@@ -670,7 +670,7 @@ impl Analyzer<'_> {
     fn cast(&mut self, expr: &ir::Expr, ty: &ir::TypeName) -> Node {
         let Ok((t, typmod)) = resolve_type_name(self.catalog, ty) else {
             let inner = self.expr(expr);
-            let text = format!("({})::{}", super::print::expr_text(&inner), ty.name);
+            let text = format!("({})::{}", super::print::expr_text(self.catalog, &inner), ty.name);
             return Node::Raw { text, ty: Type::Unknown };
         };
         // A cast applied to ARRAY[...] is pushed down to the elements (`transformArrayExpr`).

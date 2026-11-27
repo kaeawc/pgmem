@@ -41,7 +41,7 @@ fn table_analyzer<'a>(catalog: &'a Catalog, table: &TableDef) -> Analyzer<'a> {
 pub fn deparse_expr(catalog: &Catalog, table: &TableDef, e: &ir::Expr) -> SqlResult<String> {
     let mut a = table_analyzer(catalog, table);
     let n = a.expr(e);
-    Ok(expr_text(&n))
+    Ok(expr_text(catalog, &n))
 }
 
 /// A boolean expression stored on `table` (CHECK constraints, partial-index predicates):
@@ -50,7 +50,7 @@ pub fn deparse_expr(catalog: &Catalog, table: &TableDef, e: &ir::Expr) -> SqlRes
 pub fn deparse_predicate(catalog: &Catalog, table: &TableDef, e: &ir::Expr) -> SqlResult<String> {
     let mut a = table_analyzer(catalog, table);
     let n = a.boolean(e);
-    Ok(expr_text(&n))
+    Ok(expr_text(catalog, &n))
 }
 
 /// The range-table name standing for a domain constraint's `VALUE`.
@@ -63,7 +63,7 @@ pub fn deparse_domain_check(catalog: &Catalog, base: &pgmem_types::Type, typmod:
     let rte = Rte { qualifier: String::new(), refname: DOMAIN_VALUE_REF.into(), cols };
     let mut a = Analyzer { catalog, levels: vec![Level { rtes: vec![rte], names: vec![], ..Level::default() }], display_path: None };
     let n = a.boolean(e);
-    Ok(expr_text(&n))
+    Ok(expr_text(catalog, &n))
 }
 
 /// The expression coerced to the column's type, as `cookDefault` stores it.
@@ -86,14 +86,14 @@ pub fn deparse_default(catalog: &Catalog, table: &TableDef, column: &ColumnDef) 
     if matches!(n, Node::Const { value: None, .. }) {
         return Ok(None);
     }
-    Ok(Some(expr_text(&n)))
+    Ok(Some(expr_text(catalog, &n)))
 }
 
 /// The generation expression of a `GENERATED ALWAYS AS (...) STORED` column, as
 /// `pg_get_expr(adbin, adrelid)` and `information_schema.columns.generation_expression` print it.
 pub fn deparse_generated(catalog: &Catalog, table: &TableDef, column: &ColumnDef) -> SqlResult<Option<String>> {
     let Some(e) = &column.generated else { return Ok(None) };
-    Ok(Some(expr_text(&column_expr(catalog, table, column, e))))
+    Ok(Some(expr_text(catalog, &column_expr(catalog, table, column, e))))
 }
 
 fn column_list(table: &TableDef, columns: &[usize]) -> String {
@@ -137,7 +137,7 @@ pub fn deparse_constraint(catalog: &Catalog, table: &TableDef, constraint: &Cons
             let key = |e: &ir::Expr| -> SqlResult<String> {
                 let mut a = table_analyzer(catalog, table);
                 let n = a.expr(e);
-                let text = expr_text(&n);
+                let text = expr_text(catalog, &n);
                 Ok(if looks_like_function(&n) || matches!(n, Node::Var { .. }) { text } else { format!("({text})") })
             };
             if let Some(primary) = temporal {
@@ -193,7 +193,7 @@ fn index_key_text(catalog: &Catalog, table: &TableDef, index: &IndexDef, k: usiz
     let Some(e) = index.exprs.get(k) else { return Ok(None) };
     let mut a = table_analyzer(catalog, table);
     let n = a.expr(e);
-    let text = expr_text(&n);
+    let text = expr_text(catalog, &n);
     Ok(Some(if looks_like_function(&n) || matches!(n, Node::Var { .. }) { text } else { format!("({text})") }))
 }
 
@@ -265,14 +265,18 @@ pub fn deparse_index(catalog: &Catalog, table: &TableDef, index: &IndexDef) -> S
 /// ruleutils' `generate_relation_name`: the name alone when the search path finds this
 /// relation by it, else schema-qualified.
 pub fn relation_name(catalog: &Catalog, schema: &str, name: &str) -> String {
-    if catalog.relation_visible(schema, name) { quote_ident(name) } else { format!("{}.{}", quote_ident(schema), quote_ident(name)) }
+    if crate::reg::relation_visible(catalog, schema, name) {
+        quote_ident(name)
+    } else {
+        format!("{}.{}", quote_ident(schema), quote_ident(name))
+    }
 }
 
 pub fn deparse_view(catalog: &Catalog, view: &ViewDef) -> SqlResult<String> {
     let display_path = Some(pgmem_types::context::search_path().entries);
     let mut a = Analyzer { catalog, levels: Vec::new(), display_path };
     let q = pgmem_types::context::with_search_path(&view.search_path, || a.query(&view.query, false));
-    let mut p = Printer::new(q.varprefix);
+    let mut p = Printer::new(q.varprefix, catalog, Some(&view.search_path));
     p.query_def(&q, Some(&view.columns), true, 0);
     p.buf.push(';');
     Ok(p.buf)

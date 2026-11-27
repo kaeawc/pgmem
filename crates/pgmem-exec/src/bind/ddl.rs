@@ -8,7 +8,7 @@ use pgmem_catalog::{
     Catalog, ColumnDef, Constraint, ConstraintKind, FkAction, Identity, IndexDef, IndexKeyOptions, QualName, SequenceDef, TableDef, ViewDef,
 };
 use pgmem_ir as ir;
-use pgmem_types::{SqlError, SqlResult, Type, code};
+use pgmem_types::{RegKind, SqlError, SqlResult, Type, code};
 
 fn fk_action(a: ir::ReferentialAction) -> FkAction {
     match a {
@@ -35,6 +35,40 @@ fn serial_type(name: &str) -> Option<(Type, i64)> {
 /// unqualified when it is visible).
 pub fn nextval_default(schema: &str, seq: &str) -> ir::Expr {
     ir::Expr::Function(Box::new(nextval_call(schema, seq)))
+}
+
+/// A stored default with its `regclass` constants (`'seq'::regclass`, the sequence argument of
+/// `nextval` / `currval` / `setval`) resolved to schema-qualified names. Postgres resolves them
+/// when the default is stored and keeps the OID; the name written here must keep finding the
+/// same relation whatever the search path is later, and prints per the path in force then.
+///
+/// `column` is the type the default is coerced to: a bare string literal read as a `regclass`
+/// column's value is one of those constants too.
+pub(crate) fn qualify_regclass_literals(catalog: &Catalog, column: &Type, e: &mut ir::Expr) {
+    let qualify = |s: &mut String| {
+        if let Ok(Some(rel)) = crate::reg::relation_from_text(s, catalog) {
+            let quote = crate::funcs::string::quote_ident;
+            *s = format!("{}.{}", quote(rel.schema()), quote(rel.name()));
+        }
+    };
+    let is_regclass = |ty: &ir::TypeName| ty.array_dims == 0 && ty.name == "regclass";
+    if let (Type::Reg(RegKind::Class), ir::Expr::Literal(ir::Literal::String(s))) = (column, &mut *e) {
+        qualify(s);
+    }
+    e.walk_mut(&mut |x| match x {
+        ir::Expr::Cast { expr, ty } if is_regclass(ty) => {
+            if let ir::Expr::Literal(ir::Literal::String(s)) = expr.as_mut() {
+                qualify(s);
+            }
+        }
+        ir::Expr::TypedString { ty, value } if is_regclass(ty) => qualify(value),
+        ir::Expr::Function(f) if matches!(f.name.base(), "nextval" | "currval" | "setval") => {
+            if let Some(ir::Expr::Literal(ir::Literal::String(s))) = f.args.first_mut() {
+                qualify(s);
+            }
+        }
+        _ => {}
+    });
 }
 
 fn nextval_call(schema: &str, seq: &str) -> ir::FunctionCall {
@@ -147,7 +181,11 @@ pub fn bind_create_table(b: &Binder, ct: &ir::CreateTable) -> SqlResult<Option<C
                     col.not_null_name.clone_from(&con.name);
                 }
                 ir::ColumnConstraintKind::Null => {}
-                ir::ColumnConstraintKind::Default(e) => col.default = Some(e.clone()),
+                ir::ColumnConstraintKind::Default(e) => {
+                    let mut e = e.clone();
+                    qualify_regclass_literals(catalog, &col.ty, &mut e);
+                    col.default = Some(e);
+                }
                 ir::ColumnConstraintKind::Generated(e) => col.generated = Some(e.clone()),
                 ir::ColumnConstraintKind::Collate(n) => col.collation = column_collation(&col.ty, n)?,
                 ir::ColumnConstraintKind::Identity { always, options } => {
@@ -1066,7 +1104,9 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
         ir::AlterTableAction::SetDefault { column, expr } => {
             let slot = def.column_index(column).ok_or_else(|| not_found(column))?;
             check_default_binds(b, &def.columns[slot], expr)?;
-            def.columns[slot].default = Some(expr.clone());
+            let mut expr = expr.clone();
+            qualify_regclass_literals(b.catalog, &def.columns[slot].ty, &mut expr);
+            def.columns[slot].default = Some(expr);
             Ok(AlterOutcome::Replace { def: Box::new(def), rename_from: None, sequences: vec![], validate: Validation::None })
         }
         ir::AlterTableAction::DropDefault { column } => {

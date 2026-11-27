@@ -1032,7 +1032,7 @@ fn truncate(t: &ir::Truncate, txn: &mut Txn, binder: &Binder) -> SqlResult<Query
 
 /// How an object name prints in messages: unqualified when visible on the search path.
 pub(crate) fn display_name(cat: &Catalog, q: &QualName) -> String {
-    if cat.relation_visible(&q.schema, &q.name) { q.name.clone() } else { q.to_string() }
+    if crate::reg::relation_visible(cat, &q.schema, &q.name) { q.name.clone() } else { q.to_string() }
 }
 
 /// Foreign keys in other tables that reference `t`: (table, constraint name).

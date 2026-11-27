@@ -299,8 +299,11 @@ pub fn definition(cat: &Catalog, oid: u32) -> Option<String> {
         }
     }
     let kind_list = if !kinds.is_empty() && kinds.len() < 3 { format!(" ({})", kinds.join(", ")) } else { String::new() };
-    let relation =
-        if cat.relation_visible(&table.schema, &table.name) { q(&table.name) } else { format!("{}.{}", q(&table.schema), q(&table.name)) };
+    let relation = if crate::reg::relation_visible(cat, &table.schema, &table.name) {
+        q(&table.name)
+    } else {
+        format!("{}.{}", q(&table.schema), q(&table.name))
+    };
     Some(format!("CREATE STATISTICS {}.{}{kind_list} ON {} FROM {relation}", q(&st.schema), q(&st.name), key_list(cat, table, st)))
 }
 

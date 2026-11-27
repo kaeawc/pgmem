@@ -464,7 +464,7 @@ fn indexdef_fn(a: &[Value], ctx: &EvalCtx) -> SqlResult<Value> {
         let end = start + def[start..].find(" USING ")?;
         let parts = crate::reg::parse_qualified(&def[start..end]).ok()?;
         let [schema, name] = parts.as_slice() else { return None };
-        m.catalog.relation_visible(schema, name).then(|| format!("{}{}{}", &def[..start], quote_ident(name), &def[end..]))
+        crate::reg::relation_visible(m.catalog, schema, name).then(|| format!("{}{}{}", &def[..start], quote_ident(name), &def[end..]))
     };
     Ok(Value::Text(if pretty { pretty_def().unwrap_or(def) } else { def }))
 }
@@ -651,7 +651,7 @@ fn table_is_visible_fn() -> SqlResult<Option<Resolved>> {
             let Some(o) = oid_arg(&a[0]) else { return Ok(Value::Null) };
             let cat = c.txn.catalog();
             Ok(match cat.relation_by_oid(o) {
-                Some(r) => Value::Bool(cat.relation_visible(r.schema(), r.name())),
+                Some(r) => Value::Bool(crate::reg::relation_visible(cat, r.schema(), r.name())),
                 None => Value::Null,
             })
         }),
