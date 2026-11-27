@@ -55,6 +55,9 @@ pub(crate) fn alter_sequence(
         return Ok(tag("ALTER SEQUENCE"));
     }
     let restart = crate::sequences::apply_options(txn.catalog(), &mut def, options, false)?;
+    if restart.is_none() {
+        crate::sequences::check_restart(&def, txn.database().sequence_state(&seq).0)?;
+    }
     match &options.owned_by {
         Some(Some(owner)) => def.owned_by = Some(crate::sequences::resolve_owner(txn.catalog(), &def.schema, owner)?),
         Some(None) => def.owned_by = None,
@@ -128,6 +131,9 @@ pub(crate) fn alter_identity(txn: &mut Txn, table: &TableDef, action: &ir::Alter
             if let Some(seq) = identity_sequence_of(txn, table, column) {
                 let mut new = (*seq).clone();
                 let restart = crate::sequences::apply_options(txn.catalog(), &mut new, options, false)?;
+                if restart.is_none() {
+                    crate::sequences::check_restart(&new, txn.database().sequence_state(&seq).0)?;
+                }
                 if let Some(at) = restart {
                     txn.restart_sequence(&new, Some(at));
                 }
@@ -148,6 +154,23 @@ pub(crate) fn alter_identity(txn: &mut Txn, table: &TableDef, action: &ir::Alter
     }
     txn.catalog_mut().replace_table(&table.qualified(), def);
     Ok(true)
+}
+
+/// After ALTER COLUMN TYPE on identity column `column` of `table`: its sequence takes the
+/// column's new type (a serial column's sequence keeps its type, as in Postgres).
+pub(crate) fn retype_identity(txn: &mut Txn, table: &TableDef, column: &str) -> SqlResult<()> {
+    let Some(col) = table.column_index(column).map(|i| &table.columns[i]) else { return Ok(()) };
+    if col.identity.is_none() {
+        return Ok(());
+    }
+    let Some(seq) = identity_sequence_of(txn, table, column) else { return Ok(()) };
+    if seq.data_type == col.ty {
+        return Ok(());
+    }
+    let mut new = (*seq).clone();
+    crate::sequences::retype(&mut new, col.ty.clone(), txn.database().sequence_state(&seq).0)?;
+    txn.catalog_mut().replace_sequence(&QualName::new(&seq.schema, &seq.name), new);
+    Ok(())
 }
 
 /// Sequences OWNED BY a column that currently exists (serial, identity, `OWNED BY t.c`).

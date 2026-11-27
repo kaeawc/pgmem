@@ -1117,6 +1117,9 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
         ir::AlterTableAction::AlterType { column, ty, using } => {
             let slot = def.column_index(column).ok_or_else(|| not_found(column))?;
             let (t, typmod) = resolve_type_name(b.catalog, ty)?;
+            if def.columns[slot].identity.is_some() && !matches!(t, Type::Int2 | Type::Int4 | Type::Int8) {
+                return Err(SqlError::new(code::INVALID_PARAMETER_VALUE, "identity column type must be smallint, integer, or bigint"));
+            }
             let old = &def.columns[slot].ty;
             if using.is_none() && matches!(crate::cast::cast_context(old, &t), None | Some(crate::cast::CoercionContext::Explicit)) {
                 return Err(SqlError::datatype_mismatch(format!("column \"{column}\" cannot be cast automatically to type {}", t.name()))
