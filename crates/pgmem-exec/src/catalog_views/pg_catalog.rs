@@ -1259,8 +1259,11 @@ fn pg_attrdef(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
 
 fn object_exists(m: &Model, classoid: u32, objoid: u32) -> bool {
     match classoid {
-        CLASS_CLASS_OID => m.catalog.relation_by_oid(objoid).is_some(),
-        CONSTRAINT_CLASS_OID => m.constraint_by_oid(objoid).is_some(),
+        CLASS_CLASS_OID => m.catalog.relation_by_oid(objoid).is_some() || m.catalog.composite_by_relid(objoid).is_some(),
+        CONSTRAINT_CLASS_OID => {
+            m.constraint_by_oid(objoid).is_some()
+                || m.catalog.types().any(|t| domain_constraints(m.catalog, t).iter().any(|c| c.oid == objoid))
+        }
         _ => true,
     }
 }

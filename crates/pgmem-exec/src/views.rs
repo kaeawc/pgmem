@@ -234,6 +234,8 @@ pub struct Refs {
     pub relations: Vec<ir::ObjectName>,
     pub columns: Vec<String>,
     pub wildcard: bool,
+    /// `(column).field` selections as (column, field); `(column).*` reads field `*`.
+    pub fields: Vec<(String, String)>,
 }
 
 /// The relations a view's query reads: FROM items, joins, subqueries and the bodies of its
@@ -270,7 +272,13 @@ fn collect_set(s: &ir::SetExpr, ctes: &[String], out: &mut Refs) {
             }
             for p in &sel.projection {
                 match p {
-                    ir::SelectItem::Expr { expr, .. } | ir::SelectItem::FieldStar(expr) => collect_expr(expr, ctes, out),
+                    ir::SelectItem::Expr { expr, .. } => collect_expr(expr, ctes, out),
+                    ir::SelectItem::FieldStar(expr) => {
+                        if let ir::Expr::Column(parts) = expr {
+                            out.fields.extend(parts.last().map(|c| (c.clone(), "*".to_owned())));
+                        }
+                        collect_expr(expr, ctes, out);
+                    }
                     ir::SelectItem::Wildcard | ir::SelectItem::QualifiedWildcard(_) => out.wildcard = true,
                 }
             }
@@ -315,6 +323,11 @@ fn collect_expr(e: &ir::Expr, ctes: &[String], out: &mut Refs) {
         ir::Expr::Subquery(q) | ir::Expr::ArraySubquery(q) => queries.push((**q).clone()),
         ir::Expr::Exists { query, .. } | ir::Expr::InSubquery { query, .. } => queries.push((**query).clone()),
         ir::Expr::Column(parts) => out.columns.extend(parts.last().cloned()),
+        ir::Expr::FieldAccess { expr, field } => {
+            if let ir::Expr::Column(parts) = &**expr {
+                out.fields.extend(parts.last().map(|c| (c.clone(), field.clone())));
+            }
+        }
         _ => {}
     });
     for q in &queries {

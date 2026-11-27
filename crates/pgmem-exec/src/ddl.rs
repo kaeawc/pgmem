@@ -38,6 +38,19 @@ fn comment_target(
     let not_a = |r: &Relation, what: &str| SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{}\" is not {what}", r.name()));
     Ok(Some(match target {
         T::Table | T::View | T::MaterializedView | T::Sequence | T::Index => {
+            let what = match target {
+                T::Table => "a table",
+                T::View => "a view",
+                T::MaterializedView => "a materialized view",
+                T::Sequence => "a sequence",
+                _ => "an index",
+            };
+            // A composite type is a relation of kind `c`: none of these.
+            if catalog.lookup_relation(name)?.is_none()
+                && let Some(t) = catalog.find_composite_relation(name)?
+            {
+                return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{}\" is not {what}", t.name)));
+            }
             let r = relation(name)?;
             let ok = matches!(
                 (target, &r),
@@ -47,16 +60,7 @@ fn comment_target(
                     | (T::Index, Relation::Index { .. })
             );
             if !ok {
-                return Err(not_a(
-                    &r,
-                    match target {
-                        T::Table => "a table",
-                        T::View => "a view",
-                        T::MaterializedView => "a materialized view",
-                        T::Sequence => "a sequence",
-                        _ => "an index",
-                    },
-                ));
+                return Err(not_a(&r, what));
             }
             (CLASS_CLASS_OID, r.oid(), 0)
         }
@@ -65,6 +69,16 @@ fn comment_target(
                 Some((c, t)) if !t.is_empty() => (ir::ObjectName(t.to_vec()), c.clone()),
                 _ => return Err(SqlError::syntax("column name must be qualified")),
             };
+            if catalog.lookup_relation(&table)?.is_none()
+                && let Some(t) = catalog.find_composite_relation(&table)?
+                && let pgmem_catalog::TypeDefKind::Composite { fields, relid } = &t.kind
+            {
+                let i = fields
+                    .iter()
+                    .position(|f| f.name == column)
+                    .ok_or_else(|| SqlError::undefined_column(&format!("\"{column}\" of relation \"{}\"", t.name)))?;
+                return Ok(Some((CLASS_CLASS_OID, *relid, i32::try_from(i + 1).unwrap_or(i32::MAX))));
+            }
             let r = relation(&table)?;
             let attnum = match &r {
                 Relation::Table(t) => t.column_index(&column).map(|i| i + 1),
@@ -97,6 +111,27 @@ fn comment_target(
             let base = name.base();
             let c = t.constraints.iter().find(|c| c.name == base).ok_or_else(|| {
                 SqlError::new(code::UNDEFINED_OBJECT, format!("constraint \"{base}\" for table \"{}\" does not exist", t.name))
+            })?;
+            (crate::catalog_views::CONSTRAINT_CLASS_OID, c.oid, 0)
+        }
+        T::DomainConstraint(domain) => {
+            let Some(ty) = catalog.lookup_type(domain)? else {
+                // A table's or view's row type is a type that is not a domain.
+                return Err(if catalog.lookup_relation(domain)?.is_some() {
+                    SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{}\" is not a domain", domain.base()))
+                } else {
+                    SqlError::new(code::UNDEFINED_OBJECT, format!("type \"{}\" does not exist", domain.base()))
+                });
+            };
+            if !matches!(ty.kind, pgmem_catalog::TypeDefKind::Domain { .. }) {
+                return Err(SqlError::new(code::WRONG_OBJECT_TYPE, format!("\"{}\" is not a domain", ty.name)));
+            }
+            let base = name.base();
+            let c = crate::catalog_views::domain_constraints(catalog, &ty).into_iter().find(|c| c.name == base).ok_or_else(|| {
+                SqlError::new(
+                    code::UNDEFINED_OBJECT,
+                    format!("constraint \"{base}\" for domain {} does not exist", pgmem_types::Type::Domain(ty.oid).name()),
+                )
             })?;
             (crate::catalog_views::CONSTRAINT_CLASS_OID, c.oid, 0)
         }
@@ -267,12 +302,12 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
         }
         Statement::CreateType(ct) => crate::typeddl::create_type(ct, txn, binder),
         Statement::CreateDomain(cd) => crate::typeddl::create_domain(cd, txn, binder),
-        Statement::AlterType(at) => crate::typeddl::alter_type(at, txn, binder),
+        Statement::AlterType(at) => crate::typeddl::alter_type(at, txn, binder, env, state),
         Statement::AlterDomain(ad) => crate::typeddl::alter_domain(ad, txn, binder, env, state),
         Statement::Drop(d) if matches!(d.object_type, ObjectType::Type | ObjectType::Domain) => {
             crate::typeddl::drop_types(d, txn, env, state)
         }
-        Statement::Drop(d) => drop(d, txn, env, state),
+        Statement::Drop(d) => drop_objects(d, txn, env, state),
         Statement::Truncate(t) => truncate(t, txn, binder),
         Statement::SetSchema { object_type, name, if_exists, schema } => set_schema(*object_type, name, *if_exists, schema, txn),
         other => Err(SqlError::feature_not_supported(format!("statement {other:?} is not supported by pgmem"))),
@@ -813,7 +848,7 @@ pub(crate) fn dependents_error(what: &str, name: &str, detail: String) -> SqlErr
         .with_hint("Use DROP ... CASCADE to drop the dependent objects too.")
 }
 
-fn drop(d: &ir::Drop, txn: &mut Txn, env: &SessionEnv, state: &StatementState) -> SqlResult<QueryResult> {
+pub(crate) fn drop_objects(d: &ir::Drop, txn: &mut Txn, env: &SessionEnv, state: &StatementState) -> SqlResult<QueryResult> {
     let kind = match d.object_type {
         ObjectType::Table => "TABLE",
         ObjectType::View => "VIEW",

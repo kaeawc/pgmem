@@ -56,7 +56,7 @@ fn domain_has_constraints(cat: &Catalog, ty: &Type) -> bool {
 
 /// The first table column (table name, column name) storing type `oid`, through its array
 /// type, domains and composite types, in `pg_depend` order.
-fn first_user(cat: &Catalog, oid: Oid) -> Option<(String, String)> {
+pub(crate) fn first_user(cat: &Catalog, oid: Oid) -> Option<(String, String)> {
     dependents(cat, oid).into_iter().find_map(|(dep, _)| match dep {
         Dependent::Column { table, column, .. } => Some((table.name, column)),
         Dependent::Domain { oid, .. } | Dependent::Attribute { oid, .. } => first_user(cat, oid),
@@ -107,6 +107,11 @@ pub(crate) fn rewrite_stored(txn: &mut pgmem_storage::Txn, rowtype: Oid, change:
             }
         });
     }
+}
+
+/// True if values of `ty` can hold values of row type `rowtype`.
+pub(crate) fn contains_rowtype(cat: &Catalog, ty: &Type, rowtype: Oid) -> bool {
+    contains(cat, ty, rowtype, 0)
 }
 
 /// Nesting deeper than this is not followed (composite types cannot contain themselves).

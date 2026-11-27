@@ -1,0 +1,273 @@
+# ALTER TYPE ... ADD / DROP / ALTER / RENAME ATTRIBUTE on composite types.
+
+statement ok
+CREATE TYPE p AS (x int, z text)
+
+statement ok
+ALTER TYPE p ADD ATTRIBUTE v text COLLATE "C"
+
+statement ok
+ALTER TYPE p ALTER ATTRIBUTE x TYPE bigint
+
+statement ok
+ALTER TYPE p ALTER ATTRIBUTE z SET DATA TYPE varchar(7) COLLATE "POSIX" CASCADE
+
+query
+SELECT a.attname, format_type(a.atttypid, a.atttypmod), co.collname FROM pg_attribute a LEFT JOIN pg_collation co ON co.oid = a.attcollation WHERE a.attrelid = 'p'::regclass AND a.attnum > 0 ORDER BY a.attnum
+----
+attname:name | format_type:text | collname:name
+x | bigint | NULL
+z | character varying(7) | POSIX
+v | text | C
+
+# Without COLLATE the attribute gets its type's default collation again; several actions run in one statement.
+statement ok
+ALTER TYPE p ALTER ATTRIBUTE v TYPE text, ALTER ATTRIBUTE z TYPE int
+
+query
+SELECT a.attname, format_type(a.atttypid, a.atttypmod), co.collname FROM pg_attribute a LEFT JOIN pg_collation co ON co.oid = a.attcollation WHERE a.attrelid = 'p'::regclass AND a.attnum > 0 ORDER BY a.attnum
+----
+attname:name | format_type:text | collname:name
+x | bigint | NULL
+z | integer | NULL
+v | text | default
+
+statement ok
+ALTER TYPE p RENAME ATTRIBUTE x TO a CASCADE
+
+statement ok
+ALTER TYPE p ADD ATTRIBUTE k int RESTRICT, DROP ATTRIBUTE IF EXISTS nope, DROP ATTRIBUTE v
+
+statement error 42804 collations are not supported by type integer
+ALTER TYPE p ADD ATTRIBUTE i int COLLATE "C"
+
+statement error 42704 collation "nosuch" for encoding "UTF8" does not exist
+ALTER TYPE p ALTER ATTRIBUTE a TYPE text COLLATE nosuch
+
+statement error 42704 type "nosuch" does not exist
+ALTER TYPE p ALTER ATTRIBUTE a TYPE nosuch
+
+statement error 42703 column "nope" of relation "p" does not exist
+ALTER TYPE p ALTER ATTRIBUTE nope TYPE int
+
+statement error 42701 column "a" of relation "p" already exists
+ALTER TYPE p ADD ATTRIBUTE a int
+
+statement error 42703 column "nope" of relation "p" does not exist
+ALTER TYPE p DROP ATTRIBUTE nope
+
+statement error 42703 column "nope" does not exist
+ALTER TYPE p RENAME ATTRIBUTE nope TO c
+
+statement error 42701 column "k" of relation "p" already exists
+ALTER TYPE p RENAME ATTRIBUTE a TO k
+
+statement error 0A000 cannot alter type of column "a" twice
+ALTER TYPE p ALTER ATTRIBUTE a TYPE text, ALTER ATTRIBUTE a TYPE int
+
+statement error 42703 column "a" of relation "p" does not exist
+ALTER TYPE p DROP ATTRIBUTE a, ALTER ATTRIBUTE a TYPE text
+
+statement error 42703 column "y" of relation "p" does not exist
+ALTER TYPE p ADD ATTRIBUTE y int, ALTER ATTRIBUTE y TYPE text
+
+statement error 42P16 composite type p cannot be made a member of itself
+ALTER TYPE p ADD ATTRIBUTE m p
+
+statement error 42P16 composite type p cannot be made a member of itself
+ALTER TYPE p ALTER ATTRIBUTE a TYPE p[]
+
+statement error 42601 syntax error at or near "USING"
+ALTER TYPE p ALTER ATTRIBUTE a TYPE int USING a
+
+statement error 42601 syntax error at or near "DEFAULT"
+ALTER TYPE p ADD ATTRIBUTE d int DEFAULT 1
+
+# Drops run before additions, so a name can be dropped and added again
+statement ok
+ALTER TYPE p ADD ATTRIBUTE a2 int, DROP ATTRIBUTE a, ADD ATTRIBUTE a text
+
+query
+SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'p'::regclass AND attnum > 0 AND NOT attisdropped ORDER BY attnum
+----
+attname:name | format_type:text
+z | integer
+k | integer
+a2 | integer
+a | text
+
+# Only composite types have attributes
+statement ok
+CREATE TYPE e AS ENUM ('a')
+
+statement ok
+CREATE DOMAIN d AS int
+
+statement ok
+CREATE TABLE t0 (a int)
+
+statement error 42P01 relation "e" does not exist
+ALTER TYPE e ADD ATTRIBUTE x int
+
+statement error 42P01 relation "d" does not exist
+ALTER TYPE d DROP ATTRIBUTE x
+
+statement error 42P01 relation "nosuch" does not exist
+ALTER TYPE nosuch ALTER ATTRIBUTE x TYPE int
+
+statement error 42809 "t0" is not a composite type
+ALTER TYPE t0 ADD ATTRIBUTE x int
+
+statement error 42P01 relation "e" does not exist
+ALTER TYPE e RENAME ATTRIBUTE x TO y
+
+# A type stored in a table column: attributes can be added and dropped, not retyped
+statement ok
+CREATE TYPE q AS (x int, z int)
+
+statement ok
+CREATE TABLE t (c q, arr q[])
+
+statement ok
+INSERT INTO t VALUES ((1, 2), ARRAY[(3, 4)::q])
+
+statement error 0A000 cannot alter type "q" because column "t.arr" uses it
+ALTER TYPE q ALTER ATTRIBUTE x TYPE bigint
+
+statement error 0A000 cannot alter type "q" because column "t.arr" uses it
+ALTER TYPE q ALTER ATTRIBUTE x TYPE bigint CASCADE
+
+statement error 42704 type "nosuch" does not exist
+ALTER TYPE q ALTER ATTRIBUTE x TYPE nosuch
+
+statement ok
+ALTER TYPE q ADD ATTRIBUTE w text
+
+query
+SELECT c, arr, (c).w IS NULL FROM t
+----
+c:q | arr:_q | ?column?:bool
+(1,2,) | {"(3,4,)"} | t
+
+statement ok
+ALTER TYPE q DROP ATTRIBUTE z
+
+query
+SELECT c, arr FROM t
+----
+c:q | arr:_q
+(1,) | {"(3,)"}
+
+statement ok
+INSERT INTO t VALUES (ROW(5, 'w'), NULL)
+
+statement error 42846 cannot cast type record to q
+INSERT INTO t VALUES (ROW(5, 6, 'w'), NULL)
+
+query
+SELECT c, arr FROM t ORDER BY (c).x
+----
+c:q | arr:_q
+(1,) | {"(3,)"}
+(5,w) | NULL
+
+# Domains and composite types over the type nest its values too
+statement ok
+CREATE TYPE r AS (a q, b int)
+
+statement ok
+CREATE DOMAIN dq AS q
+
+statement ok
+CREATE TABLE t2 (n r, d dq)
+
+statement ok
+INSERT INTO t2 VALUES (ROW(ROW(1, 'a'), 2), ROW(3, 'b'))
+
+statement error 0A000 cannot alter type "q" because column "t.arr" uses it
+ALTER TYPE q ALTER ATTRIBUTE x TYPE bigint
+
+statement ok
+ALTER TYPE q DROP ATTRIBUTE x
+
+query
+SELECT n, d FROM t2
+----
+n:r | d:q
+("(a)",2) | (b)
+
+# Expressions reading an attribute need CASCADE to drop it
+statement ok
+CREATE TYPE s AS (x int, z int)
+
+statement ok
+CREATE TABLE ts (c s, CHECK ((c).z > 0), g int GENERATED ALWAYS AS ((c).z) STORED)
+
+statement ok
+CREATE INDEX tsi ON ts (((c).z))
+
+statement ok
+CREATE VIEW vs AS SELECT (c).z AS zz, (c).x AS xx FROM ts
+
+statement ok
+CREATE VIEW vs2 AS SELECT zz FROM vs
+
+statement ok
+CREATE DOMAIN ds AS s CHECK ((VALUE).z > 0)
+
+statement error 2BP01 cannot drop column z of composite type s because other objects depend on it
+ALTER TYPE s DROP ATTRIBUTE z
+
+statement error 2BP01 cannot drop column x of composite type s because other objects depend on it
+ALTER TYPE s DROP ATTRIBUTE x
+
+statement ok
+ALTER TYPE s DROP ATTRIBUTE z CASCADE
+
+query
+SELECT relname FROM pg_class WHERE relname IN ('vs', 'vs2', 'tsi') ORDER BY 1
+----
+relname:name
+
+query
+SELECT conname FROM pg_constraint WHERE conrelid = 'ts'::regclass OR contypid = 'ds'::regtype
+----
+conname:name
+
+query
+SELECT attname FROM pg_attribute WHERE attrelid = 'ts'::regclass AND attnum > 0 AND NOT attisdropped
+----
+attname:name
+c
+
+# Renaming an attribute keeps the expressions reading it working
+statement ok
+CREATE TYPE u AS (x int, z int)
+
+statement ok
+CREATE TABLE tu (c u, CHECK ((c).x > 0))
+
+statement ok
+ALTER TYPE u RENAME ATTRIBUTE x TO y
+
+statement error 23514 new row for relation "tu" violates check constraint "tu_c_check"
+INSERT INTO tu VALUES (ROW(0, 1))
+
+statement ok
+INSERT INTO tu VALUES (ROW(1, 1))
+
+# ALTER TYPE is transactional
+statement ok
+BEGIN
+
+statement ok
+ALTER TYPE u DROP ATTRIBUTE z
+
+statement ok
+ROLLBACK
+
+query
+SELECT c FROM tu
+----
+c:u
+(1,1)

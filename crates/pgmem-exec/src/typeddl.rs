@@ -209,12 +209,16 @@ fn rename_type(cat: &mut Catalog, mut def: TypeDef, new: &str) -> SqlResult<()> 
     Ok(())
 }
 
-pub fn alter_type(at: &ir::AlterType, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> {
+pub fn alter_type(at: &ir::AlterType, txn: &mut Txn, binder: &Binder, env: &SessionEnv, state: &StatementState) -> SqlResult<QueryResult> {
+    match &at.action {
+        ir::AlterTypeAction::Attributes(actions) => return crate::typeattrs::alter_attributes(&at.name, actions, txn, binder, env, state),
+        ir::AlterTypeAction::RenameAttribute { from, to } => return crate::typeattrs::rename_attribute(&at.name, from, to, txn),
+        _ => {}
+    }
     let mut def = user_type(binder.catalog, &at.name)?;
     let name = def.name.clone();
     let mut notices = Vec::new();
     let not_enum = || SqlError::new(code::WRONG_OBJECT_TYPE, format!("{name} is not an enum"));
-    let not_composite = || SqlError::new(code::WRONG_OBJECT_TYPE, format!("{name} is not a composite type"));
     let mut added = None;
     let cat = txn.catalog_mut();
     match &at.action {
@@ -260,42 +264,7 @@ pub fn alter_type(at: &ir::AlterType, txn: &mut Txn, binder: &Binder) -> SqlResu
             rename_type(cat, def, new)?;
             return Ok(tag("ALTER TYPE"));
         }
-        ir::AlterTypeAction::AddAttribute { name: attr, ty } => {
-            let (t, typmod) = resolve_type_name(binder.catalog, ty)?;
-            let TypeDefKind::Composite { fields, .. } = &mut def.kind else { return Err(not_composite()) };
-            if fields.iter().any(|f| &f.name == attr) {
-                return Err(SqlError::new(code::DUPLICATE_COLUMN, format!("column \"{attr}\" of relation \"{name}\" already exists")));
-            }
-            fields.push(Field { name: attr.clone(), ty: t, typmod, collation: None });
-        }
-        ir::AlterTypeAction::DropAttribute { name: attr, if_exists } => {
-            let in_use = !direct_columns(binder.catalog, def.oid).is_empty();
-            let TypeDefKind::Composite { fields, .. } = &mut def.kind else { return Err(not_composite()) };
-            let Some(i) = fields.iter().position(|f| &f.name == attr) else {
-                if *if_exists {
-                    notices.push(notice("00000", format!("column \"{attr}\" of relation \"{name}\" does not exist, skipping")));
-                    return Ok(QueryResult { tag: "ALTER TYPE".into(), notices, ..Default::default() });
-                }
-                return Err(SqlError::undefined_column(&format!("\"{attr}\" of relation \"{name}\"")));
-            };
-            if in_use {
-                return Err(SqlError::feature_not_supported(format!(
-                    "dropping an attribute of type {name} while table columns use it is not supported by pgmem"
-                )));
-            }
-            fields.remove(i);
-        }
-        ir::AlterTypeAction::RenameAttribute { from, to } => {
-            let TypeDefKind::Composite { fields, .. } = &mut def.kind else { return Err(not_composite()) };
-            if fields.iter().any(|f| &f.name == to) {
-                return Err(SqlError::new(code::DUPLICATE_COLUMN, format!("column \"{to}\" of relation \"{name}\" already exists")));
-            }
-            let f = fields
-                .iter_mut()
-                .find(|f| &f.name == from)
-                .ok_or_else(|| SqlError::undefined_column(&format!("\"{from}\" of relation \"{name}\"")))?;
-            f.name.clone_from(to);
-        }
+        ir::AlterTypeAction::Attributes(_) | ir::AlterTypeAction::RenameAttribute { .. } => unreachable!("handled above"),
         ir::AlterTypeAction::NoOp => return Ok(tag("ALTER TYPE")),
     }
     let key = QualName::new(&def.schema, &name);
@@ -356,6 +325,7 @@ pub fn alter_domain(
         ir::AlterDomainAction::NoOp => return Ok(tag("ALTER DOMAIN")),
         _ => {}
     }
+    let constraints_before: Vec<Oid> = crate::catalog_views::domain_constraints(txn.catalog(), &def).iter().map(|c| c.oid).collect();
     let TypeDefKind::Domain { base, not_null, default, checks, .. } = &mut def.kind else { return Ok(tag("ALTER DOMAIN")) };
     let base = base.clone();
     let mut notices = Vec::new();
@@ -420,6 +390,11 @@ pub fn alter_domain(
             check.name.clone_from(to);
         }
         ir::AlterDomainAction::Rename(_) | ir::AlterDomainAction::NoOp => {}
+    }
+    // The comments on a dropped constraint go with it.
+    let kept: Vec<Oid> = crate::catalog_views::domain_constraints(txn.catalog(), &def).iter().map(|c| c.oid).collect();
+    for gone in constraints_before.into_iter().filter(|o| !kept.contains(o)) {
+        txn.catalog_mut().drop_comments(gone);
     }
     let key = QualName::new(&def.schema, &name);
     txn.catalog_mut().replace_type(&key, def);
@@ -595,8 +570,19 @@ fn drop_one(
         return Err(crate::ddl::dependents_error("type", &def.name, lines.join("\n")));
     }
     drop_dependents(txn, def.oid, &[], dropped, env, state)?;
+    // The comments on the type, a composite's relation and its attributes, a domain's constraints.
+    let mut commented = vec![def.oid];
+    match &def.kind {
+        TypeDefKind::Composite { relid, .. } => commented.push(*relid),
+        TypeDefKind::Domain { .. } => {
+            commented.extend(crate::catalog_views::domain_constraints(txn.catalog(), def).iter().map(|c| c.oid));
+        }
+        TypeDefKind::Enum { .. } => {}
+    }
     txn.catalog_mut().drop_type(&QualName::new(&def.schema, &def.name));
-    txn.catalog_mut().drop_comments(def.oid);
+    for oid in commented {
+        txn.catalog_mut().drop_comments(oid);
+    }
     Ok(())
 }
 
@@ -653,10 +639,11 @@ pub(crate) fn drop_dependents(
                         position = fields.iter().position(|f| f.name == field);
                         fields.retain(|f| f.name != field);
                     }
-                    let oid = t.oid;
+                    let (oid, relid) = (t.oid, if let TypeDefKind::Composite { relid, .. } = &t.kind { *relid } else { 0 });
                     txn.catalog_mut().replace_type(&ty, t);
-                    // Stored values of the type lose the field.
+                    // Stored values of the type lose the field, and its comment goes.
                     if let Some(i) = position {
+                        txn.catalog_mut().drop_attribute_comment(relid, i32::try_from(i + 1).unwrap_or(i32::MAX));
                         crate::rowtype_deps::rewrite_stored(txn, oid, crate::rowtype_deps::FieldChange::Remove(i));
                     }
                 }

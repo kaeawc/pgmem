@@ -78,6 +78,7 @@ pub fn reg_name(kind: RegKind, oid: u32, catalog: &Catalog, user: &str) -> Strin
         RegKind::Class => catalog
             .relation_by_oid(oid)
             .map(|r| class_display(catalog, &r))
+            .or_else(|| catalog.composite_by_relid(oid).map(|t| composite_display(catalog, t)))
             .or_else(|| crate::catalog_views::system_relation_by_oid(oid).map(|d| system_display(catalog, d))),
         RegKind::Type => Type::from_oid(oid).map(|t| t.name()),
         RegKind::Namespace => namespace_name(oid).map(quote_ident).or_else(|| catalog.schema_by_oid(oid).map(|sc| quote_ident(&sc.name))),
@@ -93,6 +94,10 @@ fn lookup_class(s: &str, catalog: &Catalog) -> SqlResult<Value> {
     let missing = || SqlError::undefined_table(s.trim());
     let system = |d: &crate::catalog_views::Def| Value::Reg(RegKind::Class, d.oid, system_display(catalog, d));
     let user = |rel: &pgmem_catalog::Relation| Value::Reg(RegKind::Class, rel.oid(), class_display(catalog, rel));
+    let composite = |t: &pgmem_catalog::TypeDef| match &t.kind {
+        pgmem_catalog::TypeDefKind::Composite { relid, .. } => Value::Reg(RegKind::Class, *relid, composite_display(catalog, t)),
+        _ => unreachable!("composite_relation returns composite types"),
+    };
     match parts.as_slice() {
         // An unqualified name takes the first match along the effective search path
         // (pg_catalog implicitly first), system relations included.
@@ -108,13 +113,22 @@ fn lookup_class(s: &str, catalog: &Catalog) -> SqlResult<Value> {
                 if let Some(rel) = catalog.relation(schema, n) {
                     return Ok(user(&rel));
                 }
+                if let Some(t) = catalog.composite_relation(schema, n) {
+                    return Ok(composite(t));
+                }
             }
             Err(missing())
         }
         [schema, n] if schema == "pg_catalog" || schema == "information_schema" => {
             crate::catalog_views::system_relation(Some(schema), n).map(system).ok_or_else(missing)
         }
-        _ => catalog.find_relation(&pgmem_ir::ObjectName(parts))?.map(|rel| user(&rel)).ok_or_else(missing),
+        _ => {
+            let name = pgmem_ir::ObjectName(parts);
+            match catalog.find_relation(&name)? {
+                Some(rel) => Ok(user(&rel)),
+                None => catalog.find_composite_relation(&name)?.map(|t| composite(&t)).ok_or_else(missing),
+            }
+        }
     }
 }
 
@@ -127,6 +141,11 @@ pub fn relation_visible(catalog: &Catalog, schema: &str, name: &str) -> bool {
 /// `regclassout`: the name, schema-qualified unless the search path finds it by name.
 fn class_display(catalog: &Catalog, rel: &pgmem_catalog::Relation) -> String {
     crate::deparse::relation_name(catalog, rel.schema(), rel.name())
+}
+
+/// `regclassout` of a composite type's relation.
+fn composite_display(catalog: &Catalog, t: &pgmem_catalog::TypeDef) -> String {
+    crate::deparse::relation_name(catalog, &t.schema, &t.name)
 }
 
 /// How a system relation prints as regclass.

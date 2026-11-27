@@ -7,7 +7,9 @@
 
 use crate::expr::{lower_expr, lower_type};
 use crate::{ident, object_name};
-use pgmem_ir::{AlterDomain, AlterDomainAction, AlterType, AlterTypeAction, CreateDomain, Drop, ObjectType, Statement};
+use pgmem_ir::{
+    AlterDomain, AlterDomainAction, AlterType, AlterTypeAction, CreateDomain, Drop, ObjectType, Statement, TypeAttributeAction,
+};
 use pgmem_types::SqlResult;
 use sqlparser::ast as sq;
 use sqlparser::keywords::Keyword;
@@ -66,10 +68,15 @@ pub(crate) enum TypeAction {
     AddValue { value: String, if_not_exists: bool, neighbor: Option<(bool, String)> },
     RenameValue { from: String, to: String },
     Rename(sq::Ident),
-    AddAttribute { name: sq::Ident, ty: sq::DataType },
-    DropAttribute { name: sq::Ident, if_exists: bool },
+    Attributes(Vec<AttributeAction>),
     RenameAttribute { from: sq::Ident, to: sq::Ident },
     NoOp,
+}
+
+pub(crate) enum AttributeAction {
+    Add { name: sq::Ident, ty: sq::DataType, collation: Option<sq::ObjectName> },
+    Drop { name: sq::Ident, if_exists: bool, cascade: bool },
+    AlterType { name: sq::Ident, ty: sq::DataType, collation: Option<sq::ObjectName> },
 }
 
 fn is_word(p: &Parser, n: usize, kw: Keyword) -> bool {
@@ -85,6 +92,43 @@ fn parse_attribute_action(p: &mut Parser, kw: Keyword) -> bool {
         return true;
     }
     false
+}
+
+/// Whether the next tokens start an `ADD | DROP | ALTER ATTRIBUTE` action.
+fn is_attribute_action(p: &Parser) -> bool {
+    [Keyword::ADD, Keyword::DROP, Keyword::ALTER].iter().any(|kw| {
+        is_word(p, 0, *kw)
+            && matches!(&p.peek_nth_token(1).token, Token::Word(w) if w.quote_style.is_none() && w.value.eq_ignore_ascii_case("attribute"))
+    })
+}
+
+fn attribute_action(p: &mut Parser) -> Result<AttributeAction, ParserError> {
+    fn collate(p: &mut Parser) -> Result<Option<sq::ObjectName>, ParserError> {
+        if p.parse_keyword(Keyword::COLLATE) { p.parse_object_name(false).map(Some) } else { Ok(None) }
+    }
+    fn cascade(p: &mut Parser) -> bool {
+        matches!(p.parse_one_of_keywords(&[Keyword::RESTRICT, Keyword::CASCADE]), Some(Keyword::CASCADE))
+    }
+    if parse_attribute_action(p, Keyword::ADD) {
+        let name = p.parse_identifier()?;
+        let ty = p.parse_data_type()?;
+        let collation = collate(p)?;
+        cascade(p);
+        Ok(AttributeAction::Add { name, ty, collation })
+    } else if parse_attribute_action(p, Keyword::DROP) {
+        let if_exists = p.parse_keywords(&[Keyword::IF, Keyword::EXISTS]);
+        let name = p.parse_identifier()?;
+        Ok(AttributeAction::Drop { name, if_exists, cascade: cascade(p) })
+    } else {
+        parse_attribute_action(p, Keyword::ALTER);
+        let name = p.parse_identifier()?;
+        let _ = p.parse_keywords(&[Keyword::SET, Keyword::DATA]);
+        p.expect_keyword(Keyword::TYPE)?;
+        let ty = p.parse_data_type()?;
+        let collation = collate(p)?;
+        cascade(p);
+        Ok(AttributeAction::AlterType { name, ty, collation })
+    }
 }
 
 /// Parses one of this module's statements if the parser is positioned at one.
@@ -299,16 +343,16 @@ fn alter_type(p: &mut Parser) -> Result<TypeDdl, ParserError> {
         let to = p.parse_identifier()?;
         let _ = p.parse_one_of_keywords(&[Keyword::RESTRICT, Keyword::CASCADE]);
         TypeAction::RenameAttribute { from, to }
-    } else if parse_attribute_action(p, Keyword::ADD) {
-        let attr = p.parse_identifier()?;
-        let ty = p.parse_data_type()?;
-        let _ = p.parse_one_of_keywords(&[Keyword::RESTRICT, Keyword::CASCADE]);
-        TypeAction::AddAttribute { name: attr, ty }
-    } else if parse_attribute_action(p, Keyword::DROP) {
-        let if_exists = p.parse_keywords(&[Keyword::IF, Keyword::EXISTS]);
-        let attr = p.parse_identifier()?;
-        let _ = p.parse_one_of_keywords(&[Keyword::RESTRICT, Keyword::CASCADE]);
-        TypeAction::DropAttribute { name: attr, if_exists }
+    } else if is_attribute_action(p) {
+        // gram.y `alter_type_cmds`: comma-separated, each with its own RESTRICT / CASCADE.
+        let mut actions = Vec::new();
+        loop {
+            actions.push(attribute_action(p)?);
+            if !p.consume_token(&Token::Comma) {
+                break;
+            }
+        }
+        TypeAction::Attributes(actions)
     } else if p.parse_keywords(&[Keyword::OWNER, Keyword::TO]) || p.parse_keywords(&[Keyword::SET, Keyword::SCHEMA]) {
         p.parse_identifier()?;
         TypeAction::NoOp
@@ -362,8 +406,25 @@ pub(crate) fn lower(stmt: TypeDdl) -> SqlResult<Statement> {
                 TypeAction::AddValue { value, if_not_exists, neighbor } => AlterTypeAction::AddValue { value, if_not_exists, neighbor },
                 TypeAction::RenameValue { from, to } => AlterTypeAction::RenameValue { from, to },
                 TypeAction::Rename(n) => AlterTypeAction::Rename(ident(&n)),
-                TypeAction::AddAttribute { name, ty } => AlterTypeAction::AddAttribute { name: ident(&name), ty: lower_type(&ty)? },
-                TypeAction::DropAttribute { name, if_exists } => AlterTypeAction::DropAttribute { name: ident(&name), if_exists },
+                TypeAction::Attributes(actions) => AlterTypeAction::Attributes(
+                    actions
+                        .into_iter()
+                        .map(|a| {
+                            let collation = |c: Option<sq::ObjectName>| c.map(|c| object_name(&c).map(|o| o.base().to_owned())).transpose();
+                            Ok(match a {
+                                AttributeAction::Add { name, ty, collation: c } => {
+                                    TypeAttributeAction::Add { name: ident(&name), ty: lower_type(&ty)?, collation: collation(c)? }
+                                }
+                                AttributeAction::Drop { name, if_exists, cascade } => {
+                                    TypeAttributeAction::Drop { name: ident(&name), if_exists, cascade }
+                                }
+                                AttributeAction::AlterType { name, ty, collation: c } => {
+                                    TypeAttributeAction::AlterType { name: ident(&name), ty: lower_type(&ty)?, collation: collation(c)? }
+                                }
+                            })
+                        })
+                        .collect::<SqlResult<Vec<_>>>()?,
+                ),
                 TypeAction::RenameAttribute { from, to } => AlterTypeAction::RenameAttribute { from: ident(&from), to: ident(&to) },
                 TypeAction::NoOp => AlterTypeAction::NoOp,
             };

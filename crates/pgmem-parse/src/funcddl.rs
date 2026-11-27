@@ -233,6 +233,7 @@ fn parallel_code(v: &str) -> SqlResult<char> {
 pub(crate) enum CommentOn {
     Function(Option<Vec<sq::DataType>>),
     Constraint(sq::ObjectName),
+    DomainConstraint(sq::ObjectName),
     Trigger(sq::ObjectName),
     Policy(sq::ObjectName),
 }
@@ -395,9 +396,11 @@ pub(crate) fn try_parse(p: &mut Parser) -> Result<Option<FuncDdl>, ParserError> 
             CommentOn::Function(args)
         } else {
             expect(p, "ON")?;
-            let _ = eat(p, "DOMAIN");
+            let domain = eat(p, "DOMAIN");
             let table = p.parse_object_name(false)?;
-            if trigger {
+            if domain && !(trigger || policy) {
+                CommentOn::DomainConstraint(table)
+            } else if trigger {
                 CommentOn::Trigger(table)
             } else if policy {
                 CommentOn::Policy(table)
@@ -888,6 +891,7 @@ pub(crate) fn lower(d: FuncDdl) -> SqlResult<Statement> {
                     pgmem_ir::CommentTarget::Function(args.map(|ts| ts.iter().map(lower_type).collect::<SqlResult<Vec<_>>>()).transpose()?)
                 }
                 CommentOn::Constraint(t) => pgmem_ir::CommentTarget::Constraint(object_name(&t)?),
+                CommentOn::DomainConstraint(t) => pgmem_ir::CommentTarget::DomainConstraint(object_name(&t)?),
                 CommentOn::Trigger(t) => pgmem_ir::CommentTarget::Trigger(object_name(&t)?),
                 CommentOn::Policy(t) => pgmem_ir::CommentTarget::Policy(object_name(&t)?),
             };
