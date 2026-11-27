@@ -136,6 +136,11 @@ pub fn deparse_constraint(catalog: &Catalog, table: &TableDef, constraint: &Cons
             }
             let items = elements.iter().map(|(e, op)| Ok(format!("{} WITH {op}", key(e)?))).collect::<SqlResult<Vec<_>>>()?;
             let mut s = format!("EXCLUDE USING {method} ({})", items.join(", "));
+            if let Some(i) = table.indexes.iter().find(|i| i.name == constraint.name)
+                && !i.reloptions.is_empty()
+            {
+                s.push_str(&format!(" WITH ({})", crate::reloptions::flatten(&i.reloptions)));
+            }
             if let Some(p) = predicate {
                 s.push_str(&format!(" WHERE ({})", deparse_predicate(catalog, table, p)?));
             }
@@ -175,12 +180,20 @@ pub fn deparse_index(catalog: &Catalog, table: &TableDef, index: &IndexDef) -> S
         let text = expr_text(&n);
         keys.push(if looks_like_function(&n) || matches!(n, Node::Var { .. }) { text } else { format!("({text})") });
     }
+    for (key, oc) in keys.iter_mut().zip(&index.opclasses) {
+        if let Some(name) = &oc.shown {
+            key.push(' ');
+            key.push_str(&quote_ident(name));
+        }
+    }
     let mut s = format!(
-        "CREATE {}INDEX {} ON {}.{} USING btree ({})",
+        "CREATE {}INDEX {} ON {}{}.{} USING {} ({})",
         if index.unique { "UNIQUE " } else { "" },
         quote_ident(&index.name),
+        if catalog.is_partitioned(table.oid) { "ONLY " } else { "" },
         quote_ident(&table.schema),
         quote_ident(&table.name),
+        index.method,
         keys.join(", ")
     );
     if !index.include.is_empty() {

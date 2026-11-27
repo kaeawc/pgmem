@@ -56,3 +56,5 @@
 3807	_jsonb	-1	f	b	A	f	3802	0	array_in	array_out	array_recv	array_send	-	-	i	x	0	array_subscript_handler	array_typanalyze
 4089	regnamespace	4	t	b	N	f	0	4090	regnamespacein	regnamespaceout	regnamespacerecv	regnamespacesend	-	-	i	p	0	-	-
 4090	_regnamespace	-1	f	b	A	f	4089	0	array_in	array_out	array_recv	array_send	-	-	i	x	0	array_subscript_handler	array_typanalyze
+4096	regrole	4	t	b	N	f	0	4097	regrolein	regroleout	regrolerecv	regrolesend	-	-	i	p	0	-	-
+4097	_regrole	-1	f	b	A	f	4096	0	array_in	array_out	array_recv	array_send	-	-	i	x	0	array_subscript_handler	array_typanalyze

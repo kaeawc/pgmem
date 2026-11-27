@@ -2,7 +2,8 @@
 //! `pg_extension`); pgmem implements the functions and types of pgcrypto, uuid-ossp, citext,
 //! pg_trgm, hstore and btree_gist, which are available whether or not they are installed.
 
-use crate::session::{Notice, QueryResult};
+use crate::eval::StatementState;
+use crate::session::{Notice, QueryResult, SessionEnv};
 use pgmem_catalog::ExtensionDef;
 use pgmem_ir as ir;
 use pgmem_storage::Txn;
@@ -56,7 +57,14 @@ pub(crate) fn create_extension(
     Ok(QueryResult { tag: "CREATE EXTENSION".into(), ..Default::default() })
 }
 
-pub(crate) fn drop_extension(names: &[String], if_exists: bool, cascade: bool, txn: &mut Txn) -> SqlResult<QueryResult> {
+pub(crate) fn drop_extension(
+    names: &[String],
+    if_exists: bool,
+    cascade: bool,
+    txn: &mut Txn,
+    env: &SessionEnv,
+    state: &StatementState,
+) -> SqlResult<QueryResult> {
     let mut notices = Vec::new();
     for name in names {
         if txn.catalog().extension(name).is_none() {
@@ -89,6 +97,8 @@ pub(crate) fn drop_extension(names: &[String], if_exists: bool, cascade: bool, t
             .with_detail(lines.join("\n"))
             .with_hint("Use DROP ... CASCADE to drop the dependent objects too."));
         }
+        // Everything that goes with the extension is reported by one notice.
+        let mut cascaded: Vec<String> = Vec::new();
         for (table, slot, column, tname, _) in users {
             if let Some(def) = txn.catalog().table_q(&table).cloned() {
                 let mut def = (*def).clone();
@@ -98,14 +108,35 @@ pub(crate) fn drop_extension(names: &[String], if_exists: bool, cascade: bool, t
                 col.not_null = false;
                 col.default = None;
                 txn.catalog_mut().replace_table(&table, def);
-                notices.push(Notice {
-                    severity: "NOTICE",
-                    code: "00000",
-                    message: format!("drop cascades to column {column} of table {tname}"),
-                });
+                cascaded.push(format!("column {column} of table {tname}"));
             }
         }
+        if let Some(oid) = txn.catalog().extension(name).map(|e| e.oid) {
+            crate::ext_alter::drop_members(oid, cascade, txn, env, state)?;
+        }
+        // Functions marked DEPENDS ON EXTENSION go with it (no CASCADE needed), but what
+        // depends on them (column defaults, triggers, casts) needs CASCADE. Members were
+        // dropped above, so each is dropped once.
+        let marked: Vec<_> = txn.catalog().functions().filter(|f| f.extensions.contains(name)).cloned().collect();
+        let mut deps = crate::functions::FunctionDependents::default();
+        for f in &marked {
+            deps.extend(crate::functions::FunctionDependents::of(txn.catalog(), f));
+        }
+        if !deps.is_empty() && !cascade {
+            return Err(deps.error(&format!("extension {name}")));
+        }
+        let mut dropped = Vec::new();
+        deps.drop(txn, &mut dropped);
+        cascaded.extend(dropped.iter().map(|n| n.message.trim_start_matches("drop cascades to ").to_owned()));
+        for f in marked {
+            let cat = txn.catalog_mut();
+            cat.drop_comments(f.oid);
+            cat.drop_function(f.oid);
+        }
         txn.catalog_mut().drop_extension(name);
+        if !cascaded.is_empty() {
+            notices.push(crate::ddl::cascade_notice(&cascaded));
+        }
     }
     Ok(QueryResult { tag: "DROP EXTENSION".into(), notices, ..Default::default() })
 }

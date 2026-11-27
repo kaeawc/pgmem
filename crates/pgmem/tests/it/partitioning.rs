@@ -1,7 +1,7 @@
 //! Declarative partitioning: routing, partition constraints, row movement, sub-partitions,
 //! ON CONFLICT, foreign keys to partitioned tables, COPY, ATTACH / DETACH and the catalogs.
 
-use crate::support::{expect_code, message, setup, texts};
+use crate::support::{expect_code, message, setup, text_value, texts};
 
 fn rows(c: &mut postgres::Client, sql: &str) -> Vec<Vec<String>> {
     texts(c, sql).into_iter().map(|r| r.into_iter().map(|v| v.unwrap_or_else(|| "NULL".into())).collect()).collect()
@@ -40,7 +40,14 @@ fn routing_and_constraints() {
     assert_eq!(rows(&mut c, "SELECT string_agg(id::text, ',' ORDER BY id) FROM ev_eu"), [["1,3"]]);
     // Moving rows between partitions, through the partitioned table.
     assert_eq!(rows(&mut c, "UPDATE ev SET region = 'us' WHERE id = 3 RETURNING tableoid::regclass::text, id::text"), [["ev_us", "3"]]);
-    assert_eq!(rows(&mut c, "UPDATE ev SET at = '2025-06-01' WHERE id = 1 RETURNING tableoid::regclass::text"), [["ev_eu_25"]]);
+    assert_eq!(
+        rows(
+            &mut c,
+            "UPDATE ev SET at = '2025-06-01' WHERE id = 1
+             RETURNING tableoid::regclass::text, old.tableoid::regclass::text, new.tableoid::regclass::text"
+        ),
+        [["ev_eu_25", "ev_eu_24", "ev_eu_25"]]
+    );
     let e = expect_code(c.batch_execute("UPDATE ev_us SET region = 'eu'"), "23514");
     assert_eq!(message(&e), "new row for relation \"ev_us\" violates partition constraint");
     // Unique keys are per partition and named after it.
@@ -147,6 +154,195 @@ fn hash_partitions_foreign_keys_and_copy() {
     assert_eq!(rows(&mut c, "SELECT tableoid::regclass::text FROM acct WHERE id >= 13 ORDER BY id"), [["acct2"], ["acct0"]]);
     let e = expect_code(c.batch_execute("COPY acct TO STDOUT"), "42809");
     assert_eq!(message(&e), "cannot copy from partitioned table \"acct\"");
+}
+
+/// Each index on the tables of `like`: name, relkind, relispartition, indisvalid, parent index.
+fn index_state(c: &mut postgres::Client, like: &str) -> Vec<Vec<String>> {
+    rows(
+        c,
+        &format!(
+            "SELECT c.relname::text, c.relkind::text, c.relispartition::text, i.indisvalid::text,
+                    coalesce((SELECT inhparent::regclass::text FROM pg_inherits WHERE inhrelid = c.oid), '-')
+               FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+              WHERE c.relnamespace = 'public'::regnamespace AND c.relname LIKE '{like}' ORDER BY 1"
+        ),
+    )
+}
+
+fn detail(e: &postgres::Error) -> Option<String> {
+    e.as_db_error().and_then(|d| d.detail()).map(str::to_owned)
+}
+
+#[test]
+fn create_index_on_only_and_attach_partition() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE m (a int, b int) PARTITION BY RANGE (a);
+         CREATE TABLE m1 PARTITION OF m FOR VALUES FROM (0) TO (10);
+         CREATE TABLE m2 PARTITION OF m FOR VALUES FROM (10) TO (20);
+         CREATE INDEX mi ON ONLY m (b)",
+    )
+    .expect("on only");
+    assert_eq!(index_state(&mut c, "m%"), [["mi", "I", "false", "false", "-"]]);
+    assert_eq!(rows(&mut c, "SELECT pg_get_indexdef('mi'::regclass)"), [["CREATE INDEX mi ON ONLY public.m USING btree (b)"]]);
+    c.batch_execute("CREATE INDEX m1i ON m1 (b); ALTER INDEX mi ATTACH PARTITION m1i").expect("attach");
+    assert_eq!(index_state(&mut c, "m%"), [["m1i", "i", "true", "true", "mi"], ["mi", "I", "false", "false", "-"]]);
+    // Attaching again to the same parent is a no-op.
+    c.batch_execute("ALTER INDEX mi ATTACH PARTITION m1i").expect("reattach");
+    let e = {
+        c.batch_execute("CREATE INDEX m2a ON m2 (a)").expect("m2a");
+        expect_code(c.batch_execute("ALTER INDEX mi ATTACH PARTITION m2a"), "42P17")
+    };
+    assert_eq!(message(&e), "cannot attach index \"m2a\" as a partition of index \"mi\"");
+    assert_eq!(detail(&e).as_deref(), Some("The index definitions do not match."));
+    let e = {
+        c.batch_execute("CREATE INDEX m1j ON m1 (b)").expect("m1j");
+        expect_code(c.batch_execute("ALTER INDEX mi ATTACH PARTITION m1j"), "55000")
+    };
+    assert_eq!(message(&e), "cannot attach index \"m1j\" as a partition of index \"mi\"");
+    assert_eq!(detail(&e).as_deref(), Some("Another index is already attached for partition \"m1\"."));
+    let e = expect_code(c.batch_execute("ALTER INDEX mi ATTACH PARTITION mi"), "55000");
+    assert_eq!(detail(&e).as_deref(), Some("Index \"mi\" is not an index on any partition of table \"m\"."));
+    let e = expect_code(c.batch_execute("ALTER INDEX m ATTACH PARTITION m1i"), "42809");
+    assert_eq!(message(&e), "\"m\" is not an index");
+    let e = expect_code(c.batch_execute("ALTER INDEX m1i ATTACH PARTITION m1i"), "42809");
+    assert_eq!(message(&e), "ALTER action ATTACH PARTITION cannot be performed on relation \"m1i\"");
+    let e = expect_code(c.batch_execute("ALTER INDEX mi ATTACH PARTITION m1"), "42P17");
+    assert_eq!(message(&e), "\"m1\" is not an index");
+    expect_code(c.batch_execute("ALTER INDEX mi ATTACH PARTITION nope"), "42P01");
+    let e = expect_code(c.batch_execute("DROP INDEX m1i"), "2BP01");
+    assert_eq!(message(&e), "cannot drop index m1i because index mi requires it");
+    // The last partition's index makes the parent valid.
+    c.batch_execute("CREATE INDEX m2i ON m2 (b); ALTER INDEX mi ATTACH PARTITION m2i").expect("attach m2i");
+    assert_eq!(rows(&mut c, "SELECT indisvalid::text FROM pg_index WHERE indexrelid = 'mi'::regclass"), [["true"]]);
+    assert_eq!(
+        rows(&mut c, "SELECT relid::text, coalesce(parentrelid::text, '-'), isleaf::text, level::text FROM pg_partition_tree('mi')"),
+        [["mi", "-", "false", "0"], ["m1i", "mi", "true", "1"], ["m2i", "mi", "true", "1"]]
+    );
+    assert_eq!(rows(&mut c, "SELECT relid::text FROM pg_partition_ancestors('m1i')"), [["m1i"], ["mi"]]);
+    assert_eq!(rows(&mut c, "SELECT pg_partition_root('m2i')::text"), [["mi"]]);
+    // Dropping the parent drops the attached indexes, not the others.
+    c.batch_execute("DROP INDEX mi").expect("drop parent");
+    assert_eq!(
+        rows(&mut c, "SELECT relname::text FROM pg_class WHERE relname LIKE 'm%' AND relkind IN ('i', 'I') ORDER BY 1"),
+        [["m1j"], ["m2a"]]
+    );
+    // ON ONLY on a partitioned table without partitions is valid; on a plain table it is a plain index.
+    c.batch_execute("CREATE TABLE e (a int) PARTITION BY LIST (a); CREATE INDEX ei ON ONLY e (a); CREATE TABLE t (a int); CREATE INDEX ti ON ONLY t (a)")
+        .expect("empty");
+    assert_eq!(index_state(&mut c, "%i"), [["ei", "I", "false", "true", "-"], ["ti", "i", "false", "true", "-"]]);
+}
+
+#[test]
+fn partitioned_index_hierarchies() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE p (a int, b int) PARTITION BY RANGE (a);
+         CREATE TABLE p1 PARTITION OF p FOR VALUES FROM (0) TO (10);
+         CREATE TABLE p2 PARTITION OF p FOR VALUES FROM (10) TO (20) PARTITION BY LIST (b);
+         CREATE TABLE p21 PARTITION OF p2 FOR VALUES IN (1);
+         CREATE TABLE p22 PARTITION OF p2 FOR VALUES IN (2);
+         CREATE INDEX mine ON p1 (b);
+         CREATE INDEX mine2 ON p1 (b);
+         CREATE INDEX ON p (b)",
+    )
+    .expect("schema");
+    // A regular CREATE INDEX adopts one matching index per partition and creates the rest.
+    assert_eq!(
+        index_state(&mut c, "%"),
+        [
+            ["mine", "i", "true", "true", "p_b_idx"],
+            ["mine2", "i", "false", "true", "-"],
+            ["p21_b_idx", "i", "true", "true", "p2_b_idx"],
+            ["p22_b_idx", "i", "true", "true", "p2_b_idx"],
+            ["p2_b_idx", "I", "true", "true", "p_b_idx"],
+            ["p_b_idx", "I", "false", "true", "-"],
+        ]
+    );
+    // Validity propagates up a multi-level hierarchy once every level is complete.
+    c.batch_execute(
+        "CREATE INDEX q ON ONLY p (a);
+         CREATE INDEX q2 ON ONLY p2 (a);
+         ALTER INDEX q ATTACH PARTITION q2;
+         CREATE INDEX q1 ON p1 (a);
+         ALTER INDEX q ATTACH PARTITION q1;
+         CREATE INDEX q21 ON p21 (a);
+         ALTER INDEX q2 ATTACH PARTITION q21",
+    )
+    .expect("levels");
+    let e = {
+        c.batch_execute("CREATE INDEX r0 ON ONLY p (a)").expect("r0");
+        expect_code(c.batch_execute("ALTER INDEX r0 ATTACH PARTITION q2"), "55000")
+    };
+    assert_eq!(detail(&e).as_deref(), Some("Index \"q2\" is already attached to another index."));
+    c.batch_execute("DROP INDEX r0").expect("drop r0");
+    assert_eq!(
+        index_state(&mut c, "q%"),
+        [
+            ["q", "I", "false", "false", "-"],
+            ["q1", "i", "true", "true", "q"],
+            ["q2", "I", "true", "false", "q"],
+            ["q21", "i", "true", "true", "q2"],
+        ]
+    );
+    c.batch_execute("CREATE INDEX q22 ON p22 (a); ALTER INDEX q2 ATTACH PARTITION q22").expect("q22");
+    assert_eq!(
+        rows(&mut c, "SELECT indisvalid::text FROM pg_index WHERE indexrelid IN ('q'::regclass, 'q2'::regclass)"),
+        [["true"], ["true"]]
+    );
+    // ATTACH PARTITION adopts a matching index and creates the missing ones; DETACH unlinks them.
+    c.batch_execute(
+        "CREATE TABLE p3 (a int, b int); CREATE INDEX p3b ON p3 (b); ALTER TABLE p ATTACH PARTITION p3 FOR VALUES FROM (20) TO (30)",
+    )
+    .expect("attach");
+    assert_eq!(index_state(&mut c, "p3%"), [["p3_a_idx", "i", "true", "true", "q"], ["p3b", "i", "true", "true", "p_b_idx"]]);
+    c.batch_execute("ALTER TABLE p DETACH PARTITION p3").expect("detach");
+    assert_eq!(index_state(&mut c, "p3%"), [["p3_a_idx", "i", "false", "true", "-"], ["p3b", "i", "false", "true", "-"]]);
+    c.batch_execute("DROP INDEX p3b").expect("detached index drops");
+    // A new partition gets an attached copy of an invalid parent index, which stays invalid.
+    c.batch_execute("CREATE INDEX r ON ONLY p (a, b); CREATE TABLE p4 PARTITION OF p FOR VALUES FROM (40) TO (50)").expect("p4");
+    assert_eq!(index_state(&mut c, "p4_a_b_idx"), [["p4_a_b_idx", "i", "true", "true", "r"]]);
+    assert_eq!(rows(&mut c, "SELECT indisvalid::text FROM pg_index WHERE indexrelid = 'r'::regclass"), [["false"]]);
+    // Two identical parent indexes get one partition index each.
+    c.batch_execute("CREATE TABLE x (a int) PARTITION BY LIST (a); CREATE TABLE x1 PARTITION OF x FOR VALUES IN (1); CREATE INDEX ON x (a); CREATE INDEX ON x (a)")
+        .expect("dupes");
+    assert_eq!(
+        index_state(&mut c, "x%"),
+        [
+            ["x1_a_idx", "i", "true", "true", "x_a_idx"],
+            ["x1_a_idx1", "i", "true", "true", "x_a_idx1"],
+            ["x_a_idx", "I", "false", "true", "-"],
+            ["x_a_idx1", "I", "false", "true", "-"],
+        ]
+    );
+}
+
+#[test]
+fn partitioned_key_indexes_are_attached() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE u (a int NOT NULL, b int NOT NULL, PRIMARY KEY (a)) PARTITION BY RANGE (a);
+         CREATE TABLE u1 PARTITION OF u FOR VALUES FROM (0) TO (10);
+         ALTER TABLE u ADD CONSTRAINT u_ab UNIQUE (a, b);
+         CREATE TABLE u2 (a int NOT NULL, b int NOT NULL);
+         ALTER TABLE u ATTACH PARTITION u2 FOR VALUES FROM (10) TO (20)",
+    )
+    .expect("schema");
+    assert_eq!(
+        index_state(&mut c, "u%"),
+        [
+            ["u1_a_b_key", "i", "true", "true", "u_ab"],
+            ["u1_pkey", "i", "true", "true", "u_pkey"],
+            ["u2_a_b_key", "i", "true", "true", "u_ab"],
+            ["u2_pkey", "i", "true", "true", "u_pkey"],
+            ["u_ab", "I", "false", "true", "-"],
+            ["u_pkey", "I", "false", "true", "-"],
+        ]
+    );
+    let e = expect_code(c.batch_execute("CREATE UNIQUE INDEX u_a ON ONLY u (a); ALTER INDEX u_a ATTACH PARTITION u1_pkey"), "55000");
+    assert_eq!(detail(&e).as_deref(), Some("Index \"u1_pkey\" is already attached to another index."));
+    let e = expect_code(c.batch_execute("DROP INDEX u1_pkey"), "2BP01");
+    assert_eq!(message(&e), "cannot drop index u1_pkey because index u_pkey requires it");
 }
 
 fn hint(e: &postgres::Error) -> String {
@@ -512,4 +708,236 @@ fn partition_of_after_dropped_column() {
         [["dp1", "1", "m", "2", "9"], ["dp2a", "2", "cp", "1", "3"], ["dp2a", "2", "n", "1", "5"], ["dp2b", "3", "dflt", "1", "7"],]
     );
     assert_eq!(rows(&mut c, "DELETE FROM dp WHERE a = 3 RETURNING tableoid::regclass::text, *"), [["dp2b", "3", "dflt", "1", "7"]]);
+}
+
+#[test]
+fn add_column_default_sets_atthasmissing_on_partitions_not_the_parent() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE hm (a int, b int) PARTITION BY RANGE (a); CREATE TABLE hm1 PARTITION OF hm FOR VALUES FROM (0) TO (10);
+         INSERT INTO hm VALUES (1, 1); ALTER TABLE hm ADD COLUMN c int DEFAULT 1;
+         CREATE TABLE hm2 PARTITION OF hm FOR VALUES FROM (10) TO (20)",
+    )
+    .expect("setup");
+    let q = "SELECT attrelid::regclass::text, atthasmissing FROM pg_attribute WHERE attrelid::regclass::text LIKE 'hm%' AND attname = 'c' ORDER BY 1";
+    assert_eq!(
+        texts(&mut c, q),
+        [[Some("hm".into()), Some("f".into())], [Some("hm1".into()), Some("t".into())], [Some("hm2".into()), Some("f".into())]]
+    );
+    assert_eq!(text_value(&mut c, "SELECT c FROM hm"), Some("1".into()));
+}
+
+fn detail_text(e: &postgres::Error) -> String {
+    e.as_db_error().and_then(|d| d.detail()).unwrap_or_default().to_owned()
+}
+
+#[test]
+fn partition_column_options_and_inherited_names() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE pn (a int NOT NULL, b int, e int DEFAULT 7, CONSTRAINT pn_b_ck CHECK (b < 100)) PARTITION BY RANGE (a);
+         CREATE TABLE pn1 PARTITION OF pn (e DEFAULT 42) FOR VALUES FROM (0) TO (10)",
+    )
+    .expect("partition with column options");
+    // The partition's own default applies when inserting into it, the parent's through the parent.
+    c.batch_execute("INSERT INTO pn1 (a, b) VALUES (1, 1); INSERT INTO pn (a, b) VALUES (2, 2)").expect("insert");
+    assert_eq!(rows(&mut c, "SELECT a::text, e::text FROM pn ORDER BY a"), [["1", "42"], ["2", "7"]]);
+    // A partition keeps the parent's NOT NULL constraint name.
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT conrelid::regclass::text, conname FROM pg_constraint WHERE contype = 'n' AND conrelid IN ('pn'::regclass, 'pn1'::regclass) ORDER BY 1"
+        ),
+        [["pn", "pn_a_not_null"], ["pn1", "pn_a_not_null"]]
+    );
+    // A CHECK violated through the parent names the partition the row routed to.
+    let e = expect_code(c.batch_execute("INSERT INTO pn VALUES (3, 200, 1)"), "23514");
+    assert_eq!(message(&e), "new row for relation \"pn1\" violates check constraint \"pn_b_ck\"");
+    assert_eq!(detail_text(&e), "Failing row contains (3, 200, 1).");
+    // Neighbouring behaviour: no partition for the row is reported before CHECKs.
+    let e = expect_code(c.batch_execute("INSERT INTO pn VALUES (30, 200, 1)"), "23514");
+    assert_eq!(message(&e), "no partition of relation \"pn\" found for row");
+}
+
+#[test]
+fn referenced_partitioned_table_error_names_the_partition() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE rp (a int PRIMARY KEY) PARTITION BY RANGE (a);
+         CREATE TABLE rp1 PARTITION OF rp FOR VALUES FROM (0) TO (10);
+         CREATE TABLE rp2 PARTITION OF rp FOR VALUES FROM (10) TO (20) PARTITION BY RANGE (a);
+         CREATE TABLE rp2a PARTITION OF rp2 FOR VALUES FROM (10) TO (15);
+         CREATE TABLE rc (x int CONSTRAINT rc_fk REFERENCES rp (a));
+         INSERT INTO rp VALUES (1), (12);
+         INSERT INTO rc VALUES (1), (12)",
+    )
+    .expect("schema");
+    let e = expect_code(c.batch_execute("DELETE FROM rp WHERE a = 1"), "23503");
+    assert_eq!(message(&e), "update or delete on table \"rp1\" violates foreign key constraint \"rc_fk_1\" on table \"rc\"");
+    assert_eq!(detail_text(&e), "Key (a)=(1) is still referenced from table \"rc\".");
+    let e = expect_code(c.batch_execute("DELETE FROM rp WHERE a = 12"), "23503");
+    assert_eq!(message(&e), "update or delete on table \"rp2a\" violates foreign key constraint \"rc_fk_3\" on table \"rc\"");
+    let e = expect_code(c.batch_execute("DELETE FROM rp2a WHERE a = 12"), "23503");
+    assert_eq!(message(&e), "update or delete on table \"rp2a\" violates foreign key constraint \"rc_fk_3\" on table \"rc\"");
+    // A plain referenced table still names itself and the constraint as declared.
+    c.batch_execute("CREATE TABLE pk (id int PRIMARY KEY); CREATE TABLE pkc (x int CONSTRAINT pkc_fk REFERENCES pk); INSERT INTO pk VALUES (1); INSERT INTO pkc VALUES (1)")
+        .expect("plain");
+    let e = expect_code(c.batch_execute("DELETE FROM pk"), "23503");
+    assert_eq!(message(&e), "update or delete on table \"pk\" violates foreign key constraint \"pkc_fk\" on table \"pkc\"");
+}
+
+#[test]
+fn new_partitions_reset_missing_defaults() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE mp (a int) PARTITION BY RANGE (a);
+         CREATE TABLE mp1 PARTITION OF mp FOR VALUES FROM (0) TO (10);
+         ALTER TABLE mp ADD COLUMN z int DEFAULT 5;
+         CREATE TABLE mp2 PARTITION OF mp FOR VALUES FROM (10) TO (20)",
+    )
+    .expect("schema");
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT attrelid::regclass::text, atthasmissing::text FROM pg_attribute WHERE attname = 'z' AND attrelid IN ('mp1'::regclass, 'mp2'::regclass) ORDER BY 1"
+        ),
+        [["mp1", "true"], ["mp2", "false"]]
+    );
+}
+
+#[test]
+fn drop_schema_cascade_notice() {
+    let (db, mut c) = setup();
+    c.batch_execute(
+        "CREATE SCHEMA ds;
+         CREATE TABLE ds.pt (a serial) PARTITION BY RANGE (a);
+         CREATE TABLE ds.pt1 PARTITION OF ds.pt FOR VALUES FROM (0) TO (5);
+         CREATE SEQUENCE ds.sq;
+         CREATE TABLE ds.t2 (a int)",
+    )
+    .expect("schema");
+    let mut raw = crate::support::RawConn::connect(&db, &mut c);
+    // Dependents are listed in creation order, partitions are not listed (the table
+    // drops them), and the list is the DETAIL.
+    let r = raw.query("DROP SCHEMA ds");
+    assert_eq!(r.errors, ["2BP01"]);
+    let r = raw.query("DROP SCHEMA ds CASCADE");
+    assert_eq!(
+        r.notices,
+        ["drop cascades to 3 other objects\ndrop cascades to table ds.pt\ndrop cascades to sequence ds.sq\ndrop cascades to table ds.t2"]
+    );
+    // One dependent: just the message.
+    c.batch_execute("CREATE SCHEMA ds1; CREATE TABLE ds1.solo (a int)").expect("schema");
+    let r = raw.query("DROP SCHEMA ds1 CASCADE");
+    assert_eq!(r.notices, ["drop cascades to table ds1.solo"]);
+}
+
+#[test]
+fn merge_into_partitioned_table() {
+    let (_db, mut c) = setup();
+    schema(&mut c);
+    c.batch_execute("INSERT INTO ev VALUES (1, 'eu', '2024-03-01', 1), (2, 'us', '2024-03-01', 2), (3, 'eu', '2025-03-01', 3)")
+        .expect("seed");
+    // MATCHED UPDATE (in place and moving to another partition), DELETE, NOT MATCHED INSERT
+    // routed to its leaf; RETURNING sees each row's leaf as tableoid.
+    let mut out = rows(
+        &mut c,
+        "MERGE INTO ev t USING (VALUES (1, 'us'), (2, 'us'), (4, 'eu'), (3, 'eu')) s(id, r) ON t.id = s.id
+           WHEN MATCHED AND s.id = 1 THEN UPDATE SET region = s.r, v = 10
+           WHEN MATCHED AND s.id = 2 THEN UPDATE SET v = 20
+           WHEN MATCHED AND s.id = 3 THEN DELETE
+           WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.r, '2025-05-05')
+           RETURNING merge_action(), t.tableoid::regclass::text, t.id::text, t.region, coalesce(old.v::text, '-'), coalesce(new.v::text, '-')",
+    );
+    out.sort();
+    assert_eq!(
+        out,
+        [
+            ["DELETE", "ev_eu_25", "3", "eu", "3", "-"],
+            ["INSERT", "ev_eu_25", "4", "eu", "-", "7"],
+            ["UPDATE", "ev_us", "1", "us", "1", "10"],
+            ["UPDATE", "ev_us", "2", "us", "2", "20"],
+        ]
+    );
+    assert_eq!(
+        rows(&mut c, "SELECT tableoid::regclass::text, id::text, region, at::text, v::text FROM ev ORDER BY id"),
+        [["ev_us", "1", "us", "2024-03-01", "10"], ["ev_us", "2", "us", "2024-03-01", "20"], ["ev_eu_25", "4", "eu", "2025-05-05", "7"]]
+    );
+    let e = expect_code(
+        c.batch_execute("MERGE INTO ev t USING (VALUES (9, 'mars')) s(id, r) ON t.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.r, '2025-05-05')"),
+        "23514",
+    );
+    assert_eq!(message(&e), "no partition of relation \"ev\" found for row");
+    // NOT MATCHED BY SOURCE, DO NOTHING.
+    let mut out = rows(
+        &mut c,
+        "MERGE INTO ev t USING (VALUES (1)) s(id) ON t.id = s.id WHEN NOT MATCHED BY SOURCE THEN DELETE RETURNING merge_action(), t.tableoid::regclass::text, t.id::text",
+    );
+    out.sort();
+    assert_eq!(out, [["DELETE", "ev_eu_25", "4"], ["DELETE", "ev_us", "2"]]);
+    let n = c.execute("MERGE INTO ev t USING (VALUES (1)) s(id) ON t.id = s.id WHEN MATCHED THEN DO NOTHING", &[]).expect("do nothing");
+    assert_eq!(n, 0);
+    // Unique keys are checked per partition (named after it).
+    c.batch_execute("INSERT INTO ev VALUES (2, 'us', '2024-03-01')").expect("seed");
+    let e =
+        expect_code(c.batch_execute("MERGE INTO ev t USING (VALUES (1)) s(a) ON t.id = s.a WHEN MATCHED THEN UPDATE SET id = 2"), "23505");
+    assert_eq!(message(&e), "duplicate key value violates unique constraint \"ev_us_pkey\"");
+    // A target that is itself a partition: its constraint, then routing below it.
+    c.batch_execute("INSERT INTO ev VALUES (5, 'eu', '2024-02-02')").expect("seed");
+    let e = expect_code(
+        c.batch_execute("MERGE INTO ev_eu t USING (VALUES (5)) s(id) ON t.id = s.id WHEN MATCHED THEN UPDATE SET region = 'us'"),
+        "23514",
+    );
+    assert_eq!(message(&e), "new row for relation \"ev_eu\" violates partition constraint");
+    let e = expect_code(
+        c.batch_execute("MERGE INTO ev_eu t USING (VALUES (5)) s(id) ON t.id = s.id WHEN MATCHED THEN UPDATE SET at = '2030-01-01'"),
+        "23514",
+    );
+    assert_eq!(message(&e), "no partition of relation \"ev_eu\" found for row");
+    let e = expect_code(
+        c.batch_execute("MERGE INTO ev_us t USING (VALUES (2)) s(id) ON t.id = s.id WHEN MATCHED THEN UPDATE SET region = 'eu'"),
+        "23514",
+    );
+    assert_eq!(message(&e), "new row for relation \"ev_us\" violates partition constraint");
+    assert_eq!(
+        rows(
+            &mut c,
+            "MERGE INTO ev_eu t USING (VALUES (5)) s(id) ON t.id = s.id WHEN MATCHED THEN UPDATE SET at = '2025-02-02' RETURNING t.tableoid::regclass::text"
+        ),
+        [["ev_eu_25"]]
+    );
+}
+
+#[test]
+fn merge_returning_system_columns() {
+    let (_db, mut c) = setup();
+    c.batch_execute("CREATE TABLE mp (a int); INSERT INTO mp VALUES (1)").expect("setup");
+    let mut out = rows(
+        &mut c,
+        "MERGE INTO mp p USING (VALUES (1), (2)) s(a) ON p.a = s.a WHEN MATCHED THEN UPDATE SET a = 3
+           WHEN NOT MATCHED THEN INSERT VALUES (s.a) RETURNING p.tableoid::regclass::text, merge_action(), p.a::text",
+    );
+    out.sort();
+    assert_eq!(out, [["mp", "INSERT", "2"], ["mp", "UPDATE", "3"]]);
+}
+
+#[test]
+fn merge_into_partitioned_table_foreign_keys() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE ma (id int PRIMARY KEY) PARTITION BY HASH (id);
+         CREATE TABLE ma0 PARTITION OF ma FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+         CREATE TABLE ma1 PARTITION OF ma FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+         INSERT INTO ma SELECT generate_series(1, 4);
+         CREATE TABLE mt (acct int REFERENCES ma ON DELETE CASCADE);
+         INSERT INTO mt VALUES (1), (2), (3)",
+    )
+    .expect("setup");
+    assert_eq!(
+        c.execute("MERGE INTO ma t USING (VALUES (1), (2), (9)) s(id) ON t.id = s.id WHEN MATCHED THEN DELETE WHEN NOT MATCHED THEN INSERT VALUES (s.id)", &[])
+            .expect("merge"),
+        3
+    );
+    assert_eq!(rows(&mut c, "SELECT string_agg(acct::text, ',' ORDER BY acct) FROM mt"), [["3"]]);
+    assert_eq!(rows(&mut c, "SELECT string_agg(id::text, ',' ORDER BY id) FROM ma"), [["3,4,9"]]);
 }

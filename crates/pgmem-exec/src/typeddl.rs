@@ -422,6 +422,8 @@ enum Dependent {
     Domain { name: QualName, oid: Oid },
     /// An attribute of a composite type.
     Attribute { ty: QualName, oid: Oid, field: String },
+    /// A user-defined cast from or to the type.
+    Cast { oid: Oid, label: String },
 }
 
 impl Dependent {
@@ -430,6 +432,7 @@ impl Dependent {
             Dependent::Column { table, column, .. } => format!("column {column} of table {}", table.name),
             Dependent::Domain { name, .. } => format!("type {}", name.name),
             Dependent::Attribute { ty, field, .. } => format!("column {field} of composite type {}", ty.name),
+            Dependent::Cast { label, .. } => label.clone(),
         }
     }
 
@@ -437,7 +440,7 @@ impl Dependent {
     fn order(&self) -> (Oid, usize) {
         match self {
             Dependent::Column { table_oid, slot, .. } => (*table_oid, *slot),
-            Dependent::Domain { oid, .. } | Dependent::Attribute { oid, .. } => (*oid, 0),
+            Dependent::Domain { oid, .. } | Dependent::Attribute { oid, .. } | Dependent::Cast { oid, .. } => (*oid, 0),
         }
     }
 }
@@ -474,6 +477,9 @@ fn dependents(cat: &Catalog, oid: Oid) -> Vec<Dependent> {
             }
             _ => {}
         }
+    }
+    for c in cat.casts().filter(|c| type_mentions(&c.source, oid) || type_mentions(&c.target, oid)) {
+        direct.push(Dependent::Cast { oid: c.oid, label: crate::usercast::describe(c) });
     }
     via_array.sort_by_key(Dependent::order);
     direct.sort_by_key(Dependent::order);
@@ -554,6 +560,9 @@ fn drop_one(
                 if let Some(inner) = txn.catalog().type_by_name(&name.schema, &name.name).cloned() {
                     drop_one(txn, &inner, true, dropped, env, state)?;
                 }
+            }
+            Dependent::Cast { oid, .. } => {
+                txn.catalog_mut().drop_cast(oid);
             }
             Dependent::Attribute { ty, field, .. } => {
                 if let Some(t) = txn.catalog().type_by_name(&ty.schema, &ty.name).cloned() {

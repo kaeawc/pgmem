@@ -224,6 +224,179 @@ fn instead_of_triggers_make_views_writable() {
 }
 
 #[test]
+fn merge_fires_row_and_statement_triggers() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE acct (id int PRIMARY KEY, bal int, trail text NOT NULL DEFAULT '');
+         CREATE TABLE log (n serial, what text);
+         INSERT INTO acct VALUES (1, 10, ''), (2, 20, ''), (3, 30, '');
+         CREATE FUNCTION mark() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+           IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+           NEW.trail := NEW.trail || TG_OP || ';'; RETURN NEW; END $$;
+         CREATE FUNCTION logit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+           IF TG_LEVEL = 'STATEMENT' THEN INSERT INTO log (what) VALUES (TG_WHEN || ' ' || TG_OP);
+           ELSIF TG_OP = 'DELETE' THEN INSERT INTO log (what) VALUES (concat_ws(' ', 'row', TG_OP, OLD.id, OLD.bal, OLD.trail));
+           ELSIF TG_OP = 'UPDATE' THEN INSERT INTO log (what) VALUES (concat_ws(' ', 'row', TG_OP, OLD.id, OLD.bal, OLD.trail, '->', NEW.bal, NEW.trail));
+           ELSE INSERT INTO log (what) VALUES (concat_ws(' ', 'row', TG_OP, NEW.id, NEW.bal, NEW.trail)); END IF;
+           RETURN NULL; END $$;
+         CREATE TRIGGER b_row BEFORE INSERT OR UPDATE OR DELETE ON acct FOR EACH ROW EXECUTE FUNCTION mark();
+         CREATE TRIGGER a_row AFTER INSERT OR UPDATE OR DELETE ON acct FOR EACH ROW EXECUTE FUNCTION logit();
+         CREATE TRIGGER b_stmt BEFORE INSERT OR UPDATE OR DELETE ON acct FOR EACH STATEMENT EXECUTE FUNCTION logit();
+         CREATE TRIGGER a_stmt AFTER INSERT OR UPDATE OR DELETE ON acct FOR EACH STATEMENT EXECUTE FUNCTION logit();",
+    )
+    .expect("setup");
+    // One row per action: BEFORE statement triggers fire INSERT, UPDATE, DELETE; AFTER ones
+    // DELETE, UPDATE, INSERT; BEFORE row triggers see (and change) NEW.
+    assert_eq!(
+        rows(
+            &mut c,
+            "MERGE INTO acct a USING (VALUES (1, 5)) s(id, d) ON a.id = s.id
+               WHEN MATCHED THEN UPDATE SET bal = a.bal + s.d
+               WHEN NOT MATCHED BY SOURCE AND a.id = 2 THEN DELETE
+               WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.d)
+               RETURNING merge_action(), a.id, a.trail"
+        ),
+        [["UPDATE", "1", "UPDATE;"], ["DELETE", "2", ""]]
+    );
+    c.batch_execute("MERGE INTO acct a USING (VALUES (4, 40)) s(id, d) ON a.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.d)")
+        .expect("insert");
+    assert_eq!(
+        rows(&mut c, "SELECT what FROM log ORDER BY n"),
+        [
+            ["BEFORE INSERT"],
+            ["BEFORE UPDATE"],
+            ["BEFORE DELETE"],
+            ["row UPDATE 1 10  -> 15 UPDATE;"],
+            ["row DELETE 2 20 "],
+            ["AFTER DELETE"],
+            ["AFTER UPDATE"],
+            ["AFTER INSERT"],
+            ["BEFORE INSERT"],
+            ["row INSERT 4 40 INSERT;"],
+            ["AFTER INSERT"],
+        ]
+    );
+    // Statement triggers fire for every action type listed, even when no row matches; DO
+    // NOTHING fires none.
+    c.batch_execute(
+        "TRUNCATE log;
+         MERGE INTO acct a USING (VALUES (9, 9)) s(id, d) ON a.id = s.id WHEN MATCHED THEN UPDATE SET bal = 0;
+         MERGE INTO acct a USING (VALUES (1, 1)) s(id, d) ON a.id = s.id WHEN MATCHED THEN DO NOTHING",
+    )
+    .expect("no rows");
+    assert_eq!(rows(&mut c, "SELECT what FROM log ORDER BY n"), [["BEFORE UPDATE"], ["AFTER UPDATE"]]);
+    // A BEFORE row trigger returning NULL skips the row: not counted, not returned, and not
+    // "affected a second time" when another source row matches it.
+    c.batch_execute(
+        "TRUNCATE log;
+         CREATE FUNCTION skip_odd() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+           IF TG_OP = 'DELETE' THEN IF OLD.id % 2 = 1 THEN RETURN NULL; END IF; RETURN OLD; END IF;
+           IF NEW.id % 2 = 1 THEN RETURN NULL; END IF; RETURN NEW; END $$;
+         CREATE TRIGGER skip BEFORE INSERT OR UPDATE OR DELETE ON acct FOR EACH ROW EXECUTE FUNCTION skip_odd();",
+    )
+    .expect("skip trigger");
+    assert_eq!(
+        rows(
+            &mut c,
+            "MERGE INTO acct a USING (VALUES (1, 1), (1, 2), (3, 3), (4, 4), (5, 5), (6, 6)) s(id, d) ON a.id = s.id
+               WHEN MATCHED AND s.id = 3 THEN DELETE
+               WHEN MATCHED THEN UPDATE SET bal = s.d
+               WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.d)
+               RETURNING merge_action(), a.id, a.bal"
+        ),
+        [["UPDATE", "4", "4"], ["INSERT", "6", "6"]]
+    );
+    assert_eq!(rows(&mut c, "SELECT id, bal FROM acct ORDER BY id"), [["1", "15"], ["3", "30"], ["4", "4"], ["6", "6"]]);
+    // UPDATE OF fires for the columns of every UPDATE action listed (here `trail`, though the
+    // row took the other action); WHEN filters rows.
+    c.batch_execute(
+        "DROP TRIGGER skip ON acct; DROP TRIGGER b_row ON acct; DROP TRIGGER a_row ON acct; DROP TRIGGER b_stmt ON acct; DROP TRIGGER a_stmt ON acct;
+         CREATE TRIGGER of_trail AFTER UPDATE OF trail ON acct FOR EACH ROW EXECUTE FUNCTION logit();
+         CREATE TRIGGER of_trail_s AFTER UPDATE OF trail ON acct FOR EACH STATEMENT EXECUTE FUNCTION logit();
+         CREATE TRIGGER big AFTER UPDATE ON acct FOR EACH ROW WHEN (NEW.bal > 100) EXECUTE FUNCTION logit();
+         TRUNCATE log;
+         MERGE INTO acct a USING (VALUES (4, 7)) s(id, d) ON a.id = s.id WHEN MATCHED AND s.d = 0 THEN UPDATE SET trail = 'x' WHEN MATCHED THEN UPDATE SET bal = s.d;
+         MERGE INTO acct a USING (VALUES (6, 700)) s(id, d) ON a.id = s.id WHEN MATCHED THEN UPDATE SET bal = s.d;",
+    )
+    .expect("update of");
+    assert_eq!(
+        rows(&mut c, "SELECT what FROM log ORDER BY n"),
+        [["row UPDATE 4 4 INSERT;UPDATE; -> 7 INSERT;UPDATE;"], ["AFTER UPDATE"], ["row UPDATE 6 6 INSERT; -> 700 INSERT;"]]
+    );
+}
+
+#[test]
+fn merge_fires_partition_row_triggers() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE p (id int, v int) PARTITION BY RANGE (id);
+         CREATE TABLE p1 PARTITION OF p FOR VALUES FROM (0) TO (10);
+         CREATE TABLE p2 PARTITION OF p FOR VALUES FROM (10) TO (20);
+         CREATE TABLE log (n serial, what text);
+         INSERT INTO p VALUES (1, 1), (2, 2);
+         CREATE FUNCTION logit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+           INSERT INTO log (what) VALUES (TG_TABLE_NAME || ' ' || TG_WHEN || ' ' || TG_LEVEL || ' ' || TG_OP);
+           IF TG_OP = 'DELETE' THEN RETURN OLD; END IF; RETURN NEW; END $$;
+         CREATE FUNCTION bump() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.v := NEW.v + 100; RETURN NEW; END $$;
+         CREATE TRIGGER s1 BEFORE INSERT OR UPDATE OR DELETE ON p FOR EACH STATEMENT EXECUTE FUNCTION logit();
+         CREATE TRIGGER s2 AFTER INSERT OR UPDATE OR DELETE ON p FOR EACH STATEMENT EXECUTE FUNCTION logit();
+         CREATE TRIGGER l1s BEFORE INSERT OR UPDATE OR DELETE ON p1 FOR EACH STATEMENT EXECUTE FUNCTION logit();
+         CREATE TRIGGER l1a AFTER INSERT OR UPDATE OR DELETE ON p1 FOR EACH ROW EXECUTE FUNCTION logit();
+         CREATE TRIGGER l2a AFTER INSERT OR UPDATE OR DELETE ON p2 FOR EACH ROW EXECUTE FUNCTION logit();
+         CREATE TRIGGER l2b BEFORE INSERT ON p2 FOR EACH ROW EXECUTE FUNCTION bump();",
+    )
+    .expect("setup");
+    // A row moving to another partition is deleted from one leaf and inserted into the other;
+    // the statement triggers are the target's, the row triggers the leaves'.
+    c.batch_execute(
+        "MERGE INTO p USING (VALUES (1)) s(id) ON p.id = s.id WHEN MATCHED THEN UPDATE SET id = 15;
+         MERGE INTO p USING (VALUES (2)) s(id) ON p.id = s.id WHEN MATCHED THEN UPDATE SET v = 3;
+         MERGE INTO p USING (VALUES (13)) s(id) ON p.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (s.id, 0);",
+    )
+    .expect("merge");
+    assert_eq!(
+        rows(&mut c, "SELECT what FROM log ORDER BY n"),
+        [
+            ["p BEFORE STATEMENT UPDATE"],
+            ["p1 AFTER ROW DELETE"],
+            ["p2 AFTER ROW INSERT"],
+            ["p AFTER STATEMENT UPDATE"],
+            ["p BEFORE STATEMENT UPDATE"],
+            ["p1 AFTER ROW UPDATE"],
+            ["p AFTER STATEMENT UPDATE"],
+            ["p BEFORE STATEMENT INSERT"],
+            ["p2 AFTER ROW INSERT"],
+            ["p AFTER STATEMENT INSERT"],
+        ]
+    );
+    assert_eq!(
+        rows(&mut c, "SELECT tableoid::regclass::text, id, v FROM p ORDER BY id"),
+        [["p1", "2", "3"], ["p2", "13", "100"], ["p2", "15", "101"]]
+    );
+}
+
+#[test]
+fn returning_old_new_system_columns() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE r (a int);
+         CREATE TABLE rp (a int) PARTITION BY LIST (a);
+         CREATE TABLE rp1 PARTITION OF rp FOR VALUES IN (1);
+         CREATE TABLE rp2 PARTITION OF rp FOR VALUES IN (2);
+         INSERT INTO rp VALUES (2)",
+    )
+    .expect("setup");
+    let q = "old.tableoid::regclass::text, new.tableoid::regclass::text";
+    assert_eq!(rows(&mut c, &format!("INSERT INTO r VALUES (1) RETURNING {q}, old.ctid IS NULL")), [["NULL", "r", "t"]]);
+    assert_eq!(rows(&mut c, &format!("UPDATE r SET a = 2 RETURNING {q}")), [["r", "r"]]);
+    assert_eq!(rows(&mut c, &format!("DELETE FROM r RETURNING {q}, new.ctid IS NULL")), [["r", "NULL", "t"]]);
+    assert_eq!(
+        rows(&mut c, &format!("MERGE INTO rp USING (VALUES (2)) s(a) ON rp.a = s.a WHEN MATCHED THEN UPDATE SET a = 1 RETURNING {q}")),
+        [["rp2", "rp1"]]
+    );
+}
+
+#[test]
 fn before_row_trigger_writes_another_table() {
     // #174: a BEFORE row trigger may modify other tables (BEFORE UPDATE and DELETE too).
     let (_db, mut c) = setup();

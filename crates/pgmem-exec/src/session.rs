@@ -72,6 +72,9 @@ pub struct SessionEnv {
     pub objects: Arc<SessionObjects>,
     /// SET CONSTRAINTS state of the current transaction.
     pub constraint_modes: Arc<ConstraintModes>,
+    /// While a SECURITY DEFINER function runs: its owner, the current user for the call
+    /// (session_user and the `role` setting are unchanged).
+    pub security_definer: Option<String>,
 }
 
 /// `SET CONSTRAINTS` within a transaction: ALL, then per-constraint overrides.
@@ -110,6 +113,7 @@ impl SessionEnv {
             lastval: None,
             objects: Arc::default(),
             constraint_modes: Arc::default(),
+            security_definer: None,
         }
     }
 }
@@ -334,6 +338,7 @@ impl Session {
             lastval: self.lastval,
             objects: self.objects(),
             constraint_modes: Arc::new(self.constraint_modes.clone()),
+            security_definer: None,
         }
     }
 
@@ -424,11 +429,7 @@ impl Session {
             None => crate::usertypes::registry(&self.db.current().catalog),
         };
         let bytea_escape = self.settings.get("bytea_output").is_some_and(|v| v.eq_ignore_ascii_case("escape"));
-        let search_path = pgmem_types::context::SearchPath {
-            entries: pgmem_types::context::SearchPath::parse(self.settings.get("search_path").map_or("", String::as_str)),
-            user: self.user.clone(),
-            temp_schema: self.temp_schema.clone(),
-        };
+        let search_path = self.search_path_context();
         Context {
             zone,
             date_order,
@@ -440,6 +441,34 @@ impl Session {
             bytea_escape,
             search_path,
         }
+    }
+
+    /// The search path names resolve with (`recomputeNamespacePath`): `$user` is the current
+    /// role, and a role that is not a superuser skips schemas it has no USAGE on.
+    fn search_path_context(&self) -> pgmem_types::context::SearchPath {
+        let mut entries = pgmem_types::context::SearchPath::parse(self.settings.get("search_path").map_or("", String::as_str));
+        let role = match self.settings.get("role") {
+            Some(r) if !r.is_empty() && r != "none" => r.clone(),
+            _ => self.user.clone(),
+        };
+        let mut no_usage = Vec::new();
+        if role != self.user {
+            let current;
+            let catalog = match &self.txn {
+                Some(t) => t.catalog(),
+                None => {
+                    current = self.db.current();
+                    &current.catalog
+                }
+            };
+            let env = SessionEnv { user: self.user.clone(), ..SessionEnv::detached() };
+            no_usage = crate::roles::schemas_without_usage(catalog, &env, &role);
+            entries.retain(|e| {
+                let schema = if e == "$user" { role.as_str() } else { e.as_str() };
+                !no_usage.iter().any(|s| s == schema)
+            });
+        }
+        pgmem_types::context::SearchPath { entries, user: role, temp_schema: self.temp_schema.clone(), no_usage }
     }
 
     /// Analyzes a statement without running it: parameter types and result columns.
@@ -611,8 +640,14 @@ impl Session {
                 temp_stmt = Statement::CreateTable(Box::new(ct));
                 &temp_stmt
             }
-            (Statement::CreateSchema(cs), _) => return create_schema_with_elements(cs, txn, &user, &env, &state),
+            (Statement::CreateSchema(cs), _) => {
+                // A new schema is owned by the current role (SET ROLE's), not the session user.
+                let owner = crate::roles::current_role(&env);
+                crate::ownership::check_ddl(stmt, txn.catalog(), &env)?;
+                return create_schema_with_elements(cs, txn, &owner, &env, &state);
+            }
             (Statement::AlterSchema { name, rename_to }, _) => {
+                crate::ownership::check_ddl(stmt, txn.catalog(), &env)?;
                 return match rename_to {
                     Some(new) => crate::ddl::alter_schema(name, new, txn),
                     None => Ok(QueryResult { tag: "ALTER SCHEMA".into(), ..Default::default() }),
@@ -636,7 +671,9 @@ impl Session {
         for (oid, mode) in crate::lock_levels::ddl_locks(stmt, &catalog) {
             txn.lock_relation(oid, mode);
         }
-        let result = crate::statement::exec_statement(stmt, &binder, &ctx, txn, params, &env, &state)?;
+        let result = crate::detail_privileges::as_viewer(&catalog, &env, stmt, || {
+            crate::statement::exec_statement(stmt, &binder, &ctx, txn, params, &env, &state)
+        })?;
         for (oid, mode) in crate::lock_levels::created_locks(stmt, &catalog, txn.catalog()) {
             txn.lock_relation(oid, mode);
         }
@@ -657,7 +694,18 @@ impl Session {
             }
             let schema = rel.schema().to_owned();
             crate::roles::apply_defaults(txn, &env, rel.oid(), &schema, kind);
+            // Serial / identity sequences are created with their table.
+            if let Relation::Table(t) = &rel {
+                let seqs: Vec<(Oid, String)> = txn.catalog().owned_sequences(t).map(|q| (q.oid, q.schema.clone())).collect();
+                for (oid, schema) in seqs {
+                    if role != env.user {
+                        txn.catalog_mut().set_owner(oid, Some(&role));
+                    }
+                    crate::roles::apply_defaults(txn, &env, oid, &schema, 'S');
+                }
+            }
         }
+        record_new_owner(stmt, &catalog, txn, &env);
         if let Statement::CreateTable(ct) = stmt
             && ct.options.on_commit != ir::OnCommit::PreserveRows
             && let Ok(Some(Relation::Table(t))) = txn.catalog().lookup_relation(&ct.name)
@@ -1307,7 +1355,7 @@ fn write_command_name(stmt: &Statement) -> Option<&'static str> {
         Statement::CreateView(_) => "CREATE VIEW",
         Statement::RefreshMatview { .. } => "REFRESH MATERIALIZED VIEW",
         Statement::RenameView { .. } => "ALTER VIEW",
-        Statement::RenameIndex { .. } => "ALTER INDEX",
+        Statement::RenameIndex { .. } | Statement::AttachIndexPartition { .. } => "ALTER INDEX",
         Statement::AlterRelOptions { object, .. } => crate::reloptions::alter_tag(*object),
         Statement::AlterSequence { .. } => "ALTER SEQUENCE",
         Statement::CreateFunction(cf) if cf.procedure => "CREATE PROCEDURE",
@@ -1317,6 +1365,12 @@ fn write_command_name(stmt: &Statement) -> Option<&'static str> {
         Statement::CreateTrigger(_) => "CREATE TRIGGER",
         Statement::DropTrigger { .. } => "DROP TRIGGER",
         Statement::RenameTrigger { .. } => "ALTER TRIGGER",
+        Statement::AlterExtension { .. } => "ALTER EXTENSION",
+        Statement::AlterStatistics { .. } => "ALTER STATISTICS",
+        Statement::CreateCast(_) => "CREATE CAST",
+        Statement::CreateStatistics(_) => "CREATE STATISTICS",
+        Statement::DropCast { .. } => "DROP CAST",
+        Statement::DropStatistics { .. } => "DROP STATISTICS",
         Statement::CreateIndex(_) => "CREATE INDEX",
         Statement::CreateSequence(_) => "CREATE SEQUENCE",
         Statement::AlterTable(_) => "ALTER TABLE",
@@ -1377,6 +1431,27 @@ fn ensure_temp_schema(txn: &mut Txn, temp: &str, user: &str) {
 
 /// `CREATE SCHEMA s CREATE TABLE ... CREATE VIEW ...`: the elements are created with the new
 /// schema as the only search path entry, as Postgres does.
+/// A new type, domain or extension is owned by the role that creates it (the session user,
+/// the implicit owner, is not recorded).
+fn record_new_owner(stmt: &Statement, before: &pgmem_catalog::Catalog, txn: &mut Txn, env: &SessionEnv) {
+    let role = crate::roles::current_role(env);
+    if role == env.user {
+        return;
+    }
+    let oid = match stmt {
+        Statement::CreateType(ct) => txn.catalog().lookup_type(&ct.name).ok().flatten().map(|t| t.oid),
+        Statement::CreateDomain(cd) => txn.catalog().lookup_type(&cd.name).ok().flatten().map(|t| t.oid),
+        Statement::CreateExtension { name, .. } => {
+            txn.catalog().extension(name).filter(|_| before.extension(name).is_none()).map(|e| e.oid)
+        }
+        _ => None,
+    };
+    let is_new = |oid: Oid| before.types().all(|t| t.oid != oid) && before.extensions().all(|e| e.oid != oid);
+    if let Some(oid) = oid.filter(|o| is_new(*o)) {
+        txn.catalog_mut().set_owner(oid, Some(&role));
+    }
+}
+
 fn create_schema_with_elements(
     cs: &ir::CreateSchema,
     txn: &mut Txn,
