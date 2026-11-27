@@ -9,6 +9,7 @@ use pgmem_ir::{
 };
 use pgmem_types::{SqlError, SqlResult, code};
 use sqlparser::ast as sq;
+use sqlparser::ast::Spanned;
 
 fn referential(a: Option<sq::ReferentialAction>) -> ReferentialAction {
     match a {
@@ -27,9 +28,16 @@ fn delete_set_columns(action: ReferentialAction) -> Vec<String> {
 }
 
 fn index_column_names(cols: &[sq::IndexColumn]) -> SqlResult<Vec<String>> {
+    // Postgres points at the constraint (not the column) when a key names an unknown column.
+    let element = cols.first().and_then(|c| crate::element_start(c.span().start, 1));
     cols.iter()
         .map(|c| match &c.column.expr {
-            sq::Expr::Identifier(i) => Ok(ident(i)),
+            sq::Expr::Identifier(i) => {
+                if let Some(at) = element {
+                    crate::note_ref(pgmem_types::ErrorRef::Target(ident(i)), at);
+                }
+                Ok(ident(i))
+            }
             other => Err(unsupported(&format!("expression `{other}` in a key constraint"))),
         })
         .collect()
@@ -57,7 +65,7 @@ fn lower_column_def(c: sq::ColumnDef, untyped: bool) -> SqlResult<ColumnDef> {
         let kind = match opt.option {
             sq::ColumnOption::Null => ColumnConstraintKind::Null,
             sq::ColumnOption::NotNull => ColumnConstraintKind::NotNull,
-            sq::ColumnOption::Default(e) => ColumnConstraintKind::Default(lower_expr(e)?),
+            sq::ColumnOption::Default(e) => ColumnConstraintKind::Default(crate::in_clause("DEFAULT expressions", || lower_expr(e))?),
             sq::ColumnOption::PrimaryKey(pk) => {
                 let name = name.clone().or_else(|| pk.name.as_ref().map(ident));
                 let timing = timing(pk.characteristics.as_ref(), "PRIMARY KEY")?;
@@ -92,7 +100,7 @@ fn lower_column_def(c: sq::ColumnDef, untyped: bool) -> SqlResult<ColumnDef> {
                 let name = name.clone().or_else(|| chk.name.as_ref().map(ident));
                 constraints.push(ColumnConstraint {
                     name,
-                    kind: ColumnConstraintKind::Check(lower_expr(*chk.expr)?),
+                    kind: ColumnConstraintKind::Check(crate::in_clause("check constraints", || lower_expr(*chk.expr))?),
                     timing: ConstraintTiming { no_inherit: chk.no_inherit, ..ConstraintTiming::default() },
                     reloptions: Vec::new(),
                 });
@@ -190,7 +198,7 @@ fn lower_table_constraint(c: sq::TableConstraint) -> SqlResult<TableConstraint> 
         },
         sq::TableConstraint::Check(chk) => TableConstraint {
             name: chk.name.as_ref().map(ident),
-            kind: TableConstraintKind::Check(lower_expr(*chk.expr)?),
+            kind: TableConstraintKind::Check(crate::in_clause("check constraints", || lower_expr(*chk.expr))?),
             timing: ConstraintTiming { no_inherit: chk.no_inherit, ..ConstraintTiming::default() },
             reloptions: Vec::new(),
             include: Vec::new(),
@@ -436,7 +444,10 @@ pub(crate) fn lower_alter_table(at: sq::AlterTable) -> SqlResult<AlterTable> {
                 actions.push(AlterTableAction::DetachPartition { partition: object_name(&partition)? });
             }
             O::AddColumn { if_not_exists, column_def, .. } => {
-                actions.push(AlterTableAction::AddColumn { if_not_exists, column: lower_column_def(column_def, false)? });
+                actions.push(AlterTableAction::AddColumn {
+                    if_not_exists,
+                    column: crate::quietly(crate::QUIET_EXPRS, || lower_column_def(column_def, false))?,
+                });
             }
             O::DropColumn { column_names, if_exists, drop_behavior, .. } => {
                 for name in column_names {
@@ -464,7 +475,9 @@ pub(crate) fn lower_alter_table(at: sq::AlterTable) -> SqlResult<AlterTable> {
                 actions.push(match op {
                     sq::AlterColumnOperation::SetNotNull => AlterTableAction::SetNotNull { column },
                     sq::AlterColumnOperation::DropNotNull => AlterTableAction::DropNotNull { column },
-                    sq::AlterColumnOperation::SetDefault { value } => AlterTableAction::SetDefault { column, expr: lower_expr(value)? },
+                    sq::AlterColumnOperation::SetDefault { value } => {
+                        AlterTableAction::SetDefault { column, expr: crate::quietly(crate::QUIET_EXPRS, || lower_expr(value))? }
+                    }
                     sq::AlterColumnOperation::DropDefault => AlterTableAction::DropDefault { column },
                     sq::AlterColumnOperation::SetDataType { data_type, using, .. } => {
                         AlterTableAction::AlterType { column, ty: lower_type(&data_type)?, using: using.map(lower_expr).transpose()? }
@@ -478,7 +491,7 @@ pub(crate) fn lower_alter_table(at: sq::AlterTable) -> SqlResult<AlterTable> {
                 });
             }
             O::AddConstraint { constraint, not_valid } => {
-                let mut c = lower_table_constraint(constraint)?;
+                let mut c = crate::quietly(crate::QUIET_EXPRS, || lower_table_constraint(constraint))?;
                 c.timing.not_valid = not_valid;
                 actions.push(AlterTableAction::AddConstraint(c));
             }

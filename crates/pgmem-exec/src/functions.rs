@@ -77,6 +77,17 @@ fn resolve_type(catalog: &Catalog, t: &ir::TypeName) -> SqlResult<Type> {
     Ok(crate::bind::resolve_type_name(catalog, t)?.0)
 }
 
+/// [`resolve_type`] for a parameter (or `RETURNS TABLE` column), whose unknown type Postgres
+/// reports without quotes.
+fn resolve_param_type(catalog: &Catalog, t: &ir::TypeName) -> SqlResult<Type> {
+    resolve_type(catalog, t).map_err(|mut e| {
+        if e.code == code::UNDEFINED_OBJECT && e.message.starts_with("type \"") && e.message.ends_with("\" does not exist") {
+            e.message = e.message.replacen('"', "", 2);
+        }
+        e
+    })
+}
+
 /// `function_name(argtypes)` as Postgres names a function in messages.
 pub fn signature(name: &str, types: &[Type]) -> String {
     format!("{name}({})", types.iter().map(Type::name).collect::<Vec<_>>().join(", "))
@@ -98,7 +109,12 @@ pub(crate) fn create_function(cf: &ir::CreateFunction, txn: &mut Txn, env: &Sess
     let body = cf.body.clone().ok_or_else(|| SqlError::new(code::INVALID_FUNCTION_DEFINITION, "no function body specified"))?;
     let mut args = Vec::with_capacity(cf.args.len());
     for a in &cf.args {
-        args.push(FuncArg { name: a.name.clone(), ty: resolve_type(&catalog, &a.ty)?, mode: arg_mode(a.mode), default: a.default.clone() });
+        args.push(FuncArg {
+            name: a.name.clone(),
+            ty: resolve_param_type(&catalog, &a.ty)?,
+            mode: arg_mode(a.mode),
+            default: a.default.clone(),
+        });
     }
     let outs: Vec<(String, Type)> = args
         .iter()
@@ -112,7 +128,7 @@ pub(crate) fn create_function(cf: &ir::CreateFunction, txn: &mut Txn, env: &Sess
         (Some(ir::FunctionReturns::SetOf(t)), false) if t.name == "record" && !outs.is_empty() => FuncReturn::Table(outs.clone()),
         (Some(ir::FunctionReturns::SetOf(t)), false) => FuncReturn::SetOf(resolve_type(&catalog, t)?),
         (Some(ir::FunctionReturns::Table(cols)), false) => {
-            FuncReturn::Table(cols.iter().map(|(n, t)| Ok((n.clone(), resolve_type(&catalog, t)?))).collect::<SqlResult<Vec<_>>>()?)
+            FuncReturn::Table(cols.iter().map(|(n, t)| Ok((n.clone(), resolve_param_type(&catalog, t)?))).collect::<SqlResult<Vec<_>>>()?)
         }
         // OUT parameters determine the result: one is a scalar, several a record.
         (None, false) => match outs.as_slice() {

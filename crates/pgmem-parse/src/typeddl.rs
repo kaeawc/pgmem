@@ -26,7 +26,9 @@ pub(crate) enum TypeDdl {
         not_null: bool,
         checks: Vec<(Option<sq::Ident>, sq::Expr)>,
         /// A grammar-level conflict Postgres reports after parsing (42601).
-        conflict: Option<&'static str>,
+        conflict: Option<(&'static str, sqlparser::tokenizer::Location)>,
+        /// Where the base type starts.
+        ty_at: sqlparser::tokenizer::Location,
     },
     AlterDomain {
         name: sq::ObjectName,
@@ -208,6 +210,7 @@ pub(crate) fn try_parse(p: &mut Parser) -> Result<Option<TypeDdl>, ParserError> 
 fn create_domain(p: &mut Parser) -> Result<TypeDdl, ParserError> {
     let name = p.parse_object_name(false)?;
     let _ = p.parse_keyword(Keyword::AS);
+    let ty_at = p.peek_token().span.start;
     let ty = p.parse_data_type()?;
     let mut default = None;
     let mut collation = None;
@@ -216,31 +219,33 @@ fn create_domain(p: &mut Parser) -> Result<TypeDdl, ParserError> {
     let mut conflict = None;
     let (mut saw_null, mut saw_not_null) = (false, false);
     loop {
+        let at = p.peek_token().span.start;
         if p.parse_keyword(Keyword::COLLATE) {
             if collation.is_some() {
-                conflict = conflict.or(Some("multiple COLLATE clauses not allowed"));
+                conflict = conflict.or(Some(("multiple COLLATE clauses not allowed", at)));
             }
             collation = Some(p.parse_object_name(false)?);
             continue;
         }
         if is_word(p, 0, Keyword::DEFAULT) {
             if default.is_some() {
-                conflict = conflict.or(Some("multiple default expressions"));
+                conflict = conflict.or(Some(("multiple default expressions", at)));
             }
             default = Some(default_expr(p)?);
             continue;
         }
         let constraint_name = if p.parse_keyword(Keyword::CONSTRAINT) { Some(p.parse_identifier()?) } else { None };
+        let at = p.peek_token().span.start;
         if p.parse_keywords(&[Keyword::NOT, Keyword::NULL]) {
             not_null = true;
             saw_not_null = true;
             if saw_null {
-                conflict = conflict.or(Some("conflicting NULL/NOT NULL constraints"));
+                conflict = conflict.or(Some(("conflicting NULL/NOT NULL constraints", at)));
             }
         } else if p.parse_keyword(Keyword::NULL) {
             saw_null = true;
             if saw_not_null {
-                conflict = conflict.or(Some("conflicting NULL/NOT NULL constraints"));
+                conflict = conflict.or(Some(("conflicting NULL/NOT NULL constraints", at)));
             }
         } else if p.parse_keyword(Keyword::CHECK) {
             p.expect_token(&Token::LParen)?;
@@ -253,7 +258,7 @@ fn create_domain(p: &mut Parser) -> Result<TypeDdl, ParserError> {
             break;
         }
     }
-    Ok(TypeDdl::CreateDomain { name, ty, default, collation, not_null, checks, conflict })
+    Ok(TypeDdl::CreateDomain { name, ty, default, collation, not_null, checks, conflict, ty_at })
 }
 
 /// `DEFAULT b_expr`: the expression stops before a following `NOT NULL`, `NULL` or `COLLATE`
@@ -367,26 +372,41 @@ pub(crate) fn lower(stmt: TypeDdl) -> SqlResult<Statement> {
         TypeDdl::SetSchema { object_type, name, if_exists, schema } => {
             Statement::SetSchema { object_type, name: object_name(&name)?, if_exists, schema: ident(&schema) }
         }
-        TypeDdl::CreateDomain { conflict: Some(message), .. } => return Err(pgmem_types::SqlError::syntax(message)),
-        TypeDdl::CreateDomain { name, ty, default, collation, not_null, checks, conflict: None } => {
+        TypeDdl::CreateDomain { conflict: Some((message, at)), .. } => {
+            let e = pgmem_types::SqlError::syntax(message);
+            return Err(match crate::position_in_parsed(at) {
+                Some(p) => e.with_position(p),
+                None => e,
+            });
+        }
+        TypeDdl::CreateDomain { name, ty, default, collation, not_null, checks, conflict: None, ty_at } => {
+            let ty = lower_type(&ty)?;
+            // The base type, for errors about the domain as a whole (`COLLATE` on a type
+            // without collations).
+            crate::note_ref(pgmem_types::ErrorRef::Type(ty.schema.iter().chain([&ty.name]).cloned().collect::<Vec<_>>().join(".")), ty_at);
             Statement::CreateDomain(Box::new(CreateDomain {
                 name: object_name(&name)?,
-                ty: lower_type(&ty)?,
+                ty,
                 default: default.map(lower_expr).transpose()?,
                 collation: collation.as_ref().map(|c| object_name(c).map(|o| o.base().to_owned())).transpose()?,
                 not_null,
-                checks: checks.into_iter().map(|(n, e)| Ok((n.as_ref().map(ident), lower_expr(e)?))).collect::<SqlResult<Vec<_>>>()?,
+                checks: checks
+                    .into_iter()
+                    .map(|(n, e)| Ok((n.as_ref().map(ident), crate::quietly(crate::QUIET_EXPRS, || lower_expr(e))?)))
+                    .collect::<SqlResult<Vec<_>>>()?,
             }))
         }
         TypeDdl::AlterDomain { name, action } => {
             let action = match action {
-                DomainAction::SetDefault(e) => AlterDomainAction::SetDefault(lower_expr(e)?),
+                DomainAction::SetDefault(e) => AlterDomainAction::SetDefault(crate::quietly(crate::QUIET_EXPRS, || lower_expr(e))?),
                 DomainAction::DropDefault => AlterDomainAction::DropDefault,
                 DomainAction::SetNotNull | DomainAction::AddNotNull => AlterDomainAction::SetNotNull,
                 DomainAction::DropNotNull => AlterDomainAction::DropNotNull,
-                DomainAction::AddCheck { name, expr, not_valid } => {
-                    AlterDomainAction::AddCheck { name: name.as_ref().map(ident), expr: lower_expr(expr)?, not_valid }
-                }
+                DomainAction::AddCheck { name, expr, not_valid } => AlterDomainAction::AddCheck {
+                    name: name.as_ref().map(ident),
+                    expr: crate::quietly(crate::QUIET_EXPRS, || lower_expr(expr))?,
+                    not_valid,
+                },
                 DomainAction::DropConstraint { name, if_exists } => AlterDomainAction::DropConstraint { name: ident(&name), if_exists },
                 DomainAction::RenameConstraint { from, to } => AlterDomainAction::RenameConstraint { from: ident(&from), to: ident(&to) },
                 DomainAction::ValidateConstraint(n) => AlterDomainAction::ValidateConstraint(ident(&n)),

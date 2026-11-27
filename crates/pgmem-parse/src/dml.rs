@@ -1,6 +1,7 @@
 //! INSERT / UPDATE / DELETE lowering.
 
 use crate::expr::lower_expr;
+use crate::in_clause;
 use crate::query::{lower_query, lower_table_with_joins};
 use crate::{ident, object_name, unsupported};
 use pgmem_ir::{
@@ -15,8 +16,10 @@ fn lower_returning(items: Option<Vec<sq::SelectItem>>) -> SqlResult<Vec<SelectIt
         .into_iter()
         .map(|item| {
             Ok(match item {
-                sq::SelectItem::UnnamedExpr(e) => SelectItem::Expr { expr: lower_expr(e)?, alias: None },
-                sq::SelectItem::ExprWithAlias { expr, alias } => SelectItem::Expr { expr: lower_expr(expr)?, alias: Some(ident(&alias)) },
+                sq::SelectItem::UnnamedExpr(e) => SelectItem::Expr { expr: in_clause("RETURNING", || lower_expr(e))?, alias: None },
+                sq::SelectItem::ExprWithAlias { expr, alias } => {
+                    SelectItem::Expr { expr: in_clause("RETURNING", || lower_expr(expr))?, alias: Some(ident(&alias)) }
+                }
                 sq::SelectItem::Wildcard(_) => SelectItem::Wildcard,
                 sq::SelectItem::QualifiedWildcard(sq::SelectItemQualifiedWildcardKind::ObjectName(n), _) => {
                     SelectItem::QualifiedWildcard(object_name(&n)?)
@@ -45,7 +48,7 @@ fn lower_assignments(items: Vec<sq::Assignment>) -> SqlResult<Vec<Assignment>> {
 fn column_target(n: &sq::ObjectName) -> SqlResult<Vec<String>> {
     let name = object_name(n)?;
     if let (Some(sq::ObjectNamePart::Identifier(first)), Some(column)) = (n.0.first(), name.0.first()) {
-        crate::note_ref(pgmem_types::ErrorRef::Column(column.clone()), first.span.start);
+        crate::note_ref(pgmem_types::ErrorRef::Target(column.clone()), first.span.start);
     }
     Ok(name.0)
 }
@@ -67,7 +70,7 @@ pub(crate) fn lower_insert(i: sq::Insert) -> SqlResult<Insert> {
         .iter()
         .map(|c| {
             let n = object_name(c)?;
-            crate::note_name(pgmem_types::ErrorRef::Column, c, &n);
+            crate::note_name(pgmem_types::ErrorRef::Target, c, &n);
             Ok(n.base().to_owned())
         })
         .collect::<SqlResult<Vec<_>>>()?;
@@ -175,7 +178,7 @@ pub(crate) fn lower_update(u: sq::Update) -> SqlResult<Update> {
         only,
         assignments: lower_assignments(u.assignments)?,
         from,
-        selection: u.selection.map(lower_expr).transpose()?,
+        selection: u.selection.map(|e| in_clause("WHERE", || lower_expr(e))).transpose()?,
         returning: lower_returning(u.returning)?,
     })
 }
@@ -207,7 +210,7 @@ pub(crate) fn lower_delete(d: sq::Delete) -> SqlResult<Delete> {
         alias,
         only,
         using,
-        selection: d.selection.map(lower_expr).transpose()?,
+        selection: d.selection.map(|e| in_clause("WHERE", || lower_expr(e))).transpose()?,
         returning: lower_returning(d.returning)?,
     })
 }

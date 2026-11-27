@@ -6,7 +6,7 @@ use pgmem_exec::portal::PreparedStatement;
 use pgmem_exec::session::{is_reported, setting_display_name};
 use pgmem_exec::{CopyIn, CopyOut, OutCol, QueryResult, Session};
 use pgmem_ir::Statement;
-use pgmem_types::{Format, SourceRefs, SqlError, SqlResult, Type, Value, code};
+use pgmem_types::{Format, SqlError, SqlResult, Type, Value, code};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::Arc;
@@ -36,7 +36,9 @@ struct CopyState {
     pending: Box<CopyIn>,
     data: Vec<u8>,
     /// From a simple Query: the statements after the COPY, run once it completes.
-    rest: Option<VecDeque<(Statement, SourceRefs)>>,
+    /// The rest of the simple Query a COPY FROM STDIN suspended: its text and statements
+    /// (with their numbers in it).
+    rest: Option<(String, VecDeque<(usize, Statement)>)>,
 }
 
 fn format_for(codes: &[i16], i: usize) -> Format {
@@ -311,7 +313,7 @@ impl Conn {
                 return;
             }
         };
-        let stmts = match pgmem_parse::parse_located(&sql) {
+        let stmts = match pgmem_parse::parse(&sql) {
             Ok(s) => s,
             Err(e) => {
                 self.out.error(&e);
@@ -320,20 +322,20 @@ impl Conn {
             }
         };
         self.session.begin_implicit_block(stmts.len());
-        self.run_statements(stmts.into_iter().collect());
+        self.run_statements(sql, stmts.into_iter().enumerate().collect());
     }
 
     /// Runs a simple Query's statements. A COPY FROM STDIN suspends the batch until the
     /// client's CopyDone (`finish_copy` resumes it).
-    fn run_statements(&mut self, mut stmts: VecDeque<(Statement, SourceRefs)>) {
+    fn run_statements(&mut self, sql: String, mut stmts: VecDeque<(usize, Statement)>) {
         let mut failed = false;
-        while let Some((stmt, refs)) = stmts.pop_front() {
+        while let Some((number, stmt)) = stmts.pop_front() {
             match self.session.execute(&stmt, &[], &[]) {
                 Ok(mut r) => {
                     self.send_result_preamble(&r);
                     if let Some(pending) = r.copy_in.take() {
                         self.out.copy_response(b'G', pending.binary, pending.columns);
-                        self.copy = Some(CopyState { pending, data: Vec::new(), rest: Some(stmts) });
+                        self.copy = Some(CopyState { pending, data: Vec::new(), rest: Some((sql, stmts)) });
                         return;
                     }
                     if let Err(e) = self.send_simple_result(&r) {
@@ -343,7 +345,7 @@ impl Conn {
                     }
                 }
                 Err(e) => {
-                    self.out.error(&refs.resolve(e));
+                    self.out.error(&pgmem_parse::locate_error(&sql, number, e));
                     failed = true;
                     break;
                 }
@@ -426,7 +428,7 @@ impl Conn {
             }
         };
         match state.rest {
-            Some(rest) if ok => self.run_statements(rest),
+            Some((sql, rest)) if ok => self.run_statements(sql, rest),
             Some(_) => {
                 if let Err(e) = self.session.end_implicit_block(true) {
                     self.out.error(&e);
@@ -460,8 +462,8 @@ impl Conn {
         if !name.is_empty() && self.session.prepared(&name).is_some() {
             return Err(SqlError::new(code::DUPLICATE_PREPARED_STATEMENT, format!("prepared statement \"{name}\" already exists")));
         }
-        let (stmt, refs) = pgmem_parse::parse_one_located(&sql)?;
-        self.session.prepare_protocol(&name, &sql, stmt, &declared).map_err(|e| refs.resolve(e))?;
+        let stmt = pgmem_parse::parse_one(&sql)?;
+        self.session.prepare_protocol(&name, &sql, stmt, &declared).map_err(|e| pgmem_parse::locate_error(&sql, 0, e))?;
         self.out.parse_complete();
         Ok(())
     }

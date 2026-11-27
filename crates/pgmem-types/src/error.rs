@@ -35,35 +35,148 @@ pub struct ErrorFields {
 pub enum ErrorRef {
     /// A column reference as written, parts joined with `.` (`a`, `t.a`).
     Column(String),
+    /// A column reference as written that is not inside an aggregate call (what Postgres'
+    /// grouping check complains about), parts joined with `.`.
+    Ungrouped(String),
+    /// A column an `INSERT` column list or `UPDATE SET` names.
+    Target(String),
     /// A relation named in FROM or as a DML target, parts joined with `.`.
     Relation(String),
     /// A function call by its name as written, parts joined with `.`.
     Function(String),
-    /// A binary or prefix operator by its Postgres name.
+    /// A binary operator by its Postgres name.
     Operator(String),
+    /// A prefix operator by its Postgres name.
+    PrefixOperator(String),
     /// A string literal by its value.
     Literal(String),
+    /// A type name as written, parts joined with `.`.
+    Type(String),
+    /// A relation named in a `FOR UPDATE OF` / `FOR SHARE OF` clause.
+    LockTarget(String),
+    /// The `.1`th (0-based) expression of the `.0`th row of a `VALUES` list.
+    ValuesItem(usize, usize),
+    /// An expression, by its [`node_key`]: where it starts in the text (an expression's
+    /// position is where it starts, whatever its operator or function).
+    Expr(String),
+    /// The reference as seen in the clause `.0` of the statement (`WHERE`, `HAVING`, ...),
+    /// including inside its subqueries.
+    InClause(&'static str, Box<ErrorRef>),
+    /// One particular node: `.0` as written, with `.1` the node's [`node_key`]. Falls back to
+    /// `.0` alone when the statement holds no node with that key.
+    Keyed(Box<ErrorRef>, String),
+    /// The `.1`th (0-based) occurrence of `.0`.
+    Nth(Box<ErrorRef>, usize),
+    /// The `.1`th (0-based) operand of the AND / OR expression `.0`.
+    Operand(Box<ErrorRef>, usize),
+    /// `.1` as found inside `.0` (the first `.1` at or after where `.0` starts).
+    Within(Box<ErrorRef>, Box<ErrorRef>),
+    /// Whichever of the alternatives comes first in the text (one thing spelled several ways).
+    AnyOf(Vec<ErrorRef>),
+}
+
+impl ErrorRef {
+    /// Whether `self` is `old` pinned down: the same reference, told apart from look-alikes.
+    fn refines(&self, old: &ErrorRef) -> bool {
+        match self {
+            ErrorRef::Keyed(inner, _) | ErrorRef::InClause(_, inner) => inner.as_ref() == old,
+            ErrorRef::Within(_, child) => child.as_ref() == old,
+            ErrorRef::Operand(..) => matches!(old, ErrorRef::Expr(_)),
+            _ => false,
+        }
+    }
+
+    /// Whether the statement text can hold several different references of this kind that
+    /// the name alone does not tell apart (an operator used twice, a literal repeated in
+    /// contexts of different types): resolving by name needs exactly one match.
+    fn needs_unique(&self) -> bool {
+        match self {
+            ErrorRef::Function(_) | ErrorRef::Operator(_) | ErrorRef::PrefixOperator(_) | ErrorRef::Literal(_) => true,
+            ErrorRef::Column(_)
+            | ErrorRef::Ungrouped(_)
+            | ErrorRef::Target(_)
+            | ErrorRef::Relation(_)
+            | ErrorRef::Type(_)
+            | ErrorRef::LockTarget(_)
+            | ErrorRef::ValuesItem(..)
+            | ErrorRef::Expr(_) => false,
+            ErrorRef::InClause(_, inner) | ErrorRef::Keyed(inner, _) | ErrorRef::Nth(inner, _) => inner.needs_unique(),
+            ErrorRef::Within(_, child) => child.needs_unique(),
+            ErrorRef::Operand(..) => false,
+            ErrorRef::AnyOf(any) => any.iter().any(ErrorRef::needs_unique),
+        }
+    }
+}
+
+/// A structural key of an IR node: its `Debug` text, or `None` when that is too long to be
+/// worth comparing. Parser and binder both derive it from the same IR, so the binder can find
+/// which of several equal-looking nodes in the text an error is about.
+pub fn node_key(node: &dyn fmt::Debug) -> Option<String> {
+    use fmt::Write;
+    /// Longer nodes are not keyed (comparing them costs more than the position is worth).
+    const CAP: usize = 240;
+    struct Capped(String);
+    impl Write for Capped {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            if self.0.len() + s.len() > CAP {
+                return Err(fmt::Error);
+            }
+            self.0.push_str(s);
+            Ok(())
+        }
+    }
+    let mut out = Capped(String::new());
+    write!(out, "{node:?}").ok()?;
+    Some(out.0)
 }
 
 /// The source positions of the references in one statement: `(ref, 1-based character offset
-/// into the whole query string)`.
+/// into the whole query string)`, in position order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SourceRefs(pub Vec<(ErrorRef, u32)>);
 
 impl SourceRefs {
-    /// Gives `e` the position of its subject when the statement holds exactly one reference
-    /// that matches it (several matches are ambiguous: no position rather than a wrong one).
+    /// Gives `e` the position of its subject (see [`SourceRefs::locate`]).
     pub fn resolve(&self, mut e: SqlError) -> SqlError {
         let Some(f) = e.fields.as_deref_mut() else { return e };
         let Some(subject) = f.subject.take() else { return e };
-        if f.position.is_some() {
-            return e;
-        }
-        let mut found = self.0.iter().filter(|(r, _)| *r == subject).map(|(_, p)| *p);
-        if let (Some(p), None) = (found.next(), found.next()) {
-            f.position = Some(p);
+        if f.position.is_none() {
+            f.position = self.locate(&subject);
         }
         e
+    }
+
+    /// Where `subject` is in the statement. A name several references share resolves to the
+    /// first (statements are analyzed in text order) unless the kind of reference is one the
+    /// name alone does not pin down: those need exactly one match, or a [`ErrorRef::Keyed`]
+    /// subject, and otherwise have no position rather than a wrong one.
+    pub fn locate(&self, subject: &ErrorRef) -> Option<u32> {
+        match subject {
+            ErrorRef::Keyed(inner, _) => self.nth(subject, 0).or_else(|| self.locate(inner)),
+            ErrorRef::InClause(_, inner) => self.nth(subject, 0).or_else(|| self.locate(inner)),
+            ErrorRef::Nth(inner, n) => self.nth(inner, *n),
+            ErrorRef::Within(parent, child) => {
+                let from = self.locate(parent)?;
+                self.0.iter().find(|(r, p)| *p >= from && r == child.as_ref()).map(|(_, p)| *p)
+            }
+            ErrorRef::AnyOf(any) => any.iter().filter_map(|r| self.locate(r)).min(),
+            other if other.needs_unique() => {
+                let mut found = self.matching(other);
+                match (found.next(), found.next()) {
+                    (Some(p), None) => Some(p),
+                    _ => None,
+                }
+            }
+            other => self.nth(other, 0),
+        }
+    }
+
+    fn matching<'a>(&'a self, subject: &'a ErrorRef) -> impl Iterator<Item = u32> + 'a {
+        self.0.iter().filter(move |(r, _)| r == subject).map(|(_, p)| *p)
+    }
+
+    fn nth(&self, subject: &ErrorRef, n: usize) -> Option<u32> {
+        self.matching(subject).nth(n)
     }
 }
 
@@ -101,10 +214,37 @@ impl SqlError {
     }
 
     /// Records what the error is about (see [`SourceRefs::resolve`]), unless the error already
-    /// has a position or a subject: the innermost reference wins.
+    /// has a position or a subject: the innermost reference wins. A subject that pins down the
+    /// one the error already has (see [`ErrorRef::refines`]) replaces it.
     pub fn about(mut self, subject: ErrorRef) -> Self {
+        if let Some(f) = self.fields.as_deref_mut()
+            && f.position.is_none()
+            && let Some(old) = &f.subject
+            && subject.refines(old)
+        {
+            f.subject = Some(subject);
+            return self;
+        }
         if self.fields().is_none_or(|f| f.position.is_none() && f.subject.is_none()) {
             self.fields_mut().subject = Some(subject);
+        }
+        self
+    }
+
+    /// The error about `subject`, when it is already about the one `subject` pins down.
+    pub fn refined(self, subject: ErrorRef) -> Self {
+        self.about(subject)
+    }
+
+    /// Takes over what `other` is about: for an error that replaces `other`'s message.
+    pub fn subject_of(mut self, other: &SqlError) -> Self {
+        if self.fields().is_none_or(|f| f.position.is_none() && f.subject.is_none())
+            && let Some(f) = other.fields()
+        {
+            let (position, subject) = (f.position, f.subject.clone());
+            let own = self.fields_mut();
+            own.position = position;
+            own.subject = subject;
         }
         self
     }
@@ -305,4 +445,71 @@ pub mod code {
     pub const UNDEFINED_FILE: &str = "58P01";
     pub const IO_ERROR: &str = "58030";
     pub const INTERNAL_ERROR: &str = "XX000";
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn refs(items: &[(ErrorRef, u32)]) -> SourceRefs {
+        SourceRefs(items.to_vec())
+    }
+
+    fn column(name: &str) -> ErrorRef {
+        ErrorRef::Column(name.to_owned())
+    }
+
+    fn operator(name: &str) -> ErrorRef {
+        ErrorRef::Operator(name.to_owned())
+    }
+
+    #[test]
+    fn a_repeated_name_resolves_to_its_first_mention() {
+        let r = refs(&[(column("a"), 8), (column("a"), 20)]);
+        assert_eq!(r.locate(&column("a")), Some(8));
+        assert_eq!(r.locate(&column("b")), None);
+    }
+
+    #[test]
+    fn kinds_a_name_does_not_pin_down_need_exactly_one_match() {
+        let r = refs(&[(operator("+"), 10), (operator("+"), 17), (operator("-"), 30)]);
+        assert_eq!(r.locate(&operator("+")), None);
+        assert_eq!(r.locate(&operator("-")), Some(30));
+    }
+
+    #[test]
+    fn a_keyed_subject_picks_its_node_and_falls_back_to_the_unique_name() {
+        let keyed = |key: &str| ErrorRef::Keyed(Box::new(operator("+")), key.to_owned());
+        let r = refs(&[(keyed("x"), 10), (operator("+"), 10), (keyed("y"), 17), (operator("+"), 17)]);
+        assert_eq!(r.locate(&keyed("y")), Some(17));
+        // No node with that key: the name is ambiguous, so there is no position.
+        assert_eq!(r.locate(&keyed("z")), None);
+        let one = refs(&[(operator("+"), 10)]);
+        assert_eq!(one.locate(&keyed("z")), Some(10));
+    }
+
+    #[test]
+    fn nth_within_and_any_of() {
+        let r = refs(&[(column("a"), 5), (ErrorRef::Expr("p".into()), 12), (ErrorRef::Expr("c".into()), 20), (column("a"), 30)]);
+        assert_eq!(r.locate(&ErrorRef::Nth(Box::new(column("a")), 1)), Some(30));
+        let within = ErrorRef::Within(Box::new(ErrorRef::Expr("p".into())), Box::new(ErrorRef::Expr("c".into())));
+        assert_eq!(r.locate(&within), Some(20));
+        assert_eq!(r.locate(&ErrorRef::AnyOf(vec![column("zz"), column("a")])), Some(5));
+    }
+
+    #[test]
+    fn a_pinned_down_subject_replaces_the_plain_one_but_the_innermost_wins() {
+        let plain = SqlError::new("42883", "x").about(operator("+"));
+        let keyed = ErrorRef::Keyed(Box::new(operator("+")), "k".into());
+        let refined = plain.about(keyed.clone());
+        assert_eq!(refined.fields().and_then(|f| f.subject.clone()), Some(keyed));
+        let first = SqlError::new("42883", "x").about(column("a")).about(column("b"));
+        assert_eq!(first.fields().and_then(|f| f.subject.clone()), Some(column("a")));
+    }
+
+    #[test]
+    fn node_keys_are_capped() {
+        assert!(node_key(&"short").is_some());
+        assert!(node_key(&"x".repeat(1000)).is_none());
+    }
 }

@@ -9,6 +9,65 @@
 //! lowerings: `EXTRACT(f FROM x)` is `extract('f', x)`, `POSITION(a IN b)` is `position(a, b)`,
 //! `SUBSTRING(x FROM a FOR b)` is `substring(x, a, b)`, `TRIM(BOTH c FROM x)` is `btrim(x, c)`.
 
+/// The builtin aggregate functions, by name (the binder's `aggregate_kind` is checked against
+/// this list in `pgmem-exec`): what a lowering needs to tell a column inside an aggregate call
+/// from one outside it.
+pub const AGGREGATE_FUNCTIONS: &[&str] = &[
+    "count",
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "bool_and",
+    "every",
+    "bool_or",
+    "string_agg",
+    "array_agg",
+    "range_agg",
+    "range_intersect_agg",
+    "jsonb_agg",
+    "json_agg",
+    "__pgmem_json_arrayagg",
+    "jsonb_agg_strict",
+    "json_agg_strict",
+    "__pgmem_json_arrayagg_strict",
+    "jsonb_object_agg",
+    "json_object_agg",
+    "__pgmem_json_objectagg",
+    "jsonb_object_agg_strict",
+    "json_object_agg_strict",
+    "__pgmem_json_objectagg_strict",
+    "stddev",
+    "stddev_samp",
+    "stddev_pop",
+    "variance",
+    "var_samp",
+    "var_pop",
+    "bit_and",
+    "bit_or",
+    "bit_xor",
+    "corr",
+    "covar_pop",
+    "covar_samp",
+    "regr_count",
+    "regr_sxx",
+    "regr_syy",
+    "regr_sxy",
+    "regr_avgx",
+    "regr_avgy",
+    "regr_r2",
+    "regr_slope",
+    "regr_intercept",
+    "percentile_cont",
+    "percentile_disc",
+    "mode",
+];
+
+/// Whether `name` (unqualified, folded) is a builtin aggregate function.
+pub fn is_aggregate_function(name: &str) -> bool {
+    AGGREGATE_FUNCTIONS.contains(&name)
+}
+
 /// A possibly schema-qualified name (`public.users` → `["public", "users"]`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub struct ObjectName(pub Vec<String>);
@@ -870,6 +929,20 @@ pub enum UnaryOp {
     SquareRoot,
     CubeRoot,
     Abs,
+}
+
+impl UnaryOp {
+    /// The operator by its Postgres name.
+    pub fn name(self) -> &'static str {
+        match self {
+            UnaryOp::Minus => "-",
+            UnaryOp::Plus => "+",
+            UnaryOp::BitNot => "~",
+            UnaryOp::SquareRoot => "|/",
+            UnaryOp::CubeRoot => "||/",
+            UnaryOp::Abs => "@",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -23,7 +23,7 @@ mod value;
 pub mod zone;
 
 pub use datetime::Interval;
-pub use error::{ErrorFields, ErrorRef, SourceRefs, SqlError, SqlResult, code};
+pub use error::{ErrorFields, ErrorRef, SourceRefs, SqlError, SqlResult, code, node_key};
 pub use json::Jsonb;
 pub use numeric::Numeric;
 pub use value::{GroupKey, Value, compare_values, float_cmp};

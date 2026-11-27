@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Runs every clients/psql/*.sql script with psql against pgmem and against PostgreSQL and diffs
-# the output. Error positions (`LINE n:` and the caret under it) are dropped: pgmem reports
-# none.
+# the output, error positions (`LINE n:` and the caret under it) included.
 #
 #   clients/psql/compare.sh PGMEM_BIN POSTGRES_URL
 #   (POSTGRES_URL: an admin URL such as postgres://postgres@127.0.0.1:5432/postgres)
@@ -13,7 +12,7 @@ work=$(mktemp -d)
 status=0
 
 run() { # url script out
-  PGTZ=UTC psql -X -a -v ON_ERROR_STOP=0 "$1" -f "$2" 2>&1 | grep -Ev '^LINE [0-9]+:|^ +\^$' | sed "s|$2|SCRIPT|" > "$3"
+  PGTZ=UTC psql -X -a -v ON_ERROR_STOP=0 "$1" -f "$2" 2>&1 | sed "s|$2|SCRIPT|" > "$3"
 }
 
 for script in "$dir"/*.sql; do

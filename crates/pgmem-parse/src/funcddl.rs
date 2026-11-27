@@ -775,10 +775,16 @@ fn create_trigger(p: &mut Parser, or_replace: bool) -> Result<RawTrigger, Parser
     Ok(t)
 }
 
+/// The argument types naming an existing function (`DROP FUNCTION f(int)`); Postgres gives
+/// an unknown one no position.
+fn signature_types(types: Vec<sq::DataType>) -> SqlResult<Vec<pgmem_ir::TypeName>> {
+    crate::quietly(crate::QUIET_TYPES, || types.iter().map(lower_type).collect())
+}
+
 fn lower_returns(r: RawReturns) -> SqlResult<FunctionReturns> {
     Ok(match r {
-        RawReturns::Type(t) => FunctionReturns::Type(lower_type(&t)?),
-        RawReturns::SetOf(t) => FunctionReturns::SetOf(lower_type(&t)?),
+        RawReturns::Type(t) => FunctionReturns::Type(crate::quietly(crate::QUIET_TYPES, || lower_type(&t))?),
+        RawReturns::SetOf(t) => FunctionReturns::SetOf(crate::quietly(crate::QUIET_TYPES, || lower_type(&t))?),
         RawReturns::Table(cols) => {
             FunctionReturns::Table(cols.into_iter().map(|(n, t)| Ok((ident(&n), lower_type(&t)?))).collect::<SqlResult<Vec<_>>>()?)
         }
@@ -848,17 +854,12 @@ pub(crate) fn lower(d: FuncDdl) -> SqlResult<Statement> {
                     out
                 }
             };
-            Statement::AlterFunction {
-                name: object_name(&name)?,
-                types: types.map(|ts| ts.iter().map(lower_type).collect::<SqlResult<Vec<_>>>()).transpose()?,
-                kind,
-                actions,
-            }
+            Statement::AlterFunction { name: object_name(&name)?, types: types.map(signature_types).transpose()?, kind, actions }
         }
         FuncDdl::DropFunction { items, if_exists, cascade, kind } => Statement::DropFunction {
             items: items
                 .into_iter()
-                .map(|(n, ts)| Ok((object_name(&n)?, ts.map(|ts| ts.iter().map(lower_type).collect::<SqlResult<Vec<_>>>()).transpose()?)))
+                .map(|(n, ts)| Ok((object_name(&n)?, ts.map(signature_types).transpose()?)))
                 .collect::<SqlResult<Vec<_>>>()?,
             if_exists,
             cascade,
@@ -887,9 +888,7 @@ pub(crate) fn lower(d: FuncDdl) -> SqlResult<Statement> {
         }
         FuncDdl::Comment { target, name, text } => {
             let target = match target {
-                CommentOn::Function(args) => {
-                    pgmem_ir::CommentTarget::Function(args.map(|ts| ts.iter().map(lower_type).collect::<SqlResult<Vec<_>>>()).transpose()?)
-                }
+                CommentOn::Function(args) => pgmem_ir::CommentTarget::Function(args.map(signature_types).transpose()?),
                 CommentOn::Constraint(t) => pgmem_ir::CommentTarget::Constraint(object_name(&t)?),
                 CommentOn::DomainConstraint(t) => pgmem_ir::CommentTarget::DomainConstraint(object_name(&t)?),
                 CommentOn::Trigger(t) => pgmem_ir::CommentTarget::Trigger(object_name(&t)?),
