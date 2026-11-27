@@ -569,21 +569,21 @@ pub struct DomainCheck {
 #[derive(Clone, Debug, PartialEq)]
 pub enum TypeDefKind {
     /// Labels in sort order.
-    Enum {
-        labels: Vec<EnumLabel>,
-    },
+    Enum { labels: Vec<EnumLabel> },
     /// `relid` is the composite type's own `pg_class` entry (relkind `c`), which clients read
     /// the fields from through `typrelid`.
-    Composite {
-        fields: Vec<Field>,
-        relid: Oid,
-    },
+    Composite { fields: Vec<Field>, relid: Oid },
     Domain {
         base: Type,
         typmod: i32,
         not_null: bool,
         default: Option<Expr>,
         checks: Vec<DomainCheck>,
+        /// `typcollation`: the `COLLATE` given, else the base type's (0 for a base type
+        /// without collations).
+        collation: u32,
+        /// `typndims`: the `[]` dimensions declared on the base type (0 for a non-array).
+        ndims: i32,
     },
 }
 
@@ -603,8 +603,8 @@ impl TypeDef {
         let kind = match &self.kind {
             TypeDefKind::Enum { labels } => UserKind::Enum { labels: labels.clone() },
             TypeDefKind::Composite { fields, relid } => UserKind::Composite { fields: fields.clone(), relid: *relid },
-            TypeDefKind::Domain { base, typmod, not_null, .. } => {
-                UserKind::Domain { base: base.clone(), typmod: *typmod, not_null: *not_null }
+            TypeDefKind::Domain { base, typmod, not_null, collation, .. } => {
+                UserKind::Domain { base: base.clone(), typmod: *typmod, not_null: *not_null, collation: *collation }
             }
         };
         UserType { oid: self.oid, array_oid: self.array_oid, name: self.name.clone(), schema: self.schema.clone(), kind }

@@ -20,6 +20,7 @@ pub(crate) enum TypeDdl {
         name: sq::ObjectName,
         ty: sq::DataType,
         default: Option<sq::Expr>,
+        collation: Option<sq::ObjectName>,
         not_null: bool,
         checks: Vec<(Option<sq::Ident>, sq::Expr)>,
         /// A grammar-level conflict Postgres reports after parsing (42601).
@@ -165,20 +166,24 @@ fn create_domain(p: &mut Parser) -> Result<TypeDdl, ParserError> {
     let _ = p.parse_keyword(Keyword::AS);
     let ty = p.parse_data_type()?;
     let mut default = None;
+    let mut collation = None;
     let mut not_null = false;
     let mut checks = Vec::new();
     let mut conflict = None;
     let (mut saw_null, mut saw_not_null) = (false, false);
     loop {
         if p.parse_keyword(Keyword::COLLATE) {
-            p.parse_object_name(false)?;
+            if collation.is_some() {
+                conflict = conflict.or(Some("multiple COLLATE clauses not allowed"));
+            }
+            collation = Some(p.parse_object_name(false)?);
             continue;
         }
-        if p.parse_keyword(Keyword::DEFAULT) {
+        if is_word(p, 0, Keyword::DEFAULT) {
             if default.is_some() {
                 conflict = conflict.or(Some("multiple default expressions"));
             }
-            default = Some(p.parse_expr()?);
+            default = Some(default_expr(p)?);
             continue;
         }
         let constraint_name = if p.parse_keyword(Keyword::CONSTRAINT) { Some(p.parse_identifier()?) } else { None };
@@ -204,7 +209,18 @@ fn create_domain(p: &mut Parser) -> Result<TypeDdl, ParserError> {
             break;
         }
     }
-    Ok(TypeDdl::CreateDomain { name, ty, default, not_null, checks, conflict })
+    Ok(TypeDdl::CreateDomain { name, ty, default, collation, not_null, checks, conflict })
+}
+
+/// `DEFAULT b_expr`: the expression stops before a following `NOT NULL`, `NULL` or `COLLATE`
+/// (Postgres' grammar uses `b_expr` there, so `DEFAULT 1 NOT NULL` is a default and a
+/// constraint, not `1 IS NOT NULL`). sqlparser parses column options that way; the parser is
+/// positioned at `DEFAULT`.
+fn default_expr(p: &mut Parser) -> Result<sq::Expr, ParserError> {
+    match p.parse_optional_column_option()? {
+        Some(sq::ColumnOption::Default(e)) => Ok(e),
+        _ => p.expected("a DEFAULT expression", p.peek_token()),
+    }
 }
 
 fn alter_domain(p: &mut Parser) -> Result<TypeDdl, ParserError> {
@@ -308,13 +324,16 @@ pub(crate) fn lower(stmt: TypeDdl) -> SqlResult<Statement> {
             Statement::SetSchema { object_type, name: object_name(&name)?, if_exists, schema: ident(&schema) }
         }
         TypeDdl::CreateDomain { conflict: Some(message), .. } => return Err(pgmem_types::SqlError::syntax(message)),
-        TypeDdl::CreateDomain { name, ty, default, not_null, checks, conflict: None } => Statement::CreateDomain(Box::new(CreateDomain {
-            name: object_name(&name)?,
-            ty: lower_type(&ty)?,
-            default: default.map(lower_expr).transpose()?,
-            not_null,
-            checks: checks.into_iter().map(|(n, e)| Ok((n.as_ref().map(ident), lower_expr(e)?))).collect::<SqlResult<Vec<_>>>()?,
-        })),
+        TypeDdl::CreateDomain { name, ty, default, collation, not_null, checks, conflict: None } => {
+            Statement::CreateDomain(Box::new(CreateDomain {
+                name: object_name(&name)?,
+                ty: lower_type(&ty)?,
+                default: default.map(lower_expr).transpose()?,
+                collation: collation.as_ref().map(|c| object_name(c).map(|o| o.base().to_owned())).transpose()?,
+                not_null,
+                checks: checks.into_iter().map(|(n, e)| Ok((n.as_ref().map(ident), lower_expr(e)?))).collect::<SqlResult<Vec<_>>>()?,
+            }))
+        }
         TypeDdl::AlterDomain { name, action } => {
             let action = match action {
                 DomainAction::SetDefault(e) => AlterDomainAction::SetDefault(lower_expr(e)?),

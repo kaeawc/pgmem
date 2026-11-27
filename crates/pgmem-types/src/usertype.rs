@@ -30,6 +30,8 @@ pub struct Field {
     pub name: String,
     pub ty: Type,
     pub typmod: i32,
+    /// `COLLATE name` when not the type's default collation (`attcollation`).
+    pub collation: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -38,7 +40,8 @@ pub enum UserKind {
     Enum { labels: Vec<EnumLabel> },
     /// The constraints (CHECK expressions, DEFAULT) are catalog-level; the executor enforces
     /// them. Only what I/O needs is here.
-    Domain { base: Type, typmod: i32, not_null: bool },
+    /// `collation` is `typcollation` (0 for a base type without collations).
+    Domain { base: Type, typmod: i32, not_null: bool, collation: u32 },
     /// `relid` is the table a row type belongs to, or the `pg_class` entry (relkind `c`) of a
     /// `CREATE TYPE ... AS (...)` type.
     Composite { fields: Vec<Field>, relid: u32 },
@@ -238,6 +241,14 @@ pub fn schema_of(oid: u32) -> Option<String> {
     lookup(oid).map(|t| t.schema.clone())
 }
 
+/// A domain's `typcollation`.
+pub fn domain_collation(oid: u32) -> Option<u32> {
+    match &lookup(oid)?.kind {
+        UserKind::Domain { collation, .. } => Some(*collation),
+        _ => None,
+    }
+}
+
 pub fn domain_base(oid: u32) -> Option<(Type, i32)> {
     let t = lookup(oid)?;
     match &t.kind {
@@ -429,8 +440,8 @@ mod tests {
             schema: "public".into(),
             kind: UserKind::Composite {
                 fields: vec![
-                    Field { name: "street".into(), ty: Type::Text, typmod: -1 },
-                    Field { name: "zip".into(), ty: Type::Int4, typmod: -1 },
+                    Field { name: "street".into(), ty: Type::Text, typmod: -1, collation: None },
+                    Field { name: "zip".into(), ty: Type::Int4, typmod: -1, collation: None },
                 ],
                 relid: 0,
             },

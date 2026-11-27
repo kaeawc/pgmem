@@ -42,12 +42,16 @@ pub fn create_type(ct: &ir::CreateType, txn: &mut Txn, binder: &Binder) -> SqlRe
         }
         ir::CreateTypeKind::Composite(attrs) => {
             let mut fields: Vec<Field> = Vec::with_capacity(attrs.len());
-            for (n, t) in attrs {
+            for (n, t, collation) in attrs {
                 if fields.iter().any(|f| &f.name == n) {
                     return Err(SqlError::new(code::DUPLICATE_COLUMN, format!("column \"{n}\" specified more than once")));
                 }
                 let (ty, typmod) = resolve_type_name(binder.catalog, t)?;
-                fields.push(Field { name: n.clone(), ty, typmod });
+                let collation = match collation {
+                    Some(c) => crate::bind::ddl::column_collation(&ty, c)?,
+                    None => None,
+                };
+                fields.push(Field { name: n.clone(), ty, typmod, collation });
             }
             TypeDefKind::Composite { fields, relid: 0 }
         }
@@ -86,13 +90,23 @@ pub fn create_type(ct: &ir::CreateType, txn: &mut Txn, binder: &Binder) -> SqlRe
 pub fn create_domain(cd: &ir::CreateDomain, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> {
     let schema = binder.catalog.creation_schema(&cd.name)?;
     let name = cd.name.base().to_owned();
-    let (base, typmod) = resolve_type_name(binder.catalog, &cd.ty)?;
+    let (base, typmod) = domain_base_type(binder.catalog, &cd.ty)?;
     if matches!(base, Type::Record | Type::Unknown | Type::Void) {
         return Err(SqlError::datatype_mismatch(format!("\"{}\" is not a valid base type for a domain", base.name())));
     }
+    let collation = domain_collation(binder.catalog, &base, cd.collation.as_deref())?;
     if let Some(d) = &cd.default {
         validate_default(binder, d, &base, typmod)?;
     }
+    // A domain over a domain starts with a copy of the base domain's default (DefineDomain
+    // copies typdefaultbin); later changes to the base's default do not reach it.
+    let default = cd.default.clone().or_else(|| match &base {
+        Type::Domain(inner) => match binder.catalog.type_by_oid(*inner).map(|t| &t.kind) {
+            Some(TypeDefKind::Domain { default, .. }) => default.clone(),
+            _ => None,
+        },
+        _ => None,
+    });
     let mut checks: Vec<DomainCheck> = Vec::new();
     for (cname, expr) in &cd.checks {
         binder.bind_domain_check(expr, &base)?;
@@ -113,9 +127,37 @@ pub fn create_domain(cd: &ir::CreateDomain, txn: &mut Txn, binder: &Binder) -> S
     for c in &mut checks {
         c.oid = cat.alloc_oid();
     }
-    let kind = TypeDefKind::Domain { base, typmod, not_null: cd.not_null, default: cd.default.clone(), checks };
+    let ndims = i32::try_from(cd.ty.array_dims).unwrap_or(i32::MAX);
+    let kind = TypeDefKind::Domain { base, typmod, not_null: cd.not_null, default, checks, collation, ndims };
     cat.create_type(TypeDef { oid, array_oid, schema, name, kind })?;
     Ok(tag("CREATE DOMAIN"))
+}
+
+/// A domain's base type and typmod. An array base keeps its element's typmod
+/// (`numeric(10,2)[]` has typtypmod 655366), as Postgres records it.
+fn domain_base_type(cat: &Catalog, t: &ir::TypeName) -> SqlResult<(Type, i32)> {
+    let (ty, typmod) = resolve_type_name(cat, t)?;
+    if t.array_dims == 0 {
+        return Ok((ty, typmod));
+    }
+    let elem = ir::TypeName { array_dims: 0, ..t.clone() };
+    Ok((ty, resolve_type_name(cat, &elem)?.1))
+}
+
+/// `typcollation` of a new domain: its `COLLATE` if given (checked as a column's), else the
+/// base type's (a base domain's own `typcollation`).
+fn domain_collation(cat: &Catalog, base: &Type, collation: Option<&str>) -> SqlResult<u32> {
+    if let Some(c) = collation {
+        let c = crate::bind::ddl::column_collation(base, c)?;
+        return Ok(crate::bind::ddl::collation_oid(c.as_deref()));
+    }
+    Ok(match base {
+        Type::Domain(inner) => match cat.type_by_oid(*inner).map(|t| &t.kind) {
+            Some(TypeDefKind::Domain { collation, .. }) => *collation,
+            _ => 0,
+        },
+        _ => crate::catalog_views::type_storage(base).4,
+    })
 }
 
 /// `ChooseConstraintName(domain, NULL, "check", ...)`: `d_check`, `d_check1`, ...
@@ -224,7 +266,7 @@ pub fn alter_type(at: &ir::AlterType, txn: &mut Txn, binder: &Binder) -> SqlResu
             if fields.iter().any(|f| &f.name == attr) {
                 return Err(SqlError::new(code::DUPLICATE_COLUMN, format!("column \"{attr}\" of relation \"{name}\" already exists")));
             }
-            fields.push(Field { name: attr.clone(), ty: t, typmod });
+            fields.push(Field { name: attr.clone(), ty: t, typmod, collation: None });
         }
         ir::AlterTypeAction::DropAttribute { name: attr, if_exists } => {
             let in_use = !direct_columns(binder.catalog, def.oid).is_empty();

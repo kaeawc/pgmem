@@ -182,7 +182,7 @@ fn domains(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let cat = catalog_name(ctx);
     let mut rows = Vec::new();
     for t in m.catalog.types() {
-        let pgmem_catalog::TypeDefKind::Domain { base, typmod, default, .. } = &t.kind else { continue };
+        let pgmem_catalog::TypeDefKind::Domain { base, typmod, default, collation, .. } = &t.kind else { continue };
         // A domain over a domain is USER-DEFINED (its immediate base is a user type).
         let mut vals = match base {
             Type::Domain(_) => {
@@ -190,6 +190,20 @@ fn domains(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             }
             _ => type_columns(base, *typmod, &cat),
         };
+        // The view tests the domain's own typelem (always 0), so an array base is named by
+        // `format_type(typbasetype, NULL)` (`numeric[]`), not `ARRAY`.
+        if let Type::Array(elem) = base {
+            let data_type = if type_schema(elem) == "pg_catalog" {
+                crate::funcs::catalog::format_type(base.oid(), -1, m.catalog).unwrap_or_else(|| base.name())
+            } else {
+                "USER-DEFINED".to_owned()
+            };
+            vals.retain(|(k, _)| *k != "data_type");
+            vals.push(("data_type", txt(data_type)));
+        }
+        if let Some(coll) = crate::bind::ddl::collation_name(*collation) {
+            vals.extend([("collation_catalog", cat.clone()), ("collation_schema", name("pg_catalog")), ("collation_name", name(coll))]);
+        }
         let default_text = default.as_ref().and_then(|d| {
             let empty = TableDef {
                 oid: 0,
@@ -393,7 +407,9 @@ fn column_row(ctx: &EvalCtx, m: &Model, s: &Spec, schema: &str, rel: &str, table
         ("is_updatable", yes_no(updatable)),
     ];
     vals.extend(type_columns(&a.ty, a.typmod, &catalog_name(ctx)));
-    if let Some(coll) = a.column.and_then(|c| c.collation.as_deref()) {
+    // attcollation: the column's COLLATE, else its type's (a domain's own collation).
+    let own = a.column.and_then(|c| c.collation.as_deref());
+    if let Some(coll) = own.or_else(|| crate::bind::ddl::collation_name(super::type_storage(&a.ty).4)) {
         vals.extend([("collation_catalog", catalog_name(ctx)), ("collation_schema", name("pg_catalog")), ("collation_name", name(coll))]);
     }
     if let (Some(t), Some(c)) = (table, a.column) {

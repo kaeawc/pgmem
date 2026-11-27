@@ -1493,7 +1493,13 @@ pub(crate) fn lower_statement(stmt: sq::Statement) -> SqlResult<Statement> {
             let kind = match representation {
                 Some(sq::UserDefinedTypeRepresentation::Enum { labels }) => K::Enum(labels.into_iter().map(|l| l.value).collect()),
                 Some(sq::UserDefinedTypeRepresentation::Composite { attributes }) => K::Composite(
-                    attributes.iter().map(|a| Ok((ident(&a.name), expr::lower_type(&a.data_type)?))).collect::<SqlResult<Vec<_>>>()?,
+                    attributes
+                        .iter()
+                        .map(|a| {
+                            let collation = a.collation.as_ref().map(|c| object_name(c).map(|o| o.base().to_owned())).transpose()?;
+                            Ok((ident(&a.name), expr::lower_type(&a.data_type)?, collation))
+                        })
+                        .collect::<SqlResult<Vec<_>>>()?,
                 ),
                 // `CREATE TYPE name` (a shell type) and range / base types.
                 _ => return Err(unsupported("this form of CREATE TYPE")),

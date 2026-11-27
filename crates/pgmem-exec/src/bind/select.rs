@@ -1004,7 +1004,7 @@ impl Binder<'_> {
                 let mut fields = Vec::new();
                 for (n, t) in defs.columns.iter().zip(&defs.column_types) {
                     let (ty, typmod) = super::resolve_type_name(self.catalog, t)?;
-                    fields.push(pgmem_types::usertype::Field { name: n.clone(), ty, typmod });
+                    fields.push(pgmem_types::usertype::Field { name: n.clone(), ty, typmod, collation: None });
                 }
                 if kind == RecordFn::JsonTable {
                     // (ctx, path, vars, spec, on_error) + the descriptor.

@@ -13,7 +13,10 @@ use std::sync::Arc;
 pub fn registry(catalog: &Catalog, uncommitted_enum_values: &HashSet<u32>) -> Arc<Registry> {
     let user = catalog.types().map(|t| Arc::new(t.user_type()));
     let rows = catalog.tables().map(|t| {
-        let fields = t.live_columns().map(|(_, c)| Field { name: c.name.clone(), ty: c.ty.clone(), typmod: c.typmod }).collect();
+        let fields = t
+            .live_columns()
+            .map(|(_, c)| Field { name: c.name.clone(), ty: c.ty.clone(), typmod: c.typmod, collation: c.collation.clone() })
+            .collect();
         Arc::new(UserType {
             oid: rowtype_oid_of(t.oid),
             array_oid: rowtype_array_oid_of(t.oid),

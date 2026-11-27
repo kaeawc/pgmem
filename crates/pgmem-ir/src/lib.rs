@@ -1783,8 +1783,8 @@ pub struct CreateType {
 pub enum CreateTypeKind {
     /// `AS ENUM ('a', 'b')`.
     Enum(Vec<String>),
-    /// `AS (field type, ...)`.
-    Composite(Vec<(String, TypeName)>),
+    /// `AS (field type [COLLATE collation], ...)`.
+    Composite(Vec<(String, TypeName, Option<String>)>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1792,6 +1792,8 @@ pub struct CreateDomain {
     pub name: ObjectName,
     pub ty: TypeName,
     pub default: Option<Expr>,
+    /// `COLLATE name`.
+    pub collation: Option<String>,
     pub not_null: bool,
     /// CHECK constraints (optional name, expression over `VALUE`), in declaration order.
     pub checks: Vec<(Option<String>, Expr)>,
