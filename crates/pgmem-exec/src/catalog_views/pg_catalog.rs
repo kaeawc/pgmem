@@ -189,57 +189,8 @@ fn pg_inherits(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     }))
 }
 
-/// Default btree (403) and hash (405) operator classes by input type, recorded from Postgres 18.
-const DEFAULT_OPCLASSES: &[(u32, u32, u32)] = &[
-    (403, 16, 10003),
-    (403, 17, 10006),
-    (403, 18, 10007),
-    (403, 19, 10028),
-    (403, 20, 3124),
-    (403, 21, 1979),
-    (403, 23, 1978),
-    (403, 25, 3126),
-    (403, 26, 1981),
-    (403, 700, 10012),
-    (403, 701, 3123),
-    (403, 1042, 10004),
-    (403, 1082, 3122),
-    (403, 1083, 10038),
-    (403, 1114, 3128),
-    (403, 1184, 3127),
-    (403, 1186, 10022),
-    (403, 1266, 10041),
-    (403, 1700, 3125),
-    (403, 2950, 10065),
-    (403, 3614, 10071),
-    (403, 3802, 10088),
-    (405, 16, 10048),
-    (405, 17, 10049),
-    (405, 18, 10008),
-    (405, 19, 10029),
-    (405, 20, 10021),
-    (405, 21, 10019),
-    (405, 23, 10020),
-    (405, 25, 10037),
-    (405, 26, 10031),
-    (405, 700, 10013),
-    (405, 701, 10014),
-    (405, 1042, 10005),
-    (405, 1082, 10011),
-    (405, 1083, 10039),
-    (405, 1114, 10046),
-    (405, 1184, 10040),
-    (405, 1186, 10023),
-    (405, 1266, 10042),
-    (405, 1700, 10030),
-    (405, 2950, 10066),
-    (405, 3802, 10089),
-];
-
 fn default_opclass(method: u32, ty: &Type) -> u32 {
-    // varchar and name-like strings use text's operator class.
-    let oid = if *ty == Type::Varchar { 25 } else { ty.base().oid() };
-    DEFAULT_OPCLASSES.iter().find(|(m, t, _)| *m == method && *t == oid).map_or(0, |(_, _, o)| *o)
+    crate::opclass::default_for(method, ty).map_or(0, |o| o.oid)
 }
 
 fn pg_partitioned_table(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
@@ -518,7 +469,7 @@ fn pg_class(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             if partitioned { 'I' } else { 'i' },
             natts,
             vec![
-                ("relam", oid(403)),
+                ("relam", oid(crate::opclass::method_oid(&idx.method).unwrap_or(403))),
                 ("relfilenode", oid(if partitioned { 0 } else { idx.oid })),
                 ("relispartition", boolean(m.catalog.index_parent(idx.oid).is_some())),
                 temp_persistence(&t.schema),
@@ -997,6 +948,13 @@ fn pg_index(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
             let nkey = keys.len();
             keys.extend(idx.include.iter().map(|c| int2(c + 1)));
             let n = keys.len();
+            let method = crate::opclass::method_oid(&idx.method).unwrap_or(403);
+            let classes: Vec<Value> = if idx.opclasses.len() == nkey {
+                idx.opclasses.iter().map(|o| oid(o.oid)).collect()
+            } else {
+                let col = |c: &usize| t.columns.get(*c).map_or(0, |col| default_opclass(method, &col.ty));
+                idx.columns.iter().map(|c| oid(col(c))).chain(idx.exprs.iter().map(|_| oid(0))).collect()
+            };
             let exprs = (!idx.exprs.is_empty()).then(|| {
                 idx.true_exprs(t).map(|e| crate::deparse::deparse_expr(m.catalog, t, e).unwrap_or_default()).collect::<Vec<_>>().join(", ")
             });
@@ -1014,7 +972,7 @@ fn pg_index(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
                 ("indisreplident", boolean(idx.replica)),
                 ("indkey", Value::Array(keys)),
                 ("indcollation", Value::Array(collations)),
-                ("indclass", Value::Array(vec![oid(0); nkey])),
+                ("indclass", Value::Array(classes)),
                 ("indoption", Value::Array(vec![Value::Int2(0); nkey])),
                 ("indexprs", exprs.map_or(Value::Null, txt)),
                 ("indpred", pred.map_or(Value::Null, txt)),

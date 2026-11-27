@@ -22,6 +22,7 @@ pub mod funcs;
 pub mod functions;
 mod hashorder;
 pub mod lock_levels;
+pub mod opclass;
 pub mod partition;
 mod partition_index;
 pub mod plan;

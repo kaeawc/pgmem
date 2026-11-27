@@ -175,10 +175,23 @@ impl Constraint {
     }
 }
 
-/// A btree index. Unique indexes (including the ones backing PRIMARY KEY and UNIQUE
-/// constraints) are enforced; non-unique ones exist for catalog fidelity only.
+/// The operator class of one index key.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IndexOpclass {
+    /// `pg_opclass.oid` (0 when the class is not in the built-in table, e.g. an extension's).
+    pub oid: u32,
+    /// The name `pg_get_indexdef` prints: set only when the class is not the type's default.
+    pub shown: Option<String>,
+}
+
+/// An index. Unique indexes (including the ones backing PRIMARY KEY and UNIQUE constraints;
+/// unique is btree-only) are enforced; the rest exist for catalog fidelity only.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IndexDef {
+    /// Access method name (`btree`, `hash`, `gist`, `gin`, `spgist`, `brin`).
+    pub method: String,
+    /// Operator class per key (columns, then expressions); empty means every key's default.
+    pub opclasses: Vec<IndexOpclass>,
     pub oid: Oid,
     pub name: String,
     /// Physical column positions. Empty when the index is on expressions only.
