@@ -1,0 +1,189 @@
+# Partitions in the catalogs: a partitioned table's indexes print ON ONLY and their partitions'
+# indexes are inheritance children (pg_inherits, relispartition); a partition's columns and the
+# constraints cloned from its parent are inherited, not local (attislocal / attinhcount,
+# conislocal / coninhcount), until DETACH; inherited ones cannot be dropped from the partition.
+
+statement ok
+CREATE TABLE pi_r (id int PRIMARY KEY)
+
+statement ok
+CREATE TABLE pi_p (a int NOT NULL, b text, rid int REFERENCES pi_r, CONSTRAINT pi_ck CHECK (a > 0), UNIQUE (a, b)) PARTITION BY RANGE (a)
+
+statement ok
+CREATE TABLE pi_c PARTITION OF pi_p FOR VALUES FROM (1) TO (10)
+
+statement ok
+CREATE TABLE pi_c2 (a int NOT NULL, b text, rid int, CONSTRAINT pi_ck CHECK (a > 0))
+
+statement ok
+ALTER TABLE pi_p ATTACH PARTITION pi_c2 FOR VALUES FROM (10) TO (20)
+
+statement ok
+CREATE TABLE pi_m PARTITION OF pi_p FOR VALUES FROM (20) TO (40) PARTITION BY RANGE (a)
+
+statement ok
+CREATE TABLE pi_mm PARTITION OF pi_m FOR VALUES FROM (20) TO (30)
+
+statement ok
+CREATE INDEX pi_p_b_idx ON pi_p (b)
+
+statement ok
+CREATE INDEX pi_p_rid_idx ON ONLY pi_p (rid)
+
+query
+SELECT relname, relkind, relispartition, pg_get_indexdef(oid) FROM pg_class WHERE relname LIKE 'pi\_%' AND relkind IN ('i', 'I') ORDER BY relname COLLATE "C"
+----
+relname:name | relkind:char | relispartition:bool | pg_get_indexdef:text
+pi_c2_a_b_key | i | t | CREATE UNIQUE INDEX pi_c2_a_b_key ON public.pi_c2 USING btree (a, b)
+pi_c2_b_idx | i | t | CREATE INDEX pi_c2_b_idx ON public.pi_c2 USING btree (b)
+pi_c_a_b_key | i | t | CREATE UNIQUE INDEX pi_c_a_b_key ON public.pi_c USING btree (a, b)
+pi_c_b_idx | i | t | CREATE INDEX pi_c_b_idx ON public.pi_c USING btree (b)
+pi_m_a_b_key | I | t | CREATE UNIQUE INDEX pi_m_a_b_key ON ONLY public.pi_m USING btree (a, b)
+pi_m_b_idx | I | t | CREATE INDEX pi_m_b_idx ON ONLY public.pi_m USING btree (b)
+pi_mm_a_b_key | i | t | CREATE UNIQUE INDEX pi_mm_a_b_key ON public.pi_mm USING btree (a, b)
+pi_mm_b_idx | i | t | CREATE INDEX pi_mm_b_idx ON public.pi_mm USING btree (b)
+pi_p_a_b_key | I | f | CREATE UNIQUE INDEX pi_p_a_b_key ON ONLY public.pi_p USING btree (a, b)
+pi_p_b_idx | I | f | CREATE INDEX pi_p_b_idx ON ONLY public.pi_p USING btree (b)
+pi_p_rid_idx | I | f | CREATE INDEX pi_p_rid_idx ON ONLY public.pi_p USING btree (rid)
+pi_r_pkey | i | f | CREATE UNIQUE INDEX pi_r_pkey ON public.pi_r USING btree (id)
+
+query
+SELECT inhrelid::regclass, inhparent::regclass, inhseqno FROM pg_inherits WHERE inhparent::regclass::text LIKE 'pi\_%' ORDER BY inhrelid::regclass::text COLLATE "C"
+----
+inhrelid:regclass | inhparent:regclass | inhseqno:int4
+pi_c | pi_p | 1
+pi_c2 | pi_p | 1
+pi_c2_a_b_key | pi_p_a_b_key | 1
+pi_c2_b_idx | pi_p_b_idx | 1
+pi_c_a_b_key | pi_p_a_b_key | 1
+pi_c_b_idx | pi_p_b_idx | 1
+pi_m | pi_p | 1
+pi_m_a_b_key | pi_p_a_b_key | 1
+pi_m_b_idx | pi_p_b_idx | 1
+pi_mm | pi_m | 1
+pi_mm_a_b_key | pi_m_a_b_key | 1
+pi_mm_b_idx | pi_m_b_idx | 1
+
+query
+SELECT count(*) FROM pg_inherits WHERE inhparent = 'pi_p_b_idx'::regclass
+----
+count:int8
+3
+
+query
+SELECT relid, parentrelid, isleaf, level FROM pg_partition_tree('pi_p_b_idx')
+----
+relid:regclass | parentrelid:regclass | isleaf:bool | level:int4
+pi_p_b_idx | NULL | f | 0
+pi_c_b_idx | pi_p_b_idx | t | 1
+pi_c2_b_idx | pi_p_b_idx | t | 1
+pi_m_b_idx | pi_p_b_idx | f | 1
+pi_mm_b_idx | pi_m_b_idx | t | 2
+
+query
+SELECT attrelid::regclass, attname, attislocal, attinhcount FROM pg_attribute WHERE attrelid IN ('pi_p'::regclass, 'pi_c'::regclass, 'pi_c2'::regclass, 'pi_m'::regclass, 'pi_mm'::regclass) AND attnum > 0 AND NOT attisdropped ORDER BY attrelid::regclass::text COLLATE "C", attnum
+----
+attrelid:regclass | attname:name | attislocal:bool | attinhcount:int2
+pi_c | a | f | 1
+pi_c | b | f | 1
+pi_c | rid | f | 1
+pi_c2 | a | f | 1
+pi_c2 | b | f | 1
+pi_c2 | rid | f | 1
+pi_m | a | f | 1
+pi_m | b | f | 1
+pi_m | rid | f | 1
+pi_mm | a | f | 1
+pi_mm | b | f | 1
+pi_mm | rid | f | 1
+pi_p | a | t | 0
+pi_p | b | t | 0
+pi_p | rid | t | 0
+
+query
+SELECT conrelid::regclass, conname, contype, conislocal, coninhcount FROM pg_constraint WHERE conrelid IN ('pi_c'::regclass, 'pi_m'::regclass, 'pi_mm'::regclass) ORDER BY conrelid::regclass::text COLLATE "C", conname COLLATE "C"
+----
+conrelid:regclass | conname:name | contype:char | conislocal:bool | coninhcount:int2
+pi_c | pi_c_a_b_key | u | f | 1
+pi_c | pi_ck | c | f | 1
+pi_c | pi_p_a_not_null | n | f | 1
+pi_c | pi_p_rid_fkey | f | f | 1
+pi_m | pi_ck | c | f | 1
+pi_m | pi_m_a_b_key | u | f | 1
+pi_m | pi_p_a_not_null | n | f | 1
+pi_m | pi_p_rid_fkey | f | f | 1
+pi_mm | pi_ck | c | f | 1
+pi_mm | pi_mm_a_b_key | u | f | 1
+pi_mm | pi_p_a_not_null | n | f | 1
+pi_mm | pi_p_rid_fkey | f | f | 1
+
+query
+SELECT conname, contype, conislocal, coninhcount FROM pg_constraint WHERE conrelid = 'pi_c2'::regclass AND contype IN ('c', 'n') ORDER BY conname COLLATE "C"
+----
+conname:name | contype:char | conislocal:bool | coninhcount:int2
+pi_c2_a_not_null | n | f | 1
+pi_ck | c | f | 1
+
+statement error 42P16 cannot drop inherited column "b"
+ALTER TABLE pi_c DROP COLUMN b
+
+statement error 42P16 column "a" is marked NOT NULL in parent table
+ALTER TABLE pi_c ALTER COLUMN a DROP NOT NULL
+
+statement error 42P16 cannot drop inherited constraint "pi_ck" of relation "pi_c"
+ALTER TABLE pi_c DROP CONSTRAINT pi_ck
+
+statement error 42P16 cannot drop inherited constraint "pi_c_a_b_key" of relation "pi_c"
+ALTER TABLE pi_c DROP CONSTRAINT pi_c_a_b_key
+
+statement error 42P16 cannot rename inherited constraint "pi_ck"
+ALTER TABLE pi_c RENAME CONSTRAINT pi_ck TO pi_ck2
+
+statement ok
+CREATE INDEX pi_c_rid_idx ON pi_c (rid)
+
+statement ok
+ALTER INDEX pi_p_rid_idx ATTACH PARTITION pi_c_rid_idx
+
+statement ok
+ALTER TABLE pi_p DETACH PARTITION pi_m
+
+query
+SELECT attrelid::regclass, attname, attislocal, attinhcount FROM pg_attribute WHERE attrelid IN ('pi_m'::regclass, 'pi_mm'::regclass) AND attnum > 0 AND NOT attisdropped ORDER BY attrelid::regclass::text COLLATE "C", attnum
+----
+attrelid:regclass | attname:name | attislocal:bool | attinhcount:int2
+pi_m | a | t | 0
+pi_m | b | t | 0
+pi_m | rid | t | 0
+pi_mm | a | f | 1
+pi_mm | b | f | 1
+pi_mm | rid | f | 1
+
+query
+SELECT conname, contype, conislocal, coninhcount FROM pg_constraint WHERE conrelid = 'pi_m'::regclass ORDER BY conname COLLATE "C"
+----
+conname:name | contype:char | conislocal:bool | coninhcount:int2
+pi_ck | c | t | 0
+pi_m_a_b_key | u | t | 0
+pi_p_a_not_null | n | t | 0
+pi_p_rid_fkey | f | t | 0
+
+query
+SELECT inhrelid::regclass, inhparent::regclass FROM pg_inherits WHERE inhrelid::regclass::text LIKE 'pi\_m%' ORDER BY inhrelid::regclass::text COLLATE "C"
+----
+inhrelid:regclass | inhparent:regclass
+pi_mm | pi_m
+pi_mm_a_b_key | pi_m_a_b_key
+pi_mm_b_idx | pi_m_b_idx
+
+query
+SELECT relname, relispartition FROM pg_class WHERE relname IN ('pi_m', 'pi_m_b_idx', 'pi_mm', 'pi_mm_b_idx') ORDER BY relname COLLATE "C"
+----
+relname:name | relispartition:bool
+pi_m | f
+pi_m_b_idx | f
+pi_mm | t
+pi_mm_b_idx | t
+
+statement ok
+ALTER TABLE pi_m DROP CONSTRAINT pi_ck

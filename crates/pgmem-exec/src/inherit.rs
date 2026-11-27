@@ -562,18 +562,34 @@ fn merge_added_check(
 fn check_inherited(catalog: &Catalog, table: &TableDef, action: &A) -> SqlResult<()> {
     let column = |name: &str| table.column_index(name).map(|s| (s, catalog.column_inheritance(table.oid, s)));
     let inherited_col = |name: &str| column(name).is_some_and(|(_, i)| i.count > 0);
-    let inherited_con = |name: &str| table.constraints.iter().any(|c| c.name == name && catalog.constraint_inheritance(c.oid).count > 0);
+    let inherited_con = |name: &str, renaming: bool| {
+        // Renaming an inherited foreign key or index-backed constraint is allowed.
+        let renamable = |c: &Constraint| renaming && !matches!(c.kind, ConstraintKind::Check { .. });
+        let con = table
+            .constraints
+            .iter()
+            .any(|c| c.name == name && !renamable(c) && catalog.table_constraint_inheritance(table.oid, c).count > 0);
+        // A NOT NULL constraint, by its name.
+        let not_null = table
+            .live_columns()
+            .any(|(s, c)| c.not_null && not_null_name(table, c) == name && catalog.not_null_inheritance(table.oid, s).count > 0);
+        con || not_null
+    };
+    let partition = catalog.partition_of(table.oid).is_some();
     match action {
         A::DropColumn { name, .. } if inherited_col(name) => Err(table_def_error(format!("cannot drop inherited column \"{name}\""))),
         A::RenameColumn { old, .. } if inherited_col(old) => Err(table_def_error(format!("cannot rename inherited column \"{old}\""))),
         A::AlterType { column, .. } if inherited_col(column) => Err(table_def_error(format!("cannot alter inherited column \"{column}\""))),
-        A::DropConstraint { name, .. } if inherited_con(name) => {
+        A::DropConstraint { name, .. } if inherited_con(name, false) => {
             Err(table_def_error(format!("cannot drop inherited constraint \"{name}\" of relation \"{}\"", table.name)))
         }
-        A::RenameConstraint { old, .. } if inherited_con(old) => {
+        A::RenameConstraint { old, .. } if inherited_con(old, true) => {
             Err(table_def_error(format!("cannot rename inherited constraint \"{old}\"")))
         }
         A::DropNotNull { column } => match table.column_index(column) {
+            Some(s) if partition && catalog.not_null_inheritance(table.oid, s).count > 0 => {
+                Err(table_def_error(format!("column \"{column}\" is marked NOT NULL in parent table")))
+            }
             Some(s) if catalog.not_null_inheritance(table.oid, s).count > 0 => Err(table_def_error(format!(
                 "cannot drop inherited constraint \"{}\" of relation \"{}\"",
                 not_null_name(table, &table.columns[s]),
@@ -986,7 +1002,10 @@ pub(crate) fn constraint_flags(catalog: &Catalog, table: Oid, oid: Oid, contype:
     let inh = if contype == 'n' {
         conkey.first().map_or_else(Inherited::default, |a| catalog.not_null_inheritance(table, a - 1))
     } else {
-        catalog.constraint_inheritance(oid)
+        match catalog.table_by_oid(table).and_then(|t| t.constraints.iter().find(|c| c.oid == oid)) {
+            Some(c) => catalog.table_constraint_inheritance(table, c),
+            None => catalog.constraint_inheritance(oid),
+        }
     };
     (inh.local, inh.count, contype == 'c' && catalog.is_no_inherit(oid))
 }

@@ -1,9 +1,12 @@
 //! Table inheritance (`CREATE TABLE ... INHERITS`, `ALTER TABLE ... [NO] INHERIT`): each child's
 //! parents (`pg_inherits`), and how often each column and constraint is inherited
 //! (`attinhcount` / `attislocal`, `coninhcount` / `conislocal`, `connoinherit`). Partitions are
-//! tracked separately (`partitions.rs`).
+//! tracked separately (`partitions.rs`); what a partition inherits follows from its parent: every
+//! column, and each constraint cloned from the parent's, comes from exactly one parent and is never
+//! local (Postgres sets `attislocal` / `conislocal` false on CREATE ... PARTITION OF and ATTACH
+//! PARTITION alike, and DETACH makes them local again).
 
-use crate::{Catalog, Oid, TableDef};
+use crate::{Catalog, Constraint, ConstraintKind, Oid, TableDef};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -39,6 +42,20 @@ pub(crate) struct Inheritance {
     constraints: BTreeMap<Oid, Inherited>,
     /// CHECK constraints declared `NO INHERIT`, by OID.
     no_inherit: BTreeSet<Oid>,
+}
+
+/// Whether the parent's constraint `p` is the foreign key the partition's `c` was cloned from:
+/// the same columns (by name), referenced table and columns, and actions.
+fn same_foreign_key(parent: &TableDef, p: &Constraint, child: &TableDef, c: &Constraint) -> bool {
+    let (
+        ConstraintKind::ForeignKey { columns: pc, ref_table: pt, ref_columns: pr, on_delete: pd, on_update: pu, match_full: pm, .. },
+        ConstraintKind::ForeignKey { columns: cc, ref_table: ct, ref_columns: cr, on_delete: cd, on_update: cu, match_full: cm, .. },
+    ) = (&p.kind, &c.kind)
+    else {
+        return false;
+    };
+    let names = |t: &TableDef, cols: &[usize]| cols.iter().map(|i| t.columns.get(*i).map(|c| c.name.clone())).collect::<Vec<_>>();
+    pt == ct && pr == cr && pd == cd && pu == cu && pm == cm && names(parent, pc) == names(child, cc)
 }
 
 fn set<K: Ord>(map: &mut BTreeMap<K, Inherited>, key: K, v: Inherited) {
@@ -107,7 +124,17 @@ impl Catalog {
         self.inheritance.had_children.contains(&table)
     }
 
+    /// A partition and its parent table.
+    fn partition_and_parent(&self, table: Oid) -> Option<(&TableDef, &TableDef)> {
+        let parent = self.partition_of(table)?.parent;
+        Some((self.table_by_oid(table)?, self.table_by_oid(parent)?))
+    }
+
     pub fn column_inheritance(&self, table: Oid, slot: usize) -> Inherited {
+        if let Some((child, parent)) = self.partition_and_parent(table) {
+            let inherited = child.columns.get(slot).is_some_and(|c| !c.dropped && parent.column_index(&c.name).is_some());
+            return if inherited { Inherited::FROM_PARENT } else { Inherited::default() };
+        }
         self.inheritance.columns.get(&(table, slot)).copied().unwrap_or_default()
     }
 
@@ -116,6 +143,15 @@ impl Catalog {
     }
 
     pub fn not_null_inheritance(&self, table: Oid, slot: usize) -> Inherited {
+        if let Some((child, parent)) = self.partition_and_parent(table) {
+            let inherited = child
+                .columns
+                .get(slot)
+                .filter(|c| !c.dropped && c.not_null)
+                .and_then(|c| parent.column(&c.name))
+                .is_some_and(|p| p.not_null);
+            return if inherited { Inherited::FROM_PARENT } else { Inherited::default() };
+        }
         self.inheritance.not_nulls.get(&(table, slot)).copied().unwrap_or_default()
     }
 
@@ -125,6 +161,24 @@ impl Catalog {
 
     pub fn constraint_inheritance(&self, constraint: Oid) -> Inherited {
         self.inheritance.constraints.get(&constraint).copied().unwrap_or_default()
+    }
+
+    /// [`Catalog::constraint_inheritance`] of one of `table`'s constraints, for partitions too: a
+    /// partition's CHECK, foreign key, and index-backed constraints cloned from its parent's are
+    /// inherited.
+    pub fn table_constraint_inheritance(&self, table: Oid, con: &Constraint) -> Inherited {
+        let Some((child, parent)) = self.partition_and_parent(table) else { return self.constraint_inheritance(con.oid) };
+        let inherited = match &con.kind {
+            ConstraintKind::Check { .. } => {
+                parent.constraints.iter().any(|p| p.name == con.name && matches!(p.kind, ConstraintKind::Check { .. }))
+            }
+            // A foreign key keeps its parent link through a rename, so match by definition.
+            ConstraintKind::ForeignKey { .. } => parent.constraints.iter().any(|p| same_foreign_key(parent, p, child, con)),
+            ConstraintKind::PrimaryKey { .. } | ConstraintKind::Unique { .. } | ConstraintKind::Exclude { .. } => {
+                child.indexes.iter().find(|i| i.name == con.name).is_some_and(|i| self.index_parent(i.oid).is_some())
+            }
+        };
+        if inherited { Inherited::FROM_PARENT } else { Inherited::default() }
     }
 
     pub fn set_constraint_inheritance(&mut self, constraint: Oid, v: Inherited) {
