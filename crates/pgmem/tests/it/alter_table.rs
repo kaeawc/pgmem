@@ -1,4 +1,4 @@
-use crate::support::{TestDb, expect_code, setup};
+use crate::support::{TestDb, expect_code, setup, texts};
 use postgres::Client;
 
 fn alter_setup() -> (TestDb, Client) {
@@ -69,6 +69,113 @@ fn alter_table_drop_column_if_exists_missing() {
 fn alter_table_drop_column_cascade() {
     let (_db, mut c) = alter_setup();
     c.batch_execute("ALTER TABLE t DROP COLUMN name CASCADE").expect("DROP CASCADE");
+}
+
+fn index_names(c: &mut Client, table: &str) -> Vec<String> {
+    let sql = format!("SELECT indexrelid::regclass::text FROM pg_index WHERE indrelid = '{table}'::regclass ORDER BY 1");
+    texts(c, &sql).into_iter().map(|r| r[0].clone().expect("index name")).collect()
+}
+
+fn constraint_names(c: &mut Client, table: &str) -> Vec<String> {
+    let sql = format!("SELECT conname::text FROM pg_constraint WHERE conrelid = '{table}'::regclass ORDER BY 1");
+    texts(c, &sql).into_iter().map(|r| r[0].clone().expect("constraint name")).collect()
+}
+
+// Postgres drops every index that reads a dropped column: key column, key expression,
+// partial-index predicate or INCLUDE column (#249).
+#[test]
+fn alter_table_drop_column_drops_indexes() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE t (a int, b int, c int, d text, e int);
+         CREATE INDEX t_ab ON t (a, b);
+         CREATE INDEX t_expr ON t ((a + c));
+         CREATE INDEX t_lower ON t (lower(d));
+         CREATE INDEX t_part ON t (a) WHERE e > 0;
+         CREATE INDEX t_incl ON t (a) INCLUDE (e);
+         CREATE INDEX t_a ON t (a);",
+    )
+    .expect("setup");
+    c.batch_execute("ALTER TABLE t DROP COLUMN b").expect("drop b");
+    assert_eq!(texts(&mut c, "SELECT to_regclass('t_ab')::text"), vec![vec![None]]);
+    c.batch_execute("ALTER TABLE t DROP COLUMN c").expect("drop c");
+    assert_eq!(texts(&mut c, "SELECT to_regclass('t_expr')::text"), vec![vec![None]]);
+    c.batch_execute("ALTER TABLE t DROP COLUMN d").expect("drop d");
+    assert_eq!(texts(&mut c, "SELECT to_regclass('t_lower')::text"), vec![vec![None]]);
+    c.batch_execute("ALTER TABLE t DROP COLUMN e").expect("drop e");
+    assert_eq!(index_names(&mut c, "t"), vec!["t_a"]);
+    // The name is free again.
+    c.batch_execute("CREATE INDEX t_ab ON t (a)").expect("reuse name");
+}
+
+// A primary key or unique constraint over a dropped column goes with its index, even when
+// it spans other columns; constraints not using the column stay and are still enforced.
+#[test]
+fn alter_table_drop_column_drops_key_constraints() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE u (a int, b int, c int, PRIMARY KEY (a, b), UNIQUE (c, a), CONSTRAINT u_c_key2 UNIQUE (c));
+         CREATE UNIQUE INDEX u_uidx ON u (b, c);",
+    )
+    .expect("setup");
+    c.batch_execute("ALTER TABLE u DROP COLUMN b").expect("drop b");
+    assert_eq!(constraint_names(&mut c, "u"), vec!["u_a_not_null", "u_c_a_key", "u_c_key2"]);
+    assert_eq!(index_names(&mut c, "u"), vec!["u_c_a_key", "u_c_key2"]);
+    // The primary key's NOT NULL on the surviving column stays.
+    assert_eq!(
+        texts(&mut c, "SELECT attnotnull::text FROM pg_attribute WHERE attrelid = 'u'::regclass AND attname = 'a'"),
+        vec![vec![Some("true".to_owned())]]
+    );
+    expect_code(c.batch_execute("INSERT INTO u VALUES (1, 1), (1, 1)"), "23505");
+    c.batch_execute("ALTER TABLE u DROP COLUMN c").expect("drop c");
+    assert_eq!(constraint_names(&mut c, "u"), vec!["u_a_not_null"]);
+    assert!(index_names(&mut c, "u").is_empty());
+    c.batch_execute("INSERT INTO u VALUES (1), (1)").expect("no unique left");
+}
+
+// A unique index mixing a plain column and an expression goes when either is dropped, and
+// stops being enforced.
+#[test]
+fn alter_table_drop_column_drops_unique_expression_index() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE m (a int, b text, c int);
+         CREATE UNIQUE INDEX m_mixed ON m (a, lower(b));
+         CREATE UNIQUE INDEX m_mixed2 ON m (lower(b), c);
+         CREATE TABLE x (a int, b int, EXCLUDE USING btree (b WITH =));",
+    )
+    .expect("setup");
+    c.batch_execute("ALTER TABLE m DROP COLUMN c").expect("drop c");
+    assert_eq!(index_names(&mut c, "m"), vec!["m_mixed"]);
+    c.batch_execute("ALTER TABLE m DROP COLUMN b").expect("drop b");
+    assert!(index_names(&mut c, "m").is_empty());
+    c.batch_execute("INSERT INTO m VALUES (1), (1)").expect("no unique left");
+    c.batch_execute("ALTER TABLE x DROP COLUMN b").expect("drop b");
+    assert!(constraint_names(&mut c, "x").is_empty());
+    assert!(index_names(&mut c, "x").is_empty());
+}
+
+// On a partitioned table the partitions' indexes go too, with their pg_inherits links.
+#[test]
+fn alter_table_drop_column_drops_partitioned_indexes() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE pt (a int, b int, c int) PARTITION BY RANGE (a);
+         CREATE TABLE pt1 PARTITION OF pt FOR VALUES FROM (0) TO (10);
+         CREATE INDEX pt_bc ON pt ((b + c));
+         CREATE INDEX pt_a ON pt (a) WHERE c > 0;
+         CREATE INDEX pt_ab ON pt (a, b);",
+    )
+    .expect("setup");
+    c.batch_execute("ALTER TABLE pt DROP COLUMN c").expect("drop c");
+    assert_eq!(index_names(&mut c, "pt"), vec!["pt_ab"]);
+    assert_eq!(index_names(&mut c, "pt1"), vec!["pt1_a_b_idx"]);
+    let links = texts(
+        &mut c,
+        "SELECT inhrelid::regclass::text, inhparent::regclass::text FROM pg_inherits \
+         WHERE inhparent IN (SELECT indexrelid FROM pg_index WHERE indrelid = 'pt'::regclass) ORDER BY 1",
+    );
+    assert_eq!(links, vec![vec![Some("pt1_a_b_idx".to_owned()), Some("pt_ab".to_owned())]]);
 }
 
 #[test]

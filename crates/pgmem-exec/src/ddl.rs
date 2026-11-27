@@ -377,7 +377,16 @@ pub(crate) fn alter_table_action(
                 crate::partition::check_unique_keys(&def, &key)?;
             }
             let oid = def.oid;
+            // Indexes DROP COLUMN took with it leave the partitioned-index links too.
+            let gone: Vec<pgmem_catalog::Oid> = if matches!(action, ir::AlterTableAction::DropColumn { .. }) {
+                table.indexes.iter().filter(|i| def.indexes.iter().all(|n| n.oid != i.oid)).map(|i| i.oid).collect()
+            } else {
+                Vec::new()
+            };
             txn.catalog_mut().replace_table(rename_from.as_ref().unwrap_or(current), def);
+            for index in gone {
+                txn.catalog_mut().forget_index(index);
+            }
             // Most actions on a partitioned table apply to its partitions too.
             if let Some(child_action) = crate::partition::recurses(action) {
                 let partitions: Vec<(pgmem_catalog::Oid, QualName, Vec<pgmem_catalog::Oid>)> = txn

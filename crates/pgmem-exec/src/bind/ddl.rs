@@ -906,7 +906,7 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
             // only for objects in other tables, e.g. views; those are not tracked here).
             let _ = cascade;
             def.constraints.retain(|c| !constraint_uses(c, slot, name));
-            def.indexes.retain(|i| !i.columns.contains(&slot) && !i.include.contains(&slot));
+            def.indexes.retain(|i| !index_uses(i, slot, name));
             let col = &mut def.columns[slot];
             col.dropped = true;
             col.name = format!("........pg.dropped.{}........", slot + 1);
@@ -1133,6 +1133,12 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
             Ok(AlterOutcome::Replace { def: Box::new(def), rename_from: None, sequences: vec![], validate: Validation::None })
         }
     }
+}
+
+/// Whether an index reads the column: as a key, an INCLUDE column, inside a key expression
+/// or in its partial-index predicate. Postgres drops such an index with the column.
+fn index_uses(i: &IndexDef, slot: usize, name: &str) -> bool {
+    i.columns.contains(&slot) || i.include.contains(&slot) || i.exprs.iter().chain(i.predicate.iter()).any(|e| expr_mentions(e, name))
 }
 
 fn constraint_uses(c: &Constraint, slot: usize, name: &str) -> bool {
