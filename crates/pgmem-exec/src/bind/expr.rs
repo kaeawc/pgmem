@@ -389,7 +389,8 @@ fn aggregate_types(kind: AggKind, name: &str, args: &[Type]) -> SqlResult<(Vec<T
         }
         AggKind::Min | AggKind::Max => {
             let t = if first == Type::Unknown { Type::Text } else { first };
-            if matches!(t, Type::Jsonb | Type::Bool | Type::Uuid) && !matches!(t, Type::Uuid) {
+            // No min/max over these (ranges have btree ordering but no aggregate).
+            if matches!(t, Type::Jsonb | Type::Bool | Type::Range(_) | Type::Multirange(_)) {
                 return Err(err());
             }
             (vec![t.clone()], t)

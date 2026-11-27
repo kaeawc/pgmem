@@ -203,6 +203,10 @@ pub fn srf_column_names(name: &str) -> Option<&'static [&'static str]> {
 /// the argument coercion targets.
 pub fn resolve_srf(name: &str, args: &[Type]) -> SqlResult<Option<SrfResolution>> {
     match name {
+        // unnest(anymultirange): its ranges in order.
+        "unnest" if let [m @ Type::Multirange(sub)] = args => {
+            Ok(Some((vec![Type::Range(sub.clone())], vec![m.clone()], unnest_multirange)))
+        }
         "unnest" => {
             if args.is_empty() {
                 return Err(no_function(name, args));
@@ -323,6 +327,13 @@ fn unnest(a: &[Value], _: &EvalCtx) -> SqlResult<Vec<Row>> {
     let cols: Vec<Vec<Value>> = a.iter().map(flat).collect();
     let max = cols.iter().map(Vec::len).max().unwrap_or(0);
     Ok((0..max).map(|i| cols.iter().map(|c| c.get(i).cloned().unwrap_or(Value::Null)).collect()).collect())
+}
+
+fn unnest_multirange(a: &[Value], _: &EvalCtx) -> SqlResult<Vec<Row>> {
+    Ok(match &a[0] {
+        Value::Multirange(_, rs) => rs.iter().map(|r| vec![Value::Range(Box::new(r.clone()))]).collect(),
+        _ => Vec::new(),
+    })
 }
 
 fn generate_series(a: &[Value], _: &EvalCtx) -> SqlResult<Vec<Row>> {
