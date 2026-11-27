@@ -1390,7 +1390,8 @@ pub fn available_extension(ext: &str) -> Option<(&'static str, &'static str)> {
 fn pg_extension(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
     let m = snapshot(ctx);
     Ok(rows_of(PG_EXTENSION, |s| {
-        let mut rows = vec![s.row(vec![("oid", oid(13_558)), ("extname", name("plpgsql")), ("extversion", txt("1.0"))])];
+        let mut rows =
+            vec![s.row(vec![("oid", oid(super::depend::PLPGSQL_EXTENSION_OID)), ("extname", name("plpgsql")), ("extversion", txt("1.0"))])];
         for e in m.catalog.extensions() {
             rows.push(s.row(vec![
                 ("oid", oid(e.oid)),

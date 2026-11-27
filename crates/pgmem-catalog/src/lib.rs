@@ -425,6 +425,9 @@ pub struct FunctionDef {
     pub rows: f64,
     /// `proconfig`: `name=value` entries of the function's `SET` options.
     pub config: Vec<String>,
+    /// Extensions the function depends on (`ALTER FUNCTION ... DEPENDS ON EXTENSION`):
+    /// dropping one drops the function.
+    pub extensions: Vec<String>,
 }
 
 impl FunctionDef {

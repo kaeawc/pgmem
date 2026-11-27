@@ -14,8 +14,12 @@ fn tag(t: &str) -> QueryResult {
     QueryResult { tag: t.to_owned(), ..Default::default() }
 }
 
-/// The role privileges are checked for: `SET ROLE`'s, else the session user.
+/// The role privileges are checked for: the owner of the SECURITY DEFINER function running,
+/// else `SET ROLE`'s, else the session user.
 pub fn current_role(env: &SessionEnv) -> String {
+    if let Some(owner) = &env.security_definer {
+        return owner.clone();
+    }
     match env.settings.get("role") {
         Some(r) if !r.is_empty() && r != "none" => r.clone(),
         _ => env.user.clone(),
@@ -651,13 +655,18 @@ pub(crate) fn grant(g: &ir::GrantStmt, txn: &mut Txn, env: &SessionEnv) -> SqlRe
                         cat.revoke(&GrantObject::Column(rel, attnum), grantee, &column_letters, g.grant_option);
                     }
                 }
-                if grantee.is_empty() && matches!(object, GrantObject::Schema(_)) && privs.contains(&'U') {
-                    // Revoking PUBLIC's default USAGE on a schema.
-                    cat.grant(object.clone(), "-revoked:public", &me, &['U'], false);
+                if let Some(p) = public_default_letter(&object)
+                    && grantee.is_empty()
+                    && privs.contains(&p)
+                {
+                    // Revoking PUBLIC's default USAGE on a schema or EXECUTE on a function.
+                    cat.grant(object.clone(), "-revoked:public", &me, &[p], false);
                 }
             } else {
-                if grantee.is_empty() && matches!(object, GrantObject::Schema(_)) {
-                    cat.revoke(&object, "-revoked:public", &['U'], false);
+                if let Some(p) = public_default_letter(&object)
+                    && grantee.is_empty()
+                {
+                    cat.revoke(&object, "-revoked:public", &[p], false);
                 }
                 cat.grant(object.clone(), grantee, &me, &privs, g.grant_option);
             }
@@ -933,14 +942,17 @@ pub(crate) fn check_statement(
             }
         }
     }
-    if columns.is_empty() {
-        return Ok(());
-    }
     let binder = crate::bind::Binder::new(catalog, param_types);
     binder.record_column_use();
+    let bound = bind_for_columns(stmt, &binder, trigger_view.as_deref());
+    if columns.is_empty() {
+        // Only EXECUTE remains to check; a statement that does not bind reports that when it
+        // runs.
+        return if bound.is_ok() { check_function_use(&binder, catalog, env) } else { Ok(()) };
+    }
     // A statement that fails to bind reports that, as Postgres reports parse-analysis errors
     // before permission errors.
-    bind_for_columns(stmt, &binder, trigger_view.as_deref())?;
+    bound?;
     let used = binder.column_use();
     for c in &columns {
         let mut cols: Vec<i16> = used.iter().filter(|(rel, _, p)| *rel == c.rel && *p == c.privilege).map(|(_, a, _)| *a).collect();
@@ -956,7 +968,7 @@ pub(crate) fn check_statement(
             return Err(permission_denied(c.kind, &c.name));
         }
     }
-    Ok(())
+    check_function_use(&binder, catalog, env)
 }
 
 /// What `need` on `rel` requires of `role`: nothing (Ok(None)), a check of the columns the
@@ -1127,6 +1139,36 @@ fn target_view_columns(stmt: &ir::Statement, catalog: &Catalog) -> Option<Vec<(O
         _ => Vec::new(),
     };
     Some(uses)
+}
+
+/// The privilege PUBLIC holds by default that REVOKE ... FROM PUBLIC can take away.
+fn public_default_letter(object: &GrantObject) -> Option<char> {
+    match object {
+        GrantObject::Schema(_) => Some('U'),
+        GrantObject::Function(_) => Some('X'),
+        _ => None,
+    }
+}
+
+/// Checks the current role may execute user function `def` (42501 `permission denied for
+/// function f`, or `procedure p`).
+pub(crate) fn check_execute(catalog: &Catalog, env: &SessionEnv, def: &pgmem_catalog::FunctionDef) -> SqlResult<()> {
+    let role = current_role(env);
+    if has_privilege(catalog, env, &role, &GrantObject::Function(def.oid), 'X') {
+        return Ok(());
+    }
+    Err(permission_denied(if def.procedure { "procedure" } else { "function" }, &def.name))
+}
+
+/// EXECUTE on every user function a bound statement calls, checked before it runs (as
+/// Postgres checks when the executor starts, whether or not a row reaches the call).
+fn check_function_use(binder: &crate::bind::Binder, catalog: &Catalog, env: &SessionEnv) -> SqlResult<()> {
+    for oid in binder.function_use() {
+        if let Some(def) = catalog.function_by_oid(oid) {
+            check_execute(catalog, env, def)?;
+        }
+    }
+    Ok(())
 }
 
 /// Validates `SET ROLE name` (22023 for an unknown role, 42501 without membership).

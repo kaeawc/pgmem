@@ -67,6 +67,9 @@ pub struct SessionEnv {
     pub objects: Arc<SessionObjects>,
     /// SET CONSTRAINTS state of the current transaction.
     pub constraint_modes: Arc<ConstraintModes>,
+    /// While a SECURITY DEFINER function runs: its owner, the current user for the call
+    /// (session_user and the `role` setting are unchanged).
+    pub security_definer: Option<String>,
 }
 
 /// `SET CONSTRAINTS` within a transaction: ALL, then per-constraint overrides.
@@ -105,6 +108,7 @@ impl SessionEnv {
             lastval: None,
             objects: Arc::default(),
             constraint_modes: Arc::default(),
+            security_definer: None,
         }
     }
 }
@@ -329,6 +333,7 @@ impl Session {
             lastval: self.lastval,
             objects: self.objects(),
             constraint_modes: Arc::new(self.constraint_modes.clone()),
+            security_definer: None,
         }
     }
 

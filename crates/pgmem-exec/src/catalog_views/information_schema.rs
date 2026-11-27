@@ -52,8 +52,25 @@ const COLUMN_PRIVILEGES: &str = "grantor:name, grantee:name, table_catalog:name,
 const ENABLED_ROLES: &str = "role_name:name";
 const APPLICABLE_ROLES: &str = "grantee:name, role_name:name, is_grantable:varchar";
 pub(super) const ROUTINES: &str = "specific_catalog:name, specific_schema:name, specific_name:name, routine_catalog:name, routine_schema:name, \
-    routine_name:name, routine_type:varchar, data_type:varchar, type_udt_name:name, routine_body:varchar, routine_definition:varchar, \
-    external_language:varchar, is_deterministic:varchar, security_type:varchar";
+    routine_name:name, routine_type:varchar, module_catalog:name, module_schema:name, module_name:name, udt_catalog:name, \
+    udt_schema:name, udt_name:name, data_type:varchar, character_maximum_length:int4, character_octet_length:int4, \
+    character_set_catalog:name, character_set_schema:name, character_set_name:name, collation_catalog:name, \
+    collation_schema:name, collation_name:name, numeric_precision:int4, numeric_precision_radix:int4, numeric_scale:int4, \
+    datetime_precision:int4, interval_type:varchar, interval_precision:int4, type_udt_catalog:name, type_udt_schema:name, \
+    type_udt_name:name, scope_catalog:name, scope_schema:name, scope_name:name, maximum_cardinality:int4, \
+    dtd_identifier:name, routine_body:varchar, routine_definition:varchar, external_name:varchar, external_language:varchar, \
+    parameter_style:varchar, is_deterministic:varchar, sql_data_access:varchar, is_null_call:varchar, sql_path:varchar, \
+    schema_level_routine:varchar, max_dynamic_result_sets:int4, is_user_defined_cast:varchar, is_implicitly_invocable:varchar, \
+    security_type:varchar, to_sql_specific_catalog:name, to_sql_specific_schema:name, to_sql_specific_name:name, \
+    as_locator:varchar, created:timestamptz, last_altered:timestamptz, new_savepoint_level:varchar, is_udt_dependent:varchar, \
+    result_cast_from_data_type:varchar, result_cast_as_locator:varchar, result_cast_char_max_length:int4, \
+    result_cast_char_octet_length:int4, result_cast_char_set_catalog:name, result_cast_char_set_schema:name, \
+    result_cast_char_set_name:name, result_cast_collation_catalog:name, result_cast_collation_schema:name, \
+    result_cast_collation_name:name, result_cast_numeric_precision:int4, result_cast_numeric_precision_radix:int4, \
+    result_cast_numeric_scale:int4, result_cast_datetime_precision:int4, result_cast_interval_type:varchar, \
+    result_cast_interval_precision:int4, result_cast_type_udt_catalog:name, result_cast_type_udt_schema:name, \
+    result_cast_type_udt_name:name, result_cast_scope_catalog:name, result_cast_scope_schema:name, \
+    result_cast_scope_name:name, result_cast_maximum_cardinality:int4, result_cast_dtd_identifier:name";
 pub(super) const PARAMETERS: &str = "specific_catalog:name, specific_schema:name, specific_name:name, ordinal_position:int4, \
     parameter_mode:varchar, is_result:varchar, as_locator:varchar, parameter_name:name, data_type:varchar, udt_name:name, \
     parameter_default:varchar";
@@ -227,7 +244,7 @@ fn domain_constraints(ctx: &EvalCtx) -> SqlResult<Vec<Row>> {
 }
 
 /// The schema of a user type (or of an array's element type).
-fn type_schema(t: &Type) -> String {
+pub(super) fn type_schema(t: &Type) -> String {
     match t {
         Type::Array(e) => type_schema(e),
         Type::Enum(o) | Type::Domain(o) | Type::Composite(o) => pgmem_types::usertype::schema_of(*o).unwrap_or_else(|| "public".to_owned()),
