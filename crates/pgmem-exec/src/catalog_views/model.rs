@@ -276,11 +276,7 @@ impl<'a> Model<'a> {
                 con.confkey = attnums(ref_columns);
                 if let Some(rt) = self.catalog.table_q(ref_table) {
                     con.confrelid = rt.oid;
-                    con.conindid = rt
-                        .indexes
-                        .iter()
-                        .find(|i| (i.unique || i.primary) && i.exprs.is_empty() && i.columns == *ref_columns)
-                        .map_or(0, |i| i.oid);
+                    con.conindid = rt.fk_index(ref_columns).map_or(0, |i| i.oid);
                 }
                 con.on_update = on_update.code();
                 con.on_delete = on_delete.code();

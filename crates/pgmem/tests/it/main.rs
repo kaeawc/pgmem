@@ -68,6 +68,7 @@ mod exec_update;
 mod exists;
 mod extensions;
 mod extract;
+mod fk_dependencies;
 mod float;
 mod foreign_key;
 mod foreign_key_cascade;

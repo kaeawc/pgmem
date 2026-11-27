@@ -1,0 +1,160 @@
+# Foreign keys depend on the referenced key's unique index and on the referenced columns
+# (#216, #254): DROP CONSTRAINT, DROP INDEX and DROP COLUMN refuse to drop them; CASCADE
+# drops the foreign keys.
+
+statement ok
+CREATE TABLE p (id int PRIMARY KEY, u int UNIQUE); CREATE TABLE c (p int REFERENCES p); CREATE TABLE c2 (p int REFERENCES p, q int REFERENCES p (u))
+
+statement error 2BP01 cannot drop constraint p_pkey on table p because other objects depend on it
+ALTER TABLE p DROP CONSTRAINT p_pkey
+
+statement error 2BP01 cannot drop constraint p_u_key on table p because other objects depend on it
+ALTER TABLE p DROP CONSTRAINT p_u_key
+
+statement error 2BP01 cannot drop index p_pkey because constraint p_pkey on table p requires it
+DROP INDEX p_pkey
+
+statement error 2BP01 cannot drop column id of table p because other objects depend on it
+ALTER TABLE p DROP COLUMN id
+
+statement error 2BP01 cannot drop column u of table p because other objects depend on it
+ALTER TABLE p DROP COLUMN u
+
+query
+SELECT conrelid::regclass, conname::text, conindid::regclass FROM pg_constraint WHERE contype = 'f' AND confrelid = 'p'::regclass ORDER BY 1, 2
+----
+conrelid:regclass | conname:text | conindid:regclass
+c | c_p_fkey | p_pkey
+c2 | c2_p_fkey | p_pkey
+c2 | c2_q_fkey | p_u_key
+
+statement ok
+ALTER TABLE p DROP CONSTRAINT p_pkey CASCADE
+
+query
+SELECT conrelid::regclass, conname::text FROM pg_constraint WHERE contype = 'f' AND confrelid = 'p'::regclass ORDER BY 1, 2
+----
+conrelid:regclass | conname:text
+c2 | c2_q_fkey
+
+statement ok
+INSERT INTO c VALUES (42)
+
+statement ok
+ALTER TABLE p DROP COLUMN u CASCADE
+
+query
+SELECT count(*) FROM pg_constraint WHERE contype = 'f' AND confrelid = 'p'::regclass
+----
+count:int8
+0
+
+# A unique index (not a constraint) an FK uses.
+statement ok
+CREATE TABLE pi (id int); CREATE UNIQUE INDEX pi_id_idx ON pi (id); CREATE TABLE ci (r int REFERENCES pi (id))
+
+statement error 2BP01 cannot drop index pi_id_idx because other objects depend on it
+DROP INDEX pi_id_idx
+
+statement ok
+DROP INDEX pi_id_idx CASCADE
+
+query
+SELECT to_regclass('pi_id_idx'), (SELECT count(*) FROM pg_constraint WHERE conrelid = 'ci'::regclass)
+----
+to_regclass:regclass | count:int8
+NULL | 0
+
+# Self-referencing: the key's own FK blocks it; dropping the referencing column first does not.
+statement ok
+CREATE TABLE s (id int PRIMARY KEY, parent int REFERENCES s)
+
+statement error 2BP01 cannot drop constraint s_pkey on table s because other objects depend on it
+ALTER TABLE s DROP CONSTRAINT s_pkey
+
+statement error 2BP01 cannot drop column id of table s because other objects depend on it
+ALTER TABLE s DROP COLUMN id
+
+statement ok
+ALTER TABLE s DROP COLUMN parent, DROP COLUMN id
+
+statement ok
+CREATE TABLE s2 (id int PRIMARY KEY, parent int REFERENCES s2)
+
+statement ok
+ALTER TABLE s2 DROP COLUMN id CASCADE
+
+query
+SELECT attname::text FROM pg_attribute WHERE attrelid = 's2'::regclass AND attnum > 0 AND NOT attisdropped
+----
+attname:text
+parent
+
+statement ok
+CREATE TABLE s3 (id int PRIMARY KEY REFERENCES s3)
+
+statement ok
+ALTER TABLE s3 DROP COLUMN id
+
+# Multi-column key, referenced in another column order.
+statement ok
+CREATE TABLE m (a int, b int, PRIMARY KEY (a, b)); CREATE TABLE mc (x int, y int, FOREIGN KEY (x, y) REFERENCES m (b, a))
+
+query
+SELECT conindid::regclass FROM pg_constraint WHERE conrelid = 'mc'::regclass
+----
+conindid:regclass
+m_pkey
+
+statement error 2BP01 cannot drop column b of table m because other objects depend on it
+ALTER TABLE m DROP COLUMN b
+
+statement error 2BP01 cannot drop constraint m_pkey on table m because other objects depend on it
+ALTER TABLE m DROP CONSTRAINT m_pkey
+
+statement ok
+ALTER TABLE mc DROP COLUMN y
+
+query
+SELECT count(*) FROM pg_constraint WHERE conrelid = 'mc'::regclass
+----
+count:int8
+0
+
+statement ok
+ALTER TABLE m DROP CONSTRAINT m_pkey
+
+# Partitioned referenced table.
+statement ok
+CREATE TABLE pp (id int PRIMARY KEY) PARTITION BY RANGE (id); CREATE TABLE pp1 PARTITION OF pp FOR VALUES FROM (0) TO (10); CREATE TABLE ppc (r int REFERENCES pp)
+
+statement error 2BP01 cannot drop constraint pp_pkey on table pp because other objects depend on it
+ALTER TABLE pp DROP CONSTRAINT pp_pkey
+
+statement ok
+ALTER TABLE pp DROP CONSTRAINT pp_pkey CASCADE
+
+query
+SELECT count(*) FROM pg_constraint WHERE conrelid = 'ppc'::regclass
+----
+count:int8
+0
+
+# ROLLBACK brings the foreign key back.
+statement ok
+CREATE TABLE rp (id int PRIMARY KEY); CREATE TABLE rc (r int REFERENCES rp); INSERT INTO rp VALUES (1)
+
+statement ok
+BEGIN
+
+statement ok
+ALTER TABLE rp DROP COLUMN id CASCADE
+
+statement ok
+ROLLBACK
+
+statement ok
+INSERT INTO rc VALUES (1)
+
+statement error 23503 insert or update on table "rc" violates foreign key constraint "rc_r_fkey"
+INSERT INTO rc VALUES (2)

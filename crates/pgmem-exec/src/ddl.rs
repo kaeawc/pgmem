@@ -341,6 +341,11 @@ pub(crate) fn alter_table_action(
         for p in policies {
             txn.catalog_mut().drop_policy(p.oid);
         }
+        crate::fk_deps::drop_column(txn, &table, name, *cascade, &mut state.notices.borrow_mut())?;
+    }
+    // Foreign keys use the unique index of a primary key or unique constraint.
+    if let ir::AlterTableAction::DropConstraint { name, cascade, .. } = action {
+        crate::fk_deps::drop_key_constraint(txn, &table, name, *cascade, &mut state.notices.borrow_mut())?;
     }
     let table = txn.catalog().table_q(current).cloned().ok_or_else(|| SqlError::undefined_table(&current.name))?;
     column_view_dependencies(txn, &table, action)?;
@@ -932,6 +937,12 @@ fn drop(d: &ir::Drop, txn: &mut Txn, binder: &Binder) -> SqlResult<QueryResult> 
                     )
                     .with_hint(format!("You can drop constraint {} on table {tname} instead.", index.name)));
                 }
+                let fks = crate::fk_deps::on_index(txn.catalog(), &t, &index.name);
+                let shown = display_name(txn.catalog(), &QualName::new(&table.schema, &index.name));
+                let on = format!("index {}", crate::fk_deps::reported_index(txn.catalog(), &t, &index.name));
+                crate::fk_deps::drop_dependents(txn, &fks, ("index", &shown, &on), d.cascade, &mut notices)?;
+                // A self-referencing foreign key dropped above changed the table.
+                let t = txn.catalog().table_q(&table).cloned().ok_or_else(|| SqlError::undefined_table(&table.name))?;
                 let mut def = (*t).clone();
                 def.indexes.retain(|i| i.name != index.name);
                 txn.catalog_mut().replace_table(&table, def);
@@ -1038,7 +1049,7 @@ fn referencing_fks(cat: &Catalog, t: &TableDef) -> Vec<(QualName, String)> {
         .collect()
 }
 
-fn drop_fk(txn: &mut Txn, child: &QualName, con: &str) {
+pub(crate) fn drop_fk(txn: &mut Txn, child: &QualName, con: &str) {
     if let Some(ct) = txn.catalog().table_q(child).cloned() {
         let mut def = (*ct).clone();
         def.constraints.retain(|c| c.name != con);
