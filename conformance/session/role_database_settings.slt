@@ -1,0 +1,197 @@
+# ALTER ROLE / ALTER DATABASE ... SET and RESET: values checked when the statement runs, kept
+# as written in pg_db_role_setting (pg_roles.rolconfig), applied to new sessions.
+
+statement ok
+CREATE ROLE slt_rds_a
+
+statement ok
+ALTER ROLE slt_rds_a SET search_path = 'x', "Y", z
+
+statement ok
+ALTER ROLE slt_rds_a SET work_mem = '8MB'
+
+statement ok
+ALTER USER slt_rds_a SET datestyle = german
+
+statement ok
+ALTER ROLE slt_rds_a SET statement_timeout = 1000
+
+statement ok
+ALTER ROLE slt_rds_a SET slt_rds.custom = 1.50
+
+statement ok
+ALTER ROLE slt_rds_a SET time zone 'UTC'
+
+statement ok
+ALTER ROLE slt_rds_a SET application_name = 'my app'
+
+statement ok
+ALTER ROLE slt_rds_a SET datestyle = iso, dmy
+
+query
+SELECT setdatabase, setconfig FROM pg_db_role_setting WHERE setrole = 'slt_rds_a'::regrole
+----
+setdatabase:oid | setconfig:_text
+0 | {"search_path=x, \"Y\", z",work_mem=8MB,"DateStyle=iso, dmy",statement_timeout=1000,slt_rds.custom=1.50,TimeZone=UTC,"application_name=my app"}
+
+query
+SELECT rolconfig FROM pg_roles WHERE rolname = 'slt_rds_a'
+----
+rolconfig:_text
+{"search_path=x, \"Y\", z",work_mem=8MB,"DateStyle=iso, dmy",statement_timeout=1000,slt_rds.custom=1.50,TimeZone=UTC,"application_name=my app"}
+
+statement error 22023 invalid value for parameter "work_mem": "abc"
+ALTER ROLE slt_rds_a SET work_mem = 'abc'
+
+statement error 22023 -5 ms is outside the valid range for parameter "statement_timeout" (0 ms .. 2147483647 ms)
+ALTER ROLE slt_rds_a SET statement_timeout = '-5'
+
+statement error 42704 unrecognized configuration parameter "slt_rds_nosuch"
+ALTER ROLE slt_rds_a SET slt_rds_nosuch = 1
+
+statement error 42704 unrecognized configuration parameter "slt_rds_nosuch"
+ALTER ROLE slt_rds_a RESET slt_rds_nosuch
+
+statement error 55P02 parameter "server_version" cannot be changed
+ALTER ROLE slt_rds_a SET server_version = '1'
+
+statement error 55P02 parameter "shared_buffers" cannot be changed without restarting the server
+ALTER ROLE slt_rds_a SET shared_buffers = '1MB'
+
+statement error 55P02 parameter "ignore_system_indexes" cannot be set after connection start
+ALTER ROLE slt_rds_a SET ignore_system_indexes = on
+
+statement error 55P02 parameter "archive_command" cannot be changed now
+ALTER ROLE slt_rds_a SET archive_command = 'x'
+
+statement error 25001 SET TRANSACTION ISOLATION LEVEL must be called before any query
+ALTER ROLE slt_rds_a SET transaction_isolation = 'serializable'
+
+statement error 42704 role "slt_rds_nosuch" does not exist
+ALTER ROLE slt_rds_nosuch SET work_mem = '1MB'
+
+statement error 42704 role "all" does not exist
+ALTER ROLE "all" SET work_mem = '1MB'
+
+statement error 3D000 database "slt_rds_nosuch" does not exist
+ALTER DATABASE slt_rds_nosuch SET work_mem = '1MB'
+
+statement error 3D000 database "slt_rds_nosuch" does not exist
+ALTER ROLE slt_rds_a IN DATABASE slt_rds_nosuch SET work_mem = '1MB'
+
+statement ok
+ALTER ROLE slt_rds_a RESET work_mem
+
+statement ok
+ALTER ROLE slt_rds_a RESET lock_timeout
+
+statement ok
+ALTER ROLE slt_rds_a SET search_path TO DEFAULT
+
+statement ok
+ALTER ROLE slt_rds_a SET slt_rds.custom = DEFAULT
+
+query
+SELECT setconfig FROM pg_db_role_setting WHERE setrole = 'slt_rds_a'::regrole
+----
+setconfig:_text
+{"DateStyle=iso, dmy",statement_timeout=1000,TimeZone=UTC,"application_name=my app"}
+
+statement ok
+BEGIN
+
+statement ok
+ALTER ROLE slt_rds_a SET slt_rds.rolled = 1
+
+statement ok
+ROLLBACK
+
+query
+SELECT setconfig FROM pg_db_role_setting WHERE setrole = 'slt_rds_a'::regrole
+----
+setconfig:_text
+{"DateStyle=iso, dmy",statement_timeout=1000,TimeZone=UTC,"application_name=my app"}
+
+statement ok
+DO $$ BEGIN EXECUTE format('ALTER ROLE slt_rds_a IN DATABASE %I SET lock_timeout = %L', current_database(), '5s'); END $$
+
+statement ok
+DO $$ BEGIN EXECUTE format('ALTER DATABASE %I SET statement_timeout = %L', current_database(), '5s'); END $$
+
+statement ok
+DO $$ BEGIN EXECUTE format('ALTER ROLE ALL IN DATABASE %I SET search_path = d, public', current_database()); END $$
+
+query
+SELECT setrole::regrole, setconfig FROM pg_db_role_setting WHERE setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database()) ORDER BY 1
+----
+setrole:regrole | setconfig:_text
+- | {statement_timeout=5s,"search_path=d, public"}
+slt_rds_a | {lock_timeout=5s}
+
+# psql's \drds
+query
+SELECT rolname AS "Role", datname = current_database() AS "Database", pg_catalog.array_to_string(setconfig, E'\n') AS "Settings" FROM pg_catalog.pg_db_role_setting s LEFT JOIN pg_catalog.pg_database d ON d.oid = setdatabase LEFT JOIN pg_catalog.pg_roles r ON r.oid = setrole WHERE r.rolname = 'slt_rds_a' OR d.datname = current_database() ORDER BY 1, 2
+----
+Role:name | Database:bool | Settings:text
+slt_rds_a | t | lock_timeout=5s
+slt_rds_a | NULL | DateStyle=iso, dmy\nstatement_timeout=1000\nTimeZone=UTC\napplication_name=my app
+NULL | t | statement_timeout=5s\nsearch_path=d, public
+
+# A new session starts with the database's settings.
+connection other
+query
+SELECT name, setting, source, reset_val FROM pg_settings WHERE name IN ('search_path', 'statement_timeout', 'lock_timeout') ORDER BY name
+----
+name:text | setting:text | source:text | reset_val:text
+lock_timeout | 0 | default | 0
+search_path | d, public | database | d, public
+statement_timeout | 5000 | database | 5000
+
+connection other
+statement ok
+SET search_path = public
+
+connection other
+statement ok
+RESET search_path
+
+connection other
+query
+SHOW search_path
+----
+search_path:text
+d, public
+
+statement ok
+DO $$ BEGIN EXECUTE format('ALTER DATABASE %I RESET ALL', current_database()); END $$
+
+statement ok
+DO $$ BEGIN EXECUTE format('ALTER ROLE slt_rds_a IN DATABASE %I RESET ALL', current_database()); END $$
+
+statement ok
+ALTER ROLE slt_rds_a RESET ALL
+
+query
+SELECT count(*) FROM pg_db_role_setting WHERE setrole = 'slt_rds_a'::regrole OR setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
+----
+count:int8
+0
+
+statement ok
+ALTER ROLE slt_rds_a SET work_mem = '1MB'
+
+statement ok
+CREATE TABLE slt_rds_oid AS SELECT 'slt_rds_a'::regrole::oid AS o
+
+statement ok
+DROP ROLE slt_rds_a
+
+query
+SELECT count(*) FROM pg_db_role_setting WHERE setrole = (SELECT o FROM slt_rds_oid)
+----
+count:int8
+0
+
+statement ok
+DROP TABLE slt_rds_oid
+

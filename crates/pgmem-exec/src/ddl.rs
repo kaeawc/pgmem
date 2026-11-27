@@ -190,6 +190,9 @@ pub fn execute_ddl(stmt: &Statement, txn: &mut Txn, binder: &Binder, env: &Sessi
         Statement::AlterExtension { name, action } => crate::ext_alter::alter_extension(name, action, txn),
         Statement::CreateRole { name, options, if_not_exists } => crate::roles::create_role(name, options, *if_not_exists, txn, env),
         Statement::AlterRole { name, action } => crate::roles::alter_role(name, action, txn, env),
+        Statement::AlterRoleConfig { role, database, action, is_database } => {
+            crate::roles::alter_role_config(role.as_deref(), database.as_deref(), action, *is_database, txn, env)
+        }
         Statement::DropRole { names, if_exists } => crate::roles::drop_role(names, *if_exists, txn, env),
         Statement::Grant(g) => crate::roles::grant(g, txn, env),
         Statement::GrantRole { roles, members, admin, revoke } => crate::roles::grant_role(roles, members, *admin, *revoke, txn, env),

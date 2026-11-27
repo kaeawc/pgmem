@@ -748,6 +748,9 @@ pub struct Catalog {
     members: Vec<(String, String, bool)>,
     grants: Vec<Grant>,
     default_privileges: Vec<DefaultPrivilege>,
+    /// `pg_db_role_setting`: `name=value` entries of ALTER ROLE / ALTER DATABASE ... SET, by
+    /// (database name, "" for all; role OID, 0 for all).
+    db_role_settings: BTreeMap<(String, Oid), Vec<String>>,
     /// Object owners other than the bootstrap superuser, by OID.
     owners: BTreeMap<Oid, String>,
     /// Installed extensions (plpgsql is implicit).
@@ -810,6 +813,7 @@ impl Catalog {
             members: Vec::new(),
             grants: Vec::new(),
             default_privileges: Vec::new(),
+            db_role_settings: BTreeMap::new(),
             owners: BTreeMap::new(),
             extensions: BTreeMap::new(),
             ext_members: BTreeMap::new(),

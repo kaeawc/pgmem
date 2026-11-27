@@ -3,6 +3,7 @@
 //! recorded owner.
 
 use crate::{Catalog, Oid};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -19,8 +20,6 @@ pub struct RoleDef {
     pub connlimit: i32,
     pub password: Option<String>,
     pub valid_until: Option<String>,
-    /// `ALTER ROLE ... SET name = value` entries (`name=value`).
-    pub config: Vec<String>,
 }
 
 impl RoleDef {
@@ -38,7 +37,6 @@ impl RoleDef {
             connlimit: -1,
             password: None,
             valid_until: None,
-            config: Vec::new(),
         }
     }
 }
@@ -215,7 +213,30 @@ impl Catalog {
     pub fn drop_role(&mut self, name: &str) -> Option<Arc<RoleDef>> {
         self.members.retain(|(r, m, _)| r != name && m != name);
         self.drop_default_privileges_of(name);
-        self.roles.remove(name)
+        let dropped = self.roles.remove(name);
+        if let Some(r) = &dropped {
+            self.db_role_settings.retain(|(_, role), _| *role != r.oid);
+        }
+        dropped
+    }
+
+    /// The `pg_db_role_setting` entries: (database name or "", role OID or 0) to `name=value`s.
+    pub fn db_role_settings(&self) -> &BTreeMap<(String, Oid), Vec<String>> {
+        &self.db_role_settings
+    }
+
+    /// The `name=value` entries of one (database, role) pair.
+    pub fn db_role_setting(&self, database: &str, role: Oid) -> &[String] {
+        self.db_role_settings.get(&(database.to_owned(), role)).map_or(&[], Vec::as_slice)
+    }
+
+    /// Replaces one (database, role) pair's entries (an empty list removes the row).
+    pub fn set_db_role_setting(&mut self, database: &str, role: Oid, config: Vec<String>) {
+        if config.is_empty() {
+            self.db_role_settings.remove(&(database.to_owned(), role));
+        } else {
+            self.db_role_settings.insert((database.to_owned(), role), config);
+        }
     }
 
     /// Renames a role everywhere it is referenced.

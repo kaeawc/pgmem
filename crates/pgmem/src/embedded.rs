@@ -55,11 +55,31 @@ impl Embedded {
         Embedded::from_parts(Arc::new(self.db.fork()), Arc::new(clock))
     }
 
-    /// A new session, like a new connection as user `pgmem` to database `pgmem`.
+    /// A new session, like a new connection as user `pgmem` to database `pgmem`. It starts
+    /// with the settings of `ALTER ROLE` / `ALTER DATABASE ... SET` (a stored setting that is
+    /// no longer valid is skipped).
     pub fn session(&self) -> EmbeddedSession {
+        let mut session = self.new_session();
+        let _ = session.apply_startup(&[]);
+        EmbeddedSession { session }
+    }
+
+    /// A new session with startup packet parameters, as a client sends them: `options`
+    /// (`-c name=value`, `--name=value`) and settings by name (`search_path`,
+    /// `application_name`, ...). They override `ALTER ROLE` / `ALTER DATABASE ... SET` and are
+    /// the session defaults RESET restores. An unknown parameter or invalid value is an
+    /// error, as it fails a connection.
+    pub fn session_with_params(&self, params: &[(&str, &str)]) -> Result<EmbeddedSession, DbError> {
+        let mut session = self.new_session();
+        let params: Vec<(String, String)> = params.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
+        session.apply_startup(&params)?;
+        Ok(EmbeddedSession { session })
+    }
+
+    fn new_session(&self) -> Session {
         let pid = self.db.next_backend_pid();
         let clock = Arc::clone(&self.clock) as Arc<dyn Clock>;
-        EmbeddedSession { session: Session::new(Arc::clone(&self.db), clock, SESSION_USER, SESSION_USER, pid) }
+        Session::new(Arc::clone(&self.db), clock, SESSION_USER, SESSION_USER, pid)
     }
 
     /// Pins the time `now()` / `CURRENT_TIMESTAMP` report (`None` restores the wall clock).

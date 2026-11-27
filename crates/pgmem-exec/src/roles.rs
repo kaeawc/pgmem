@@ -415,19 +415,110 @@ pub(crate) fn alter_role(name: &str, action: &ir::AlterRoleAction, txn: &mut Txn
             });
             return Ok(QueryResult { tag: "ALTER ROLE".into(), notices: notice.into_iter().collect(), ..Default::default() });
         }
-        ir::AlterRoleAction::Set(param, value) => {
-            role.config.retain(|c| !c.starts_with(&format!("{param}=")));
-            if let Some(v) = value {
-                role.config.push(format!("{param}={v}"));
-            }
-        }
-        ir::AlterRoleAction::Reset(param) => match param {
-            Some(p) => role.config.retain(|c| !c.starts_with(&format!("{p}="))),
-            None => role.config.clear(),
-        },
     }
     txn.catalog_mut().put_role(role);
     Ok(tag("ALTER ROLE"))
+}
+
+/// The OID `pg_db_role_setting.setrole` records for a role: a created role's, a predefined
+/// role's, else the bootstrap superuser's (the session user).
+pub fn setting_role_oid(catalog: &Catalog, name: &str) -> Oid {
+    catalog.role(name).map(|r| r.oid).or_else(|| crate::catalog_views::predefined_role(name)).unwrap_or(crate::catalog_views::SUPERUSER_OID)
+}
+
+/// Whether a database of that name exists: the current one and the templates.
+fn database_exists(env: &SessionEnv, name: &str) -> bool {
+    name == env.database || name == "template0" || name == "template1"
+}
+
+/// `ALTER ROLE {name | ALL} [IN DATABASE db] SET / RESET` and `ALTER DATABASE db SET / RESET`
+/// (`AlterRoleSet`, `AlterDatabaseSet`): validates the parameter and value as `SET` would
+/// (`validate_option_array_item`) and edits the `pg_db_role_setting` entry (`GUCArrayAdd`,
+/// `GUCArrayDelete`), keeping the value as written.
+pub(crate) fn alter_role_config(
+    role: Option<&str>,
+    database: Option<&str>,
+    action: &ir::ConfigAction,
+    is_database: bool,
+    txn: &mut Txn,
+    env: &SessionEnv,
+) -> SqlResult<QueryResult> {
+    let what = if is_database { "ALTER DATABASE" } else { "ALTER ROLE" };
+    let role_oid = match role {
+        Some(r) => setting_role_oid(txn.catalog(), &resolve_role(txn.catalog(), env, r)?),
+        None => 0,
+    };
+    let database = database.unwrap_or("");
+    if !database.is_empty() && !database_exists(env, database) {
+        return Err(SqlError::new(code::INVALID_CATALOG_NAME, format!("database \"{database}\" does not exist")));
+    }
+    let mut config = txn.catalog().db_role_setting(database, role_oid).to_vec();
+    let mut notices = Vec::new();
+    let key_of = |entry: &str| entry.split_once('=').map_or(entry, |(k, _)| k).to_ascii_lowercase();
+    match action {
+        ir::ConfigAction::Reset(None) => config.clear(),
+        ir::ConfigAction::Set { name, value } if !(value.len() == 1 && value[0].eq_ignore_ascii_case("default")) => {
+            let (canonical, flat) = validate_config_item(name, value, txn.catalog(), env, &mut notices)?;
+            let entry = format!("{canonical}={flat}");
+            let key = canonical.to_ascii_lowercase();
+            match config.iter_mut().find(|c| key_of(c) == key) {
+                Some(slot) => *slot = entry,
+                None => config.push(entry),
+            }
+        }
+        ir::ConfigAction::Set { name, .. } | ir::ConfigAction::Reset(Some(name)) => {
+            let key = config_name(name)?.to_ascii_lowercase();
+            config.retain(|c| key_of(c) != key);
+        }
+    }
+    txn.catalog_mut().set_db_role_setting(database, role_oid, config);
+    Ok(QueryResult { tag: what.into(), notices, ..Default::default() })
+}
+
+/// A parameter's canonical name (`DateStyle`), or a custom one as written; unknown names fail.
+fn config_name(name: &str) -> SqlResult<String> {
+    let name = match name.to_ascii_lowercase().as_str() {
+        "time zone" => "timezone".to_owned(),
+        _ => name.to_owned(),
+    };
+    match crate::settings::lookup(&name) {
+        Some(def) => Ok(def.name.to_owned()),
+        None if crate::settings::is_custom(&name) => Ok(name),
+        None if matches!(name.as_str(), "role" | "session_authorization") => Ok(name),
+        None => Err(crate::settings::unrecognized(&name)),
+    }
+}
+
+/// Validates one `SET name = value` of ALTER ROLE / DATABASE: (canonical name, value as stored).
+fn validate_config_item(
+    name: &str,
+    value: &[String],
+    catalog: &Catalog,
+    env: &SessionEnv,
+    notices: &mut Vec<Notice>,
+) -> SqlResult<(String, String)> {
+    let canonical = config_name(name)?;
+    let key = canonical.to_ascii_lowercase();
+    let flat = crate::session::flatten_set_value(&key, value);
+    match key.as_str() {
+        // check_role / check_session_authorization at PGC_S_TEST: a missing role is a NOTICE.
+        "role" | "session_authorization" => {
+            if !flat.eq_ignore_ascii_case("none") && !role_exists(catalog, env, &flat) {
+                notices.push(Notice {
+                    severity: "NOTICE",
+                    code: code::UNDEFINED_OBJECT,
+                    message: format!("role \"{flat}\" does not exist"),
+                });
+            }
+        }
+        "transaction_isolation" => {
+            return Err(SqlError::new(code::ACTIVE_SQL_TRANSACTION, "SET TRANSACTION ISOLATION LEVEL must be called before any query"));
+        }
+        _ => {
+            crate::session::validate_setting(&key, &flat, None)?;
+        }
+    }
+    Ok((canonical, flat))
 }
 
 /// What depends on a role (DROP ROLE's DETAIL lines).

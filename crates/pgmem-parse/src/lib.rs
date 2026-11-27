@@ -1707,7 +1707,7 @@ fn show_name(parts: &[String]) -> String {
     }
 }
 
-fn lower_set(set: sq::Set) -> SqlResult<Statement> {
+pub(crate) fn lower_set(set: sq::Set) -> SqlResult<Statement> {
     Ok(match set {
         sq::Set::SingleAssignment { scope, variable, values, .. } => Statement::Set {
             name: object_name(&variable)?.to_string().to_ascii_lowercase(),
