@@ -69,7 +69,7 @@ fn run_with(
     env: &SessionEnv,
     state: &StatementState,
 ) -> SqlResult<QueryResult> {
-    let mut ctx = Ctx { levels: ctx.levels.clone(), ctes: ctx.ctes.clone(), clause: ctx.clause, windows: Vec::new() };
+    let mut ctx = ctx.fresh(ctx.clause);
     for (i, cte) in with.ctes.iter().enumerate() {
         if with.ctes[..i].iter().any(|c| c.name == cte.name) {
             return Err(SqlError::new(code::DUPLICATE_ALIAS, format!("WITH query name \"{}\" specified more than once", cte.name)));
@@ -103,7 +103,7 @@ fn run_with(
 /// The result columns of a statement with a leading WITH, binding without running it.
 pub(crate) fn describe_with(stmt: &Statement, binder: &Binder, ctx: &Ctx) -> SqlResult<Option<Vec<crate::plan::OutCol>>> {
     let Some(with) = leading_with(stmt) else { return Ok(None) };
-    let mut ctx = Ctx { levels: ctx.levels.clone(), ctes: ctx.ctes.clone(), clause: ctx.clause, windows: Vec::new() };
+    let mut ctx = ctx.fresh(ctx.clause);
     for cte in &with.ctes {
         let binding = match &cte.query.body {
             ir::SetExpr::Dml(inner) => {

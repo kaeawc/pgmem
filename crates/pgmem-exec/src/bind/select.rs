@@ -18,7 +18,7 @@ pub struct BoundQuery {
 impl Binder<'_> {
     pub fn bind_query(&self, q: &ir::Query, ctx: &Ctx) -> SqlResult<BoundQuery> {
         let inherited_lock = self.take_lock_next();
-        let mut ctx = Ctx { levels: ctx.levels.clone(), ctes: ctx.ctes.clone(), clause: Clause::Other, windows: Vec::new() };
+        let mut ctx = ctx.fresh(Clause::Other);
         let mut cte_plans = Vec::new();
         if let Some(with) = &q.with {
             for (i, cte) in with.ctes.iter().enumerate() {

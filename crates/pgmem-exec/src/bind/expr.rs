@@ -733,10 +733,7 @@ impl Binder<'_> {
                     return Ok((Expr::Col(i), t));
                 }
                 // Every level between the reference and its target is correlated.
-                let n = ctx.levels.len();
-                for l in &ctx.levels[n - depth..] {
-                    l.correlated.set(true);
-                }
+                ctx.note_outer_reference(depth);
                 return Ok((Expr::Outer { depth, idx: i }, t));
             }
         }
@@ -780,11 +777,7 @@ impl Binder<'_> {
     fn whole_row(&self, name: &str, depth: usize, ctx: &Ctx) -> Bound {
         let n = ctx.levels.len();
         let level = ctx.levels[n - 1 - depth];
-        if depth > 0 {
-            for l in &ctx.levels[n - depth..] {
-                l.correlated.set(true);
-            }
-        }
+        ctx.note_outer_reference(depth);
         let positions = level.scope.qualified_star(name);
         let cols: Vec<&super::ScopeCol> = positions.iter().map(|&i| &level.scope.cols[i]).collect();
         for c in &cols {

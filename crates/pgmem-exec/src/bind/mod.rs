@@ -221,11 +221,15 @@ pub struct Ctx<'l> {
     pub clause: Clause,
     /// Named windows of the current SELECT.
     pub windows: Vec<pgmem_ir::NamedWindow>,
+    /// Query levels dropped from `levels` while binding one of their FROM items, with the
+    /// position they held: a reference from inside the item to a level below that position
+    /// leaves the query, which makes it correlated too.
+    pub hidden: Vec<(usize, &'l Level)>,
 }
 
 impl<'l> Ctx<'l> {
     pub fn new(level: &'l Level) -> Ctx<'l> {
-        Ctx { levels: vec![level], ctes: Vec::new(), clause: Clause::Other, windows: Vec::new() }
+        Ctx { levels: vec![level], ctes: Vec::new(), clause: Clause::Other, windows: Vec::new(), hidden: Vec::new() }
     }
 
     pub fn current(&self) -> &'l Level {
@@ -233,7 +237,30 @@ impl<'l> Ctx<'l> {
     }
 
     pub fn with_clause(&self, clause: Clause) -> Ctx<'l> {
-        Ctx { levels: self.levels.clone(), ctes: self.ctes.clone(), clause, windows: self.windows.clone() }
+        Ctx { levels: self.levels.clone(), ctes: self.ctes.clone(), clause, windows: self.windows.clone(), hidden: self.hidden.clone() }
+    }
+
+    /// The same levels and CTEs for a new query body: no named windows.
+    pub fn fresh(&self, clause: Clause) -> Ctx<'l> {
+        Ctx { windows: Vec::new(), ..self.with_clause(clause) }
+    }
+
+    /// Records a reference `depth` levels out from the current one: every query level it
+    /// crosses (including those hidden while binding a FROM item) is correlated.
+    pub fn note_outer_reference(&self, depth: usize) {
+        if depth == 0 {
+            return;
+        }
+        let n = self.levels.len();
+        for l in &self.levels[n - depth..] {
+            l.correlated.set(true);
+        }
+        let target = n - 1 - depth;
+        for (pos, l) in &self.hidden {
+            if target < *pos {
+                l.correlated.set(true);
+            }
+        }
     }
 
     /// A context for a nested query level (a subquery evaluated per row of this level).
@@ -243,7 +270,7 @@ impl<'l> Ctx<'l> {
     {
         let mut levels: Vec<&'m Level> = self.levels.clone();
         levels.push(level);
-        Ctx { levels, ctes: self.ctes.clone(), clause: Clause::Other, windows: Vec::new() }
+        Ctx { levels, ctes: self.ctes.clone(), clause: Clause::Other, windows: Vec::new(), hidden: self.hidden.clone() }
     }
 
     /// A context for an item of this level's FROM clause: the current (not yet populated)
@@ -253,9 +280,12 @@ impl<'l> Ctx<'l> {
         'l: 'm,
     {
         let mut levels: Vec<&'m Level> = self.levels.clone();
-        levels.pop();
+        let mut hidden: Vec<(usize, &'m Level)> = self.hidden.clone();
+        if let Some(current) = levels.pop() {
+            hidden.push((levels.len(), current));
+        }
         levels.extend_from_slice(extra);
-        Ctx { levels, ctes: self.ctes.clone(), clause: Clause::Other, windows: Vec::new() }
+        Ctx { levels, ctes: self.ctes.clone(), clause: Clause::Other, windows: Vec::new(), hidden }
     }
 
     /// The same query level with its FROM scope filled in.
@@ -266,7 +296,7 @@ impl<'l> Ctx<'l> {
         let mut levels: Vec<&'m Level> = self.levels.clone();
         levels.pop();
         levels.push(level);
-        Ctx { levels, ctes: self.ctes.clone(), clause: Clause::Other, windows: self.windows.clone() }
+        Ctx { levels, ctes: self.ctes.clone(), clause: Clause::Other, windows: self.windows.clone(), hidden: self.hidden.clone() }
     }
 }
 
