@@ -49,6 +49,7 @@ fn format_for(codes: &[i16], i: usize) -> Format {
 
 pub async fn handle(stream: TcpStream, shared: Arc<Shared>) -> io::Result<()> {
     stream.set_nodelay(true)?;
+    let (server_addr, client_addr) = (stream.local_addr().ok(), stream.peer_addr().ok());
     let (rd, wr) = stream.into_split();
     let mut rd = BufReader::new(rd);
     let mut wr = BufWriter::new(wr);
@@ -74,6 +75,8 @@ pub async fn handle(stream: TcpStream, shared: Arc<Shared>) -> io::Result<()> {
     let database = get("database").unwrap_or_else(|| user.clone());
     let pid = shared.next_pid();
     let mut session = Session::new(Arc::clone(&shared.db), shared.clock(), &user, &database, pid);
+    session.server_addr = server_addr;
+    session.client_addr = client_addr;
     let mut out = Writer::default();
     // Protocol 3.x with x > 0, or `_pq_.` options: negotiate down to 3.0.
     let unrecognized: Vec<String> = params.iter().filter(|(k, _)| k.starts_with("_pq_.")).map(|(k, _)| k.clone()).collect();

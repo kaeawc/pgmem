@@ -29,6 +29,7 @@ mod check;
 mod coalesce_nullif;
 mod column_default;
 mod concat;
+mod connection_info;
 mod constraint_timing;
 mod copy;
 mod correlated;

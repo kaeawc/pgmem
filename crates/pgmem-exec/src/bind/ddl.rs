@@ -269,6 +269,10 @@ const NOT_IMMUTABLE: &[&str] = &[
     "current_schema",
     "txid_current",
     "pg_backend_pid",
+    "inet_server_addr",
+    "inet_server_port",
+    "inet_client_addr",
+    "inet_client_port",
 ];
 
 /// A generation expression's rules: it binds against the row, reads no other generated

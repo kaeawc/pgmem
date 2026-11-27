@@ -1,0 +1,32 @@
+# inet_server_addr() / inet_server_port() / inet_client_addr() / inet_client_port():
+# the connection's TCP addresses. Only connection-independent facts are recorded.
+
+query
+SELECT inet_server_addr() IS NOT NULL, inet_server_port() > 0, inet_client_addr() IS NOT NULL, inet_client_port() > 0
+----
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t
+
+query
+SELECT pg_typeof(inet_server_addr()), pg_typeof(inet_server_port()), pg_typeof(inet_client_addr()), pg_typeof(inet_client_port())
+----
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+inet | integer | inet | integer
+
+query
+SELECT masklen(inet_server_addr()) = CASE family(inet_server_addr()) WHEN 4 THEN 32 ELSE 128 END, family(inet_server_addr()) = family(inet_client_addr())
+----
+?column?:bool | ?column?:bool
+t | t
+
+query
+SELECT inet_client_port() = inet_client_port(), inet_server_addr() = inet_server_addr()
+----
+?column?:bool | ?column?:bool
+t | t
+
+statement error 42P17 generation expression is not immutable
+CREATE TABLE g (a int, b text GENERATED ALWAYS AS (inet_server_addr()::text) STORED)
+
+statement error 42P17 generation expression is not immutable
+CREATE TABLE g (a int, b int GENERATED ALWAYS AS (inet_client_port()) STORED)

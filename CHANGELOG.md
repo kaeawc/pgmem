@@ -8,6 +8,7 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 
 ### Added
 
+- `inet_server_addr()`, `inet_server_port()`, `inet_client_addr()` and `inet_client_port()` return the connection's local and remote TCP address (`inet`) and port (`int4`); they are NULL on an in-process `Embedded` session. Like PostgreSQL they are stable, so a generation expression may not call them (`42P17`). `inet_server_port()` / `inet_client_port()` previously always returned NULL and the address functions did not exist (#255).
 - Client matrix: node-postgres (`pg`, with `pg-copy-streams`) and psycopg 3 suites (`clients/node`, `clients/python`) run against pgmem and PostgreSQL in CI.
 - Static Linux binaries (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) on each release.
 - `cargo binstall pgmem` installs the prebuilt binary from the GitHub release.
