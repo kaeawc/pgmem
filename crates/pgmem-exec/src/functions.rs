@@ -460,6 +460,8 @@ pub(crate) struct FunctionDependents {
     lines: Vec<String>,
     defaults: Vec<(pgmem_catalog::QualName, usize)>,
     triggers: Vec<Arc<pgmem_catalog::TriggerDef>>,
+    /// Casts using the function (`cast from a to b`); `drop_function` removes them.
+    casts: Vec<String>,
 }
 
 impl FunctionDependents {
@@ -478,7 +480,9 @@ impl FunctionDependents {
             let table = catalog.relation_by_oid(t.table).map(|r| r.name().to_owned()).unwrap_or_default();
             lines.push(format!("trigger {} on table {table} depends on function {sig}", t.name));
         }
-        FunctionDependents { lines, defaults, triggers }
+        let casts: Vec<String> = catalog.casts().filter(|c| c.function == Some(f.oid)).map(|c| crate::usercast::describe(c)).collect();
+        lines.extend(casts.iter().map(|c| format!("{c} depends on function {sig}")));
+        FunctionDependents { lines, defaults, triggers, casts }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -490,6 +494,7 @@ impl FunctionDependents {
         self.lines.extend(other.lines);
         self.defaults.extend(other.defaults);
         self.triggers.extend(other.triggers);
+        self.casts.extend(other.casts);
     }
 
     /// 2BP01 `cannot drop <what> because other objects depend on it`, the dependents as DETAIL.
@@ -499,7 +504,8 @@ impl FunctionDependents {
             .with_hint("Use DROP ... CASCADE to drop the dependent objects too.")
     }
 
-    /// DROP ... CASCADE: the defaults are removed and the triggers dropped, each reported.
+    /// DROP ... CASCADE: the defaults are removed and the triggers dropped, each reported; casts
+    /// are reported here and removed with the function.
     pub(crate) fn drop(self, txn: &mut Txn, notices: &mut Vec<crate::session::Notice>) {
         let notice = |message: String| crate::session::Notice { severity: "NOTICE", code: "00000", message };
         for (t, slot) in self.defaults {
@@ -516,6 +522,9 @@ impl FunctionDependents {
             let cat = txn.catalog_mut();
             cat.drop_comments(t.oid);
             cat.drop_trigger(t.oid);
+        }
+        for c in self.casts {
+            notices.push(notice(format!("drop cascades to {c}")));
         }
     }
 }

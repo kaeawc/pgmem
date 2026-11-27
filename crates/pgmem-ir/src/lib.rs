@@ -184,6 +184,8 @@ pub enum Statement {
     },
     /// `ALTER DEFAULT PRIVILEGES [IN SCHEMA s] {GRANT | REVOKE} ... ON {TABLES | ...}`.
     AlterDefaultPrivileges {
+        /// `FOR ROLE` (empty: the current role).
+        roles: Vec<String>,
         schemas: Vec<String>,
         kind: char,
         grant: Box<GrantStmt>,
@@ -213,6 +215,11 @@ pub enum Statement {
         if_exists: bool,
         cascade: bool,
     },
+    /// `ALTER EXTENSION name {UPDATE [TO version] | SET SCHEMA s | ADD member | DROP member}`.
+    AlterExtension {
+        name: String,
+        action: AlterExtensionAction,
+    },
     CreateFunction(Box<CreateFunction>),
     /// `ALTER {FUNCTION | PROCEDURE | ROUTINE} name [(types)] action ...` (not `OWNER TO`).
     AlterFunction {
@@ -239,6 +246,29 @@ pub enum Statement {
         body: String,
     },
     CreateTrigger(Box<CreateTrigger>),
+    /// `CREATE STATISTICS [IF NOT EXISTS] [name] [(kinds)] ON items FROM table`.
+    CreateStatistics(Box<CreateStatistics>),
+    /// `ALTER STATISTICS name RENAME TO | SET SCHEMA | SET STATISTICS | OWNER TO`.
+    AlterStatistics {
+        name: ObjectName,
+        if_exists: bool,
+        action: AlterStatisticsAction,
+    },
+    /// `DROP STATISTICS [IF EXISTS] name, ... [CASCADE | RESTRICT]`.
+    DropStatistics {
+        names: Vec<ObjectName>,
+        if_exists: bool,
+        cascade: bool,
+    },
+    /// `CREATE CAST (source AS target) WITH FUNCTION | WITHOUT FUNCTION | WITH INOUT`.
+    CreateCast(Box<CreateCast>),
+    /// `DROP CAST [IF EXISTS] (source AS target) [CASCADE | RESTRICT]`.
+    DropCast {
+        source: TypeName,
+        target: TypeName,
+        if_exists: bool,
+        cascade: bool,
+    },
     DropTrigger {
         name: String,
         table: ObjectName,
@@ -257,6 +287,11 @@ pub enum Statement {
         if_exists: bool,
         options: Box<SequenceOptions>,
         rename_to: Option<String>,
+    },
+    /// `ALTER INDEX name ATTACH PARTITION partition_index`.
+    AttachIndexPartition {
+        index: ObjectName,
+        partition: ObjectName,
     },
     /// `ALTER {TABLE | INDEX | VIEW | MATERIALIZED VIEW} [IF EXISTS] name {SET | RESET} (options)`:
     /// `object` is the keyword used.
@@ -278,10 +313,10 @@ pub enum Statement {
         names: Vec<ObjectName>,
         deferred: bool,
     },
-    /// `LOCK [TABLE] name, ... [IN mode MODE] [NOWAIT]`: `mode` from 1 (ACCESS SHARE) to 8
-    /// (ACCESS EXCLUSIVE, the default).
+    /// `LOCK [TABLE] [ONLY] name, ... [IN mode MODE] [NOWAIT]`: `mode` from 1 (ACCESS SHARE)
+    /// to 8 (ACCESS EXCLUSIVE, the default); each table with whether ONLY was given.
     Lock {
-        tables: Vec<ObjectName>,
+        tables: Vec<(ObjectName, bool)>,
         mode: u8,
         nowait: bool,
     },
@@ -375,6 +410,10 @@ pub enum CommentTarget {
     Constraint(ObjectName),
     /// `TRIGGER name ON table`.
     Trigger(ObjectName),
+    /// `STATISTICS name`.
+    Statistics,
+    /// `CAST (source AS target)`; the comment's name is empty.
+    Cast(TypeName, TypeName),
     /// Object kinds pgmem has no catalog entry for (extensions, roles, databases, ...):
     /// accepted without effect.
     Other,
@@ -1242,6 +1281,10 @@ pub struct CreateIndex {
     pub nulls_not_distinct: bool,
     /// `USING method` (lowercase), if given.
     pub method: Option<String>,
+    /// The explicit operator class of each key (parallel to `columns`; the last name part).
+    pub opclasses: Vec<Option<String>>,
+    /// `ON ONLY table`: a partitioned table's index without its partitions' indexes.
+    pub only: bool,
     /// `WITH (fillfactor = 70, ...)`.
     pub reloptions: Vec<RelOption>,
 }
@@ -1443,6 +1486,46 @@ pub struct CreateTrigger {
     pub when: Option<String>,
     pub function: ObjectName,
     pub args: Vec<String>,
+}
+
+/// One key of `CREATE STATISTICS`: a column or an expression.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StatisticsKey {
+    Column(String),
+    Expr(Expr),
+}
+
+/// `CREATE STATISTICS [IF NOT EXISTS] [name] [(kinds)] ON keys FROM tables`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateStatistics {
+    pub name: Option<ObjectName>,
+    pub if_not_exists: bool,
+    /// The statistics kinds as written (`ndistinct`, `dependencies`, `mcv`); empty = all.
+    pub kinds: Vec<String>,
+    pub keys: Vec<StatisticsKey>,
+    /// The FROM list (Postgres accepts exactly one relation).
+    pub tables: Vec<ObjectName>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum AlterStatisticsAction {
+    RenameTo(String),
+    SetSchema(String),
+    /// `SET STATISTICS n`.
+    SetStatistics(i64),
+    OwnerTo(String),
+}
+
+/// `CREATE CAST (source AS target) ...`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateCast {
+    pub source: TypeName,
+    pub target: TypeName,
+    /// `WITH FUNCTION name(args)`; None for `WITHOUT FUNCTION` / `WITH INOUT`.
+    pub function: Option<(ObjectName, Vec<TypeName>)>,
+    pub inout: bool,
+    /// `pg_cast.castcontext`: `e` (default), `a` (AS ASSIGNMENT) or `i` (AS IMPLICIT).
+    pub context: char,
 }
 
 /// CREATE / ALTER SEQUENCE and identity column options; None where not given.
@@ -1686,6 +1769,33 @@ pub enum ObjectType {
     Type,
     Domain,
     Function,
+}
+
+/// What `ALTER EXTENSION` does.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AlterExtensionAction {
+    Update {
+        version: Option<String>,
+    },
+    SetSchema(String),
+    /// `ADD member` (`add`) or `DROP member`.
+    Member {
+        add: bool,
+        member: ExtensionMember,
+    },
+}
+
+/// An object `ALTER EXTENSION ADD / DROP` names.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExtensionMember {
+    Table(ObjectName),
+    View(ObjectName),
+    MaterializedView(ObjectName),
+    Sequence(ObjectName),
+    Function { name: ObjectName, args: Option<Vec<TypeName>>, kind: RoutineKind },
+    Type(ObjectName),
+    Domain(ObjectName),
+    Schema(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]

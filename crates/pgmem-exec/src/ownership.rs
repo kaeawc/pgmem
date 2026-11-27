@@ -462,7 +462,8 @@ fn check_comment(ck: &Checker, target: &ir::CommentTarget, name: &ir::ObjectName
             Some(f) => ck.require_function(&f, if f.procedure { "procedure" } else { "function" }),
             None => Ok(()),
         },
-        T::Other => Ok(()),
+        // Statistics objects and casts have no owner check here yet.
+        T::Statistics | T::Cast(..) | T::Other => Ok(()),
     }
 }
 

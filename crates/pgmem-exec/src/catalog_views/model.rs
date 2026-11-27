@@ -363,10 +363,11 @@ pub fn index_def(model: &Model, t: &TableDef, idx: &IndexDef) -> String {
         keys.push(if matches!(e, pgmem_ir::Expr::Function(_)) { text } else { format!("({text})") });
     }
     let mut s = format!(
-        "CREATE {}INDEX {} ON public.{} USING btree ({})",
+        "CREATE {}INDEX {} ON public.{} USING {} ({})",
         if idx.unique { "UNIQUE " } else { "" },
         quote_ident(&idx.name),
         quote_ident(&t.name),
+        idx.method,
         keys.join(", ")
     );
     if !idx.include.is_empty() {

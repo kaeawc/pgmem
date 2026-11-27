@@ -179,6 +179,8 @@ pub struct RawReply {
     pub errors: Vec<String>,
     /// NotificationResponse (channel, payload) pairs.
     pub notifications: Vec<(String, String)>,
+    /// NoticeResponse messages, each followed by its DETAIL lines (after a newline) if any.
+    pub notices: Vec<String>,
     /// DataRow first-column values (text format).
     pub values: Vec<Option<String>>,
     /// The ReadyForQuery transaction status.
@@ -236,6 +238,17 @@ impl RawConn {
                 b'E' => r
                     .errors
                     .extend(body.split(|b| *b == 0).filter_map(|f| f.strip_prefix(b"C")).map(|c| String::from_utf8_lossy(c).into_owned())),
+                b'N' => {
+                    let field = |k: u8| {
+                        body.split(|b| *b == 0).find_map(|f| f.strip_prefix(&[k][..])).map(|f| String::from_utf8_lossy(f).into_owned())
+                    };
+                    let mut n = field(b'M').unwrap_or_default();
+                    if let Some(d) = field(b'D') {
+                        n.push('\n');
+                        n.push_str(&d);
+                    }
+                    r.notices.push(n);
+                }
                 b'A' => {
                     let s = cstrs(&body[4..]);
                     r.notifications.push((s[0].clone(), s[1].clone()));
