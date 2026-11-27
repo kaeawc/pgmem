@@ -1018,3 +1018,258 @@ fn long_foreign_key_clone_names() {
         format!("update or delete on table \"{r61}\" violates foreign key constraint \"{}_1\" on table \"f\"", "f".repeat(61))
     );
 }
+
+/// A partitioned table's indexes print `ON ONLY` (its partitions' do not), and each partition's
+/// index is an inheritance child of the parent's (`pg_inherits`, `relispartition`, the
+/// partition-tree functions) until the partition is detached (#287, #289).
+#[test]
+fn partitioned_index_definitions_and_links() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE p (a int, b int) PARTITION BY RANGE (a);
+         CREATE TABLE c PARTITION OF p FOR VALUES FROM (1) TO (10);
+         CREATE INDEX p_a_idx ON p (a);
+         CREATE UNIQUE INDEX p_u ON p (a, b);
+         ALTER TABLE p ADD PRIMARY KEY (a);
+         CREATE INDEX p_b ON ONLY p (b);
+         CREATE INDEX c_b ON c (b)",
+    )
+    .expect("schema");
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT relname, relkind::text, left(relispartition::text, 1), pg_get_indexdef(oid) FROM pg_class
+              WHERE relkind IN ('i', 'I') AND relnamespace = 'public'::regnamespace ORDER BY relname COLLATE \"C\""
+        ),
+        [
+            ["c_a_b_idx", "i", "t", "CREATE UNIQUE INDEX c_a_b_idx ON public.c USING btree (a, b)"],
+            ["c_a_idx", "i", "t", "CREATE INDEX c_a_idx ON public.c USING btree (a)"],
+            ["c_b", "i", "f", "CREATE INDEX c_b ON public.c USING btree (b)"],
+            ["c_pkey", "i", "t", "CREATE UNIQUE INDEX c_pkey ON public.c USING btree (a)"],
+            ["p_a_idx", "I", "f", "CREATE INDEX p_a_idx ON ONLY public.p USING btree (a)"],
+            ["p_b", "I", "f", "CREATE INDEX p_b ON ONLY public.p USING btree (b)"],
+            ["p_pkey", "I", "f", "CREATE UNIQUE INDEX p_pkey ON ONLY public.p USING btree (a)"],
+            ["p_u", "I", "f", "CREATE UNIQUE INDEX p_u ON ONLY public.p USING btree (a, b)"],
+        ]
+    );
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT conrelid::regclass::text, pg_get_constraintdef(oid) FROM pg_constraint
+              WHERE contype = 'p' AND connamespace = 'public'::regnamespace ORDER BY 1"
+        ),
+        [["c", "PRIMARY KEY (a)"], ["p", "PRIMARY KEY (a)"]]
+    );
+    let links = "SELECT inhrelid::regclass::text, inhparent::regclass::text, inhseqno::text FROM pg_inherits
+                  WHERE inhparent::regclass::text LIKE 'p%' ORDER BY inhrelid::regclass::text COLLATE \"C\"";
+    assert_eq!(rows(&mut c, links), [["c", "p", "1"], ["c_a_b_idx", "p_u", "1"], ["c_a_idx", "p_a_idx", "1"], ["c_pkey", "p_pkey", "1"]]);
+    assert_eq!(rows(&mut c, "SELECT count(*)::text FROM pg_inherits WHERE inhparent = 'p_b'::regclass"), [["0"]]);
+    c.batch_execute("ALTER INDEX p_b ATTACH PARTITION c_b").expect("attach index");
+    assert_eq!(rows(&mut c, "SELECT inhrelid::regclass::text FROM pg_inherits WHERE inhparent = 'p_b'::regclass"), [["c_b"]]);
+    assert_eq!(rows(&mut c, "SELECT left(relispartition::text, 1) FROM pg_class WHERE relname = 'c_b'"), [["t"]]);
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT relid::text, coalesce(parentrelid::text, '-'), left(isleaf::text, 1), level::text FROM pg_partition_tree('p_b')"
+        ),
+        [["p_b", "-", "f", "0"], ["c_b", "p_b", "t", "1"]]
+    );
+    assert_eq!(rows(&mut c, "SELECT relid::text FROM pg_partition_ancestors('c_b')"), [["c_b"], ["p_b"]]);
+    assert_eq!(rows(&mut c, "SELECT pg_partition_root('c_a_idx')::text"), [["p_a_idx"]]);
+    c.batch_execute("ALTER TABLE p DETACH PARTITION c").expect("detach");
+    assert_eq!(rows(&mut c, links), Vec::<Vec<String>>::new());
+    assert_eq!(
+        rows(&mut c, "SELECT relname, left(relispartition::text, 1) FROM pg_class WHERE relname IN ('c', 'c_a_idx', 'c_b') ORDER BY 1"),
+        [["c", "f"], ["c_a_idx", "f"], ["c_b", "f"]]
+    );
+    // Sub-partitioned: the middle level's index is partitioned too.
+    c.batch_execute(
+        "CREATE TABLE r (a int) PARTITION BY LIST (a);
+         CREATE TABLE r1 PARTITION OF r FOR VALUES IN (1) PARTITION BY LIST (a);
+         CREATE TABLE r11 PARTITION OF r1 FOR VALUES IN (1);
+         CREATE INDEX r_a ON r (a)",
+    )
+    .expect("multi-level");
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT relid::text, coalesce(parentrelid::text, '-'), left(isleaf::text, 1), level::text FROM pg_partition_tree('r_a')"
+        ),
+        [["r_a", "-", "f", "0"], ["r1_a_idx", "r_a", "f", "1"], ["r11_a_idx", "r1_a_idx", "t", "2"]]
+    );
+    assert_eq!(
+        rows(&mut c, "SELECT pg_get_indexdef('r1_a_idx'::regclass), pg_get_indexdef('r11_a_idx'::regclass)"),
+        [["CREATE INDEX r1_a_idx ON ONLY public.r1 USING btree (a)", "CREATE INDEX r11_a_idx ON public.r11 USING btree (a)"]]
+    );
+}
+
+/// A partition's columns and the constraints cloned from its parent are inherited, not local:
+/// `attislocal` / `conislocal` false and an inheritance count of one, whether the partition was
+/// created as one or attached; DETACH makes them local again (#288).
+#[test]
+fn partition_columns_and_constraints_are_inherited() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE r (id int PRIMARY KEY);
+         CREATE TABLE p (a int NOT NULL, b text, rid int REFERENCES r, CONSTRAINT ck CHECK (a > 0), UNIQUE (a, b))
+           PARTITION BY RANGE (a);
+         CREATE TABLE c PARTITION OF p FOR VALUES FROM (1) TO (10);
+         CREATE TABLE c2 (a int NOT NULL, b text, rid int REFERENCES r, CONSTRAINT ck CHECK (a > 0), x int);
+         ALTER TABLE c2 DROP COLUMN x;
+         ALTER TABLE p ATTACH PARTITION c2 FOR VALUES FROM (10) TO (20);
+         CREATE TABLE m PARTITION OF p FOR VALUES FROM (20) TO (40) PARTITION BY RANGE (a);
+         CREATE TABLE mm PARTITION OF m FOR VALUES FROM (20) TO (30);
+         CREATE TABLE c4 PARTITION OF p (b NOT NULL, CONSTRAINT own CHECK (a < 100)) FOR VALUES FROM (40) TO (50)",
+    )
+    .expect("schema");
+    let atts = "SELECT attrelid::regclass::text, attname, left(attislocal::text, 1), attinhcount::text FROM pg_attribute
+                 WHERE attrelid IN ('p'::regclass, 'c'::regclass, 'c2'::regclass, 'm'::regclass, 'mm'::regclass, 'c4'::regclass)
+                   AND attnum > 0 AND NOT attisdropped ORDER BY attrelid::regclass::text COLLATE \"C\", attnum";
+    let att = |t: &str, a: &str, l: &str, n: &str| vec![t.to_owned(), a.to_owned(), l.to_owned(), n.to_owned()];
+    let mut want = Vec::new();
+    for t in ["c", "c2", "c4", "m", "mm"] {
+        for a in ["a", "b", "rid"] {
+            want.push(att(t, a, "f", "1"));
+        }
+    }
+    for a in ["a", "b", "rid"] {
+        want.push(att("p", a, "t", "0"));
+    }
+    assert_eq!(rows(&mut c, atts), want);
+    let cons = "SELECT conrelid::regclass::text, conname, contype::text, left(conislocal::text, 1), coninhcount::text FROM pg_constraint
+                 WHERE conrelid IN ('c'::regclass, 'c2'::regclass, 'm'::regclass, 'mm'::regclass, 'c4'::regclass)
+                 ORDER BY conrelid::regclass::text COLLATE \"C\", conname COLLATE \"C\"";
+    let con = |t: &str, n: &str, ty: &str, l: &str, k: &str| vec![t.to_owned(), n.to_owned(), ty.to_owned(), l.to_owned(), k.to_owned()];
+    assert_eq!(
+        rows(&mut c, cons),
+        [
+            con("c", "c_a_b_key", "u", "f", "1"),
+            con("c", "ck", "c", "f", "1"),
+            con("c", "p_a_not_null", "n", "f", "1"),
+            con("c", "p_rid_fkey", "f", "f", "1"),
+            con("c2", "c2_a_b_key", "u", "f", "1"),
+            con("c2", "c2_a_not_null", "n", "f", "1"),
+            con("c2", "c2_rid_fkey", "f", "f", "1"),
+            con("c2", "ck", "c", "f", "1"),
+            con("c4", "c4_a_b_key", "u", "f", "1"),
+            con("c4", "c4_b_not_null", "n", "t", "0"),
+            con("c4", "ck", "c", "f", "1"),
+            con("c4", "own", "c", "t", "0"),
+            con("c4", "p_a_not_null", "n", "f", "1"),
+            con("c4", "p_rid_fkey", "f", "f", "1"),
+            con("m", "ck", "c", "f", "1"),
+            con("m", "m_a_b_key", "u", "f", "1"),
+            con("m", "p_a_not_null", "n", "f", "1"),
+            con("m", "p_rid_fkey", "f", "f", "1"),
+            con("mm", "ck", "c", "f", "1"),
+            con("mm", "mm_a_b_key", "u", "f", "1"),
+            con("mm", "p_a_not_null", "n", "f", "1"),
+            con("mm", "p_rid_fkey", "f", "f", "1"),
+        ]
+    );
+    // DETACH: the detached partition's own columns and constraints become local; its partitions
+    // still inherit from it.
+    c.batch_execute("ALTER TABLE p DETACH PARTITION c2; ALTER TABLE p DETACH PARTITION m").expect("detach");
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT attrelid::regclass::text, attname, left(attislocal::text, 1), attinhcount::text FROM pg_attribute
+              WHERE attrelid IN ('c2'::regclass, 'm'::regclass, 'mm'::regclass) AND attnum > 0 AND NOT attisdropped
+              ORDER BY attrelid::regclass::text COLLATE \"C\", attnum"
+        ),
+        [
+            att("c2", "a", "t", "0"),
+            att("c2", "b", "t", "0"),
+            att("c2", "rid", "t", "0"),
+            att("m", "a", "t", "0"),
+            att("m", "b", "t", "0"),
+            att("m", "rid", "t", "0"),
+            att("mm", "a", "f", "1"),
+            att("mm", "b", "f", "1"),
+            att("mm", "rid", "f", "1"),
+        ]
+    );
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT conrelid::regclass::text, conname, left(conislocal::text, 1), coninhcount::text FROM pg_constraint
+              WHERE conrelid IN ('c2'::regclass, 'm'::regclass) ORDER BY conrelid::regclass::text COLLATE \"C\", conname COLLATE \"C\""
+        ),
+        [
+            ["c2", "c2_a_b_key", "t", "0"],
+            ["c2", "c2_a_not_null", "t", "0"],
+            ["c2", "c2_rid_fkey", "t", "0"],
+            ["c2", "ck", "t", "0"],
+            ["m", "ck", "t", "0"],
+            ["m", "m_a_b_key", "t", "0"],
+            ["m", "p_a_not_null", "t", "0"],
+            ["m", "p_rid_fkey", "t", "0"],
+        ]
+    );
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT conname, left(conislocal::text, 1), coninhcount::text FROM pg_constraint WHERE conrelid = 'mm'::regclass AND contype = 'c'"
+        ),
+        [["ck", "f", "1"]]
+    );
+}
+
+/// What a partition inherits it cannot drop, rename or retype on its own; its parent's ALTER
+/// TABLE still reaches it (#288).
+#[test]
+fn partition_inherited_columns_and_constraints_are_protected() {
+    let (_db, mut c) = setup();
+    c.batch_execute(
+        "CREATE TABLE r (id int PRIMARY KEY);
+         CREATE TABLE p (a int PRIMARY KEY, b int NOT NULL, rid int REFERENCES r, CONSTRAINT ck CHECK (b > 0), z int)
+           PARTITION BY RANGE (a);
+         CREATE TABLE c PARTITION OF p FOR VALUES FROM (1) TO (10)",
+    )
+    .expect("schema");
+    let fails = [
+        ("ALTER TABLE c DROP COLUMN b", "cannot drop inherited column \"b\""),
+        ("ALTER TABLE c RENAME COLUMN b TO bb", "cannot rename inherited column \"b\""),
+        ("ALTER TABLE c ALTER COLUMN b TYPE bigint", "cannot alter inherited column \"b\""),
+        ("ALTER TABLE c ALTER COLUMN b DROP NOT NULL", "column \"b\" is marked NOT NULL in parent table"),
+        ("ALTER TABLE c DROP CONSTRAINT ck", "cannot drop inherited constraint \"ck\" of relation \"c\""),
+        ("ALTER TABLE c DROP CONSTRAINT c_pkey", "cannot drop inherited constraint \"c_pkey\" of relation \"c\""),
+        ("ALTER TABLE c DROP CONSTRAINT p_rid_fkey", "cannot drop inherited constraint \"p_rid_fkey\" of relation \"c\""),
+        ("ALTER TABLE c DROP CONSTRAINT p_b_not_null", "cannot drop inherited constraint \"p_b_not_null\" of relation \"c\""),
+        ("ALTER TABLE c RENAME CONSTRAINT ck TO ck2", "cannot rename inherited constraint \"ck\""),
+        ("ALTER TABLE c RENAME CONSTRAINT p_b_not_null TO nn", "cannot rename inherited constraint \"p_b_not_null\""),
+    ];
+    for (sql, msg) in fails {
+        let e = expect_code(c.batch_execute(sql), "42P16");
+        assert_eq!(message(&e), msg, "{sql}");
+    }
+    // Renaming an inherited foreign key or key constraint is allowed, and it stays inherited.
+    c.batch_execute("ALTER TABLE c RENAME CONSTRAINT p_rid_fkey TO c_fk; ALTER TABLE c RENAME CONSTRAINT c_pkey TO c_key").expect("rename");
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT conname, left(conislocal::text, 1), coninhcount::text FROM pg_constraint
+              WHERE conrelid = 'c'::regclass AND contype IN ('f', 'p') ORDER BY 1"
+        ),
+        [["c_fk", "f", "1"], ["c_key", "f", "1"]]
+    );
+    // The parent's changes still apply to the partition.
+    c.batch_execute(
+        "ALTER TABLE p DROP COLUMN z;
+         ALTER TABLE p RENAME COLUMN b TO bb;
+         ALTER TABLE p ALTER COLUMN bb DROP NOT NULL;
+         ALTER TABLE p DROP CONSTRAINT ck",
+    )
+    .expect("alter parent");
+    assert_eq!(
+        rows(
+            &mut c,
+            "SELECT attname, left(attnotnull::text, 1), left(attislocal::text, 1), attinhcount::text FROM pg_attribute
+              WHERE attrelid = 'c'::regclass AND attnum > 0 AND NOT attisdropped ORDER BY attnum"
+        ),
+        [["a", "t", "f", "1"], ["bb", "f", "f", "1"], ["rid", "f", "f", "1"]]
+    );
+    // Once detached, they are the table's own.
+    c.batch_execute("ALTER TABLE p DETACH PARTITION c; ALTER TABLE c DROP COLUMN bb; ALTER TABLE c DROP CONSTRAINT c_fk")
+        .expect("detached");
+}
