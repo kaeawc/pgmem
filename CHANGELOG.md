@@ -30,6 +30,9 @@ and versions follow [Semantic Versioning](https://semver.org/). Add entries unde
 - An index with mixed column and expression keys reports the plain column's attnum in `pg_index.indkey` (`1 0`) and lists only the real expressions in `indexprs`.
 - The SQL deparser (`pg_get_viewdef`, `pg_get_constraintdef`, `pg_get_indexdef`, column defaults) quotes identifiers with the same recorded keyword data as `quote_ident()`.
 - Function lookup and `pg_get_triggerdef` never resolve functions through `pg_temp` implicitly (a temp trigger function prints as `pg_temp.f()`), and a user function shadowed by a same-signature `pg_catalog` builtin is schema-qualified.
+- `DROP SCHEMA` lists the schema's functions and procedures (and materialized views) in the "depends on schema" detail and the `CASCADE` notice, in creation order, fails with 2BP01 while they exist, and `CASCADE` drops them.
+- `ALTER TABLE ... ADD COLUMN ... DEFAULT` on a partitioned table sets `atthasmissing` on existing partitions only, not on the parent or on partitions created afterwards.
+- Under `session_replication_role = replica`, foreign keys are not enforced and `ON DELETE` / `ON UPDATE` actions do not fire, as in PostgreSQL (`ADD CONSTRAINT` still validates existing rows).
 - `pg_constraint.connamespace` is the namespace of the owning table or domain instead of always `public`.
 - `pg_get_indexdef` and `pg_indexes.indexdef` print `INCLUDE (...)` for covering indexes, and `pg_index.indnatts`, `indnkeyatts`, `indkey` and `pg_class.relnatts` count the INCLUDE columns like PostgreSQL.
 - Storage parameters are stored and validated like PostgreSQL: `WITH (...)` on tables, indexes, views and materialized views, `ALTER TABLE / INDEX / VIEW / MATERIALIZED VIEW ... SET / RESET (...)`, `pg_class.reloptions`, `pg_get_indexdef` (`WITH (fillfactor='70')`) and `information_schema.views.check_option` (including `WITH CHECK OPTION` and `check_option`). `security_invoker` is stored but not yet enforced.

@@ -308,6 +308,12 @@ pub(crate) struct Checks<'a> {
 }
 
 impl Checks<'_> {
+    /// Foreign keys are enforced by origin-only triggers: `session_replication_role = replica`
+    /// skips their checks and referential actions.
+    fn skips_foreign_keys(&self) -> bool {
+        self.env.setting("session_replication_role").is_some_and(|r| r.eq_ignore_ascii_case("replica"))
+    }
+
     /// True (and the check queued for commit) when `con` of `table` is deferred.
     fn defer(&self, table: &TableDef, con: &pgmem_catalog::Constraint) -> bool {
         if !self.env.constraint_modes.deferred(con) {
@@ -324,6 +330,9 @@ impl Checks<'_> {
 
 /// Child-side foreign key check: every non-NULL key in `rows` must exist in the parent.
 fn check_foreign_keys(table: &TableDef, rows: &[&Row], txn: &Txn, own_final: Option<&[(RowId, Row)]>, ck: Checks) -> SqlResult<()> {
+    if ck.skips_foreign_keys() {
+        return Ok(());
+    }
     for con in &table.constraints {
         let ConstraintKind::ForeignKey { columns, ref_table, ref_columns, match_full, .. } = &con.kind else { continue };
         if rows.is_empty() || ck.defer(table, con) {
@@ -440,7 +449,7 @@ fn referential_actions_from(
     depth: usize,
     ck: Checks,
 ) -> SqlResult<()> {
-    if removed.is_empty() {
+    if removed.is_empty() || ck.skips_foreign_keys() {
         return Ok(());
     }
     if depth > 64 {

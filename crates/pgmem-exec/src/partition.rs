@@ -728,8 +728,8 @@ pub(crate) fn create_partition(
         oid: 0,
         schema,
         name: name.clone(),
-        // A partition's NOT NULL constraints keep the parent's names; new copies carry no
-        // "missing" default value (`atthasmissing` is false).
+        // A partition's NOT NULL constraints keep the parent's names; a new partition holds no
+        // rows, so its copies carry no "missing" default (`atthasmissing` is false).
         columns: parent
             .live_columns()
             .map(|(_, c)| {

@@ -838,7 +838,11 @@ pub fn bind_alter_table(b: &Binder, table: &TableDef, action: &ir::AlterTableAct
                 let ctx = Ctx::new(&empty);
                 let (e, t) = b.bind_expr(d, &ctx)?;
                 let e = super::coerce_assignment(b, e, &t, &col.ty, col.typmod, &col.name)?;
-                if let crate::plan::Expr::Const(v) = e {
+                // A partitioned table holds no rows of its own: only its partitions get the fast
+                // default (the ALTER recurses into them).
+                if let crate::plan::Expr::Const(v) = e
+                    && !b.catalog.is_partitioned(def.oid)
+                {
                     col.missing = v;
                 }
             }
